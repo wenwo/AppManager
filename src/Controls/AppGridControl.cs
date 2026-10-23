@@ -1,0 +1,1082 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.IO;
+using System.Windows.Forms;
+using AppManager;
+
+namespace AppManager.Controls
+{
+    /// <summary>
+    /// 主内容区：网格/列表双视图，自绘卡片（图标+名称），支持滚动、悬停、
+    /// 右键菜单（屏幕坐标回调）、双击启动。图标由外部注入到 AppInfo.Icon。
+    /// </summary>
+    public class AppGridControl : ScrollableControl
+    {
+        private readonly List<AppInfo> apps = new List<AppInfo>();
+        private bool grid = true;
+        private int hoverIndex = -1;
+
+        // 复用的绘制资源：避免每帧为每个条目新建画笔/字体/路径，降低 GDI 句柄抖动
+        private readonly SolidBrush cardBrush = new SolidBrush(Theme.Card);
+        private readonly SolidBrush hoverBrush = new SolidBrush(Theme.CardHover);
+        private readonly SolidBrush rowHoverBrush = new SolidBrush(Theme.RowHover);
+        private readonly SolidBrush textBrush = new SolidBrush(Theme.TextPrimary);
+        private readonly SolidBrush subTextBrush = new SolidBrush(Theme.TextSecondary);
+        private readonly SolidBrush favoriteBrush = new SolidBrush(Theme.Accent);
+        private readonly SolidBrush actionBlueBrush = new SolidBrush(Theme.Accent);
+        private readonly SolidBrush actionRedBrush = new SolidBrush(Theme.DeleteRed);
+        private Font subFont;
+        private Font actionFont;
+        private Font headerFont;   // 列表表头字体（略加粗，与数据行区分）
+        private GraphicsPath gridItemPath;   // 网格卡片路径（原点，尺寸固定）
+        private readonly Pen accentPen = new Pen(Theme.Accent, 2f);
+        private readonly SolidBrush chipBrush = new SolidBrush(Theme.ChipBg);   // 分类分段底色
+        private readonly SolidBrush headerBgBrush = new SolidBrush(Theme.Background);   // 列表表头底色（吸顶，覆盖滚动到其下方的行）
+        private readonly Pen headerLinePen = new Pen(Theme.Separator);   // 列表表头底部分隔线
+        private readonly StringFormat pathFormat = CreatePathFormat();   // 路径列：中间省略
+        private readonly StringFormat tipFormat = CreateTipFormat();      // 悬浮信息卡：仅按 \n 换行，超宽省略
+        private readonly Dictionary<string, string> sizeCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // 大小列缓存
+        private int locTextMaxW = -1;   // 位置列文本最大宽度（按当前 apps 缓存，重绘不再重复测量）
+        private int catTextMaxW = -1;   // 分类列胶囊组最大宽度（按当前 apps 缓存）
+        private int actionReserveMax = -1;   // 整表统一预留的最大操作按钮数（保证列 X 一致）
+
+        // 拖动排序状态：按下→越过系统阈值→拖动→落点缝隙
+        private bool allowReorder;
+        private bool dragPending;
+        private bool dragging;
+        private int dragFrom = -1;
+        private int dragGap = -1;
+        private int dropTarget = -1;   // 拖动悬停命中的目录条目（文件搬迁目标），-1 表示无
+        private Point dragStart;
+        private bool suppressClick;
+
+        // iOS Grouped List 尺寸（单行表格：名称靠左，分类/大小/位置 靠右且上下对齐）
+        private const int ListRowH = 30;
+        private const int ListTop = 10;
+        private const int ListHeaderH = 26;   // 列表表头高度（吸顶，仅列表视图显示）
+        private const int ListMargin = 14;
+        private const int ListIcon = 20;
+        private const int ActionBtnW = 40;
+        private const int ActionBtnGap = 4;
+        // 每条记录为独立卡片：卡片间距 + 圆角
+        private const int ListGap = 4;
+        private const int ListCardRadius = 8;
+        // 右侧三列：分类列左对齐（胶囊组左边缘固定）、大小列固定宽（数字纵向对齐）、位置列按内容宽度并贴右边缘
+        private const int ColGap = 18;
+        private const int CatColMinW = 56;
+        private const int SizeColW = 76;
+        private const int LocColMinW = 56;
+        // 分类分段（胶囊）尺寸
+        private const int ChipH = 18;
+        private const int ChipPadX = 6;
+        private const int ChipGap = 4;
+
+        public bool GridMode
+        {
+            get { return grid; }
+            set { grid = value; UpdateScroll(); Invalidate(); }
+        }
+
+        public event Action<AppInfo> LaunchRequested;
+        public event Action<AppInfo, Point> MenuRequested;
+        /// <summary>列表行右侧操作按钮：改名。</summary>
+        public event Action<AppInfo> RenameRequested;
+        /// <summary>列表行右侧操作按钮：改地址（仅网址）。</summary>
+        public event Action<AppInfo> EditUrlRequested;
+        /// <summary>列表行右侧操作按钮：删除。</summary>
+        public event Action<AppInfo> DeleteRequested;
+
+        /// <summary>是否允许拖动排序（仅在可排序分类下由外部开启）。</summary>
+        public bool AllowReorder
+        {
+            get { return allowReorder; }
+            set
+            {
+                allowReorder = value;
+                if (!value) ResetDrag();
+                Cursor = Cursors.Default;
+                Invalidate();
+            }
+        }
+
+        /// <summary>拖动排序完成：from=源索引，to=目标索引（列表移除源项后插入的位置）。</summary>
+        public event Action<int, int> ReorderRequested;
+
+        /// <summary>网格内拖动条目期间持续触发（携带屏幕坐标），供外部（侧栏分类）联动高亮投放目标。</summary>
+        public event Action<Point> DragMoved;
+        /// <summary>拖动条目在网格外松手时触发（条目 + 屏幕坐标）；触发后不再执行网格内排序。</summary>
+        public event Action<AppInfo, Point> DroppedOutside;
+
+        /// <summary>文件类型条目拖入目录类型条目：请求把条目目标（文件/文件夹）搬迁进该目录。</summary>
+        public event Action<AppInfo, AppInfo> MoveIntoFolder;
+        /// <summary>空白区右键：请求弹出新建菜单（文件夹/文本文档），携带屏幕坐标。</summary>
+        public event Action<Point> BlankRightClicked;
+
+        /// <summary>是否接受外部文件/文件夹拖入（由外部按当前分类是否可编辑设置）。</summary>
+        public bool AllowExternalDrop { get; set; }
+
+        /// <summary>
+        /// 是否允许把条目拖出网格（拖到侧栏分类即「加入」该分类，多归属，原分类与存储位置不变）。
+        /// 用于只读全集分类（全部软件/全部文件/全部网站）：这些分类不支持网格内排序，但需支持拖出加入。
+        /// </summary>
+        public bool AllowDragOut { get; set; }
+
+        /// <summary>外部文件/文件夹拖入主内容区：携带路径数组，由外部按当前分类入库。</summary>
+        public event Action<string[]> FilesDropped;
+
+        /// <summary>是否在列表行右侧显示操作按钮（改名/改地址/删除）。</summary>
+        public bool ShowRowActions { get; set; }
+
+        /// <summary>由外部提供：返回条目「所属」分类的显示文本（多个用逗号分隔）。</summary>
+        public Func<AppInfo, string> CategoryTextProvider { get; set; }
+
+        // 自绘悬浮信息卡（替代系统 ToolTip，风格统一）
+        private string tipText = string.Empty;
+        private bool tipVisible;
+        private readonly Timer tipTimer = new Timer { Interval = 450 };
+
+        public AppGridControl()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            BackColor = Theme.Background;
+            AutoScroll = true;
+            Font = Theme.FontOf(9F);
+            DoubleBuffered = true;
+            subFont = Theme.FontOf(8F);
+            actionFont = Theme.FontOf(9F);
+            headerFont = Theme.FontOf(8F, FontStyle.Bold);
+            tipTimer.Tick += delegate { tipVisible = true; tipTimer.Stop(); Invalidate(); };
+            AllowDrop = true;   // 接受外部文件/文件夹拖入（是否放行由 AllowExternalDrop 决定）
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                cardBrush.Dispose();
+                hoverBrush.Dispose();
+                rowHoverBrush.Dispose();
+                textBrush.Dispose();
+                subTextBrush.Dispose();
+                favoriteBrush.Dispose();
+                actionBlueBrush.Dispose();
+                actionRedBrush.Dispose();
+                if (subFont != null) subFont.Dispose();
+                if (actionFont != null) actionFont.Dispose();
+                if (headerFont != null) headerFont.Dispose();
+                if (gridItemPath != null) gridItemPath.Dispose();
+                accentPen.Dispose();
+                chipBrush.Dispose();
+                headerBgBrush.Dispose();
+                headerLinePen.Dispose();
+                pathFormat.Dispose();
+                tipFormat.Dispose();
+                tipTimer.Dispose();
+            }
+            base.Dispose(disposing);
+        }
+
+        /// <summary>路径列 StringFormat：贴右对齐、垂直居中、超宽时中间省略。</summary>
+        private static StringFormat CreatePathFormat()
+        {
+            StringFormat sf = new StringFormat();
+            sf.Alignment = StringAlignment.Far;
+            sf.LineAlignment = StringAlignment.Center;
+            sf.Trimming = StringTrimming.EllipsisPath;
+            sf.FormatFlags = StringFormatFlags.NoWrap;
+            return sf;
+        }
+
+        /// <summary>悬浮信息卡 StringFormat：仅在文本自带的 \n 处换行（不按宽度折行），超宽以省略号截断。</summary>
+        private static StringFormat CreateTipFormat()
+        {
+            StringFormat sf = new StringFormat();
+            sf.FormatFlags = StringFormatFlags.NoWrap;
+            sf.Trimming = StringTrimming.EllipsisCharacter;
+            return sf;
+        }
+
+        public void SetApps(List<AppInfo> list)
+        {
+            apps.Clear();
+            apps.AddRange(list);
+            sizeCache.Clear();
+            locTextMaxW = -1;
+            catTextMaxW = -1;
+            actionReserveMax = -1;
+            UpdateScroll();
+            Invalidate();
+        }
+
+        public void RefreshIcons()
+        {
+            Invalidate();
+        }
+
+        private void UpdateScroll()
+        {
+            int h;
+            if (grid)
+            {
+                int rows = GridRows();
+                h = rows * (Theme.GridItemHeight + Theme.GridItemGap) + Theme.GridItemGap;
+            }
+            else
+            {
+                // 列表：表头高度 + 上下留白 + 各行（含卡片间距）
+                h = ListHeaderH + ListTop * 2 + apps.Count * (ListRowH + ListGap) - (apps.Count > 0 ? ListGap : 0);
+            }
+            AutoScrollMinSize = new Size(0, h);
+        }
+
+        /// <summary>列表单条记录矩形（独立卡片，卡片之间留缝；首行让出顶部吸顶表头）。</summary>
+        private Rectangle ListRowRect(int index)
+        {
+            return new Rectangle(ListMargin, ListTop + ListHeaderH + index * (ListRowH + ListGap),
+                ClientSize.Width - ListMargin * 2, ListRowH);
+        }
+
+        /// <summary>
+        /// 位置列宽度：按当前条目文本最大宽度取值（贴右边缘、右侧不留白），
+        /// 结果按 SetApps 缓存；并夹在 [LocColMinW, 行宽 42%] 内，保证左侧名称区不被挤没。
+        /// </summary>
+        private int LocationColumnWidth(Graphics g, int rowWidth)
+        {
+            if (locTextMaxW < 0)
+            {
+                int m = 0;
+                for (int i = 0; i < apps.Count; i++)
+                {
+                    int w = (int)Math.Ceiling(g.MeasureString(LocationText(apps[i]), subFont).Width);
+                    if (w > m) m = w;
+                }
+                locTextMaxW = m;
+            }
+            int w2 = locTextMaxW + 2;
+            int cap = (int)(rowWidth * 0.42f);
+            if (w2 > cap) w2 = cap;
+            if (w2 < LocColMinW) w2 = LocColMinW;
+            return w2;
+        }
+
+        /// <summary>
+        /// 分类列宽度：按当前条目胶囊组最大宽度取值（左对齐、上下对齐），
+        /// 结果按 SetApps 缓存；并夹在 [CatColMinW, 行宽 26%] 内，保证左侧名称区不被挤没。
+        /// </summary>
+        private int CategoryColumnWidth(Graphics g, int rowWidth)
+        {
+            if (catTextMaxW < 0)
+            {
+                int m = 0;
+                for (int i = 0; i < apps.Count; i++)
+                {
+                    int w = CategoryGroupWidth(g, apps[i]);
+                    if (w > m) m = w;
+                }
+                catTextMaxW = m;
+            }
+            int w2 = catTextMaxW + 2;
+            int cap = (int)(rowWidth * 0.26f);
+            if (w2 > cap) w2 = cap;
+            if (w2 < CatColMinW) w2 = CatColMinW;
+            return w2;
+        }
+
+        /// <summary>整表统一的右侧操作按钮预留宽度（按最大按钮数），保证各行数据列上下对齐。</summary>
+        private int ActionReserveWidth()
+        {
+            if (!ShowRowActions) return 0;
+            if (actionReserveMax < 0)
+            {
+                int m = 0;
+                for (int i = 0; i < apps.Count; i++)
+                {
+                    int c = RowActionCount(apps[i]);
+                    if (c > m) m = c;
+                }
+                actionReserveMax = m;
+            }
+            return actionReserveMax * (ActionBtnW + ActionBtnGap);
+        }
+
+        /// <summary>条目所属分类拆分结果（去空白、忽略空项），供测量与绘制共用。</summary>
+        private List<string> CategoryList(AppInfo a)
+        {
+            List<string> cats = new List<string>();
+            string text = (CategoryTextProvider != null) ? CategoryTextProvider(a) : a.Category;
+            if (string.IsNullOrEmpty(text)) return cats;
+            string[] raw = text.Split(',');
+            for (int i = 0; i < raw.Length; i++)
+            {
+                string s = raw[i].Trim();
+                if (s.Length > 0) cats.Add(s);
+            }
+            return cats;
+        }
+
+        /// <summary>分类列内容宽度：全部胶囊宽度 + 间距（不含省略）。</summary>
+        private int CategoryGroupWidth(Graphics g, AppInfo a)
+        {
+            List<string> cats = CategoryList(a);
+            if (cats.Count == 0) return 0;
+            int w = 0;
+            for (int i = 0; i < cats.Count; i++) w += ChipWidth(g, cats[i]);
+            return w + ChipGap * (cats.Count - 1);
+        }
+
+        private int Columns()
+        {
+            int w = ClientSize.Width - Theme.GridItemGap;
+            int cols = w / (Theme.GridItemWidth + Theme.GridItemGap);
+            return cols < 1 ? 1 : cols;
+        }
+
+        private int GridRows()
+        {
+            int cols = Columns();
+            return (apps.Count + cols - 1) / cols;
+        }
+
+        private Rectangle GridRect(int index)
+        {
+            int cols = Columns();
+            int col = index % cols;
+            int row = index / cols;
+            int x = Theme.GridItemGap + col * (Theme.GridItemWidth + Theme.GridItemGap);
+            int y = Theme.GridItemGap + row * (Theme.GridItemHeight + Theme.GridItemGap);
+            return new Rectangle(x, y, Theme.GridItemWidth, Theme.GridItemHeight);
+        }
+
+        private int HitIndex(Point client)
+        {
+            // 顶部吸顶表头区域不参与命中（否则滚动后点击表头会误命中其下方被遮挡的行）
+            if (!grid && client.Y < ListHeaderH) return -1;
+            Point p = new Point(client.X - AutoScrollPosition.X, client.Y - AutoScrollPosition.Y);
+            if (grid)
+            {
+                for (int i = 0; i < apps.Count; i++)
+                    if (GridRect(i).Contains(p)) return i;
+            }
+            else
+            {
+                for (int i = 0; i < apps.Count; i++)
+                    if (ListRowRect(i).Contains(p)) return i;
+            }
+            return -1;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+
+            // 空态：无条目时居中提示，替代一片空白
+            if (apps.Count == 0)
+            {
+                GraphicsState es = g.Save();
+                g.ResetTransform();
+                PaintEmptyState(g);
+                g.Restore(es);
+                return;
+            }
+
+            if (grid) PaintGrid(g);
+            else PaintList(g);
+
+            if (dragging && dragGap >= 0) PaintDropIndicator(g);
+            if (dragging && dropTarget >= 0) PaintFolderDropHighlight(g);
+
+            // 列表表头：吸顶绘制（在行之后绘制以覆盖滚动到其下方的行，且不受滚动位移影响）
+            if (!grid)
+            {
+                GraphicsState st = g.Save();
+                g.ResetTransform();
+                PaintListHeader(g);
+                g.Restore(st);
+            }
+
+            // 自绘悬浮信息卡（iOS 深色圆角，替代系统 ToolTip）：锚定在悬停条目下方，避免遮挡条目本身
+            if (tipVisible && !string.IsNullOrEmpty(tipText))
+            {
+                GraphicsState ts = g.Save();
+                g.ResetTransform();   // 以客户区坐标绘制，便于按可视区域夹紧
+                PaintTooltip(g);
+                g.Restore(ts);
+            }
+        }
+
+        /// <summary>
+        /// 绘制悬浮信息卡：以悬停条目为锚点置于其下方（不遮挡条目图标与名称），
+        /// 右/下越界时自动翻转并夹紧到可视区域内；文本过长以省略号截断。
+        /// </summary>
+        private void PaintTooltip(Graphics g)
+        {
+            if (hoverIndex < 0 || hoverIndex >= apps.Count) return;
+
+            // 内容坐标 → 客户区坐标（与滚动位置一致）
+            Rectangle anchor = grid ? GridRect(hoverIndex) : ListRowRect(hoverIndex);
+            anchor.Offset(AutoScrollPosition.X, AutoScrollPosition.Y);
+
+            SizeF sz = g.MeasureString(tipText, subFont, new SizeF(10000f, 10000f), tipFormat);
+            int w = (int)Math.Ceiling(sz.Width) + 24;
+            int h = (int)Math.Ceiling(sz.Height) + 14;
+            int maxW = ClientSize.Width - 8;
+            if (w > maxW) w = maxW;
+
+            int x = anchor.X;
+            if (x + w > ClientSize.Width - 4) x = ClientSize.Width - 4 - w;
+            if (x < 4) x = 4;
+
+            int y = anchor.Bottom + 6;                       // 默认置于条目下方
+            if (y + h > ClientSize.Height - 4) y = anchor.Y - 6 - h;   // 下方空间不足则翻转到条目上方
+            int minY = grid ? 4 : ListHeaderH + 4;           // 列表视图需避开吸顶表头
+            if (y < minY) y = minY;
+
+            Rectangle tr = new Rectangle(x, y, w, h);
+            Draw.DrawShadow(g, tr, 8, 0.8f);
+            using (SolidBrush b = new SolidBrush(Theme.TooltipBg))
+            using (GraphicsPath p = Draw.RoundedPath(tr, 8))
+                g.FillPath(b, p);
+            using (SolidBrush tb = new SolidBrush(Color.White))
+                g.DrawString(tipText, subFont, tb,
+                    new RectangleF(tr.X + 12, tr.Y + 7, tr.Width - 24, tr.Height - 14), tipFormat);
+        }
+
+        /// <summary>空态提示：主内容区居中显示浅灰文案（网格/列表通用）。</summary>
+        private void PaintEmptyState(Graphics g)
+        {
+            using (Font f = Theme.FontOf(11F))
+            using (SolidBrush br = new SolidBrush(Theme.TextSecondary))
+                Draw.DrawStringCenter(g, "暂无内容", f, br,
+                    new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
+        }
+
+        /// <summary>网格视图：iOS 大图标卡片（轻阴影 + 悬停上浮）。</summary>
+        private void PaintGrid(Graphics g)
+        {
+            EnsurePaths();
+            for (int i = 0; i < apps.Count; i++)
+            {
+                Rectangle r = GridRect(i);
+                bool hover = (i == hoverIndex);
+
+                // 轻阴影 + 悬停上浮
+                Rectangle shadowRect = r;
+                if (hover) shadowRect.Offset(0, -2);
+                Draw.DrawShadow(g, shadowRect, Theme.CornerRadius - 4, 0.55f);
+
+                g.TranslateTransform(shadowRect.X, shadowRect.Y);
+                g.FillPath(cardBrush, gridItemPath);
+                if (hover) g.FillPath(hoverBrush, gridItemPath);
+
+                AppInfo a = apps[i];
+                int iconSize = Theme.IconSize;
+                Rectangle ir = new Rectangle((r.Width - iconSize) / 2, 10, iconSize, iconSize);
+                if (a.Icon != null)
+                {
+                    try { g.DrawImage(a.Icon, ir); } catch { }
+                }
+                else
+                {
+                    // 图标尚未加载：浅灰圆角占位，避免纯白卡片出现空洞
+                    using (SolidBrush pb = new SolidBrush(Theme.SegmentBg))
+                        Draw.FillRoundedRect(g, pb, ir, 12);
+                }
+                Rectangle tr = new Rectangle(0, ir.Bottom + 6, r.Width, r.Height - ir.Height - 18);
+                Draw.DrawStringCenter(g, a.DisplayName(), Font, textBrush, tr);
+                if (a.IsFavorite)
+                    g.FillEllipse(favoriteBrush, r.Width - 16, 6, 8, 8);
+
+                g.TranslateTransform(-shadowRect.X, -shadowRect.Y);
+            }
+        }
+
+        /// <summary>
+        /// 列表视图：每条记录为独立圆角卡片（卡片之间留缝），
+        /// 单行表格布局——名称 靠左，分类（左对齐）/大小（右对齐）/实际位置（贴右边缘）三列靠右且上下对齐。
+        /// </summary>
+        private void PaintList(Graphics g)
+        {
+            if (apps.Count == 0) return;
+
+            int actionReserve = ActionReserveWidth();
+
+            // 每条记录独立成卡片，不再合并为整块容器
+            for (int i = 0; i < apps.Count; i++)
+            {
+                Rectangle r = ListRowRect(i);
+                AppInfo a = apps[i];
+
+                // 独立卡片：白底圆角，悬停浅灰
+                using (GraphicsPath cp = Draw.RoundedPath(r, ListCardRadius))
+                    g.FillPath(i == hoverIndex ? rowHoverBrush : cardBrush, cp);
+
+                // 图标：列表用 shell 小图标按 1:1 绘制（不缩放大图，避免发虚）
+                Rectangle ir = new Rectangle(r.X + 12, r.Y + (r.Height - ListIcon) / 2, ListIcon, ListIcon);
+                DrawListIcon(g, a, ir);
+
+                // 各数据列矩形（宽度整表统一，保证各行上下对齐；与表头共用同一套几何）
+                Rectangle nameRect, catRect, sizeRect, locRect;
+                ListColumns(g, r, actionReserve, out nameRect, out catRect, out sizeRect, out locRect);
+
+                // 名称：占据图标与分类列之间的剩余宽度，超宽省略
+                Draw.DrawStringLeft(g, a.DisplayName(), Font, textBrush, nameRect);
+
+                // 分类（左对齐，胶囊组左边缘固定 → 上下对齐）
+                DrawCategoryChips(g, a, catRect.X, catRect.Right, r);
+
+                // 大小（右对齐，数字纵向对齐） / 实际位置（贴右边缘）
+                Draw.DrawStringRight(g, FormatSize(a), subFont, subTextBrush, sizeRect);
+                DrawStringPath(g, LocationText(a), locRect);
+
+                // 行右侧 iOS 文字按钮：仅悬停当前行显示（占位宽度已由 ActionReserveWidth 预留，避免列跳动）
+                if (ShowRowActions && i == hoverIndex) PaintRowActions(g, a, r);
+            }
+        }
+
+        /// <summary>
+        /// 计算列表一行内各数据列矩形（名称/分类/大小/位置），左侧为图标槽。
+        /// 行与表头共用，保证列 X 完全一致。
+        /// </summary>
+        private void ListColumns(Graphics g, Rectangle row, int actionReserve,
+            out Rectangle nameRect, out Rectangle catRect, out Rectangle sizeRect, out Rectangle locRect)
+        {
+            int rightEnd = row.Right - 12 - actionReserve;
+            int locW = LocationColumnWidth(g, row.Width);
+            locRect = new Rectangle(rightEnd - locW, row.Y, locW, row.Height);
+            sizeRect = new Rectangle(locRect.X - ColGap - SizeColW, row.Y, SizeColW, row.Height);
+            int catW = CategoryColumnWidth(g, row.Width);
+            catRect = new Rectangle(sizeRect.X - ColGap - catW, row.Y, catW, row.Height);
+
+            int textLeft = row.X + 12 + ListIcon + 10;   // 与行内图标右侧的名称起点一致
+            int nameW = catRect.X - ColGap - textLeft;
+            if (nameW < 0) nameW = 0;
+            nameRect = new Rectangle(textLeft, row.Y, nameW, row.Height);
+        }
+
+        /// <summary>列表吸顶表头：底部分隔线 + 各列栏位名（与数据列对齐）。</summary>
+        private void PaintListHeader(Graphics g)
+        {
+            // 表头底色铺满整宽，遮住滚动到其下方的行
+            g.FillRectangle(headerBgBrush, 0, 0, ClientSize.Width, ListHeaderH);
+            g.DrawLine(headerLinePen, 0, ListHeaderH - 1, ClientSize.Width, ListHeaderH - 1);
+
+            // 用与数据行同宽同列的参照矩形取列几何（仅 X 相关，Y 用表头高度以垂直居中）
+            Rectangle refRow = new Rectangle(ListMargin, 0, ClientSize.Width - ListMargin * 2, ListHeaderH);
+            int actionReserve = ActionReserveWidth();
+            Rectangle nameRect, catRect, sizeRect, locRect;
+            ListColumns(g, refRow, actionReserve, out nameRect, out catRect, out sizeRect, out locRect);
+
+            // 每列栏位名与对应数据的对齐方式一致（名称/分类左对齐，大小/位置右对齐）
+            Draw.DrawStringLeft(g, "名称", headerFont, subTextBrush, nameRect);
+            Draw.DrawStringLeft(g, "分类", headerFont, subTextBrush, catRect);
+            Draw.DrawStringRight(g, "大小", headerFont, subTextBrush, sizeRect);
+            Draw.DrawStringRight(g, "位置", headerFont, subTextBrush, locRect);
+        }
+
+        /// <summary>列表图标：shell 小图标按 1:1 绘制（不缩放，保证清晰细腻）；大于槽位时回退缩放。</summary>
+        private void DrawListIcon(Graphics g, AppInfo a, Rectangle slot)
+        {
+            Bitmap ico = (a.SmallIcon != null) ? a.SmallIcon : a.Icon;
+            if (ico == null) return;
+            try
+            {
+                if (ico.Width <= slot.Width && ico.Height <= slot.Height)
+                {
+                    g.DrawImageUnscaled(ico,
+                        slot.X + (slot.Width - ico.Width) / 2,
+                        slot.Y + (slot.Height - ico.Height) / 2);
+                }
+                else
+                {
+                    int iw = Math.Min(ico.Width, slot.Width);
+                    int ih = Math.Min(ico.Height, slot.Height);
+                    g.DrawImage(ico, new Rectangle(
+                        slot.X + (slot.Width - iw) / 2, slot.Y + (slot.Height - ih) / 2, iw, ih));
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>分类列内分段（胶囊）绘制所属分类；空间不足时以「…」省略。</summary>
+        private void DrawCategoryChips(Graphics g, AppInfo a, int startX, int maxRight, Rectangle row)
+        {
+            List<string> cats = CategoryList(a);
+            if (cats.Count == 0) return;
+
+            int x = startX;
+            int ellipsisW = ChipWidth(g, "…");
+            for (int i = 0; i < cats.Count; i++)
+            {
+                int w = ChipWidth(g, cats[i]);
+                bool last = (i == cats.Count - 1);
+                // 非最后一项时，为其之后的内容预留「…」的位置
+                int need = last ? w : w + ChipGap + ellipsisW;
+                if (x + need > maxRight)
+                {
+                    if (x + ellipsisW <= maxRight) DrawChip(g, "…", x, row);
+                    return;
+                }
+                DrawChip(g, cats[i], x, row);
+                x += w + ChipGap;
+            }
+        }
+
+        /// <summary>绘制单个分类分段（圆角胶囊）。</summary>
+        private void DrawChip(Graphics g, string text, int x, Rectangle row)
+        {
+            int w = ChipWidth(g, text);
+            Rectangle cr = new Rectangle(x, row.Y + (row.Height - ChipH) / 2, w, ChipH);
+            using (GraphicsPath p = Draw.RoundedPath(cr, 5))
+                g.FillPath(chipBrush, p);
+            Draw.DrawStringCenter(g, text, subFont, subTextBrush, cr);
+        }
+
+        private int ChipWidth(Graphics g, string text)
+        {
+            return (int)Math.Ceiling(g.MeasureString(text, subFont).Width) + ChipPadX * 2;
+        }
+
+        /// <summary>路径列：垂直居中、超宽时中间省略。</summary>
+        private void DrawStringPath(Graphics g, string text, Rectangle rect)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+            g.DrawString(text, subFont, subTextBrush, rect, pathFormat);
+        }
+
+        /// <summary>「大小」列文本：文件显示真实大小、文件夹显示「文件夹」、软件显示 —。结果按路径缓存，避免重绘时反复读盘。</summary>
+        private string FormatSize(AppInfo a)
+        {
+            if (a.IsFolder) return "文件夹";
+            string path = a.TargetPath;
+            if (!a.IsFile || string.IsNullOrEmpty(path)) return "—";
+
+            string cached;
+            if (sizeCache.TryGetValue(path, out cached)) return cached;
+
+            string val = "—";
+            try
+            {
+                if (File.Exists(path)) val = HumanSize(new FileInfo(path).Length);
+            }
+            catch { }
+            sizeCache[path] = val;
+            return val;
+        }
+
+        private static string HumanSize(long bytes)
+        {
+            if (bytes < 1024) return bytes + " B";
+            double kb = bytes / 1024.0;
+            if (kb < 1024) return kb.ToString("0.#") + " KB";
+            double mb = kb / 1024.0;
+            if (mb < 1024) return mb.ToString("0.#") + " MB";
+            return (mb / 1024.0).ToString("0.##") + " GB";
+        }
+
+        /// <summary>「实际位置」列文本：显示所在目录；网址/打包应用给出说明。</summary>
+        private static string LocationText(AppInfo a)
+        {
+            if (a == null) return "—";
+            string t = a.TargetPath;
+            if (string.IsNullOrEmpty(t)) return "—";
+            if (Scanner.IsUrl(t)) return "网络";
+            if (Scanner.IsAppsFolderTarget(t)) return "打包应用";
+            try
+            {
+                string dir = Path.GetDirectoryName(t.TrimEnd(Path.DirectorySeparatorChar));
+                return string.IsNullOrEmpty(dir) ? t : dir;
+            }
+            catch { return t; }
+        }
+
+        /// <summary>行操作按钮数量（改名 / 改址 / 删除）。</summary>
+        private int RowActionCount(AppInfo a)
+        {
+            return Scanner.IsUrl(a.TargetPath) ? 3 : 2;
+        }
+
+        /// <summary>行右侧绘制 iOS 文字操作按钮：改名/改址 蓝色、删除 红色。</summary>
+        private void PaintRowActions(Graphics g, AppInfo a, Rectangle r)
+        {
+            bool isUrl = Scanner.IsUrl(a.TargetPath);
+            string[] labels = isUrl ? new[] { "改名", "改址", "删除" } : new[] { "改名", "删除" };
+            int total = labels.Length * (ActionBtnW + ActionBtnGap) - ActionBtnGap;
+            int x = r.Right - 12 - total;
+            for (int bi = 0; bi < labels.Length; bi++)
+            {
+                Rectangle br = new Rectangle(x + bi * (ActionBtnW + ActionBtnGap), r.Y, ActionBtnW, r.Height);
+                Brush bb = labels[bi] == "删除" ? (Brush)actionRedBrush : (Brush)actionBlueBrush;
+                Draw.DrawStringCenter(g, labels[bi], actionFont, bb, br);
+            }
+        }
+
+        /// <summary>按需构建/刷新网格卡片缓存路径（尺寸固定）。</summary>
+        private void EnsurePaths()
+        {
+            if (gridItemPath == null)
+                gridItemPath = Draw.RoundedPath(
+                    new Rectangle(0, 0, Theme.GridItemWidth, Theme.GridItemHeight), Theme.CornerRadius - 4);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+
+            // 拖动排序：越过系统拖拽阈值才开始，避免与单击/双击冲突
+            if (dragPending && (e.Button & MouseButtons.Left) == MouseButtons.Left)
+            {
+                if (!dragging)
+                {
+                    Size d = SystemInformation.DragSize;
+                    if (Math.Abs(e.X - dragStart.X) > d.Width || Math.Abs(e.Y - dragStart.Y) > d.Height)
+                    {
+                        dragging = true;
+                        tipVisible = false;
+                        tipTimer.Stop();
+                    }
+                }
+                if (dragging)
+                {
+                    // 持续通知外部：便于侧栏分类联动高亮（指针在网格外时同样触发）
+                    Action<Point> moved = DragMoved;
+                    if (moved != null) moved(PointToScreen(e.Location));
+
+                    // 命中「可接收的目录条目」→ 高亮为搬迁目标，隐藏插入缝隙指示
+                    int t = FolderDropTargetAt(e.Location);
+                    if (t != dropTarget) { dropTarget = t; Invalidate(); }
+                    if (t >= 0)
+                    {
+                        if (dragGap != -1) { dragGap = -1; Invalidate(); }
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+
+                    // 指针移出网格边界，或当前分类仅支持拖出（不支持网格内排序）：
+                    // 隐藏网格内插入指示，交由外部（侧栏分类）处理
+                    if (!allowReorder || !ClientRectangle.Contains(e.Location))
+                    {
+                        if (dragGap != -1) { dragGap = -1; Invalidate(); }
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+                    int gap = DropGap(e.Location);
+                    if (gap != dragGap) { dragGap = gap; Invalidate(); }
+                    Cursor = Cursors.SizeAll;
+                    return;
+                }
+            }
+
+            int idx = HitIndex(e.Location);
+            if (idx != hoverIndex)
+            {
+                hoverIndex = idx;
+                tipVisible = false;
+                tipTimer.Stop();
+                if (idx >= 0 && idx < apps.Count)
+                {
+                    AppInfo a = apps[idx];
+                    string cat = (CategoryTextProvider != null) ? CategoryTextProvider(a) : a.Category;
+                    tipText = "所属：" + cat;
+                    if (!string.IsNullOrEmpty(a.TargetPath)) tipText += "\n" + a.TargetPath;
+                    tipTimer.Start();
+                }
+                else
+                {
+                    tipText = string.Empty;
+                }
+                Invalidate();
+                Cursor = idx >= 0 ? Cursors.Hand : Cursors.Default;
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            hoverIndex = -1;
+            tipVisible = false;
+            tipTimer.Stop();
+            if (dropTarget != -1) dropTarget = -1;   // 拖出网格时清除搬迁落点高亮
+            Invalidate();
+            base.OnMouseLeave(e);
+        }
+
+        protected override void OnScroll(ScrollEventArgs se)
+        {
+            base.OnScroll(se);
+            // 滚动不触发 MouseMove，需按当前光标位置重算悬停项，否则高亮会停留在错误的条目上
+            SyncHoverToCursor();
+            // 滚动由系统整体位移（blit）实现，吸顶表头必须整屏重绘，否则会被滚动上来的行覆盖
+            Invalidate();
+        }
+
+        private void SyncHoverToCursor()
+        {
+            Point p = PointToClient(Cursor.Position);
+            int idx = ClientRectangle.Contains(p) ? HitIndex(p) : -1;
+            if (idx != hoverIndex)
+            {
+                hoverIndex = idx;
+                Cursor = idx >= 0 ? Cursors.Hand : Cursors.Default;
+                Invalidate();
+            }
+        }
+
+        // ===== 外部文件/文件夹拖入（OLE 拖放） =====
+
+        protected override void OnDragEnter(DragEventArgs e)
+        {
+            base.OnDragEnter(e);
+            e.Effect = AcceptFileDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+        }
+
+        protected override void OnDragOver(DragEventArgs e)
+        {
+            base.OnDragOver(e);
+            e.Effect = AcceptFileDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+        }
+
+        protected override void OnDragDrop(DragEventArgs e)
+        {
+            base.OnDragDrop(e);
+            if (!AcceptFileDrop(e)) return;
+            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
+            if (files == null || files.Length == 0) return;
+            Action<string[]> h = FilesDropped;
+            if (h != null) h(files);
+        }
+
+        /// <summary>是否放行拖入：当前分类可编辑且携带文件拖放数据。</summary>
+        private bool AcceptFileDrop(DragEventArgs e)
+        {
+            return AllowExternalDrop && e.Data != null
+                && e.Data.GetDataPresent(DataFormats.FileDrop);
+        }
+
+        protected override void OnMouseClick(MouseEventArgs e)
+        {
+            if (suppressClick) { suppressClick = false; return; }
+            int idx = HitIndex(e.Location);
+            if (idx < 0)
+            {
+                // 空白区右键：请求新建菜单（对齐资源管理器桌面交互习惯）
+                if (e.Button == MouseButtons.Right)
+                {
+                    Action<Point> h = BlankRightClicked;
+                    if (h != null) h(PointToScreen(e.Location));
+                }
+                return;
+            }
+            if (e.Button == MouseButtons.Right)
+            {
+                Point sp = PointToScreen(e.Location);
+                Action<AppInfo, Point> h = MenuRequested;
+                if (h != null) h(apps[idx], sp);
+                return;
+            }
+            // 左键：列表行操作按钮优先命中
+            if (!grid && ShowRowActions)
+            {
+                int act = HitActionButton(e.Location, idx);
+                if (act >= 0)
+                {
+                    AppInfo a = apps[idx];
+                    if (act == 0) { Action<AppInfo> h = RenameRequested; if (h != null) h(a); }
+                    else if (act == 1) { Action<AppInfo> h = EditUrlRequested; if (h != null) h(a); }
+                    else if (act == 2) { Action<AppInfo> h = DeleteRequested; if (h != null) h(a); }
+                    return;
+                }
+            }
+        }
+
+        /// <summary>命中列表行右侧操作按钮：0=改名 1=改地址 2=删除，未命中返回 -1。</summary>
+        private int HitActionButton(Point client, int idx)
+        {
+            Point p = new Point(client.X - AutoScrollPosition.X, client.Y - AutoScrollPosition.Y);
+            Rectangle r = ListRowRect(idx);
+            AppInfo a = apps[idx];
+            bool isUrl = Scanner.IsUrl(a.TargetPath);
+            string[] labels = isUrl ? new[] { "改名", "改址", "删除" } : new[] { "改名", "删除" };
+            int total = labels.Length * (ActionBtnW + ActionBtnGap) - ActionBtnGap;
+            int x = r.Right - 12 - total;
+            for (int bi = 0; bi < labels.Length; bi++)
+            {
+                Rectangle br = new Rectangle(x + bi * (ActionBtnW + ActionBtnGap), r.Y, ActionBtnW, r.Height);
+                if (br.Contains(p)) return isUrl ? bi : (bi == 0 ? 0 : 2);
+            }
+            return -1;
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            int idx = HitIndex(e.Location);
+            if (idx < 0) return;
+            Action<AppInfo> h = LaunchRequested;
+            if (h != null) h(apps[idx]);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            suppressClick = false;
+            if (e.Button == MouseButtons.Left && (allowReorder || AllowDragOut))
+            {
+                int idx = HitIndex(e.Location);
+                if (idx >= 0)
+                {
+                    dragPending = true;
+                    dragging = false;
+                    dragFrom = idx;
+                    dragGap = -1;
+                    dragStart = e.Location;
+                }
+            }
+        }
+
+        /// <summary>
+        /// 拖动落点是否命中「可接收的目录条目」：仅文件类型条目（含文件夹条目）可拖入目录条目。
+        /// 自嵌套 / 已在目标内等磁盘级校验由 MainForm 复核。未命中返回 -1。
+        /// </summary>
+        private int FolderDropTargetAt(Point client)
+        {
+            if (!ClientRectangle.Contains(client)) return -1;
+            if (dragFrom < 0 || dragFrom >= apps.Count) return -1;
+            AppInfo src = apps[dragFrom];
+            if (!src.IsFile) return -1;                       // 仅文件类型条目可拖入目录
+            int idx = HitIndex(client);
+            if (idx < 0 || idx >= apps.Count || idx == dragFrom) return -1;
+            AppInfo t = apps[idx];
+            if (!t.IsFile || !t.IsFolder) return -1;          // 目标须为目录类型条目
+            return idx;
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            // 文件条目拖入目录条目：请求搬迁（优先于重排与拖出）
+            if (dragging && dropTarget >= 0 && dropTarget != dragFrom
+                && dragFrom >= 0 && dragFrom < apps.Count && dropTarget < apps.Count)
+            {
+                Action<AppInfo, AppInfo> h = MoveIntoFolder;
+                if (h != null) h(apps[dragFrom], apps[dropTarget]);
+                ResetDrag();
+                suppressClick = true;
+                Invalidate();
+                return;
+            }
+            bool droppedOutside = dragging && !ClientRectangle.Contains(e.Location)
+                && dragFrom >= 0 && dragFrom < apps.Count;
+            if (droppedOutside)
+            {
+                Action<AppInfo, Point> h = DroppedOutside;
+                if (h != null) h(apps[dragFrom], PointToScreen(e.Location));
+            }
+            else if (dragging && dragFrom >= 0 && dragGap >= 0)
+            {
+                int to = dragGap > dragFrom ? dragGap - 1 : dragGap;
+                if (to != dragFrom)
+                {
+                    Action<int, int> h = ReorderRequested;
+                    if (h != null) h(dragFrom, to);
+                }
+            }
+            bool wasDrag = dragging;
+            if (wasDrag) suppressClick = true;
+            ResetDrag();
+            Cursor = Cursors.Default;
+            if (wasDrag) Invalidate();
+        }
+
+        private void ResetDrag()
+        {
+            dragPending = false;
+            dragging = false;
+            dragFrom = -1;
+            dragGap = -1;
+            dropTarget = -1;
+        }
+
+        /// <summary>计算插入缝隙位置（0..count），供拖动指示与落点判定。</summary>
+        private int DropGap(Point client)
+        {
+            int count = apps.Count;
+            if (count == 0) return 0;
+            Point p = new Point(client.X - AutoScrollPosition.X, client.Y - AutoScrollPosition.Y);
+            if (grid)
+            {
+                int cols = Columns();
+                int cw = Theme.GridItemWidth + Theme.GridItemGap;
+                int rh = Theme.GridItemHeight + Theme.GridItemGap;
+                int gcol = (p.X - Theme.GridItemGap) / cw;
+                int grow = (p.Y - Theme.GridItemGap) / rh;
+                if (gcol < 0) gcol = 0;
+                if (gcol >= cols) gcol = cols - 1;
+                if (grow < 0) grow = 0;
+                int gidx = grow * cols + gcol;
+                if (gidx < 0) return 0;
+                if (gidx >= count) return count;
+                Rectangle r = GridRect(gidx);
+                return (p.X < r.X + r.Width / 2) ? gidx : gidx + 1;
+            }
+            int pitch = ListRowH + ListGap;
+            int idx = (p.Y - ListTop - ListHeaderH) / pitch;
+            if (idx < 0) return 0;
+            if (idx >= count) return count;
+            Rectangle row = ListRowRect(idx);
+            return (p.Y < row.Y + row.Height / 2) ? idx : idx + 1;
+        }
+
+        /// <summary>文件拖入目录的落点高亮：目标条目以强调色描边（网格卡片 / 列表行通用）。</summary>
+        private void PaintFolderDropHighlight(Graphics g)
+        {
+            if (dropTarget < 0 || dropTarget >= apps.Count) return;
+            using (Pen pen = new Pen(Theme.Accent, 2F))
+            {
+                if (grid)
+                {
+                    EnsurePaths();
+                    Rectangle r = GridRect(dropTarget);
+                    System.Drawing.Drawing2D.GraphicsState st = g.Save();
+                    g.TranslateTransform(r.X, r.Y);
+                    g.DrawPath(pen, gridItemPath);
+                    g.Restore(st);
+                }
+                else
+                {
+                    Rectangle r = ListRowRect(dropTarget);
+                    using (GraphicsPath p = Draw.RoundedPath(r, ListCardRadius))
+                        g.DrawPath(pen, p);
+                }
+            }
+        }
+
+        /// <summary>拖动落点指示：网格竖线（带圆帽）/ 列表横线。</summary>
+        private void PaintDropIndicator(Graphics g)
+        {
+            int count = apps.Count;
+            if (count == 0) return;
+            if (grid)
+            {
+                int gap = dragGap > count ? count : dragGap;
+                Rectangle refRect;
+                int x;
+                if (gap < count) { refRect = GridRect(gap); x = refRect.X - 4; }
+                else { refRect = GridRect(count - 1); x = refRect.Right + 4; }
+                g.DrawLine(accentPen, x, refRect.Y, x, refRect.Bottom);
+                g.FillEllipse(favoriteBrush, x - 3, refRect.Y - 3, 6, 6);
+                g.FillEllipse(favoriteBrush, x - 3, refRect.Bottom - 3, 6, 6);
+            }
+            else
+            {
+                int gap = dragGap > count ? count : dragGap;
+                int y = ListTop + ListHeaderH + gap * (ListRowH + ListGap) - ListGap / 2;
+                g.DrawLine(accentPen, ListMargin + 6, y, ClientSize.Width - ListMargin - 6, y);
+            }
+        }
+    }
+}

@@ -1,0 +1,260 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using Microsoft.VisualBasic.FileIO;
+using Microsoft.Win32;
+
+namespace AppManager
+{
+    /// <summary>
+    /// 应用启动与卸载入口：封装进程启动、目录打开、卸载调用。
+    /// 网址条目优先使用 Chrome 打开，Chrome 不可用时回退系统默认浏览器。
+    /// 所有方法吞并异常并返回布尔，调用方据此提示用户。
+    /// </summary>
+    internal static class Launcher
+    {
+        /// <summary>启动应用；UWP 走快捷方式 shell 解析，网址优先 Chrome，其余走目标/快捷方式。</summary>
+        public static bool Launch(AppInfo app)
+        {
+            if (app == null) return false;
+            try
+            {
+                // 网址：优先 Chrome，回退系统默认浏览器
+                if (Scanner.IsUrl(app.TargetPath))
+                {
+                    return LaunchUrl(app.TargetPath);
+                }
+                if (app.IsUwp)
+                {
+                    if (!string.IsNullOrEmpty(app.ShortcutPath))
+                    {
+                        Process.Start(new ProcessStartInfo(app.ShortcutPath) { UseShellExecute = true });
+                        return true;
+                    }
+                    // 打包/UWP 应用：以 shell:AppsFolder\<AUMID> 定位串经 explorer 启动
+                    if (Scanner.IsAppsFolderTarget(app.TargetPath))
+                    {
+                        Process.Start(new ProcessStartInfo("explorer.exe", "\"" + app.TargetPath + "\"")
+                        { UseShellExecute = true });
+                        return true;
+                    }
+                    return false;
+                }
+                string start = !string.IsNullOrEmpty(app.ShortcutPath) ? app.ShortcutPath : app.TargetPath;
+                if (string.IsNullOrEmpty(start)) return false;
+                ProcessStartInfo psi = new ProcessStartInfo(start);
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("启动失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>用 Chrome 打开网址；Chrome 不存在时回退系统默认浏览器。</summary>
+        private static bool LaunchUrl(string url)
+        {
+            string chrome = FindChrome();
+            if (!string.IsNullOrEmpty(chrome))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(chrome, "\"" + url + "\"") { UseShellExecute = false });
+                    return true;
+                }
+                catch (Exception ex) { Debug.WriteLine("Chrome 启动失败，回退默认浏览器: " + ex.Message); }
+            }
+            try
+            {
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("网址打开失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>查找 Chrome 可执行文件：注册表 → 常见安装路径。</summary>
+        private static string FindChrome()
+        {
+            try
+            {
+                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"))
+                {
+                    if (key != null)
+                    {
+                        string v = key.GetValue(null) as string;
+                        if (!string.IsNullOrEmpty(v) && File.Exists(v)) return v;
+                    }
+                }
+            }
+            catch { }
+            string[] candidates = new string[]
+            {
+                @"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    @"Google\Chrome\Application\chrome.exe")
+            };
+            for (int i = 0; i < candidates.Length; i++)
+                if (File.Exists(candidates[i])) return candidates[i];
+            return null;
+        }
+
+        /// <summary>打开安装目录（或目标所在目录）。</summary>
+        public static bool OpenInstallDirectory(AppInfo app)
+        {
+            string dir = ResolveDirectory(app);
+            return OpenFolder(dir);
+        }
+
+        public static bool OpenFolder(string dir)
+        {
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return false;
+            try
+            {
+                Process.Start(new ProcessStartInfo(dir) { UseShellExecute = true });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("打开目录失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>打开目标文件本身（资源管理器）。</summary>
+        public static bool OpenFile(AppInfo app)
+        {
+            string file = ResolveTargetFile(app);
+            if (string.IsNullOrEmpty(file) || !File.Exists(file)) return false;
+            try
+            {
+                Process.Start(new ProcessStartInfo(file) { UseShellExecute = true });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("打开文件失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>打开目标文件所在位置（资源管理器选中）。</summary>
+        public static bool OpenFileLocation(AppInfo app)
+        {
+            string file = ResolveTargetFile(app);
+            if (string.IsNullOrEmpty(file) || !File.Exists(file)) return OpenInstallDirectory(app);
+            try
+            {
+                Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + file + "\""));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("打开所在位置失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>调用卸载入口；解析常见 UninstallString 形态。</summary>
+        public static bool Uninstall(AppInfo app)
+        {
+            if (app == null || string.IsNullOrEmpty(app.UninstallString)) return false;
+            try
+            {
+                string u = app.UninstallString.Trim();
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.UseShellExecute = true;
+                if (u.StartsWith("msiexec", StringComparison.OrdinalIgnoreCase))
+                {
+                    int sp = u.IndexOf(' ');
+                    psi.FileName = "msiexec.exe";
+                    psi.Arguments = sp >= 0 ? u.Substring(sp + 1) : string.Empty;
+                }
+                else if (u.StartsWith("\""))
+                {
+                    int end = u.IndexOf('"', 1);
+                    if (end > 0)
+                    {
+                        psi.FileName = u.Substring(1, end - 1);
+                        psi.Arguments = u.Substring(end + 1).Trim();
+                    }
+                    else
+                    {
+                        psi.FileName = u.Trim('"');
+                    }
+                }
+                else
+                {
+                    int sp = u.IndexOf(' ');
+                    if (sp > 0)
+                    {
+                        psi.FileName = u.Substring(0, sp);
+                        psi.Arguments = u.Substring(sp + 1);
+                    }
+                    else
+                    {
+                        psi.FileName = u;
+                    }
+                }
+                Process.Start(psi);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("卸载失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        // ===== 删除 =====
+
+        /// <summary>删除文件/目录：toRecycle 时免确认进回收站（可恢复），否则永久删除。失败返回 false。
+        /// 采用 FileIO 官方封装，正常路径无弹层；出错时弹系统错误框，异常同时上抛给调用方提示。</summary>
+        public static bool DeletePath(string path, bool toRecycle)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            bool isDir = Directory.Exists(path);
+            if (!isDir && !File.Exists(path)) return false;
+            try
+            {
+                RecycleOption mode = toRecycle ? RecycleOption.SendToRecycleBin : RecycleOption.DeletePermanently;
+                if (isDir) FileSystem.DeleteDirectory(path, UIOption.OnlyErrorDialogs, mode);
+                else FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, mode);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("删除失败 " + path + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        // ===== 解析辅助 =====
+
+        private static string ResolveTargetFile(AppInfo app)
+        {
+            if (app == null) return string.Empty;
+            if (!string.IsNullOrEmpty(app.TargetPath) && File.Exists(app.TargetPath)) return app.TargetPath;
+            if (!string.IsNullOrEmpty(app.ShortcutPath) && File.Exists(app.ShortcutPath)) return app.ShortcutPath;
+            return string.Empty;
+        }
+
+        private static string ResolveDirectory(AppInfo app)
+        {
+            if (app == null) return string.Empty;
+            if (!string.IsNullOrEmpty(app.InstallLocation) && Directory.Exists(app.InstallLocation))
+                return app.InstallLocation;
+            string t = ResolveTargetFile(app);
+            if (!string.IsNullOrEmpty(t) && File.Exists(t)) return Path.GetDirectoryName(t);
+            return string.Empty;
+        }
+    }
+}

@@ -1,0 +1,943 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Text;
+
+namespace AppManager
+{
+    /// <summary>
+    /// 内置自测：覆盖目录/配置/分类/图标/扫描/去重/启动/收纳/网址/快捷中心/模糊匹配/改名/排序/备份导出导入/额外归属分类/全部应用过滤/AppsFolder 定位串/目录搬迁（同卷与跨卷）等关键路径。
+    /// 结果写入 selftest.log，返回通过用例数。无 UI、无副作用（不实际收纳、不弹窗）。
+    /// </summary>
+    internal static class SelfTest
+    {
+        private static readonly string AppDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+        private static readonly string LogPath = Path.Combine(AppDir, "selftest.log");
+
+        private static int _pass;
+        private static int _total;
+        private static StringBuilder _log = new StringBuilder();
+
+        /// <summary>运行全部用例，返回通过数；同时落盘 selftest.log。</summary>
+        public static int Run()
+        {
+            _pass = 0; _total = 0; _log = new StringBuilder();
+            Log("==== AppManager 自测开始 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ====");
+
+            Case01_DirWritable();
+            Case02_ConfigDefault();
+            Case03_ConfigRoundtrip();
+            Case04_ClassifyDocker();
+            Case05_ClassifyChrome();
+            Case06_ClassifyWechat();
+            Case07_ClassifyUnknown();
+            Case08_IconExtractNotepad();
+            Case09_TransparentInvalid();
+            Case10_ScanNonEmpty();
+            Case11_ScanDedup();
+            Case12_IconPlaceholderFallback();
+            Case13_LauncherNullGuard();
+            Case14_DesktopBackupDir();
+            Case15_BuiltInCount();
+            Case16_NonAppEntryFilter();
+            Case17_IconExtractSize();
+            Case18_ClassifyPriority();
+            Case19_AddedItemsRoundtrip();
+            Case20_IsAliveTarget();
+            Case21_StripIndexSuffix();
+            Case22_NameDedupRule();
+            Case23_IconUrlFile();
+            Case24_IconFolder();
+            Case25_IconWebsite();
+            Case26_AddedUrlRoundtrip();
+            Case27_QuickCenterDir();
+            Case28_FuzzyMatch();
+            Case29_CategoryViewModeRoundtrip();
+            Case30_AddedEntryNameRoundtrip();
+            Case31_ItemOrderRoundtrip();
+            Case32_DesktopBackupEntryRoundtrip();
+            Case33_OrganizeFlagsRoundtrip();
+            Case34_ExportImportRoundtrip();
+            Case35_ImportInvalidGuard();
+            Case36_AppsFolderTarget();
+            Case37_MoveDirectory();
+            Case38_MoveDirectoryCrossVolume();
+            Case39_CloseToTrayRoundtrip();
+            Case40_NormalizeRootAndAtomicSave();
+            Case41_IconCacheClone();
+            Case42_UniqueDestSuffix();
+            Case43_MoveIntoFolderRules();
+            Case44_DeletePath();
+
+            Log("==== 用例通过 " + _pass + "/" + _total + " ====");
+            Flush();
+            return _pass;
+        }
+
+        /// <summary>最近一次 Run 的用例总数，供调用方判定是否全部通过（退出码约定）。</summary>
+        public static int TotalCount { get { return _total; } }
+
+        // ===== 用例 =====
+
+        private static void Case01_DirWritable()
+        {
+            Begin("01 目录可创建可写");
+            try
+            {
+                if (!Directory.Exists(AppDir)) Directory.CreateDirectory(AppDir);
+                string probe = Path.Combine(AppDir, "probe.tmp");
+                File.WriteAllText(probe, "x");
+                bool ok = File.Exists(probe);
+                File.Delete(probe);
+                Assert(ok, "目录可写");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case02_ConfigDefault()
+        {
+            Begin("02 配置默认值（无文件回退）");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = AppConfig.Load();
+                Assert(c.ViewGrid && !c.ShowHidden && c.AutoScan, "默认值正确");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        private static void Case03_ConfigRoundtrip()
+        {
+            Begin("03 配置保存/重读一致");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                c.Favorites.Add("k1");
+                c.Hidden.Add("h1");
+                c.CustomCategories.Add("自定义1");
+                c.CategoryOverride["k1"] = "浏览器";
+                c.ItemCategories["k1"] = new List<string> { "开发工具", "常用" };
+                c.Save();
+                AppConfig r = AppConfig.Load();
+                Assert(r.Favorites.Contains("k1") && r.Hidden.Contains("h1")
+                    && r.CustomCategories.Contains("自定义1")
+                    && r.CategoryOverride.ContainsKey("k1") && r.CategoryOverride["k1"] == "浏览器"
+                    && r.ItemCategories.ContainsKey("k1") && r.ItemCategories["k1"].Count == 2
+                    && r.ItemCategories["k1"].Contains("开发工具"),
+                    "字段往返一致");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        private static void Case04_ClassifyDocker()
+        {
+            Begin("04 分类 docker desktop -> 开发工具");
+            Assert(CategoryRules.Classify("Docker Desktop") == "开发工具", "归类开发工具");
+        }
+
+        private static void Case05_ClassifyChrome()
+        {
+            Begin("05 分类 Google Chrome -> 浏览器");
+            Assert(CategoryRules.Classify("Google Chrome") == "浏览器", "归类浏览器");
+        }
+
+        private static void Case06_ClassifyWechat()
+        {
+            Begin("06 分类 微信 -> 通讯社交");
+            Assert(CategoryRules.Classify("微信") == "通讯社交", "归类通讯社交");
+        }
+
+        private static void Case07_ClassifyUnknown()
+        {
+            Begin("07 分类 未知名称 -> 其他");
+            Assert(CategoryRules.Classify("一个不认识的软件XYZ") == "其他", "兜底其他");
+        }
+
+        private static void Case08_IconExtractNotepad()
+        {
+            Begin("08 图标提取 notepad.exe 有效");
+            try
+            {
+                AppInfo a = new AppInfo();
+                a.Name = "notepad";
+                a.TargetPath = @"C:\Windows\System32\notepad.exe";
+                Bitmap b = Icons.Extract(a, 56);
+                Assert(Icons.IsValid(b), "取得有效图标");
+                if (b != null) b.Dispose();
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case09_TransparentInvalid()
+        {
+            Begin("09 有效像素阈值：全透明图判无效");
+            try
+            {
+                using (Bitmap t = new Bitmap(32, 32, PixelFormat.Format32bppArgb))
+                {
+                    for (int y = 0; y < 32; y++)
+                        for (int x = 0; x < 32; x++)
+                            t.SetPixel(x, y, Color.Transparent);
+                    Assert(!Icons.IsValid(t), "全透明图被识别为空图");
+                }
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case10_ScanNonEmpty()
+        {
+            Begin("10 扫描器返回非空列表");
+            try
+            {
+                AppConfig cfg = AppConfig.Load();
+                Scanner s = new Scanner(cfg);
+                List<AppInfo> list = s.ScanAll();
+                Assert(list.Count > 0, "扫描到 " + list.Count + " 项");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case11_ScanDedup()
+        {
+            Begin("11 扫描结果 DisplayKey 去重");
+            try
+            {
+                AppConfig cfg = AppConfig.Load();
+                Scanner s = new Scanner(cfg);
+                List<AppInfo> list = s.ScanAll();
+                HashSet<string> keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                int dup = 0;
+                foreach (AppInfo a in list)
+                {
+                    if (!keys.Add(a.DisplayKey())) dup++;
+                }
+                Assert(dup == 0, "无重复键，共 " + list.Count + " 项");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case12_IconPlaceholderFallback()
+        {
+            Begin("12 图标占位兜底：空宿主返回占位非空");
+            try
+            {
+                AppInfo a = new AppInfo();
+                a.Name = "X";
+                a.TargetPath = string.Empty;
+                a.DisplayIcon = string.Empty;
+                using (Bitmap b = Icons.Extract(a, 56))
+                {
+                    Assert(b != null, "占位图非空");
+                }
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case13_LauncherNullGuard()
+        {
+            Begin("13 Launcher 参数守卫：null 不抛异常");
+            try
+            {
+                bool l = Launcher.Launch(null);
+                bool u = Launcher.Uninstall(null);
+                Assert(!l && !u, "null 返回 false");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case14_DesktopBackupDir()
+        {
+            Begin("14 DesktopOrganizer 备份目录可建");
+            try
+            {
+                string bp = DesktopOrganizer.BackupPath;
+                if (!Directory.Exists(bp)) Directory.CreateDirectory(bp);
+                Assert(Directory.Exists(bp), "备份目录存在 " + bp);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case15_BuiltInCount()
+        {
+            Begin("15 内置分类数量为 9");
+            Assert(CategoryRules.BuiltIn.Length == 9, "数量=" + CategoryRules.BuiltIn.Length);
+        }
+
+        private static void Case16_NonAppEntryFilter()
+        {
+            Begin("16 全部应用过滤：网址/文档/卸载器/虚拟项剔除，正常应用保留");
+            bool doc = Scanner.IsNonAppEntry("Git Release Notes", @"C:\Program Files\Git\ReleaseNotes.html");
+            bool website = Scanner.IsNonAppEntry("Node.js website", string.Empty);
+            bool uninstall = Scanner.IsNonAppEntry("卸载微信", string.Empty);
+            bool virtualItem = Scanner.IsNonAppEntry("此电脑", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}");
+            bool url = Scanner.IsNonAppEntry("主页", "https://example.com");
+            bool keepApp = !Scanner.IsNonAppEntry("Apifox", "cn.apifox.app");
+            bool keepExe = !Scanner.IsNonAppEntry("微信", @"D:\APP\WeChat\WeChat.exe");
+            bool keepNamed = !Scanner.IsNonAppEntry("计算器", string.Empty);
+            Assert(doc && website && uninstall && virtualItem && url && keepApp && keepExe && keepNamed,
+                "doc=" + doc + " website=" + website + " uninstall=" + uninstall + " virtual=" + virtualItem
+                + " url=" + url + " app=" + keepApp + " exe=" + keepExe + " named=" + keepNamed);
+        }
+
+        private static void Case17_IconExtractSize()
+        {
+            Begin("17 图标提取输出尺寸为 56");
+            try
+            {
+                AppInfo a = new AppInfo();
+                a.Name = "notepad";
+                a.TargetPath = @"C:\Windows\System32\notepad.exe";
+                using (Bitmap b = Icons.Extract(a, 56))
+                {
+                    Assert(b != null && b.Width == 56 && b.Height == 56,
+                        "尺寸=" + (b == null ? "null" : b.Width + "x" + b.Height));
+                }
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case18_ClassifyPriority()
+        {
+            Begin("18 分类关键词覆盖：VSCode/Edge");
+            string dev = CategoryRules.Classify("Visual Studio Code");
+            string browser = CategoryRules.Classify("Microsoft Edge");
+            Assert(dev == "开发工具" && browser == "浏览器", dev + " / " + browser);
+        }
+
+        private static void Case19_AddedItemsRoundtrip()
+        {
+            Begin("19 用户添加项与显示全部已安装开关往返一致");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                c.ShowAllInstalled = true;
+                AddedEntry e = new AddedEntry();
+                e.Path = @"C:\Windows\System32\notepad.exe";
+                e.Category = "开发工具";
+                e.IsFolder = false;
+                c.AddedItems.Add(e);
+                c.Save();
+                AppConfig r = AppConfig.Load();
+                bool ok = r.ShowAllInstalled
+                    && r.AddedItems.Count == 1
+                    && r.AddedItems[0].Path == e.Path
+                    && r.AddedItems[0].Category == "开发工具"
+                    && !r.AddedItems[0].IsFolder;
+                Assert(ok, "开关=" + r.ShowAllInstalled + " 条目数=" + r.AddedItems.Count);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        private static void Case20_IsAliveTarget()
+        {
+            Begin("20 失效判定：UWP/网址/协议串恒有效，缺失路径剔除");
+            bool uwp = Scanner.IsAliveTarget(string.Empty, true);
+            bool url = Scanner.IsAliveTarget("https://example.com", false);
+            // 协议定位串（非磁盘路径）不得被误判失效，否则 steam:// 等快捷方式会被剔除
+            bool proto = Scanner.IsAliveTarget("steam://rungameid/730", false);
+            bool missing = Scanner.IsAliveTarget(@"C:\__no_such__\x.exe", false);
+            bool sys = Scanner.IsAliveTarget(@"C:\Windows", false);
+            Assert(uwp && url && proto && !missing && sys,
+                "uwp=" + uwp + " url=" + url + " proto=" + proto + " missing=" + missing + " dir=" + sys);
+        }
+
+        private static void Case21_StripIndexSuffix()
+        {
+            Begin("21 重名后缀剔除（(2)/_1/-1；空格+数字视为版本号不裁）");
+            bool a = Scanner.StripIndexSuffix("微信 (2)") == "微信";
+            bool b = Scanner.StripIndexSuffix("Chrome_1") == "Chrome";
+            bool c = Scanner.StripIndexSuffix("工具-2") == "工具";
+            bool d = Scanner.StripIndexSuffix("Visual Studio Code") == "Visual Studio Code";
+            bool e = Scanner.StripIndexSuffix("App (Beta)") == "App (Beta)";
+            // 版本号形如「名称 16」，不得被当作重名序号裁剪，否则不同版本会被合并
+            bool f = Scanner.StripIndexSuffix("Navicat Premium 16") == "Navicat Premium 16";
+            bool g = Scanner.StripIndexSuffix("App 7") == "App 7";
+            Assert(a && b && c && d && e && f && g,
+                "a=" + a + " b=" + b + " c=" + c + " d=" + d + " e=" + e + " f=" + f + " g=" + g);
+        }
+
+        private static void Case22_NameDedupRule()
+        {
+            Begin("22 收纳去重：同名条目视为重复（条目名称不重复）");
+            bool same = Scanner.IsSameEntryName("微信 (2)", "微信");
+            bool suffix = Scanner.IsSameEntryName("Chrome_1", "Chrome (3)");
+            bool diff = !Scanner.IsSameEntryName("微信", "QQ");
+            Assert(same && suffix && diff, "same=" + same + " suffix=" + suffix + " diff=" + diff);
+        }
+
+        private static void Case23_IconUrlFile()
+        {
+            Begin("23 .url 专用取图：IconFile 指向 exe 可提取");
+            string tmp = Path.Combine(Path.GetTempPath(), "AppManagerUrl_" + Guid.NewGuid().ToString("N") + ".url");
+            try
+            {
+                File.WriteAllText(tmp,
+                    "[InternetShortcut]\r\nURL=https://example.com\r\n" +
+                    "IconFile=C:\\Windows\\System32\\notepad.exe\r\nIconIndex=0\r\n");
+                AppInfo a = new AppInfo();
+                a.Name = "example";
+                a.ShortcutPath = tmp;
+                a.TargetPath = "https://example.com";
+                a.DisplayIcon = tmp;
+                a.IsFile = true;
+                using (Bitmap b = Icons.Extract(a, 56))
+                    Assert(Icons.IsValid(b), "取得有效图标");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static void Case24_IconFolder()
+        {
+            Begin("24 文件夹条目取系统文件夹图标");
+            string dir = Path.Combine(Path.GetTempPath(), "AppManagerDir_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(dir);
+                AppInfo a = new AppInfo();
+                a.Name = "测试文件夹";
+                a.TargetPath = dir;
+                a.DisplayIcon = dir;
+                a.IsFile = true;
+                a.IsFolder = true;
+                using (Bitmap b = Icons.Extract(a, 56))
+                    Assert(Icons.IsValid(b), "取得有效图标");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (Directory.Exists(dir)) Directory.Delete(dir, true); } catch { } }
+        }
+
+        private static void Case25_IconWebsite()
+        {
+            Begin("25 网址条目取 Internet 快捷方式图标");
+            try
+            {
+                AppInfo a = new AppInfo();
+                a.Name = "example.com";
+                a.TargetPath = "https://example.com";
+                a.IsFile = true;
+                using (Bitmap b = Icons.Extract(a, 56))
+                    Assert(Icons.IsValid(b), "取得有效图标");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case26_AddedUrlRoundtrip()
+        {
+            Begin("26 网址条目 IsUrl 往返一致（快捷中心/全部网站）");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                AddedEntry e = new AddedEntry();
+                e.Path = "https://example.com";
+                e.Category = "快捷中心";
+                e.IsUrl = true;
+                c.AddedItems.Add(e);
+                c.Save();
+                AppConfig r = AppConfig.Load();
+                bool ok = r.AddedItems.Count == 1
+                    && r.AddedItems[0].IsUrl
+                    && r.AddedItems[0].Category == "快捷中心"
+                    && r.AddedItems[0].Path == "https://example.com";
+                Assert(ok, "条目数=" + r.AddedItems.Count
+                    + " url=" + (r.AddedItems.Count > 0 ? r.AddedItems[0].IsUrl.ToString() : "-"));
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        private static void Case27_QuickCenterDir()
+        {
+            Begin("27 快捷中心收纳目录可建");
+            try
+            {
+                string qc = DesktopOrganizer.QuickCenterDir;
+                if (!Directory.Exists(qc)) Directory.CreateDirectory(qc);
+                Assert(Directory.Exists(qc), "收纳目录存在 " + qc);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case28_FuzzyMatch()
+        {
+            Begin("28 模糊匹配：归一化包含 + 字符序列容错");
+            bool sub = Scanner.FuzzyMatch("Google Chrome", "chrome");
+            bool seq = Scanner.FuzzyMatch("Visual Studio Code", "vsc");
+            // 归一化：忽略空格/连字符，故 vscode 可命中「VS Code」「Visual Studio Code」
+            bool norm1 = Scanner.FuzzyMatch("VS Code", "vscode");
+            bool norm2 = Scanner.FuzzyMatch("Visual Studio Code", "vscode");
+            bool miss = !Scanner.FuzzyMatch("微信", "qq");
+            bool empty = Scanner.FuzzyMatch("anything", "");
+            Assert(sub && seq && norm1 && norm2 && miss && empty,
+                "sub=" + sub + " seq=" + seq + " norm1=" + norm1 + " norm2=" + norm2
+                + " miss=" + miss + " empty=" + empty);
+        }
+
+        private static void Case29_CategoryViewModeRoundtrip()
+        {
+            Begin("29 分类视图模式往返一致（每分类独立网格/列表）");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                c.CategoryViewMode["浏览器"] = false;
+                c.CategoryViewMode["开发工具"] = true;
+                c.ManageRootPath = @"H:\Manage";
+                c.Save();
+                AppConfig r = AppConfig.Load();
+                bool ok = r.CategoryViewMode.ContainsKey("浏览器") && !r.CategoryViewMode["浏览器"]
+                    && r.CategoryViewMode.ContainsKey("开发工具") && r.CategoryViewMode["开发工具"]
+                    && r.ManageRootPath == @"H:\Manage";
+                Assert(ok, "浏览器=" + (r.CategoryViewMode.ContainsKey("浏览器") ? r.CategoryViewMode["浏览器"].ToString() : "-")
+                    + " ManageRoot=" + r.ManageRootPath);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        private static void Case30_AddedEntryNameRoundtrip()
+        {
+            Begin("30 用户添加条目改名（Name 字段）往返一致");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                AddedEntry e = new AddedEntry();
+                e.Path = "https://example.com";
+                e.Category = "快捷中心";
+                e.IsUrl = true;
+                e.Name = "我的示例网站";
+                c.AddedItems.Add(e);
+                c.Save();
+                AppConfig r = AppConfig.Load();
+                bool ok = r.AddedItems.Count == 1
+                    && r.AddedItems[0].Name == "我的示例网站"
+                    && r.AddedItems[0].IsUrl;
+                Assert(ok, "name=" + (r.AddedItems.Count > 0 ? r.AddedItems[0].Name : "-"));
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        private static void Case31_ItemOrderRoundtrip()
+        {
+            Begin("31 拖动排序记录往返一致（条目顺序 + 侧栏分类顺序）");
+            string tmp = TempFile(".ambak");
+            try
+            {
+                AppConfig c = new AppConfig();
+                c.ItemOrder["开发工具"] = new List<string> { "lnk:a", "reg:b", "add:c" };
+                c.SidebarOrder = new List<string> { "游戏", "开发工具", "浏览器" };
+                c.SaveTo(tmp);
+                AppConfig r = AppConfig.LoadFrom(tmp);
+                List<string> order;
+                bool ok = r.ItemOrder.TryGetValue("开发工具", out order)
+                    && order.Count == 3 && order[1] == "reg:b"
+                    && r.SidebarOrder.Count == 3 && r.SidebarOrder[0] == "游戏" && r.SidebarOrder[2] == "浏览器";
+                Assert(ok, "条目=" + (order == null ? "-" : order.Count.ToString())
+                    + " 侧栏=" + r.SidebarOrder.Count);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static void Case32_DesktopBackupEntryRoundtrip()
+        {
+            Begin("32 桌面备份条目新字段往返（目录 / 副本模式）");
+            string tmp = TempFile(".ambak");
+            try
+            {
+                AppConfig c = new AppConfig();
+                DesktopBackupEntry e = new DesktopBackupEntry();
+                e.OriginalPath = @"C:\Users\x\Desktop\项目";
+                e.CurrentPath = @"C:\Users\x\AppData\Local\AppManager\DesktopBackup\Folders\项目";
+                e.IsShortcut = false;
+                e.IsDir = true;
+                e.IsCopy = true;
+                c.DesktopBackup.Add(e);
+                c.SaveTo(tmp);
+                AppConfig r = AppConfig.LoadFrom(tmp);
+                bool ok = r.DesktopBackup.Count == 1
+                    && r.DesktopBackup[0].IsDir
+                    && r.DesktopBackup[0].IsCopy
+                    && !r.DesktopBackup[0].IsShortcut
+                    && r.DesktopBackup[0].CurrentPath == e.CurrentPath;
+                Assert(ok, "条目数=" + r.DesktopBackup.Count
+                    + " dir=" + (r.DesktopBackup.Count > 0 ? r.DesktopBackup[0].IsDir.ToString() : "-")
+                    + " copy=" + (r.DesktopBackup.Count > 0 ? r.DesktopBackup[0].IsCopy.ToString() : "-"));
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static void Case33_OrganizeFlagsRoundtrip()
+        {
+            Begin("33 收纳模式与范围开关往返一致");
+            string tmp = TempFile(".ambak");
+            try
+            {
+                AppConfig c = new AppConfig();
+                c.OrganizeCopy = true;
+                c.OrganizeShortcut = false;
+                c.OrganizeFile = true;
+                c.OrganizeDir = false;
+                c.SaveTo(tmp);
+                AppConfig r = AppConfig.LoadFrom(tmp);
+                bool ok = r.OrganizeCopy && !r.OrganizeShortcut && r.OrganizeFile && !r.OrganizeDir;
+                Assert(ok, "copy=" + r.OrganizeCopy + " sc=" + r.OrganizeShortcut
+                    + " file=" + r.OrganizeFile + " dir=" + r.OrganizeDir);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static void Case34_ExportImportRoundtrip()
+        {
+            Begin("34 备份包导出/导入往返一致（.ambak）");
+            string tmp = TempFile(".ambak");
+            try
+            {
+                AppConfig c = new AppConfig();
+                c.CustomCategories.Add("我的分类");
+                c.ItemOrder["我的分类"] = new List<string> { "add:1", "add:2" };
+                c.SidebarOrder = new List<string> { "我的分类", "游戏" };
+                c.ExportTo(tmp);
+                AppConfig r = AppConfig.ImportFrom(tmp);
+                bool ok = r != null
+                    && r.CustomCategories.Contains("我的分类")
+                    && r.ItemOrder.ContainsKey("我的分类")
+                    && r.ItemOrder["我的分类"].Count == 2
+                    && r.SidebarOrder.Count == 2;
+                Assert(ok, "分类=" + (r == null ? "null" : r.CustomCategories.Count.ToString()));
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static void Case35_ImportInvalidGuard()
+        {
+            Begin("35 非法备份包导入守卫：损坏/缺失均返回 null");
+            string bad = TempFile(".ambak");
+            try
+            {
+                File.WriteAllText(bad, "<NotAppManager/>");
+                AppConfig broken = AppConfig.ImportFrom(bad);
+                AppConfig missing = AppConfig.ImportFrom(Path.Combine(Path.GetTempPath(), "__no_such__.ambak"));
+                Assert(broken == null && missing == null,
+                    "broken=" + (broken == null) + " missing=" + (missing == null));
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(bad)) File.Delete(bad); } catch { } }
+        }
+
+        private static void Case36_AppsFolderTarget()
+        {
+            Begin("36 AppsFolder 定位串识别：打包应用 target 判定");
+            bool yes = Scanner.IsAppsFolderTarget("shell:AppsFolder\\Chrome");
+            bool yesCn = Scanner.IsAppsFolderTarget("SHELL:APPSFOLDER\\cn.apifox.app");
+            bool noExe = !Scanner.IsAppsFolderTarget(@"C:\Windows\notepad.exe");
+            bool noEmpty = !Scanner.IsAppsFolderTarget(string.Empty);
+            bool noUrl = !Scanner.IsAppsFolderTarget("https://example.com");
+            Assert(yes && yesCn && noExe && noEmpty && noUrl,
+                "yes=" + yes + " cn=" + yesCn + " exe=" + noExe + " empty=" + noEmpty + " url=" + noUrl);
+        }
+
+        private static void Case37_MoveDirectory()
+        {
+            Begin("37 目录搬迁-同卷：直接 Move，源消失且目标结构一致");
+            string baseTmp = Path.Combine(Path.GetTempPath(), "AppManagerMove_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string src = Path.Combine(baseTmp, "src");
+                string dest = Path.Combine(baseTmp, "dest");
+                Directory.CreateDirectory(Path.Combine(src, "sub"));
+                File.WriteAllText(Path.Combine(src, "a.txt"), "x");
+                File.WriteAllText(Path.Combine(src, "sub", "b.txt"), "y");
+                DesktopOrganizer.MoveDirectory(src, dest);
+                bool ok = !Directory.Exists(src)
+                    && File.Exists(Path.Combine(dest, "a.txt"))
+                    && File.Exists(Path.Combine(dest, "sub", "b.txt"));
+                Assert(ok, "源残留=" + Directory.Exists(src) + " 目标=" + Directory.Exists(dest));
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(baseTmp); }
+        }
+
+        /// <summary>跨卷搬迁：仅在存在可用第二卷时执行，避免无第二卷环境下误报失败。</summary>
+        private static void Case38_MoveDirectoryCrossVolume()
+        {
+            string other = OtherFixedVolume(Path.GetPathRoot(Path.GetTempPath()));
+            if (other == null) return;
+            Begin("38 目录搬迁-跨卷：复制后删除源，源消失且目标结构一致");
+            string baseTmp = Path.Combine(Path.GetTempPath(), "AppManagerMove_" + Guid.NewGuid().ToString("N"));
+            string xdest = Path.Combine(other, "AppManagerMoveTest_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string xsrc = Path.Combine(baseTmp, "xsrc");
+                Directory.CreateDirectory(Path.Combine(xsrc, "deep"));
+                File.WriteAllText(Path.Combine(xsrc, "deep", "c.txt"), "z");
+                DesktopOrganizer.MoveDirectory(xsrc, xdest);
+                bool ok = !Directory.Exists(xsrc)
+                    && File.Exists(Path.Combine(xdest, "deep", "c.txt"));
+                Assert(ok, "源残留=" + Directory.Exists(xsrc) + " 目标=" + Directory.Exists(xdest) + " 卷=" + other);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(baseTmp); TryDeleteTree(xdest); }
+        }
+
+        private static void Case39_CloseToTrayRoundtrip()
+        {
+            Begin("39 关闭行为开关往返一致（退出/最小化到托盘）");
+            string tmp = TempFile(".ambak");
+            try
+            {
+                AppConfig c = new AppConfig();
+                c.CloseToTray = true;
+                c.SaveTo(tmp);
+                AppConfig r = AppConfig.LoadFrom(tmp);
+                bool on = r.CloseToTray;
+                c.CloseToTray = false;
+                c.SaveTo(tmp);
+                AppConfig r2 = AppConfig.LoadFrom(tmp);
+                bool off = !r2.CloseToTray;
+                Assert(on && off, "toTray=" + on + " exit=" + off);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static void Case40_NormalizeRootAndAtomicSave()
+        {
+            Begin("40 盘符根规范化 + 配置原子写");
+            bool root = DesktopOrganizer.NormalizeRoot("H:") == "H:\\"
+                && DesktopOrganizer.NormalizeRoot("H:\\Manage\\") == "H:\\Manage"
+                && DesktopOrganizer.NormalizeRoot(string.Empty) == string.Empty;
+            string tmp = TempFile(".ambak");
+            bool atomic;
+            try
+            {
+                AppConfig c = new AppConfig();
+                c.Favorites.Add("x");
+                c.SaveTo(tmp);              // 首次：无目标文件，临时文件整体移动
+                c.Favorites.Add("y");
+                c.SaveTo(tmp);              // 再次：File.Replace 原子替换，原文件不被中途写坏
+                AppConfig r = AppConfig.LoadFrom(tmp);
+                atomic = r.Favorites.Count == 2 && !File.Exists(tmp + ".tmp");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); return; }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+            Assert(root && atomic, "root=" + root + " atomic=" + atomic);
+        }
+
+        private static void Case41_IconCacheClone()
+        {
+            Begin("41 图标缓存：重复取得为独立副本，释放其一不影响缓存复用");
+            AppInfo a = new AppInfo();
+            a.Name = "notepad";
+            a.TargetPath = @"C:\Windows\System32\notepad.exe";
+            a.DisplayIcon = a.TargetPath;
+            bool independent = false, reusable = false;
+            try
+            {
+                Bitmap first = Icons.Extract(a, 48);
+                Bitmap second = Icons.Extract(a, 48);
+                // 两次取得必须是不同实例，避免调用方释放副本时污染缓存
+                independent = first != null && second != null && !ReferenceEquals(first, second);
+                if (first != null) first.Dispose();
+                Bitmap third = Icons.Extract(a, 48);      // 释放副本后仍应从缓存取到有效图标
+                reusable = Icons.IsValid(third);
+                if (second != null) second.Dispose();
+                if (third != null) third.Dispose();
+            }
+            catch (Exception ex) { Assert(false, ex.Message); return; }
+            Assert(independent && reusable, "独立=" + independent + " 可复用=" + reusable);
+        }
+
+        /// <summary>用例42：落点唯一化规则——重名追加 _1/_2 后缀，无冲突时原样返回（拖入目录与新建共用）。</summary>
+        private static void Case42_UniqueDestSuffix()
+        {
+            Begin("42 落点唯一化：重名追加 _1/_2，无冲突原样返回");
+            string dir = Path.Combine(Path.GetTempPath(), "AppManagerUD_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(dir);
+                // 无冲突：原样返回
+                string first = MainForm.UniqueDest(dir, "新建文本文档.txt");
+                File.WriteAllText(first, "x");
+                // 同名文件冲突：追加 _1
+                string second = MainForm.UniqueDest(dir, "新建文本文档.txt");
+                File.WriteAllText(second, "y");
+                // 再冲突：追加 _2
+                string third = MainForm.UniqueDest(dir, "新建文本文档.txt");
+                // 同名目录冲突：同样走 _1 规则
+                string sub = Path.Combine(dir, "新建文件夹");
+                Directory.CreateDirectory(sub);
+                string dirDest = MainForm.UniqueDest(dir, "新建文件夹");
+                bool ok = Path.GetFileName(first) == "新建文本文档.txt"
+                       && Path.GetFileName(second) == "新建文本文档_1.txt"
+                       && Path.GetFileName(third) == "新建文本文档_2.txt"
+                       && Path.GetFileName(dirDest) == "新建文件夹_1";
+                Assert(ok, first + " | " + second + " | " + third + " | " + dirDest);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(dir); }
+        }
+
+        /// <summary>用例43：拖入目录搬迁规则——IsUnder 防自嵌套边界 + 文件经 UniqueDest 搬入后源消失、目标存在。</summary>
+        private static void Case43_MoveIntoFolderRules()
+        {
+            Begin("43 拖入目录：防自嵌套边界正确，搬迁落点与源清理一致");
+            string baseTmp = Path.Combine(Path.GetTempPath(), "AppManagerMF_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(baseTmp);
+                string folder = Path.Combine(baseTmp, "目录");
+                string child = Path.Combine(folder, "子");
+                Directory.CreateDirectory(folder);
+                Directory.CreateDirectory(child);
+                // 防自嵌套边界：拖入自身 / 拖入子目录 / 子目录拖出 均须拦截
+                bool selfBlocked = MainForm.IsUnder(folder, folder);        // 含自身 → 拖到自身被拦
+                bool intoChildBlocked = MainForm.IsUnder(folder, child);    // 目录拖入自己的子目录被拦
+                bool childOutAllowed = !MainForm.IsUnder(child, folder);    // 子目录拖回父目录放行
+                // 文件搬迁：UniqueDest 落点 + File.Move，源消失、目标存在
+                string file = Path.Combine(baseTmp, "笔记.txt");
+                File.WriteAllText(file, "data");
+                string dest = MainForm.UniqueDest(folder, Path.GetFileName(file));
+                File.Move(file, dest);
+                bool moved = !File.Exists(file) && File.Exists(dest)
+                          && File.ReadAllText(dest) == "data";
+                Assert(selfBlocked && intoChildBlocked && childOutAllowed && moved,
+                    "自身=" + selfBlocked + " 入子=" + intoChildBlocked
+                    + " 子出=" + childOutAllowed + " 落点=" + dest);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(baseTmp); }
+        }
+
+        /// <summary>用例44：删除能力——永久删除目录树/单文件生效，空参与已消失路径守卫返回 false（回收站模式不污染测试）。</summary>
+        private static void Case44_DeletePath()
+        {
+            Begin("44 删除：目录树与单文件删除生效，无效路径守卫拦截");
+            string dir = Path.Combine(Path.GetTempPath(), "AppManagerDel_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                Directory.CreateDirectory(dir);
+                string sub = Path.Combine(dir, "子目录");
+                Directory.CreateDirectory(sub);
+                File.WriteAllText(Path.Combine(sub, "inner.txt"), "i");
+                File.WriteAllText(Path.Combine(dir, "笔记.txt"), "d");
+                bool dirOk = Launcher.DeletePath(dir, false);        // 永久删除目录树（测试不进回收站）
+                string f2 = Path.Combine(Path.GetTempPath(), "AppManagerDelF_" + Guid.NewGuid().ToString("N") + ".txt");
+                File.WriteAllText(f2, "f");
+                bool fileOk = Launcher.DeletePath(f2, false);        // 永久删除单文件
+                bool guard = !Launcher.DeletePath(null, false)       // 空参守卫
+                          && !Launcher.DeletePath(dir, false);       // 已消失路径守卫
+                Assert(dirOk && fileOk && guard && !Directory.Exists(dir) && !File.Exists(f2),
+                    "目录=" + dirOk + " 文件=" + fileOk + " 守卫=" + guard);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(dir); }
+        }
+
+        /// <summary>查找与给定根不同的、就绪的本地固定卷（供跨卷搬迁用例使用），无则返回 null。</summary>
+        private static string OtherFixedVolume(string currentRoot)
+        {
+            try
+            {
+                foreach (DriveInfo d in DriveInfo.GetDrives())
+                {
+                    if (!d.IsReady || d.DriveType != DriveType.Fixed) continue;
+                    if (string.Equals(d.Name, currentRoot, StringComparison.OrdinalIgnoreCase)) continue;
+                    return d.Name;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        private static void TryDeleteTree(string dir)
+        {
+            try { if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir)) Directory.Delete(dir, true); }
+            catch { }
+        }
+
+        // ===== 日志辅助 =====
+
+        private static void Begin(string title)
+        {
+            _total++;
+            Log("[用例] " + title);
+        }
+
+        private static void Assert(bool ok, string detail)
+        {
+            if (ok) { _pass++; Log("  -> 通过: " + detail); }
+            else { Log("  -> 失败: " + detail); }
+        }
+
+        private static void Log(string s) { _log.AppendLine(s); }
+
+        private static void Flush()
+        {
+            try
+            {
+                if (!Directory.Exists(AppDir)) Directory.CreateDirectory(AppDir);
+                File.WriteAllText(LogPath, _log.ToString(), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private static string ConfigFilePath()
+        {
+            return Path.Combine(AppDir, "config.xml");
+        }
+
+        /// <summary>临时文件路径（供导出/导入等用例使用，用后即删，避免副作用）。</summary>
+        private static string TempFile(string ext)
+        {
+            return Path.Combine(Path.GetTempPath(), "AppManagerTest_" + Guid.NewGuid().ToString("N") + ext);
+        }
+
+        private static string BackupConfig()
+        {
+            string p = ConfigFilePath();
+            if (!File.Exists(p)) return null;
+            string bak = p + ".selftestbak";
+            try { File.Copy(p, bak, true); } catch { }
+            return bak;
+        }
+
+        private static void RestoreConfig(string bak)
+        {
+            string p = ConfigFilePath();
+            try
+            {
+                if (bak != null && File.Exists(bak))
+                {
+                    File.Copy(bak, p, true);
+                    File.Delete(bak);
+                }
+                else if (File.Exists(p))
+                {
+                    File.Delete(p);
+                }
+            }
+            catch { }
+        }
+    }
+}

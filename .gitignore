@@ -1,0 +1,13 @@
+# 构建产物
+AppManager.exe
+AppManager.pdb
+
+# 运行时生成（日志 / 用户配置 / 收纳备份 / 快捷中心）
+selftest.log
+tidy.log
+config.xml
+DesktopBackup/
+QuickCenter/
+
+# 临时探测文件
+_probe_icon.png
