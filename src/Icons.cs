@@ -180,6 +180,10 @@ namespace AppManager
 
         private static Bitmap ExtractCore(AppInfo app, int displaySize)
         {
+            // 本地图片条目：直接生成内容缩略图（照片等资源分类展示图片本身而非文件类型图标）
+            Bitmap thumb = TryLoadImageThumbnail(app.TargetPath, displaySize);
+            if (thumb != null) return thumb;
+
             string host;
             int iconIndex;
             ResolveIconHost(app, out host, out iconIndex);
@@ -232,6 +236,10 @@ namespace AppManager
         {
             Bitmap bmp = null;
 
+            // 本地图片条目：小尺寸同样使用内容缩略图，列表视图与网格视图一致
+            Bitmap thumb = TryLoadImageThumbnail(app.TargetPath, displaySize);
+            if (thumb != null) return thumb;
+
             // 打包/UWP 应用：按 shell:AppsFolder\<AUMID> 解析名取小图标
             if (Scanner.IsAppsFolderTarget(app.TargetPath))
                 bmp = TryShGetInfoByParsingName(app.TargetPath, true);
@@ -257,6 +265,39 @@ namespace AppManager
                 return Extract(app, displaySize);   // 兜底：沿用大图标流程
             }
             return ScaleTo(bmp, displaySize);
+        }
+
+        /// <summary>
+        /// 本地图片文件取内容缩略图：解码原图后等比缩放到 displaySize 方形画布并居中（透明留白），
+        /// 与图标网格布局一致。仅处理图片文件（MediaRules.IsImage），损坏/不支持的格式返回 null 走图标兜底。
+        /// 加载期间用独占读共享打开，读完即释放，不长期占用文件句柄。
+        /// </summary>
+        private static Bitmap TryLoadImageThumbnail(string path, int displaySize)
+        {
+            try
+            {
+                if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
+                using (Bitmap src = new Bitmap(path))
+                {
+                    if (src.Width <= 0 || src.Height <= 0) return null;
+                    Bitmap dst = new Bitmap(displaySize, displaySize, PixelFormat.Format32bppArgb);
+                    using (Graphics g = Graphics.FromImage(dst))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        g.Clear(Color.Transparent);
+                        double scale = Math.Min((double)displaySize / src.Width,
+                            (double)displaySize / src.Height);
+                        int w = Math.Max(1, (int)Math.Round(src.Width * scale));
+                        int h = Math.Max(1, (int)Math.Round(src.Height * scale));
+                        g.DrawImage(src, new Rectangle((displaySize - w) / 2,
+                            (displaySize - h) / 2, w, h));
+                    }
+                    return dst;
+                }
+            }
+            catch { return null; }   // 损坏文件/非图片内容：回退到常规图标流程
         }
 
         /// <summary>检测一个 Bitmap 是否为有效图标（非空、有效像素占比 >= 2%）。</summary>

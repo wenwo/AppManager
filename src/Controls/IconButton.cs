@@ -40,6 +40,15 @@ namespace AppManager.Controls
         private IconKind _kind = IconKind.None;
         private bool _hover;
         private bool _pressed;
+        // 图标色覆盖：默认 null 时用统一 GlyphColor（标题栏深灰）；深色背景场景（如图片查看器）可设浅色
+        private Color? _iconColor;
+
+        /// <summary>图标颜色覆盖；未设置时使用统一 GlyphColor。悬停底色仍按深色叠加不变。</summary>
+        public Color? IconColor
+        {
+            get { return _iconColor; }
+            set { _iconColor = value; Invalidate(); }
+        }
 
         public IconButton()
         {
@@ -83,6 +92,7 @@ namespace AppManager.Controls
                     Draw.FillRoundedRect(g, b, r, 6);
             }
             if (_kind == IconKind.None) return;
+            Color stroke = _iconColor ?? GlyphColor;
 
             if (_kind == IconKind.Settings)
             {
@@ -92,7 +102,7 @@ namespace AppManager.Controls
 
             float cx = Width / 2F;
             float cy = Height / 2F;
-            using (Pen pen = new Pen(GlyphColor, StrokeWidth))
+            using (Pen pen = new Pen(stroke, StrokeWidth))
             {
                 pen.StartCap = LineCap.Round;
                 pen.EndCap = LineCap.Round;
@@ -147,9 +157,10 @@ namespace AppManager.Controls
                         path.Transform(m);
                     }
                 }
-                using (SolidBrush br = new SolidBrush(GlyphColor))
+                Color strokeC = _iconColor ?? GlyphColor;
+                using (SolidBrush br = new SolidBrush(strokeC))
                     g.FillPath(br, path);
-                using (Pen pen = new Pen(GlyphColor, GlyphStroke))
+                using (Pen pen = new Pen(strokeC, GlyphStroke))
                 {
                     pen.LineJoin = LineJoin.Round;
                     pen.StartCap = LineCap.Round;

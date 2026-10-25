@@ -96,6 +96,8 @@ namespace AppManager
         public List<string> Favorites = new List<string>();
         public List<string> Hidden = new List<string>();
         public List<string> CustomCategories = new List<string>();
+        // 资源模式自定义分类（照片/视频/音乐/书签之外用户自建）
+        public List<string> ResourceCategories = new List<string>();
         public Dictionary<string, string> CategoryOverride = new Dictionary<string, string>();
         public List<AddedEntry> AddedItems = new List<AddedEntry>();
         public List<DesktopBackupEntry> DesktopBackup = new List<DesktopBackupEntry>();
@@ -167,6 +169,8 @@ namespace AppManager
                     AddUnique(cfg.Hidden, n.InnerText);
                 foreach (XmlNode n in root.SelectNodes("CustomCategories/Item"))
                     AddUnique(cfg.CustomCategories, n.InnerText);
+                foreach (XmlNode n in root.SelectNodes("ResourceCategories/Item"))
+                    AddUnique(cfg.ResourceCategories, n.InnerText);
                 foreach (XmlNode n in root.SelectNodes("CategoryOverrides/Item"))
                 {
                     string k = XmlAttr(n, "key");
@@ -268,6 +272,7 @@ namespace AppManager
                     WriteList(w, "Favorites", Favorites);
                     WriteList(w, "Hidden", Hidden);
                     WriteList(w, "CustomCategories", CustomCategories);
+                    WriteList(w, "ResourceCategories", ResourceCategories);
                     w.WriteStartElement("CategoryOverrides");
                     foreach (KeyValuePair<string, string> kv in CategoryOverride)
                     {
