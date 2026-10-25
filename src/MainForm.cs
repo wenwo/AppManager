@@ -53,6 +53,8 @@ namespace AppManager
         // 状态
         private string currentCategory = "常用";
         private SidebarControl.ContentMode contentMode = SidebarControl.ContentMode.Software;
+        // 软件模式下上次选中的分类：切到资源模式再切回时恢复，避免丢失浏览位置
+        private string lastSoftwareCategory = "常用";
         private bool _ready = false;
         private int categoryTotal = 0;
         private int iconGen = 0;        // 图标加载代号：换列表即自增，使旧加载任务自动失效
@@ -659,27 +661,47 @@ namespace AppManager
         private void RebuildSidebar()
         {
             List<SidebarControl.SidebarItem> list = new List<SidebarControl.SidebarItem>();
-            list.Add(MkItem("常用", "常用"));
-            // 「快捷中心」常驻显示（为空也在），并作为文件/文件夹的投放目标
-            list.Add(MkItem(QuickCenter, QuickCenter, true));
-            list.Add(Sep());
-            // 中间区块（可拖动排序）：自定义分类在前、内置分类在后，中间以分隔线断开
-            List<string> mid = OrderedMiddleCategories();
-            int customCount = 0;
-            for (int i = 0; i < mid.Count; i++)
-                if (config.CustomCategories.Contains(mid[i])) customCount++;
-            for (int i = 0; i < mid.Count; i++)
+            if (contentMode == SidebarControl.ContentMode.Website)
             {
-                if (i == customCount && customCount > 0 && customCount < mid.Count)
-                    list.Add(Sep());
-                // 中间区块均为可编辑分类：既是拖拽排序对象，也是文件/目录投放目标
-                list.Add(MkItem(mid[i], mid[i], true, true, i < customCount ? 1 : 2));
+                // 资源模式：自定义资源分类在前、内置四大分类在后（与软件侧一致，以分隔线分组），底部「全部资源」
+                // 两者均为资源条目投放目标
+                for (int i = 0; i < config.ResourceCategories.Count; i++)
+                {
+                    string c = config.ResourceCategories[i];
+                    list.Add(MkItem(c, c, true));
+                }
+                for (int i = 0; i < CategoryRules.ResourceBuiltIn.Length; i++)
+                {
+                    string c = CategoryRules.ResourceBuiltIn[i];
+                    if (i == 0 && config.ResourceCategories.Count > 0) list.Add(Sep());
+                    list.Add(MkItem(c, c, true));
+                }
+                list.Add(Sep());
+                list.Add(MkItem("全部资源", "全部资源"));
             }
-            list.Add(Sep());
-            // 只读全集分类：全部软件 / 全部文件 / 全部网站
-            list.Add(MkItem("全部软件", "全部软件"));
-            list.Add(MkItem("全部文件", "全部文件"));
-            list.Add(MkItem("全部网站", "全部网站"));
+            else
+            {
+                list.Add(MkItem("常用", "常用"));
+                // 「快捷中心」常驻显示（为空也在），并作为文件/文件夹的投放目标
+                list.Add(MkItem(QuickCenter, QuickCenter, true));
+                list.Add(Sep());
+                // 中间区块（可拖动排序）：自定义分类在前、内置分类在后，中间以分隔线断开
+                List<string> mid = OrderedMiddleCategories();
+                int customCount = 0;
+                for (int i = 0; i < mid.Count; i++)
+                    if (config.CustomCategories.Contains(mid[i])) customCount++;
+                for (int i = 0; i < mid.Count; i++)
+                {
+                    if (i == customCount && customCount > 0 && customCount < mid.Count)
+                        list.Add(Sep());
+                    // 中间区块均为可编辑分类：既是拖拽排序对象，也是文件/目录投放目标
+                    list.Add(MkItem(mid[i], mid[i], true, true, i < customCount ? 1 : 2));
+                }
+                list.Add(Sep());
+                // 只读全集分类：全部软件 / 全部文件（资源条目统一在资源模式「全部资源」查看）
+                list.Add(MkItem("全部软件", "全部软件"));
+                list.Add(MkItem("全部文件", "全部文件"));
+            }
             sidebarItems = list;
             sidebar.SetItems(list);
             sidebar.SetActive(currentCategory);
@@ -788,37 +810,36 @@ namespace AppManager
             // 每分类独立视图模式：切换分类时恢复该分类上次选择的网格/列表
             bool gm = GetCategoryGridMode(key);
             viewToggle.Checked = gm;   // 触发 CheckedChanged 自动落盘与应用
-            // 网站模式强制列表：切换分类不得把网址切回网格（与 OnModeChanged 保持一致）
+            // 资源模式强制列表：切换分类不得把资源条目切回网格（与 OnModeChanged 保持一致）
             grid.GridMode = contentMode == SidebarControl.ContentMode.Website ? false : gm;
-            addBtn.Visible = CanEditCategory(key) && contentMode == SidebarControl.ContentMode.Software;
+            addBtn.Visible = CanEditCategory(key);
             LayoutControls();
             RefreshGrid();
         }
 
-        /// <summary>内容模式切换（软件/网站）：网站模式下展示全部网址条目，且强制列表视图。</summary>
+        /// <summary>
+        /// 内容模式切换（软件/资源）：重建侧栏分类并恢复各自上次选中的分类。
+        /// 资源模式强制列表视图，隐藏网格/列表开关。
+        /// </summary>
         private void OnModeChanged(SidebarControl.ContentMode m)
         {
             contentMode = m;
-            if (m == SidebarControl.ContentMode.Website)
+            bool website = m == SidebarControl.ContentMode.Website;
+            grid.ShowRowActions = website;
+            viewToggle.Visible = !website;
+            toggleLabel.Visible = !website;
+            RebuildSidebar();
+            if (website)
             {
-                grid.GridMode = false;
-                grid.ShowRowActions = true;
-                addBtn.Visible = true;   // 网站模式下可添加网址
-                // 网站强制列表视图：隐藏网格/列表开关，避免切换后破坏强制列表
-                viewToggle.Visible = false;
-                toggleLabel.Visible = false;
+                lastSoftwareCategory = currentCategory;
+                OnSidebarSelect("全部资源");
+                return;
             }
-            else
-            {
-                grid.GridMode = GetCategoryGridMode(currentCategory);
-                viewToggle.Checked = GetCategoryGridMode(currentCategory);
-                viewToggle.Visible = true;
-                toggleLabel.Visible = true;
-                grid.ShowRowActions = false;
-                addBtn.Visible = CanEditCategory(currentCategory);
-            }
-            LayoutControls();
-            RefreshGrid();
+            // 切回软件模式：恢复上次选中的软件分类，已不存在时回退「常用」
+            bool exists = false;
+            for (int i = 0; i < sidebarItems.Count; i++)
+                if (!sidebarItems[i].Separator && sidebarItems[i].Key == lastSoftwareCategory) { exists = true; break; }
+            OnSidebarSelect(exists ? lastSoftwareCategory : "常用");
         }
 
         /// <summary>取指定分类的网格/列表偏好，缺失时用全局 ViewGrid 兜底。</summary>
@@ -836,23 +857,26 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 允许添加/移除条目的分类：内置分类、自定义分类与「快捷中心」；
-        /// 常用与只读全集分类（全部软件/全部文件/全部网站）不可编辑。
+        /// 允许添加/移除条目的分类：内置分类、自定义分类、资源分类与「快捷中心」；
+        /// 常用与只读全集分类（全部软件/全部文件/全部资源）不可编辑。
         /// </summary>
         private bool CanEditCategory(string cat)
         {
             if (IsReadOnlyCategory(cat) || cat == "常用") return false;
             if (cat == QuickCenter) return true;
             if (IsCustomCategory(cat)) return true;
+            if (config.ResourceCategories.Contains(cat)) return true;
             for (int i = 0; i < CategoryRules.BuiltIn.Length; i++)
                 if (CategoryRules.BuiltIn[i] == cat) return true;
+            for (int i = 0; i < CategoryRules.ResourceBuiltIn.Length; i++)
+                if (CategoryRules.ResourceBuiltIn[i] == cat) return true;
             return false;
         }
 
-        /// <summary>只读全集分类：全部软件 / 全部文件 / 全部网站（不参与编辑与分类移动）。</summary>
+        /// <summary>只读全集分类：全部软件 / 全部文件（软件模式）与全部资源（资源模式），不参与编辑与分类移动。</summary>
         private static bool IsReadOnlyCategory(string cat)
         {
-            return cat == "全部软件" || cat == "全部文件" || cat == "全部网站";
+            return cat == "全部软件" || cat == "全部文件" || cat == "全部资源";
         }
 
         /// <summary>
@@ -1006,11 +1030,12 @@ namespace AppManager
             }
             else if (contentMode == SidebarControl.ContentMode.Website)
             {
-                // 网站模式：展示全部网址条目（忽略分类选择）
+                // 资源模式：「全部资源」展示全部资源条目，其余分类按归属过滤（仅网址条目）
                 foreach (AppInfo a in allApps)
                 {
                     if (!ShouldShow(a)) continue;
-                    if (Scanner.IsUrl(a.TargetPath)) shown.Add(a);
+                    if (!Scanner.IsUrl(a.TargetPath)) continue;
+                    if (currentCategory == "全部资源" || InCategory(a, currentCategory)) shown.Add(a);
                 }
                 categoryTotal = shown.Count;
             }
@@ -1036,12 +1061,14 @@ namespace AppManager
             grid.AllowReorder = kw.Length == 0
                 && contentMode == SidebarControl.ContentMode.Software
                 && CanReorderCategory(currentCategory);
-            // 主内容区接受外部文件/文件夹拖入：仅可编辑分类放行
-            grid.AllowExternalDrop = CanEditCategory(currentCategory);
-            // 拖出来源：搜索态（结果跨分类，可直接拖到侧栏「加入」）或只读全集 /「常用」分类；
-            // 与网格内排序相互独立：只读全集不排序，「常用」两者皆可（网格内排序 + 拖出加入）
-            grid.AllowDragOut = contentMode == SidebarControl.ContentMode.Software
-                && (kw.Length > 0 || IsDragOutSourceCategory(currentCategory));
+            // 外部文件/文件夹拖入主内容区：仅软件模式可编辑分类放行（资源分类只收资源条目）
+            grid.AllowExternalDrop = contentMode == SidebarControl.ContentMode.Software
+                && CanEditCategory(currentCategory);
+            // 拖出来源：软件模式=搜索态或只读全集/「常用」；资源模式=搜索态或「全部资源」
+            // （拖到侧栏资源分类即「加入」，多归属）。与网格内排序相互独立。
+            grid.AllowDragOut = contentMode == SidebarControl.ContentMode.Website
+                ? (kw.Length > 0 || currentCategory == "全部资源")
+                : (kw.Length > 0 || IsDragOutSourceCategory(currentCategory));
             UpdateCount(shown.Count, categoryTotal);
         }
 
@@ -1290,10 +1317,10 @@ namespace AppManager
 
         private bool InCategory(AppInfo a, string category)
         {
-            // 只读全集分类：全部软件=软件（不含文件/文件夹），全部文件=文件/文件夹，全部网站=网址
+            // 只读全集分类：全部软件=软件（不含文件/文件夹），全部文件=文件/文件夹，全部资源=资源条目（网址）
             if (category == "全部软件") return !a.IsFile;
             if (category == "全部文件") return a.IsFile && !Scanner.IsUrl(a.TargetPath);
-            if (category == "全部网站") return Scanner.IsUrl(a.TargetPath);
+            if (category == "全部资源") return Scanner.IsUrl(a.TargetPath);
             if (category == "常用") return a.IsFavorite;
 
             // 额外归属分类（拖放「加入分类」，多归属）：原分类保留，命中即视为属于该分类
@@ -1386,29 +1413,35 @@ namespace AppManager
             return config.CustomCategories.Contains(name);
         }
 
-        /// <summary>侧栏底部「+ 新建分类」：弹出输入框创建自定义分类。</summary>
+        /// <summary>侧栏底部「+ 新建分类」：按当前内容模式创建软件自定义分类或资源自定义分类。</summary>
         private void OnAddCategory()
         {
             string name = InputDialog.Show("新建分类", "请输入分类名称：");
             if (string.IsNullOrEmpty(name)) return;
             name = name.Trim();
             if (name.Length == 0) return;
-            if (config.CustomCategories.Contains(name))
+            bool resource = contentMode == SidebarControl.ContentMode.Website;
+            List<string> cats = resource ? config.ResourceCategories : config.CustomCategories;
+            if (cats.Contains(name)
+                || (resource && Array.IndexOf(CategoryRules.ResourceBuiltIn, name) >= 0))
             {
                 MessageBox.Show("分类「" + name + "」已存在。", "新建分类",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            config.CustomCategories.Add(name);
+            cats.Add(name);
             config.Save();
             RebuildSidebar();
             OnSidebarSelect(name);
         }
 
-        /// <summary>自定义分类右键菜单：重命名 / 删除。</summary>
+        /// <summary>自定义分类右键菜单：重命名 / 删除（资源模式下作用于资源自定义分类）。</summary>
         private void OnCategoryContext(string category, Point screen)
         {
-            if (!IsCustomCategory(category)) return;
+            bool custom = contentMode == SidebarControl.ContentMode.Website
+                ? config.ResourceCategories.Contains(category)
+                : IsCustomCategory(category);
+            if (!custom) return;
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             items.Add(MkMenu("重命名…", delegate { RenameCategory(category); }));
             items.Add(MkMenu("删除分类", delegate { DeleteCategory(category); }));
@@ -1417,53 +1450,70 @@ namespace AppManager
             mw.Show(this);
         }
 
+        /// <summary>重命名自定义分类（软件/资源按当前内容模式），并同步所有引用该分类的配置。</summary>
         private void RenameCategory(string oldName)
         {
             string name = InputDialog.Show("重命名分类", "请输入新名称：", oldName);
             if (string.IsNullOrEmpty(name)) return;
             name = name.Trim();
             if (name.Length == 0 || name == oldName) return;
-            if (config.CustomCategories.Contains(name))
+            bool resource = contentMode == SidebarControl.ContentMode.Website;
+            List<string> cats = resource ? config.ResourceCategories : config.CustomCategories;
+            if (cats.Contains(name))
             {
                 MessageBox.Show("分类「" + name + "」已存在。", "重命名分类",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            int idx = config.CustomCategories.IndexOf(oldName);
-            if (idx >= 0) config.CustomCategories[idx] = name;
+            int idx = cats.IndexOf(oldName);
+            if (idx >= 0) cats[idx] = name;
             // 同步所有指向旧分类的 override 与 added items
             List<string> keys = new List<string>(config.CategoryOverride.Keys);
             foreach (string k in keys)
                 if (config.CategoryOverride[k] == oldName) config.CategoryOverride[k] = name;
             foreach (AddedEntry e in config.AddedItems)
                 if (e.Category == oldName) e.Category = name;
+            // 同步额外归属记录（拖放「加入分类」结果），避免改名后条目丢失归属
+            foreach (List<string> extra in config.ItemCategories.Values)
+                for (int i = 0; i < extra.Count; i++)
+                    if (extra[i] == oldName) extra[i] = name;
             // 同步排序记录中的分类名
             if (config.ItemOrder.ContainsKey(oldName))
             {
                 config.ItemOrder[name] = config.ItemOrder[oldName];
                 config.ItemOrder.Remove(oldName);
             }
-            for (int i = 0; i < config.SidebarOrder.Count; i++)
-                if (config.SidebarOrder[i] == oldName) config.SidebarOrder[i] = name;
+            if (!resource)
+            {
+                for (int i = 0; i < config.SidebarOrder.Count; i++)
+                    if (config.SidebarOrder[i] == oldName) config.SidebarOrder[i] = name;
+            }
             if (currentCategory == oldName) currentCategory = name;
             config.Save();
             RebuildSidebar();
             RefreshGrid();
         }
 
+        /// <summary>删除自定义分类（软件/资源按当前内容模式）；分类下条目回归默认归属。</summary>
         private void DeleteCategory(string category)
         {
             if (!ConfirmDialog.Show("删除分类", "确认删除分类「" + category + "」？\n该分类下的条目将回归默认分类。")) return;
-            config.CustomCategories.Remove(category);
+            bool resource = contentMode == SidebarControl.ContentMode.Website;
+            if (resource) config.ResourceCategories.Remove(category);
+            else config.CustomCategories.Remove(category);
             List<string> keys = new List<string>(config.CategoryOverride.Keys);
             foreach (string k in keys)
                 if (config.CategoryOverride[k] == category) config.CategoryOverride.Remove(k);
             foreach (AddedEntry e in config.AddedItems)
-                if (e.Category == category) e.Category = CategoryRules.Classify(Path.GetFileName(e.Path));
+                if (e.Category == category)
+                    e.Category = resource ? "书签" : CategoryRules.Classify(Path.GetFileName(e.Path));
+            // 清理指向已删分类的额外归属记录
+            foreach (List<string> extra in config.ItemCategories.Values)
+                extra.Remove(category);
             config.ItemOrder.Remove(category);
-            config.SidebarOrder.Remove(category);
+            if (!resource) config.SidebarOrder.Remove(category);
             config.Save();
-            if (currentCategory == category) currentCategory = "全部软件";
+            if (currentCategory == category) currentCategory = resource ? "全部资源" : "全部软件";
             RebuildSidebar();
             sidebar.SetActive(currentCategory);
             RefreshGrid();
@@ -1484,7 +1534,8 @@ namespace AppManager
         private void OnContextMenu(AppInfo app, Point screen)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
-            bool readOnly = IsReadOnlyCategory(currentCategory) && contentMode != SidebarControl.ContentMode.Website;
+            bool website = contentMode == SidebarControl.ContentMode.Website;
+            bool readOnly = IsReadOnlyCategory(currentCategory);
 
             if (readOnly)
             {
@@ -1495,8 +1546,9 @@ namespace AppManager
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
                 items.Add(MkSep());
                 // 只读全集分类：以「加入」方式把条目多归属到其它分类（原归属与「全部」中的条目均不变）
-                items.Add(MkSubMenu("移动到分类…", BuildAddCategoryItems(app, false)));
-                items.Add(MkSubMenu("移动到自定义…", BuildAddCategoryItems(app, true)));
+                items.Add(MkSubMenu("移动到分类…", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
+                if (!website)
+                    items.Add(MkSubMenu("移动到自定义…", BuildAddCategoryItems(app, true)));
                 AddDeleteMenu(items, app);
             }
             else
@@ -1523,14 +1575,22 @@ namespace AppManager
                     items.Add(MkMenu("打开所在位置", delegate { Launcher.OpenFileLocation(app); }));
                 }
                 items.Add(MkSep());
-                if (app.IsFavorite)
-                    items.Add(MkMenu("从常用移除", delegate { ToggleFavorite(app, false); }));
+                if (website)
+                {
+                    // 资源条目：仅资源分类相关操作（硬移动到资源分类），不涉及常用/软件自定义分类
+                    items.Add(MkSubMenu("移动到分类…", BuildMoveResourceItems(app)));
+                }
                 else
-                    items.Add(MkMenu("添加到常用", delegate { ToggleFavorite(app, true); }));
-                items.Add(MkSubMenu("移动到分类…", BuildMoveCategoryItems(app)));
-                if (InCustom(app))
-                    items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(app); }));
-                items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(app)));
+                {
+                    if (app.IsFavorite)
+                        items.Add(MkMenu("从常用移除", delegate { ToggleFavorite(app, false); }));
+                    else
+                        items.Add(MkMenu("添加到常用", delegate { ToggleFavorite(app, true); }));
+                    items.Add(MkSubMenu("移动到分类…", BuildMoveCategoryItems(app)));
+                    if (InCustom(app))
+                        items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(app); }));
+                    items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(app)));
+                }
                 if (CanEditCategory(currentCategory))
                     items.Add(MkMenu("从「" + currentCategory + "」移除", delegate { RemoveFromCategory(app); }));
                 items.Add(MkSep());
@@ -1540,7 +1600,7 @@ namespace AppManager
                     items.Add(MkMenu("隐藏", delegate { SetHidden(app, true); }));
                 items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
-                if (!string.IsNullOrEmpty(app.UninstallString))
+                if (!website && !string.IsNullOrEmpty(app.UninstallString))
                 {
                     items.Add(MkSep());
                     items.Add(MkMenu("卸载", delegate { Launcher.Uninstall(app); }));
@@ -1646,6 +1706,33 @@ namespace AppManager
                 string c = config.CustomCategories[i];
                 items.Add(MkMenu(c, MakeSetCat(app, c)));
             }
+            return items;
+        }
+
+        /// <summary>资源条目「移动到分类」的级联子项：内置四大资源分类 + 自定义资源分类（硬归属）。</summary>
+        private List<MenuWindow.MenuItem> BuildMoveResourceItems(AppInfo app)
+        {
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            for (int i = 0; i < CategoryRules.ResourceBuiltIn.Length; i++)
+                items.Add(MkMenu(CategoryRules.ResourceBuiltIn[i], MakeSetCat(app, CategoryRules.ResourceBuiltIn[i])));
+            if (config.ResourceCategories.Count > 0) items.Add(MkSep());
+            for (int i = 0; i < config.ResourceCategories.Count; i++)
+            {
+                string c = config.ResourceCategories[i];
+                items.Add(MkMenu(c, MakeSetCat(app, c)));
+            }
+            return items;
+        }
+
+        /// <summary>「全部资源」条目的「加入分类」级联子项：资源分类（多归属），已加入的置灰。</summary>
+        private List<MenuWindow.MenuItem> BuildResourceAddItems(AppInfo app)
+        {
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            for (int i = 0; i < CategoryRules.ResourceBuiltIn.Length; i++)
+                items.Add(MkAddCatMenu(app, CategoryRules.ResourceBuiltIn[i]));
+            if (config.ResourceCategories.Count > 0) items.Add(MkSep());
+            for (int i = 0; i < config.ResourceCategories.Count; i++)
+                items.Add(MkAddCatMenu(app, config.ResourceCategories[i]));
             return items;
         }
 
@@ -1763,15 +1850,22 @@ namespace AppManager
 
         // ===== 添加 / 移除条目 =====
 
-        /// <summary>点击「+ 添加」：弹出"添加软件/文件/文件夹"菜单，网址走「添加网址…」。</summary>
+        /// <summary>点击「+ 添加」：软件模式弹出"添加软件/文件/文件夹/网址"菜单；资源模式仅「添加资源…」。</summary>
         private void OnAdd(object sender, EventArgs e)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
-            items.Add(MkMenu("添加软件…", delegate { PickSoftware(); }));
-            items.Add(MkMenu("添加文件…", delegate { PickFiles(); }));
-            items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
-            items.Add(MkSep());
-            items.Add(MkMenu("添加网址…", delegate { AddWebsite(); }));
+            if (contentMode == SidebarControl.ContentMode.Website)
+            {
+                items.Add(MkMenu("添加资源…", delegate { AddWebsite(); }));
+            }
+            else
+            {
+                items.Add(MkMenu("添加软件…", delegate { PickSoftware(); }));
+                items.Add(MkMenu("添加文件…", delegate { PickFiles(); }));
+                items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
+                items.Add(MkSep());
+                items.Add(MkMenu("添加网址…", delegate { AddWebsite(); }));
+            }
             MenuWindow mw = new MenuWindow(items, 180);
             mw.Location = FixLocation(addBtn.PointToScreen(new Point(0, addBtn.Height)), mw.Size);
             mw.Show(this);
@@ -1909,21 +2003,22 @@ namespace AppManager
             }
         }
 
-        /// <summary>「网站模式」：输入网址后以网站条目登记，可在「全部网站」查看。</summary>
+        /// <summary>资源模式：输入网址后以资源条目登记，归入当前资源分类（「全部资源」下默认「书签」）。</summary>
         private void AddWebsite()
         {
-            string url = InputDialog.Show("添加网址", "请输入网址（http/https）：");
+            string url = InputDialog.Show("添加资源", "请输入网址（http/https）：");
             if (url == null) return;
             url = url.Trim();
             if (url.Length == 0) return;
             if (url.IndexOf("://", StringComparison.Ordinal) < 0) url = "https://" + url;
             if (!Scanner.IsUrl(url))
             {
-                MessageBox.Show("网址格式不正确，请输入以 http:// 或 https:// 开头的地址。", "添加网址",
+                MessageBox.Show("网址格式不正确，请输入以 http:// 或 https:// 开头的地址。", "添加资源",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
-            AddUrl(url, currentCategory);
+            // 「全部资源」下添加无明确归属，默认归入「书签」；其余按当前资源分类归入
+            AddUrl(url, currentCategory == "全部资源" ? "书签" : currentCategory);
         }
 
         /// <summary>把网址写入 AddedItems（按 网址+分类 去重），随后重扫并刷新。</summary>
@@ -2136,6 +2231,7 @@ namespace AppManager
         private void OnFilesDroppedToCategory(string category, string[] paths)
         {
             if (paths == null || paths.Length == 0) return;
+            if (contentMode == SidebarControl.ContentMode.Website) return;   // 资源分类不接收文件/文件夹拖放
             if (!CanEditCategory(category)) return;
             currentCategory = category;
             sidebar.SetActive(currentCategory);
@@ -2521,7 +2617,7 @@ namespace AppManager
                 sidebar.SetActive(currentCategory);
                 viewToggle.Checked = GetCategoryGridMode(currentCategory);
                 grid.GridMode = GetCategoryGridMode(currentCategory);
-                addBtn.Visible = CanEditCategory(currentCategory) && contentMode == SidebarControl.ContentMode.Software;
+                addBtn.Visible = CanEditCategory(currentCategory);
                 LayoutControls();
                 ReloadLibrary();
                 MessageBox.Show("导入完成，已还原至备份包状态。\n原配置已备份至：\n" + bak, "导入备份包",
@@ -2578,7 +2674,7 @@ namespace AppManager
             bool website = contentMode == SidebarControl.ContentMode.Website;
             viewToggle.Visible = show && !website;
             toggleLabel.Visible = show && !website;
-            addBtn.Visible = show && (website || CanEditCategory(currentCategory));
+            addBtn.Visible = show && CanEditCategory(currentCategory);   // 「全部资源」等只读分类不显示
         }
 
         /// <summary>存储位置设置：分别设定文件夹与文件的入库目标目录（iOS 风格对话框）。</summary>

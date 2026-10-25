@@ -8,7 +8,7 @@ using AppManager;
 namespace AppManager.Controls
 {
     /// <summary>
-    /// 侧栏：顶部 iOS 分段控件（软件/网站），下方分类列表；"全部软件"置底并加分隔线；
+    /// 侧栏：顶部 iOS 分段控件（软件/资源），下方分类列表；"全部软件/全部资源"置底并加分隔线；
     /// 标记为 DropTarget 的条目（可编辑分类）可接收文件/文件夹拖放，回调 FilesDropped。
     /// </summary>
     public class SidebarControl : ScrollableControl
@@ -25,7 +25,7 @@ namespace AppManager.Controls
             public int OrderGroup;    // 排序分组，阻止跨组拖动
         }
 
-        /// <summary>内容模式：软件 / 网站。</summary>
+        /// <summary>内容模式：软件 / 资源。</summary>
         public enum ContentMode { Software, Website }
 
         private readonly List<SidebarItem> items = new List<SidebarItem>();
@@ -50,7 +50,7 @@ namespace AppManager.Controls
         private bool scrollbarHot;             // 滚动条悬停（加深显示）
 
         // 区块划分（按 Orderable 标记）：中间区块（自定义/内置分类）滚动，其前的常用/快捷中心固定顶部，
-        // 其后的全部软件/全部文件/全部网站固定底部
+        // 其后的全部软件/全部文件/全部资源固定底部
         private int scrollStart = -1;          // 中间区块起始下标
         private int scrollEnd = -1;            // 中间区块结束下标（含）
         private bool hasScrollBlock;           // 是否存在中间滚动区块
@@ -66,7 +66,7 @@ namespace AppManager.Controls
         public event Action<string> SelectedChanged;
         /// <summary>文件/文件夹拖放到可投放分类时触发，参数为（目标分类 key, 被拖入的路径）。</summary>
         public event Action<string, string[]> FilesDropped;
-        /// <summary>内容模式切换时触发（软件/网站）。</summary>
+        /// <summary>内容模式切换时触发（软件/资源）。</summary>
         public event Action<ContentMode> ModeChanged;
         /// <summary>点击底部「+ 新建分类」时触发。</summary>
         public event Action AddCategoryRequested;
@@ -124,7 +124,7 @@ namespace AppManager.Controls
             get { return hasScrollBlock ? scrollStart : items.Count; }
         }
 
-        /// <summary>底部固定条目数（中间区块之后：全部软件/全部文件/全部网站及分隔线）。</summary>
+        /// <summary>底部固定条目数（中间区块之后：全部软件/全部文件/全部资源及分隔线）。</summary>
         private int BottomCount
         {
             get { return hasScrollBlock ? items.Count - 1 - scrollEnd : 0; }
@@ -142,7 +142,7 @@ namespace AppManager.Controls
             Graphics g = e.Graphics;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
 
-            // ===== 顶部分段控件（软件 | 网站）：位于顶栏行2 =====
+            // ===== 顶部分段控件（软件 | 资源）：位于顶栏行2 =====
             Rectangle segRect = SegRect;
             using (SolidBrush bg = new SolidBrush(Theme.SegmentBg))
                 Draw.FillRoundedRect(g, bg, segRect, 9);
@@ -152,7 +152,7 @@ namespace AppManager.Controls
                 : new Rectangle(segRect.X + segW, segRect.Y, segRect.Width - segW, segRect.Height);
             using (SolidBrush active = new SolidBrush(Color.White))
                 Draw.FillRoundedRect(g, active, activeRect, 8);
-            string[] labels = { "软件", "网站" };
+            string[] labels = { "软件", "资源" };
             for (int i = 0; i < 2; i++)
             {
                 Rectangle r = new Rectangle(segRect.X + i * segW, segRect.Y, segW, segRect.Height);
@@ -382,7 +382,7 @@ namespace AppManager.Controls
             if (h2 != null) h2(it.Key);
         }
 
-        /// <summary>顶部分段控件（软件 | 网站）矩形：置于顶栏行2（工具行）垂直居中。</summary>
+        /// <summary>顶部分段控件（软件 | 资源）矩形：置于顶栏行2（工具行）垂直居中。</summary>
         private Rectangle SegRect
         {
             get
