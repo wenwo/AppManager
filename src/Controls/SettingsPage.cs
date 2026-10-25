@@ -66,6 +66,7 @@ namespace AppManager.Controls
         public event EventHandler StorageLocationRequested;
         public event EventHandler RescanRequested;
         public event EventHandler SelfTestRequested;
+        public event EventHandler LayoutBackupRequested;
 
         public SettingsPage()
         {
@@ -178,6 +179,7 @@ namespace AppManager.Controls
             y2 = AddSection("维护", rightX, colW, y2, new Row[]
             {
                 MakeActionRow("重新扫描", delegate { Raise(RescanRequested); }, ActionRowH),
+                MakeActionRow("布局备份与还原…", delegate { Raise(LayoutBackupRequested); }, ActionRowH),
                 MakeActionRow("运行自测（--selftest 日志）", delegate { Raise(SelfTestRequested); }, ActionRowH)
             });
         }

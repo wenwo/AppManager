@@ -63,6 +63,7 @@ namespace AppManager
             ScanDesktop(dict);          // 桌面快捷方式（快捷中心来源）
             ScanDesktopBackup(dict);    // 已收纳备份（快捷中心来源）
             ScanAdded(dict);            // 用户手动添加
+            ScanManagedFiles(dict);     // 收纳主目录里实际存在的文件/文件夹（「全部文件」视图）
             int appsFolder = ScanAppsFolder(dict);      // 系统「全部应用」列表（权威来源）
             if (appsFolder == 0) ScanStartMenu(dict);   // 枚举失败时兜底开始菜单
             EnrichFromRegistry(dict);   // 注册表仅补充卸载/安装/图标信息，不新增条目
@@ -70,6 +71,99 @@ namespace AppManager
             List<AppInfo> list = new List<AppInfo>(dict.Values);
             ApplyConfig(list);
             return list;
+        }
+
+        /// <summary>
+        /// 扫描「收纳主目录」（ManageRoot，默认 H:\Manage）里实际存在的文件夹与文件，供「全部文件」视图使用。
+        /// 只做登记展示，不写配置、不移动磁盘内容；结构与入库规则一致：文件夹在根下，文件在文件存储目录。
+        /// </summary>
+        private void ScanManagedFiles(Dictionary<string, AppInfo> dict)
+        {
+            string root = ResolveManageRoot();
+            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
+
+            string foldersDir = string.IsNullOrEmpty(config.FolderStorePath)
+                ? root : SafeFullPath(config.FolderStorePath);
+            string filesDir = string.IsNullOrEmpty(config.FileStorePath)
+                ? Path.Combine(root, "Files") : SafeFullPath(config.FileStorePath);
+
+            try
+            {
+                if (Directory.Exists(foldersDir))
+                {
+                    foreach (string dir in Directory.GetDirectories(foldersDir))
+                    {
+                        if (IsSameDirectory(dir, filesDir)) continue;
+                        AddManaged(dict, dir, true);
+                    }
+                }
+            }
+            catch (Exception ex) { Paths.LogError(ex); }
+
+            try
+            {
+                if (Directory.Exists(filesDir))
+                {
+                    foreach (string file in Directory.GetFiles(filesDir))
+                    {
+                        if (IsStoreMetadata(file)) continue;
+                        AddManaged(dict, file, false);
+                    }
+                }
+            }
+            catch (Exception ex) { Paths.LogError(ex); }
+        }
+
+        private static void AddManaged(Dictionary<string, AppInfo> dict, string path, bool isFolder)
+        {
+            AppInfo a = new AppInfo();
+            a.Name = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
+            if (string.IsNullOrEmpty(a.Name)) a.Name = path;
+            a.TargetPath = path;
+            a.DisplayIcon = path;
+            a.Source = "Managed";
+            a.Key = "add:" + path;
+            a.IsFile = true;
+            a.IsFolder = isFolder;
+            // 收纳库条目只属于「全部文件」视图，不参与软件分类
+            a.Category = "全部文件";
+            Merge(dict, a);
+        }
+
+        /// <summary>收纳库里的元数据文件（网址记录等）不作为条目展示。</summary>
+        private static bool IsStoreMetadata(string path)
+        {
+            string name = Path.GetFileName(path);
+            return string.Equals(name, "nets.md", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "desktop.ini", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(name, "thumbs.db", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string SafeFullPath(string path)
+        {
+            try { return DesktopOrganizer.NormalizeRoot(path); }
+            catch { return path; }
+        }
+
+        private static bool IsSameDirectory(string a, string b)
+        {
+            try
+            {
+                string fa = Path.GetFullPath(a).TrimEnd('\\');
+                string fb = Path.GetFullPath(b).TrimEnd('\\');
+                return string.Equals(fa, fb, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
+
+        /// <summary>收纳根路径：配置值可用则用，其次默认 H:\Manage，都不可用时返回空（不主动建目录）。</summary>
+        private string ResolveManageRoot()
+        {
+            string configured = SafeFullPath(config.ManageRootPath);
+            if (!string.IsNullOrEmpty(configured) && Directory.Exists(configured)) return configured;
+            string fallback = @"H:\Manage";
+            if (Directory.Exists(fallback)) return fallback;
+            return string.Empty;
         }
 
         /// <summary>注入用户手动添加的软件/文件/文件夹/网址条目（来源 AddedItems）。</summary>
@@ -556,11 +650,11 @@ namespace AppManager
 
         private void ScanDesktopBackup(Dictionary<string, AppInfo> dict)
         {
-            string backup = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                "AppManager", "DesktopBackup");
-            if (Directory.Exists(backup))
-                ScanShortcuts(backup, dict, "Desktop");
+            // 新版收纳目录 + 旧版 DesktopStash（升级后旧收纳的快捷方式也要能在快捷中心看到）
+            if (Directory.Exists(Paths.DesktopBackupDir))
+                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop");
+            if (Directory.Exists(Paths.LegacyStashDir))
+                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop");
         }
 
         // ===== 去重与配置 =====
@@ -677,10 +771,14 @@ namespace AppManager
         {
             foreach (AppInfo a in list)
             {
-                if (config.Favorites.Contains(a.Key)) a.IsFavorite = true;
-                if (config.Hidden.Contains(a.Key)) a.IsHidden = true;
+                // 旧版配置用「名称归一化 id」记录，导入时写成 af:<id>；路径键对不上时按名称回退匹配
+                string legacyKey = "af:" + NormalizeEntryName(a.Name);
+                if (config.Favorites.Contains(a.Key) || config.Favorites.Contains(legacyKey)) a.IsFavorite = true;
+                if (config.Hidden.Contains(a.Key) || config.Hidden.Contains(legacyKey)) a.IsHidden = true;
                 string ov;
                 if (config.CategoryOverride.TryGetValue(a.Key, out ov) && !string.IsNullOrEmpty(ov))
+                    a.Category = ov;
+                else if (config.CategoryOverride.TryGetValue(legacyKey, out ov) && !string.IsNullOrEmpty(ov))
                     a.Category = ov;
             }
         }

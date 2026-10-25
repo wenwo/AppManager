@@ -30,6 +30,67 @@ namespace AppManager
         /// <summary>快捷中心收纳主目录：文件夹收进此目录，文件收进其 Files 子目录。</summary>
         public static string QuickCenterDir { get { return QuickCenterDirPath; } }
 
+        /// <summary>当前用户桌面目录（自动监听用）。</summary>
+        public static string UserDesktop
+        {
+            get { return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); }
+        }
+
+        /// <summary>公共桌面目录（所有用户共享）。</summary>
+        public static string PublicDesktop
+        {
+            get { return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory); }
+        }
+
+        /// <summary>本程序入口名称：桌面上的这个快捷方式不收纳（避免把唯一入口收走）。</summary>
+        private const string AppDisplayName = "应用中心";
+
+        /// <summary>判断是否为本程序自身的快捷方式。</summary>
+        public static bool IsSelfShortcut(string shortcutPath)
+        {
+            string name = Path.GetFileNameWithoutExtension(shortcutPath);
+            return string.Equals(name, AppDisplayName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// 自动收纳一批桌面快捷方式到收纳目录根并登记还原清单（自动监听触发时使用）。
+        /// 已消失、非快捷方式、本程序自身的入口都会被跳过，返回成功收纳数。
+        /// </summary>
+        public static int AutoStashShortcuts(AppConfig cfg, List<string> paths, out int failed)
+        {
+            failed = 0;
+            if (cfg == null || paths == null) return 0;
+            int moved = 0;
+            foreach (string path in paths)
+            {
+                try
+                {
+                    if (string.IsNullOrEmpty(path) || !File.Exists(path)) continue;
+                    if (!IsShortcutFile(path) || IsSelfShortcut(path)) continue;
+                    if (!Directory.Exists(ShortcutDestDir)) Directory.CreateDirectory(ShortcutDestDir);
+                    string dest = Path.Combine(ShortcutDestDir, Path.GetFileName(path));
+                    if (File.Exists(dest)) dest = UniquePath(ShortcutDestDir, Path.GetFileName(path), false);
+                    File.Copy(path, dest, false);
+                    File.Delete(path);
+                    DesktopBackupEntry entry = new DesktopBackupEntry();
+                    entry.OriginalPath = path;
+                    entry.CurrentPath = dest;
+                    entry.IsShortcut = true;
+                    entry.IsDir = false;
+                    entry.IsCopy = false;
+                    cfg.DesktopBackup.Add(entry);
+                    moved++;
+                }
+                catch (Exception ex)
+                {
+                    Paths.LogError(ex);
+                    failed++;
+                }
+            }
+            if (moved > 0) cfg.Save();
+            return moved;
+        }
+
         // 各类目标的备份落点：快捷方式沿用历史扁平布局，文件/文件夹各归子目录
         private static string ShortcutDestDir { get { return BackupDir; } }
         private static string FileDestDir { get { return Path.Combine(BackupDir, FilesSub); } }
@@ -205,7 +266,7 @@ namespace AppManager
             config.DesktopBackup.Add(e);
         }
 
-        private static bool IsShortcutFile(string path)
+        public static bool IsShortcutFile(string path)
         {
             string ext = Path.GetExtension(path).ToLowerInvariant();
             return ext == ".lnk" || ext == ".url";

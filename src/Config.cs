@@ -5,6 +5,54 @@ using System.Xml;
 
 namespace AppManager
 {
+    /// <summary>统一管理运行期路径（数据目录 / 配置 / 收纳目录 / 备份目录 / 日志）。</summary>
+    internal static class Paths
+    {
+        public static string DataDir
+        {
+            get
+            {
+                string dir = Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+                Directory.CreateDirectory(dir);
+                return dir;
+            }
+        }
+
+        public static string ConfigFile { get { return Path.Combine(DataDir, "config.xml"); } }
+
+        /// <summary>新版桌面收纳目录。</summary>
+        public static string DesktopBackupDir { get { return Path.Combine(DataDir, "DesktopBackup"); } }
+
+        /// <summary>旧版桌面收纳目录（迁移前的 DesktopStash），备份时一并快照。</summary>
+        public static string LegacyStashDir { get { return Path.Combine(DataDir, "DesktopStash"); } }
+
+        /// <summary>布局备份根目录。</summary>
+        public static string BackupsDir
+        {
+            get
+            {
+                string dir = Path.Combine(DataDir, "Backups");
+                Directory.CreateDirectory(dir);
+                return dir;
+            }
+        }
+
+        public static string LogFile { get { return Path.Combine(DataDir, "error.log"); } }
+
+        /// <summary>异常写入 error.log，绝不抛出。</summary>
+        public static void LogError(Exception ex)
+        {
+            try
+            {
+                string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss}] {1}\r\n{2}\r\n\r\n",
+                    DateTime.Now, ex.Message, ex);
+                File.AppendAllText(LogFile, line, System.Text.Encoding.UTF8);
+            }
+            catch { }
+        }
+    }
+
     /// <summary>
     /// 桌面收纳备份条目：记录原路径、当前路径、是否快捷方式，用于一键还原。
     /// </summary>
@@ -73,9 +121,12 @@ namespace AppManager
         public bool OrganizeFile = true;
         public bool OrganizeDir = true;
 
-        private static readonly string Dir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
-        private static readonly string FilePath = Path.Combine(Dir, "config.xml");
+        // ===== 旧版 config.xml（<appmanager> 属性式）导入标记 =====
+        // 旧版以「名称归一化 id」标识条目，导入时统一写成 af:<id>，扫描时再按名称回退匹配。
+        internal bool LoadedLegacy;
+
+        private static string Dir { get { return Paths.DataDir; } }
+        private static string FilePath { get { return Paths.ConfigFile; } }
 
         /// <summary>加载配置；文件不存在或损坏时返回默认实例，绝不抛出。</summary>
         public static AppConfig Load()
@@ -94,6 +145,15 @@ namespace AppManager
                 doc.Load(filePath);
                 XmlNode root = doc.DocumentElement;
                 if (root == null) return cfg;
+
+                // 旧版配置（<appmanager version="1">，属性式）：导入到新版模型，避免升级后分类/收藏丢失
+                if (string.Equals(root.Name, "appmanager", StringComparison.OrdinalIgnoreCase))
+                {
+                    LoadLegacy(root, cfg);
+                    cfg.LoadedLegacy = true;
+                    BackupLegacyFile(filePath);
+                    return cfg;
+                }
 
                 cfg.ViewGrid = XmlElementBool(root, "ViewGrid", true);
                 cfg.ShowHidden = XmlElementBool(root, "ShowHidden", false);
@@ -346,6 +406,164 @@ namespace AppManager
                 return null;
             }
             return LoadFrom(filePath);
+        }
+
+        // ===== 旧版配置导入 =====
+
+        /// <summary>
+        /// 导入旧版 &lt;appmanager&gt; 属性式配置：设置、分类、收藏/隐藏、视图、排序、
+        /// 自定义条目、桌面收纳清单与网站统一换成新版字段；旧版 id 统一加 af: 前缀，
+        /// 扫描时若路径键对不上，再按名称归一化回退匹配（见 Scanner.ApplyConfig）。
+        /// </summary>
+        private static void LoadLegacy(XmlNode root, AppConfig cfg)
+        {
+            XmlNode settings = root.SelectSingleNode("settings");
+            if (settings != null)
+            {
+                cfg.ShowAllInstalled = XmlAttributeBool(settings, "displayAll", false);
+                cfg.ShowHidden = XmlAttributeBool(settings, "showHidden", false);
+                cfg.AutoScan = XmlAttributeBool(settings, "autoscan", true);
+                cfg.CloseToTray = XmlAttributeBool(settings, "closetotray", true);
+                cfg.OrganizeCopy = XmlAttributeBool(settings, "organizecopy", false);
+                cfg.OrganizeShortcut = XmlAttributeBool(settings, "organizescut", true);
+                cfg.OrganizeFile = XmlAttributeBool(settings, "organizefile", true);
+                cfg.OrganizeDir = XmlAttributeBool(settings, "organizedir", true);
+                cfg.ViewGrid = !string.Equals(XmlAttr(settings, "view"), "list", StringComparison.OrdinalIgnoreCase);
+                string manageRoot = XmlAttr(settings, "manageroot");
+                if (manageRoot.Length > 0) cfg.ManageRootPath = manageRoot;
+            }
+
+            foreach (XmlNode n in root.SelectNodes("sidebarorder/item"))
+            {
+                string name = XmlAttr(n, "name");
+                if (name.Length > 0) AddUnique(cfg.SidebarOrder, name);
+            }
+
+            foreach (XmlNode n in root.SelectNodes("categories/item"))
+            {
+                string id = XmlAttr(n, "id");
+                string cat = XmlAttr(n, "category");
+                if (id.Length > 0 && cat.Length > 0) cfg.CategoryOverride["af:" + id] = cat;
+            }
+
+            foreach (XmlNode n in root.SelectNodes("usercategories/item"))
+            {
+                string name = XmlAttr(n, "name");
+                if (name.Length > 0) AddUnique(cfg.CustomCategories, name);
+            }
+
+            foreach (XmlNode n in root.SelectNodes("pinned/id"))
+            {
+                string id = (n.InnerText ?? string.Empty).Trim();
+                if (id.Length > 0) AddUnique(cfg.Favorites, "af:" + id);
+            }
+
+            foreach (XmlNode n in root.SelectNodes("hidden/id"))
+            {
+                string id = (n.InnerText ?? string.Empty).Trim();
+                if (id.Length > 0) AddUnique(cfg.Hidden, "af:" + id);
+            }
+
+            // 旧版「已移除」= 不再出现在列表里，对应新版的隐藏项
+            foreach (XmlNode n in root.SelectNodes("removed/id"))
+            {
+                string id = (n.InnerText ?? string.Empty).Trim();
+                if (id.Length > 0) AddUnique(cfg.Hidden, "af:" + id);
+            }
+
+            foreach (XmlNode n in root.SelectNodes("views/item"))
+            {
+                string scope = XmlAttr(n, "scope");
+                if (scope.Length > 0 && !string.Equals(scope, "soft", StringComparison.OrdinalIgnoreCase)) continue;
+                string cat = XmlAttr(n, "category");
+                if (cat.Length == 0) continue;
+                cfg.CategoryViewMode[cat] =
+                    !string.Equals(XmlAttr(n, "mode"), "list", StringComparison.OrdinalIgnoreCase);
+            }
+
+            foreach (XmlNode v in root.SelectNodes("orders/view"))
+            {
+                string key = XmlAttr(v, "key");
+                int bar = key.IndexOf('|');
+                string scope = bar > 0 ? key.Substring(0, bar) : string.Empty;
+                string cat = bar > 0 ? key.Substring(bar + 1) : key;
+                if (cat.Length == 0) continue;
+                if (scope.Length > 0 && !string.Equals(scope, "soft", StringComparison.OrdinalIgnoreCase)) continue;
+                List<string> ids = new List<string>();
+                foreach (XmlNode e in v.SelectNodes("id"))
+                {
+                    string id = (e.InnerText ?? string.Empty).Trim();
+                    if (id.Length > 0) ids.Add("af:" + id);
+                }
+                if (ids.Count > 0) cfg.ItemOrder[cat] = ids;
+            }
+
+            // 旧版自定义条目（软件/文件/文件夹/网址）→ 新版「已添加条目」
+            foreach (XmlNode e in root.SelectNodes("custom/entry"))
+            {
+                AddedEntry item = new AddedEntry();
+                item.Name = XmlAttr(e, "name");
+                item.Path = XmlAttr(e, "target");
+                string kind = XmlAttr(e, "kind");
+                item.IsFolder = string.Equals(kind, "folder", StringComparison.OrdinalIgnoreCase);
+                item.IsUrl = string.Equals(kind, "url", StringComparison.OrdinalIgnoreCase);
+                item.Category = XmlAttr(e, "category");
+                if (item.Path.Length == 0) continue;
+                if (item.Name.Length == 0) item.Name = Path.GetFileNameWithoutExtension(item.Path);
+                cfg.AddedItems.Add(item);
+            }
+
+            // 旧版桌面收纳清单（文件相对 DesktopStash 目录）→ 新版还原清单
+            foreach (XmlNode e in root.SelectNodes("stash/entry"))
+            {
+                DesktopBackupEntry en = new DesktopBackupEntry();
+                string file = XmlAttr(e, "file");
+                en.OriginalPath = XmlAttr(e, "original");
+                en.IsDir = XmlAttributeBool(e, "dir", false);
+                en.IsCopy = XmlAttributeBool(e, "copy", false);
+                en.IsShortcut = !en.IsDir;
+                if (file.Length == 0 || en.OriginalPath.Length == 0) continue;
+                en.CurrentPath = Path.Combine(Paths.LegacyStashDir, file.Replace('/', '\\'));
+                cfg.DesktopBackup.Add(en);
+            }
+
+            // 旧版网站条目 → 新版网址条目（全部网站分类）
+            foreach (XmlNode e in root.SelectNodes("websites/entry"))
+            {
+                string url = XmlAttr(e, "url");
+                if (url.Length == 0) continue;
+                AddedEntry item = new AddedEntry();
+                item.Path = url;
+                item.IsUrl = true;
+                item.Category = "全部网站";
+                item.Name = XmlAttr(e, "name");
+                if (item.Name.Length == 0) item.Name = DisplayHost(url);
+                cfg.AddedItems.Add(item);
+            }
+        }
+
+        /// <summary>首次导入旧版配置时，把原文件另存一份 config.legacy.xml 供回查。</summary>
+        private static void BackupLegacyFile(string filePath)
+        {
+            try
+            {
+                string bak = Path.Combine(Paths.DataDir, "config.legacy.xml");
+                if (!File.Exists(bak) && File.Exists(filePath)) File.Copy(filePath, bak, false);
+            }
+            catch { }
+        }
+
+        /// <summary>网址域名（去掉 www.），用于缺省显示名。</summary>
+        private static string DisplayHost(string url)
+        {
+            try
+            {
+                Uri uri = new Uri(url);
+                string host = uri.Host;
+                if (host.StartsWith("www.", StringComparison.OrdinalIgnoreCase)) host = host.Substring(4);
+                return host.Length > 0 ? host : url;
+            }
+            catch { return url ?? string.Empty; }
         }
 
         // ===== 私有辅助 =====

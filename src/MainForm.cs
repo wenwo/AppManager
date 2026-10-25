@@ -50,6 +50,13 @@ namespace AppManager
         private IosProgressBar statusProgress;
         private Label statusDetail;   // 每项独立进度详情
 
+        // 自动收录：开始菜单 / 桌面有变化时静默重扫，并把新出现的桌面快捷方式收进快捷中心
+        private AutoScanWatcher autoScan;
+
+        // 扫描串行化：正在扫描时再次请求只登记一轮补扫，防止多线程同时回写列表
+        private bool scanRunning;
+        private bool scanPending;
+
         // 状态
         private string currentCategory = "常用";
         private SidebarControl.ContentMode contentMode = SidebarControl.ContentMode.Software;
@@ -124,6 +131,7 @@ namespace AppManager
             BuildControls();
             LayoutControls();
             BuildTray();
+            StartAutoScan();
             _ready = true;
             MinimumSize = new Size(960, 560);
             UpdateRegion();
@@ -207,6 +215,7 @@ namespace AppManager
         /// <summary>窗体真正关闭时释放托盘资源，避免残留图标。</summary>
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            StopAutoScan();
             Application.RemoveMessageFilter(this);
             base.OnFormClosed(e);
             if (tray != null)
@@ -474,6 +483,8 @@ namespace AppManager
             {
                 config.AutoScan = settingsPage.AutoScan;
                 config.Save();
+                if (config.AutoScan) StartAutoScan();
+                else StopAutoScan();
             };
             settingsPage.CloseToTrayChanged += delegate { SetCloseToTray(settingsPage.CloseToTray); };
             settingsPage.StorageLocationRequested += delegate
@@ -484,6 +495,7 @@ namespace AppManager
                     config.CloseToTray, FolderStoreOf(), FileStoreOf());
             };
             settingsPage.RescanRequested += delegate { StartScan(); };
+            settingsPage.LayoutBackupRequested += delegate { ShowLayoutBackups(); };
             settingsPage.SelfTestRequested += delegate
             {
                 ThreadPool.QueueUserWorkItem(delegate { SelfTest.Run(); });
@@ -873,12 +885,64 @@ namespace AppManager
 
         // ===== 扫描与图标 =====
 
+        /// <summary>按设置启动自动监听：关掉「自动收录」或窗口已销毁时直接跳过。</summary>
+        private void StartAutoScan()
+        {
+            StopAutoScan();
+            if (config == null || !config.AutoScan || IsDisposed) return;
+            autoScan = new AutoScanWatcher(this);
+            autoScan.ChangesDetected += OnAutoScanDetected;
+        }
+
+        private void StopAutoScan()
+        {
+            if (autoScan == null) return;
+            autoScan.ChangesDetected -= OnAutoScanDetected;
+            autoScan.Dispose();
+            autoScan = null;
+        }
+
+        /// <summary>
+        /// 监听回调：先把桌面上新出现的快捷方式收进「快捷中心」（仅搬家模式），
+        /// 再静默重扫，新装的软件随即出现在「全部软件」里。
+        /// </summary>
+        private void OnAutoScanDetected(object sender, EventArgs e)
+        {
+            if (config == null || !config.AutoScan || autoScan == null) return;
+            List<string> fresh = autoScan.TakeNewDesktopFiles();
+            if (fresh.Count > 0 && !config.OrganizeCopy && config.OrganizeShortcut)
+            {
+                // 先登记「这些删除是我们自己造成的」，避免搬运后再白扫一遍
+                autoScan.IgnoreDeletions(fresh);
+                int failed;
+                DesktopOrganizer.AutoStashShortcuts(config, fresh, out failed);
+            }
+            StartScan(false);
+        }
+
         private void StartScan()
         {
-            loadingLabel.Visible = true;
-            loadingLabel.BringToFront();
-            // 设置页打开时扫描进度不应压住页面（从设置页「重新扫描」触发）
-            if (settingsOpen) settingsPage.BringToFront();
+            StartScan(true);
+        }
+
+        /// <summary>执行扫描；showLoading=false 时不显示「正在扫描」遮罩（自动收录的静默重扫）。</summary>
+        private void StartScan(bool showLoading)
+        {
+            if (IsDisposed) return;
+            if (showLoading)
+            {
+                loadingLabel.Visible = true;
+                loadingLabel.BringToFront();
+                // 设置页打开时扫描进度不应压住页面（从设置页「重新扫描」触发）
+                if (settingsOpen) settingsPage.BringToFront();
+            }
+            // 扫描进行中再次请求：只登记一次补扫，避免多个扫描线程同时回写列表
+            if (scanRunning)
+            {
+                scanPending = true;
+                return;
+            }
+            scanRunning = true;
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
                 List<AppInfo> result;
@@ -889,13 +953,22 @@ namespace AppManager
                     BeginInvoke((Action)delegate
                     {
                         // 换列表与释放旧图标必须在 UI 线程完成，避免与绘制/图标加载竞态
+                        scanRunning = false;
                         SwapApps(result);
-                        loadingLabel.Visible = false;
                         RefreshGrid();
                         StartIconLoad();
+                        if (scanPending)
+                        {
+                            scanPending = false;
+                            StartScan(false);   // 扫描期间又来了一轮请求：补扫
+                        }
+                        else
+                        {
+                            loadingLabel.Visible = false;
+                        }
                     });
                 }
-                catch { }
+                catch { scanRunning = false; }
             });
         }
 
@@ -1059,16 +1132,30 @@ namespace AppManager
             for (int i = 0; i < list.Count; i++)
             {
                 int r;
+                // 旧版配置的排序键是「名称归一化 id」，导入时加 af: 前缀；按名称回退匹配
                 if (list[i].Key != null && rank.TryGetValue(list[i].Key, out r)) known.Add(list[i]);
+                else if (list[i].Name != null
+                    && rank.TryGetValue("af:" + Scanner.NormalizeEntryName(list[i].Name), out r)) known.Add(list[i]);
                 else unknown.Add(list[i]);
             }
             known.Sort(delegate(AppInfo x, AppInfo y)
             {
-                return rank[x.Key].CompareTo(rank[y.Key]);
+                int rx = RankOf(rank, x);
+                int ry = RankOf(rank, y);
+                return rx.CompareTo(ry);
             });
             list.Clear();
             list.AddRange(known);
             list.AddRange(unknown);
+        }
+
+        /// <summary>排序名次：优先精确 Key，其次按名称归一化回退（兼容旧版导入的 af: 键）。</summary>
+        private static int RankOf(Dictionary<string, int> rank, AppInfo a)
+        {
+            int r;
+            if (a.Key != null && rank.TryGetValue(a.Key, out r)) return r;
+            if (a.Name != null && rank.TryGetValue("af:" + Scanner.NormalizeEntryName(a.Name), out r)) return r;
+            return int.MaxValue;
         }
 
         /// <summary>条目拖动排序完成：调整当前展示顺序并写入 config.ItemOrder 后刷新。</summary>
@@ -2461,6 +2548,31 @@ namespace AppManager
 
                 ConfirmDialog.ShowModal(f);   // 模态 + 遮罩层
             }
+        }
+
+        /// <summary>打开「布局备份」管理窗口；恢复后重载配置与列表。</summary>
+        private void ShowLayoutBackups()
+        {
+            using (BackupForm f = new BackupForm())
+            {
+                ConfirmDialog.ShowModal(f);
+                if (f.Restored) ReloadAfterRestore();
+            }
+        }
+
+        /// <summary>布局恢复后：重载配置、重建扫描器与列表，并把设置页状态同步到恢复后的值。</summary>
+        private void ReloadAfterRestore()
+        {
+            config = AppConfig.Load();
+            scanner = new Scanner(config);
+            organizer = new DesktopOrganizer(config);
+            grid.GridMode = GetCategoryGridMode(currentCategory);
+            settingsPage.Bind(config.ShowHidden, config.ShowAllInstalled, config.AutoScan,
+                config.CloseToTray, FolderStoreOf(), FileStoreOf());
+            StartAutoScan();
+            RebuildSidebar();
+            StartScan();
+            Invalidate();
         }
 
         /// <summary>导出备份包（.ambak，仅记录与设置，不含物理文件）。</summary>
