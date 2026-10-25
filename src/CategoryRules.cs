@@ -15,10 +15,10 @@ namespace AppManager
             "媒体娱乐", "图像设计", "网络工具", "其他"
         };
 
-        /// <summary>资源模式内置四大分类（照片/视频/音乐/书签）。</summary>
+        /// <summary>资源模式内置分类（照片/视频/音乐/文档/证件/压缩包/文件/书签）。</summary>
         public static readonly string[] ResourceBuiltIn = new string[]
         {
-            "照片", "视频", "音乐", "书签"
+            "照片", "视频", "音乐", "文档", "证件", "压缩包", "文件", "书签"
         };
 
         /// <summary>各分类关键词，与 BuiltIn 一一对应（"其他"无关键词，仅兜底）。</summary>

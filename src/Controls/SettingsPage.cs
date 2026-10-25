@@ -54,6 +54,7 @@ namespace AppManager.Controls
         private Rectangle headerRect;
         private string folderPath = string.Empty;
         private string filePath = string.Empty;
+        private string resourcePath = string.Empty;
         private int hoverRow = -1;
         /// <summary>绑定期间抑制开关事件，避免回填状态时触发「已改动」回调。</summary>
         private bool syncing;
@@ -97,7 +98,7 @@ namespace AppManager.Controls
 
         /// <summary>回填页面状态（开关与存储路径）。绑定过程中不触发变更事件。</summary>
         public void Bind(bool showHidden, bool showAllInstalled, bool autoScan, bool closeToTray,
-            string folderStorePath, string fileStorePath)
+            string folderStorePath, string fileStorePath, string resourceStorePath)
         {
             syncing = true;
             showHiddenToggle.Checked = showHidden;
@@ -107,6 +108,7 @@ namespace AppManager.Controls
             syncing = false;
             folderPath = folderStorePath ?? string.Empty;
             filePath = fileStorePath ?? string.Empty;
+            resourcePath = resourceStorePath ?? string.Empty;
             Relayout();   // 路径文本参与行布局，重新生成行以刷新展示内容
             Invalidate();
         }
@@ -173,6 +175,7 @@ namespace AppManager.Controls
             {
                 MakeInfoRow("文件夹存储位置", folderPath),
                 MakeInfoRow("文件存储位置", filePath),
+                MakeInfoRow("资源存储位置", resourcePath),
                 MakeActionRow("修改存储位置…", delegate { Raise(StorageLocationRequested); }, ActionRowH)
             });
             y2 += GapY;

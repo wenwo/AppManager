@@ -124,13 +124,15 @@ namespace AppManager
                 c.CustomCategories.Add("自定义1");
                 c.CategoryOverride["k1"] = "浏览器";
                 c.ItemCategories["k1"] = new List<string> { "开发工具", "常用" };
+                c.ResourceStorePath = @"D:\Resources";
                 c.Save();
                 AppConfig r = AppConfig.Load();
                 Assert(r.Favorites.Contains("k1") && r.Hidden.Contains("h1")
                     && r.CustomCategories.Contains("自定义1")
                     && r.CategoryOverride.ContainsKey("k1") && r.CategoryOverride["k1"] == "浏览器"
                     && r.ItemCategories.ContainsKey("k1") && r.ItemCategories["k1"].Count == 2
-                    && r.ItemCategories["k1"].Contains("开发工具"),
+                    && r.ItemCategories["k1"].Contains("开发工具")
+                    && r.ResourceStorePath == @"D:\Resources",
                     "字段往返一致");
             }
             catch (Exception ex) { Assert(false, ex.Message); }
@@ -267,8 +269,13 @@ namespace AppManager
 
         private static void Case15_BuiltInCount()
         {
-            Begin("15 内置分类数量为 9");
-            Assert(CategoryRules.BuiltIn.Length == 9, "数量=" + CategoryRules.BuiltIn.Length);
+            Begin("15 内置分类数量为 9（并含新增资源分类）");
+            bool resource = Array.IndexOf(CategoryRules.ResourceBuiltIn, "文档") >= 0
+                && Array.IndexOf(CategoryRules.ResourceBuiltIn, "证件") >= 0
+                && Array.IndexOf(CategoryRules.ResourceBuiltIn, "压缩包") >= 0
+                && Array.IndexOf(CategoryRules.ResourceBuiltIn, "文件") >= 0;
+            Assert(CategoryRules.BuiltIn.Length == 9 && resource,
+                "数量=" + CategoryRules.BuiltIn.Length + " 资源=" + string.Join(",", CategoryRules.ResourceBuiltIn));
         }
 
         private static void Case16_NonAppEntryFilter()

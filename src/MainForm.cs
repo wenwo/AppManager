@@ -494,7 +494,7 @@ namespace AppManager
                 ShowStorageLocationDialog();
                 // 对话框可能改了存储目录，回到页面后刷新展示的路径
                 settingsPage.Bind(config.ShowHidden, config.ShowAllInstalled, config.AutoScan,
-                    config.CloseToTray, FolderStoreOf(), FileStoreOf());
+                    config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             };
             settingsPage.RescanRequested += delegate { StartScan(); };
             settingsPage.LayoutBackupRequested += delegate { ShowLayoutBackups(); };
@@ -675,7 +675,7 @@ namespace AppManager
             List<SidebarControl.SidebarItem> list = new List<SidebarControl.SidebarItem>();
             if (contentMode == SidebarControl.ContentMode.Website)
             {
-                // 资源模式：自定义资源分类在前、内置四大分类在后（与软件侧一致，以分隔线分组），底部「全部资源」
+                // 资源模式：自定义资源分类在前、内置资源分类在后（与软件侧一致，以分隔线分组），底部「全部资源」
                 // 两者均为资源条目投放目标
                 for (int i = 0; i < config.ResourceCategories.Count; i++)
                 {
@@ -1103,11 +1103,11 @@ namespace AppManager
             }
             else if (contentMode == SidebarControl.ContentMode.Website)
             {
-                // 资源模式：「全部资源」展示全部资源条目，其余分类按归属过滤（仅网址条目）
+                // 资源模式：「全部资源」展示全部资源条目（网址 + 资源分类下的本地文件），其余分类按归属过滤
                 foreach (AppInfo a in allApps)
                 {
                     if (!ShouldShow(a)) continue;
-                    if (!Scanner.IsUrl(a.TargetPath)) continue;
+                    if (!IsResourceEntry(a)) continue;
                     if (currentCategory == "全部资源" || InCategory(a, currentCategory)) shown.Add(a);
                 }
                 categoryTotal = shown.Count;
@@ -1134,9 +1134,8 @@ namespace AppManager
             grid.AllowReorder = kw.Length == 0
                 && contentMode == SidebarControl.ContentMode.Software
                 && CanReorderCategory(currentCategory);
-            // 外部文件/文件夹拖入主内容区：仅软件模式可编辑分类放行（资源分类只收资源条目）
-            grid.AllowExternalDrop = contentMode == SidebarControl.ContentMode.Software
-                && CanEditCategory(currentCategory);
+            // 外部文件/文件夹拖入主内容区：软件/资源模式下当前分类可编辑时放行
+            grid.AllowExternalDrop = CanEditCategory(currentCategory);
             // 拖出来源：软件模式=搜索态或只读全集/「常用」；资源模式=搜索态或「全部资源」
             // （拖到侧栏资源分类即「加入」，多归属）。与网格内排序相互独立。
             grid.AllowDragOut = contentMode == SidebarControl.ContentMode.Website
@@ -1216,7 +1215,7 @@ namespace AppManager
             AddItemToCategory(app, cat);
         }
 
-        /// <summary>外部文件/文件夹拖入主内容区：按当前分类入库（实体搬入配置存储路径，分类中收录引用）。</summary>
+        /// <summary>外部文件/文件夹拖入主内容区：按当前模式入库（软件/资源各自的存储位置，实体移动、原文件不保留）。</summary>
         private void OnGridFilesDropped(string[] paths)
         {
             if (paths == null || paths.Length == 0) return;
@@ -1372,11 +1371,12 @@ namespace AppManager
             StartIconLoad();
         }
 
-        /// <summary>当前内容模式下条目是否应展示。</summary>
+        /// <summary>当前内容模式下条目是否应展示：资源模式=资源条目（网址或资源分类下的本地文件），软件模式=其余条目。</summary>
         private bool MatchesContentMode(AppInfo a)
         {
             bool isUrl = Scanner.IsUrl(a.TargetPath);
-            return contentMode == SidebarControl.ContentMode.Website ? isUrl : !isUrl;
+            bool resource = IsResourceEntry(a);
+            return contentMode == SidebarControl.ContentMode.Website ? resource : (!isUrl && !resource);
         }
 
         /// <summary>可见性判定：隐藏项开关 + 显示全部已安装开关。</summary>
@@ -1404,10 +1404,10 @@ namespace AppManager
 
         private bool InCategory(AppInfo a, string category)
         {
-            // 只读全集分类：全部软件=软件（不含文件/文件夹），全部文件=文件/文件夹，全部资源=资源条目（网址）
+            // 只读全集分类：全部软件=软件（不含文件/文件夹），全部文件=软件存储中的文件/文件夹，全部资源=资源条目
             if (category == "全部软件") return !a.IsFile;
-            if (category == "全部文件") return a.IsFile && !Scanner.IsUrl(a.TargetPath);
-            if (category == "全部资源") return Scanner.IsUrl(a.TargetPath);
+            if (category == "全部文件") return a.IsFile && !Scanner.IsUrl(a.TargetPath) && !IsResourceEntry(a);
+            if (category == "全部资源") return IsResourceEntry(a);
             if (category == "常用") return a.IsFavorite;
 
             // 额外归属分类（拖放「加入分类」，多归属）：原分类保留，命中即视为属于该分类
@@ -1444,6 +1444,30 @@ namespace AppManager
             if (a == null || string.IsNullOrEmpty(a.Key) || string.IsNullOrEmpty(category)) return false;
             List<string> cats;
             return config.ItemCategories.TryGetValue(a.Key, out cats) && cats.Contains(category);
+        }
+
+        /// <summary>资源条目判定：网址，或按资源模式收纳登记过的本地文件/文件夹。</summary>
+        private bool IsResourceEntry(AppInfo a)
+        {
+            if (a == null) return false;
+            if (Scanner.IsUrl(a.TargetPath)) return true;
+            if (!a.IsFile) return false;
+            // 资源文件一律来自带 IsResource 标记的 AddedItems 记录（改名/移动分类只改归属，不改变该记录）
+            return IsAddedAsResource(a);
+        }
+
+        /// <summary>是否为按资源模式登记的手动添加条目（依据 AddedItems.IsResource 判定）。</summary>
+        private bool IsAddedAsResource(AppInfo a)
+        {
+            if (string.IsNullOrEmpty(a.TargetPath)) return false;
+            for (int i = 0; i < config.AddedItems.Count; i++)
+            {
+                AddedEntry e = config.AddedItems[i];
+                if (e.IsResource
+                    && string.Equals(e.Path, a.TargetPath, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+            return false;
         }
 
         /// <summary>把条目「加入」指定分类（多归属）：原分类与存储位置均不变，已在该分类则不重复添加。</summary>
@@ -1593,7 +1617,9 @@ namespace AppManager
                 if (config.CategoryOverride[k] == category) config.CategoryOverride.Remove(k);
             foreach (AddedEntry e in config.AddedItems)
                 if (e.Category == category)
-                    e.Category = resource ? "书签" : CategoryRules.Classify(Path.GetFileName(e.Path));
+                    e.Category = resource
+                        ? (Scanner.IsUrl(e.Path) ? "书签" : "文件")
+                        : CategoryRules.Classify(Path.GetFileName(e.Path));
             // 清理指向已删分类的额外归属记录
             foreach (List<string> extra in config.ItemCategories.Values)
                 extra.Remove(category);
@@ -1937,13 +1963,16 @@ namespace AppManager
 
         // ===== 添加 / 移除条目 =====
 
-        /// <summary>点击「+ 添加」：软件模式弹出"添加软件/文件/文件夹/网址"菜单；资源模式仅「添加资源…」。</summary>
+        /// <summary>点击「+ 添加」：软件模式弹出"添加软件/文件/文件夹/网址"菜单；资源模式支持文件/文件夹/网址。</summary>
         private void OnAdd(object sender, EventArgs e)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             if (contentMode == SidebarControl.ContentMode.Website)
             {
-                items.Add(MkMenu("添加资源…", delegate { AddWebsite(); }));
+                items.Add(MkMenu("添加文件…", delegate { PickFiles(); }));
+                items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
+                items.Add(MkSep());
+                items.Add(MkMenu("添加网址…", delegate { AddWebsite(); }));
             }
             else
             {
@@ -2124,22 +2153,22 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 把路径批量写入 AddedItems（按 路径+分类 去重），并按分类规则搬运入库：
-        /// 文件夹搬入该分类目录、文件搬入其 Files 子目录、软件（.exe）只登记不搬运。
+        /// 把路径批量写入 AddedItems（按 路径+分类 去重），并按当前模式搬运入库：
+        /// 软件模式进入软件存储位置；资源模式进入资源存储位置（按分类建子目录），原文件移动后即不保留。
         /// 搬运为异步执行，状态栏显示每项独立进度。
         /// </summary>
         private void AddPaths(string[] paths, string category)
         {
             if (paths == null || paths.Length == 0) return;
             if (!CanEditCategory(category)) return;   // 只读分类不接受收录
-            MoveToCategoryAsync(paths, category);
+            MoveToCategoryAsync(paths, category, contentMode == SidebarControl.ContentMode.Website);
         }
 
         /// <summary>
         /// 异步把路径搬入目标分类：逐项移动并更新状态栏进度，完成后重扫刷新。
-        /// 每项独立显示进度详情；软件（.exe）只登记不搬。
+        /// 每项独立显示进度详情。
         /// </summary>
-        private void MoveToCategoryAsync(string[] paths, string category)
+        private void MoveToCategoryAsync(string[] paths, string category, bool resource)
         {
             string[] valid = paths.Where(p => !string.IsNullOrEmpty(p)
                 && (File.Exists(p) || Directory.Exists(p))).ToArray();
@@ -2154,7 +2183,7 @@ namespace AppManager
                     string p = valid[i];
                     string name = Path.GetFileName(p);
                     UpdateStatus(i, total, name);
-                    string stored = StoreIntoCategory(p, category);
+                    string stored = StoreIntoCategory(p, category, resource);
                     lock (storedList) storedList.Add(stored);
                 }
                 BeginInvoke((Action)delegate
@@ -2167,6 +2196,7 @@ namespace AppManager
                         e.Path = stored;
                         e.Category = category;
                         e.IsFolder = Directory.Exists(stored);
+                        e.IsResource = resource;
                         config.AddedItems.Add(e);
                         added++;
                     }
@@ -2183,17 +2213,19 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 入库规则：文件夹收进配置的「文件夹存储位置」、文件收进「文件存储位置」（均为统一目录，不再按分类细分）；
-        /// 软件（.exe）只登记不搬运。未配置时回退 ManageRoot（H:\Manage，其下 Files 收文件）。
-        /// 已在目标目录内或搬运失败时返回原路径，保证条目不丢失。
+        /// 入库规则：软件模式下文件夹/文件收进配置的统一存储位置（.exe 只登记不搬）；
+        /// 资源模式收进「资源存储位置」下按分类建立的子目录，所有文件（含 .exe）均实体移动。
+        /// 未配置时回退 ManageRoot（H:\Manage）。已在目标目录内或搬运失败时返回原路径，保证条目不丢失。
         /// </summary>
-        private string StoreIntoCategory(string path, string category)
+        private string StoreIntoCategory(string path, string category, bool resource)
         {
             try
             {
                 bool isFolder = Directory.Exists(path);
-                if (!isFolder && IsSoftwareFile(path)) return path;      // 软件只登记不搬
-                string destDir = isFolder ? FolderStoreOf() : FileStoreOf();
+                if (!resource && !isFolder && IsSoftwareFile(path)) return path; // 软件分类下的 .exe 只登记不搬
+                string destDir = resource
+                    ? ResourceStoreOf(category)
+                    : (isFolder ? FolderStoreOf() : FileStoreOf());
                 if (IsUnder(destDir, path)) return path;                 // 已在目标目录内，避免二次搬运
                 if (!Directory.Exists(destDir)) Directory.CreateDirectory(destDir);
                 string name = Path.GetFileName(path);
@@ -2244,6 +2276,45 @@ namespace AppManager
                 catch { }
             }
             return Path.Combine(ResolveManageRoot(), "Files");
+        }
+
+        /// <summary>资源存储根目录：配置了「资源存储位置」则用之，否则回退 ManageRoot\Resources。</summary>
+        private string ResourceStoreRoot()
+        {
+            if (!string.IsNullOrEmpty(config.ResourceStorePath))
+            {
+                string p = DesktopOrganizer.NormalizeRoot(config.ResourceStorePath);
+                try { Directory.CreateDirectory(p); return p; }
+                catch { }
+            }
+            string root = Path.Combine(ResolveManageRoot(), "Resources");
+            try { Directory.CreateDirectory(root); }
+            catch { }
+            return root;
+        }
+
+        /// <summary>资源分类的存储目录：资源存储根目录下的分类子目录（分类名做非法字符替换）。</summary>
+        private string ResourceStoreOf(string category)
+        {
+            string dir = Path.Combine(ResourceStoreRoot(), SafeDirName(category));
+            try { Directory.CreateDirectory(dir); }
+            catch { }
+            return dir;
+        }
+
+        /// <summary>把分类名转换为合法目录名：替换非法字符并去除首尾空格/句点。</summary>
+        private static string SafeDirName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return "其他";
+            char[] invalid = Path.GetInvalidFileNameChars();
+            char[] chars = name.ToCharArray();
+            for (int i = 0; i < chars.Length; i++)
+            {
+                for (int j = 0; j < invalid.Length; j++)
+                    if (chars[i] == invalid[j]) { chars[i] = '_'; break; }
+            }
+            string s = new string(chars).Trim().Trim('.');
+            return s.Length == 0 ? "其他" : s;
         }
 
         /// <summary>解析收纳根路径：配置 ManageRootPath 可用则用之，否则默认 H:\Manage，再回退本地 QuickCenter。</summary>
@@ -2314,11 +2385,10 @@ namespace AppManager
             return p.StartsWith(d, StringComparison.OrdinalIgnoreCase);
         }
 
-        /// <summary>文件/文件夹拖放到侧栏某分类：切到该分类并按规则入库（异步 + 状态栏进度）。</summary>
+        /// <summary>文件/文件夹拖放到侧栏某分类：切到该分类并按当前模式入库（异步 + 状态栏进度）。</summary>
         private void OnFilesDroppedToCategory(string category, string[] paths)
         {
             if (paths == null || paths.Length == 0) return;
-            if (contentMode == SidebarControl.ContentMode.Website) return;   // 资源分类不接收文件/文件夹拖放
             if (!CanEditCategory(category)) return;
             currentCategory = category;
             sidebar.SetActive(currentCategory);
@@ -2664,7 +2734,7 @@ namespace AppManager
             organizer = new DesktopOrganizer(config);
             grid.GridMode = GetCategoryGridMode(currentCategory);
             settingsPage.Bind(config.ShowHidden, config.ShowAllInstalled, config.AutoScan,
-                config.CloseToTray, FolderStoreOf(), FileStoreOf());
+                config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             StartAutoScan();
             RebuildSidebar();
             StartScan();
@@ -2753,7 +2823,7 @@ namespace AppManager
             if (settingsOpen) return;
             settingsOpen = true;
             settingsPage.Bind(config.ShowHidden, config.ShowAllInstalled, config.AutoScan,
-                config.CloseToTray, FolderStoreOf(), FileStoreOf());
+                config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             SetMainContentVisible(false);
             settingsBtn.Visible = false;
             settingsPage.Visible = true;
@@ -2789,17 +2859,18 @@ namespace AppManager
             addBtn.Visible = show && CanEditCategory(currentCategory);   // 「全部资源」等只读分类不显示
         }
 
-        /// <summary>存储位置设置：分别设定文件夹与文件的入库目标目录（iOS 风格对话框）。</summary>
+        /// <summary>存储位置设置：分别设定文件夹、文件与资源的入库目标目录（iOS 风格对话框）。</summary>
         private void ShowStorageLocationDialog()
         {
             string folderPath = FolderStoreOf();
             string filePath = FileStoreOf();
+            string resourcePath = ResourceStoreRoot();
 
             using (Form f = new Form())
             {
                 f.FormBorderStyle = FormBorderStyle.None;
                 f.StartPosition = FormStartPosition.CenterParent;
-                f.ClientSize = new Size(520, 288);
+                f.ClientSize = new Size(520, 358);
                 f.BackColor = Theme.Background;
                 f.ShowInTaskbar = false;
                 ApplyRoundedCorners(f);
@@ -2814,7 +2885,7 @@ namespace AppManager
                 f.Controls.Add(title);
 
                 Label desc = new Label();
-                desc.Text = "拖入分类的文件夹与文件，实体分别存放到以下位置；分类中仅收录其快捷方式。";
+                desc.Text = "拖入分类的文件夹与文件，实体均移动到以下位置（原文件不再保留）。";
                 desc.Font = Theme.FontOf(9F);
                 desc.ForeColor = Theme.TextSecondary;
                 desc.BackColor = Color.Transparent;
@@ -2824,12 +2895,14 @@ namespace AppManager
 
                 TextBox folderBox = MakePathRow(f, "文件夹存储位置", folderPath, 82);
                 TextBox fileBox = MakePathRow(f, "文件存储位置", filePath, 152);
+                TextBox resourceBox = MakePathRow(f, "资源存储位置（按分类建子目录）", resourcePath, 222);
                 // 避免首个输入框获得焦点后被整体选中（观感突兀）
                 f.Shown += delegate
                 {
                     folderBox.SelectionStart = folderBox.TextLength;
                     folderBox.SelectionLength = 0;
                     fileBox.SelectionLength = 0;
+                    resourceBox.SelectionLength = 0;
                 };
 
                 RoundButton ok = new RoundButton();
@@ -2841,6 +2914,7 @@ namespace AppManager
                 {
                     config.FolderStorePath = folderBox.Text.Trim();
                     config.FileStorePath = fileBox.Text.Trim();
+                    config.ResourceStorePath = resourceBox.Text.Trim();
                     config.Save();
                     f.Close();
                 };

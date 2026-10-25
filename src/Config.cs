@@ -76,6 +76,7 @@ namespace AppManager
         public string Category = string.Empty;
         public bool IsFolder;
         public bool IsUrl;      // 网址条目（Path 存 URL，不做磁盘校验）
+        public bool IsResource; // 资源模式收纳的本地文件/文件夹（仅在资源模式展示）
         public string Name = string.Empty;   // 用户改过的显示名，空则按路径/主机名推导
     }
 
@@ -109,6 +110,8 @@ namespace AppManager
         // 文件/文件夹各自的存储位置（留空时按 ManageRootPath 与 ManageRootPath\Files 兜底）
         public string FolderStorePath = string.Empty;
         public string FileStorePath = string.Empty;
+        // 资源模式本地文件的存储根目录（留空时按 ManageRootPath\Resources 兜底；各分类在其下建子目录）
+        public string ResourceStorePath = string.Empty;
 
         // 拖动排序持久化：分类名 -> 有序稳定键列表（AppInfo.Key），各分类独立
         public Dictionary<string, List<string>> ItemOrder = new Dictionary<string, List<string>>();
@@ -186,6 +189,7 @@ namespace AppManager
                 cfg.ManageRootPath = XmlElementText(root, "ManageRootPath", string.Empty);
                 cfg.FolderStorePath = XmlElementText(root, "FolderStorePath", string.Empty);
                 cfg.FileStorePath = XmlElementText(root, "FileStorePath", string.Empty);
+                cfg.ResourceStorePath = XmlElementText(root, "ResourceStorePath", string.Empty);
                 foreach (XmlNode n in root.SelectNodes("AddedItems/Item"))
                 {
                     AddedEntry e = new AddedEntry();
@@ -193,6 +197,7 @@ namespace AppManager
                     e.Category = XmlAttr(n, "category");
                     e.IsFolder = XmlAttributeBool(n, "folder", false);
                     e.IsUrl = XmlAttributeBool(n, "url", false);
+                    e.IsResource = XmlAttributeBool(n, "resource", false);
                     e.Name = XmlAttr(n, "name");
                     if (!string.IsNullOrEmpty(e.Path)) cfg.AddedItems.Add(e);
                 }
@@ -269,6 +274,7 @@ namespace AppManager
                     w.WriteElementString("ManageRootPath", ManageRootPath ?? string.Empty);
                     w.WriteElementString("FolderStorePath", FolderStorePath ?? string.Empty);
                     w.WriteElementString("FileStorePath", FileStorePath ?? string.Empty);
+                    w.WriteElementString("ResourceStorePath", ResourceStorePath ?? string.Empty);
                     WriteList(w, "Favorites", Favorites);
                     WriteList(w, "Hidden", Hidden);
                     WriteList(w, "CustomCategories", CustomCategories);
@@ -299,6 +305,7 @@ namespace AppManager
                         w.WriteAttributeString("category", e.Category ?? string.Empty);
                         w.WriteAttributeString("folder", e.IsFolder ? "true" : "false");
                         w.WriteAttributeString("url", e.IsUrl ? "true" : "false");
+                        w.WriteAttributeString("resource", e.IsResource ? "true" : "false");
                         w.WriteAttributeString("name", e.Name ?? string.Empty);
                         w.WriteEndElement();
                     }

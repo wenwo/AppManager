@@ -86,6 +86,9 @@ namespace AppManager
                 ? root : SafeFullPath(config.FolderStorePath);
             string filesDir = string.IsNullOrEmpty(config.FileStorePath)
                 ? Path.Combine(root, "Files") : SafeFullPath(config.FileStorePath);
+            // 资源模式的存储目录不参与「全部文件」展示，避免把资源库本身当成一个文件夹条目
+            string resourceDir = string.IsNullOrEmpty(config.ResourceStorePath)
+                ? Path.Combine(root, "Resources") : SafeFullPath(config.ResourceStorePath);
 
             try
             {
@@ -94,6 +97,7 @@ namespace AppManager
                     foreach (string dir in Directory.GetDirectories(foldersDir))
                     {
                         if (IsSameDirectory(dir, filesDir)) continue;
+                        if (IsSameDirectory(dir, resourceDir)) continue;
                         AddManaged(dict, dir, true);
                     }
                 }
