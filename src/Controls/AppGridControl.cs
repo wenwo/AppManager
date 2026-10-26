@@ -83,8 +83,6 @@ namespace AppManager.Controls
         public event Action<AppInfo, Point> MenuRequested;
         /// <summary>列表行右侧操作按钮：改名。</summary>
         public event Action<AppInfo> RenameRequested;
-        /// <summary>列表行右侧操作按钮：改地址（仅网址）。</summary>
-        public event Action<AppInfo> EditUrlRequested;
         /// <summary>列表行右侧操作按钮：删除。</summary>
         public event Action<AppInfo> DeleteRequested;
 
@@ -119,7 +117,7 @@ namespace AppManager.Controls
 
         /// <summary>
         /// 是否允许把条目拖出网格（拖到侧栏分类即「加入」该分类，多归属，原分类与存储位置不变）。
-        /// 用于只读全集分类（全部软件/全部文件/全部网站）：这些分类不支持网格内排序，但需支持拖出加入。
+        /// 用于只读全集分类（全部软件/全部文件/全部资源）：这些分类不支持网格内排序，但需支持拖出加入。
         /// </summary>
         public bool AllowDragOut { get; set; }
 
@@ -164,9 +162,7 @@ namespace AppManager.Controls
                 favoriteBrush.Dispose();
                 actionBlueBrush.Dispose();
                 actionRedBrush.Dispose();
-                if (subFont != null) subFont.Dispose();
-                if (actionFont != null) actionFont.Dispose();
-                if (headerFont != null) headerFont.Dispose();
+                // subFont/actionFont/headerFont 来自 Theme 字体缓存（应用生命周期共享），不得在此释放
                 if (gridItemPath != null) gridItemPath.Dispose();
                 accentPen.Dispose();
                 chipBrush.Dispose();
@@ -386,8 +382,8 @@ namespace AppManager.Controls
                 return;
             }
 
-            if (grid) PaintGrid(g);
-            else PaintList(g);
+            if (grid) PaintGrid(g, VisibleContentRect(e.ClipRectangle));
+            else PaintList(g, VisibleContentRect(e.ClipRectangle));
 
             if (dragging && dragGap >= 0) PaintDropIndicator(g);
             if (dragging && dropTarget >= 0) PaintFolderDropHighlight(g);
@@ -451,19 +447,31 @@ namespace AppManager.Controls
         /// <summary>空态提示：主内容区居中显示浅灰文案（网格/列表通用）。</summary>
         private void PaintEmptyState(Graphics g)
         {
-            using (Font f = Theme.FontOf(11F))
             using (SolidBrush br = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringCenter(g, "暂无内容", f, br,
+                Draw.DrawStringCenter(g, "暂无内容", Theme.FontOf(11F), br,
                     new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
         }
 
+        /// <summary>
+        /// 本次重绘的内容区可视范围（空矩形表示不裁剪）：把客户区失效区换算为内容坐标，
+        /// 供 PaintGrid/PaintList 跳过屏外条目，长列表滚动/局部重绘只画可见部分。
+        /// </summary>
+        private Rectangle VisibleContentRect(Rectangle clip)
+        {
+            if (clip.IsEmpty) return Rectangle.Empty;
+            clip.Offset(-AutoScrollPosition.X, -AutoScrollPosition.Y);
+            clip.Inflate(8, 8);   // 外扩覆盖卡片阴影/悬停位移，避免边缘残影
+            return clip;
+        }
+
         /// <summary>网格视图：iOS 大图标卡片（轻阴影 + 悬停上浮）。</summary>
-        private void PaintGrid(Graphics g)
+        private void PaintGrid(Graphics g, Rectangle clip)
         {
             EnsurePaths();
             for (int i = 0; i < apps.Count; i++)
             {
                 Rectangle r = GridRect(i);
+                if (!clip.IsEmpty && !clip.IntersectsWith(r)) continue;
                 bool hover = (i == hoverIndex);
 
                 // 轻阴影 + 悬停上浮
@@ -501,7 +509,7 @@ namespace AppManager.Controls
         /// 列表视图：每条记录为独立圆角卡片（卡片之间留缝），
         /// 单行表格布局——名称 靠左，分类（左对齐）/大小（右对齐）/实际位置（贴右边缘）三列靠右且上下对齐。
         /// </summary>
-        private void PaintList(Graphics g)
+        private void PaintList(Graphics g, Rectangle clip)
         {
             if (apps.Count == 0) return;
 
@@ -511,6 +519,7 @@ namespace AppManager.Controls
             for (int i = 0; i < apps.Count; i++)
             {
                 Rectangle r = ListRowRect(i);
+                if (!clip.IsEmpty && !clip.IntersectsWith(r)) continue;
                 AppInfo a = apps[i];
 
                 // 独立卡片：白底圆角，悬停浅灰
@@ -696,17 +705,16 @@ namespace AppManager.Controls
             catch { return t; }
         }
 
-        /// <summary>行操作按钮数量（改名 / 改址 / 删除）。</summary>
+        /// <summary>行操作按钮数量（改名 / 删除）。</summary>
         private int RowActionCount(AppInfo a)
         {
-            return Scanner.IsUrl(a.TargetPath) ? 3 : 2;
+            return 2;
         }
 
-        /// <summary>行右侧绘制 iOS 文字操作按钮：改名/改址 蓝色、删除 红色。</summary>
+        /// <summary>行右侧绘制 iOS 文字操作按钮：改名 蓝色、删除 红色。</summary>
         private void PaintRowActions(Graphics g, AppInfo a, Rectangle r)
         {
-            bool isUrl = Scanner.IsUrl(a.TargetPath);
-            string[] labels = isUrl ? new[] { "改名", "改址", "删除" } : new[] { "改名", "删除" };
+            string[] labels = new[] { "改名", "删除" };
             int total = labels.Length * (ActionBtnW + ActionBtnGap) - ActionBtnGap;
             int x = r.Right - 12 - total;
             for (int bi = 0; bi < labels.Length; bi++)
@@ -776,6 +784,7 @@ namespace AppManager.Controls
             int idx = HitIndex(e.Location);
             if (idx != hoverIndex)
             {
+                int old = hoverIndex;
                 hoverIndex = idx;
                 tipVisible = false;
                 tipTimer.Stop();
@@ -791,9 +800,26 @@ namespace AppManager.Controls
                 {
                     tipText = string.Empty;
                 }
-                Invalidate();
+                InvalidateHover(old, idx);
                 Cursor = idx >= 0 ? Cursors.Hand : Cursors.Default;
             }
+        }
+
+        /// <summary>悬停条目切换时只重绘新旧两个条目区域（外扩覆盖阴影/行按钮），避免整屏重绘造成鼠标划过时发卡。</summary>
+        private void InvalidateHover(int oldIndex, int newIndex)
+        {
+            Rectangle dirty = Rectangle.Empty;
+            if (oldIndex >= 0 && oldIndex < apps.Count)
+                dirty = grid ? GridRect(oldIndex) : ListRowRect(oldIndex);
+            if (newIndex >= 0 && newIndex < apps.Count)
+            {
+                Rectangle r = grid ? GridRect(newIndex) : ListRowRect(newIndex);
+                dirty = dirty.IsEmpty ? r : Rectangle.Union(dirty, r);
+            }
+            if (dirty.IsEmpty) { Invalidate(); return; }
+            dirty.Inflate(10, 10);
+            dirty.Offset(AutoScrollPosition.X, AutoScrollPosition.Y);
+            Invalidate(dirty);
         }
 
         protected override void OnMouseLeave(EventArgs e)
@@ -887,27 +913,23 @@ namespace AppManager.Controls
                 {
                     AppInfo a = apps[idx];
                     if (act == 0) { Action<AppInfo> h = RenameRequested; if (h != null) h(a); }
-                    else if (act == 1) { Action<AppInfo> h = EditUrlRequested; if (h != null) h(a); }
-                    else if (act == 2) { Action<AppInfo> h = DeleteRequested; if (h != null) h(a); }
+                    else if (act == 1) { Action<AppInfo> h = DeleteRequested; if (h != null) h(a); }
                     return;
                 }
             }
         }
 
-        /// <summary>命中列表行右侧操作按钮：0=改名 1=改地址 2=删除，未命中返回 -1。</summary>
+        /// <summary>命中列表行右侧操作按钮：0=改名 1=删除，未命中返回 -1。</summary>
         private int HitActionButton(Point client, int idx)
         {
             Point p = new Point(client.X - AutoScrollPosition.X, client.Y - AutoScrollPosition.Y);
             Rectangle r = ListRowRect(idx);
-            AppInfo a = apps[idx];
-            bool isUrl = Scanner.IsUrl(a.TargetPath);
-            string[] labels = isUrl ? new[] { "改名", "改址", "删除" } : new[] { "改名", "删除" };
-            int total = labels.Length * (ActionBtnW + ActionBtnGap) - ActionBtnGap;
+            int total = 2 * (ActionBtnW + ActionBtnGap) - ActionBtnGap;
             int x = r.Right - 12 - total;
-            for (int bi = 0; bi < labels.Length; bi++)
+            for (int bi = 0; bi < 2; bi++)
             {
                 Rectangle br = new Rectangle(x + bi * (ActionBtnW + ActionBtnGap), r.Y, ActionBtnW, r.Height);
-                if (br.Contains(p)) return isUrl ? bi : (bi == 0 ? 0 : 2);
+                if (br.Contains(p)) return bi;
             }
             return -1;
         }

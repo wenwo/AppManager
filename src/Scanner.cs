@@ -170,20 +170,17 @@ namespace AppManager
             return string.Empty;
         }
 
-        /// <summary>注入用户手动添加的软件/文件/文件夹/网址条目（来源 AddedItems）。</summary>
+        /// <summary>注入用户手动添加的软件/文件/文件夹条目（来源 AddedItems）；路径失效则跳过。</summary>
         private void ScanAdded(Dictionary<string, AppInfo> dict)
         {
             foreach (AddedEntry e in config.AddedItems)
             {
                 if (string.IsNullOrEmpty(e.Path)) continue;
-                bool isUrl = e.IsUrl || IsUrl(e.Path);
-                bool isFolder = !isUrl && (e.IsFolder || Directory.Exists(e.Path));
-                // 网址不做磁盘校验；文件/文件夹路径失效则跳过
-                if (!isUrl && !File.Exists(e.Path) && !Directory.Exists(e.Path)) continue;
+                bool isFolder = e.IsFolder || Directory.Exists(e.Path);
+                if (!File.Exists(e.Path) && !Directory.Exists(e.Path)) continue;
                 AppInfo a = new AppInfo();
                 a.Name = !string.IsNullOrEmpty(e.Name) ? e.Name
-                    : (isUrl ? UrlDisplayName(e.Path)
-                    : (isFolder ? Path.GetFileName(e.Path) : Path.GetFileNameWithoutExtension(e.Path)));
+                    : (isFolder ? Path.GetFileName(e.Path) : Path.GetFileNameWithoutExtension(e.Path));
                 if (string.IsNullOrEmpty(a.Name)) a.Name = e.Path;
                 a.TargetPath = e.Path;
                 a.Source = "Added";
@@ -192,23 +189,10 @@ namespace AppManager
                 a.IsFolder = isFolder;
                 a.DisplayIcon = e.Path;
                 a.Category = string.IsNullOrEmpty(e.Category)
-                    ? (isUrl ? "网络工具" : CategoryRules.Classify(a.Name))
+                    ? CategoryRules.Classify(a.Name)
                     : e.Category;
                 Merge(dict, a);
             }
-        }
-
-        /// <summary>网址条目的显示名：取主机名（去 www. 前缀），解析失败回退原始串。</summary>
-        private static string UrlDisplayName(string url)
-        {
-            try
-            {
-                Uri u = new Uri(url);
-                string host = u.Host;
-                if (host.StartsWith("www.", StringComparison.OrdinalIgnoreCase)) host = host.Substring(4);
-                return string.IsNullOrEmpty(host) ? url : host;
-            }
-            catch { return url; }
         }
 
         // ===== 系统「全部应用」列表（shell:AppsFolder） =====
@@ -492,10 +476,10 @@ namespace AppManager
             foreach (string f in files)
             {
                 string ext = Path.GetExtension(f).ToLowerInvariant();
-                if (ext != ".lnk" && ext != ".url") continue;
+                if (ext != ".lnk") continue;
                 AppInfo app = ResolveShortcut(f, source);
                 if (app == null) continue;
-                // 失效剔除：目标不存在则剔除；UWP 恒有效，网址恒有效，文件夹/文件需真实存在
+                // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
                 if (!IsAliveTarget(app.TargetPath, app.IsUwp)) continue;
                 if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
                 MergeByName(dict, app);
@@ -504,20 +488,6 @@ namespace AppManager
 
         private AppInfo ResolveShortcut(string path, string source)
         {
-            string ext = Path.GetExtension(path).ToLowerInvariant();
-            if (ext == ".url")
-            {
-                AppInfo a = new AppInfo();
-                a.ShortcutPath = path;
-                a.Name = Path.GetFileNameWithoutExtension(path);
-                a.Source = source;
-                a.TargetPath = ReadUrlTarget(path);
-                a.IsDesktop = (source == "Desktop");
-                a.IsFile = true;              // 网址条目：按文件类处理
-                a.Key = "lnk:" + path;
-                a.DisplayIcon = path;
-                return a;
-            }
             try
             {
                 IShellLinkW link = (IShellLinkW)new CShellLink();
@@ -580,7 +550,7 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 判断条目目标是否有效：UWP 恒有效；网址与协议定位串（含 "://"，如 steam://、discord://）恒有效；
+        /// 判断条目目标是否有效：UWP 恒有效；协议定位串（含 "://"，如 http://、steam://）恒有效；
         /// 文件/文件夹需真实存在。
         /// 说明：协议快捷方式的目标不是磁盘路径，若按 File.Exists 判定会被误判失效而从列表剔除，
         /// 故对任何含 "://" 的目标一律放行。
@@ -589,12 +559,11 @@ namespace AppManager
         {
             if (isUwp) return true;
             if (string.IsNullOrEmpty(target)) return false;
-            if (IsUrl(target)) return true;
             if (target.IndexOf("://", StringComparison.Ordinal) >= 0) return true;
             return File.Exists(target) || Directory.Exists(target);
         }
 
-        /// <summary>是否为 http/https/ftp 网址。</summary>
+        /// <summary>是否为 http/https/ftp 网址字符串（供非应用项过滤与显示兜底使用）。</summary>
         internal static bool IsUrl(string s)
         {
             if (string.IsNullOrEmpty(s)) return false;
@@ -625,21 +594,6 @@ namespace AppManager
                 ti = found + 1;
             }
             return true;
-        }
-
-        private static string ReadUrlTarget(string path)
-        {
-            try
-            {
-                foreach (string line in File.ReadAllLines(path))
-                {
-                    string l = line.Trim();
-                    if (l.StartsWith("URL=", StringComparison.OrdinalIgnoreCase))
-                        return l.Substring(4).Trim();
-                }
-            }
-            catch { }
-            return string.Empty;
         }
 
         // ===== 桌面 =====

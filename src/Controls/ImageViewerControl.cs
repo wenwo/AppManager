@@ -166,11 +166,12 @@ namespace AppManager.Controls
         {
             if (image == null || loadFailed) return;
             float oldS = DisplayScale;
+            Rectangle area = ImageArea;
+            // 必须先取旧倍率下的绘制矩形：更新 zoomFactor 后 ImageDestRect 已是新倍率，锚点会算错
+            RectangleF oldRect = ImageDestRect();
             zoomFactor = Clamp(zoomFactor * (float)Math.Pow(1.15, steps), 0.05F, 40F);
             float newS = DisplayScale;
             if (Math.Abs(newS - oldS) < 0.0001F) return;
-            Rectangle area = ImageArea;
-            RectangleF oldRect = ImageDestRect();
             // 光标处图像坐标在新倍率下保持不动
             float ix = (pt.X - oldRect.X) / oldS;
             float iy = (pt.Y - oldRect.Y) / oldS;

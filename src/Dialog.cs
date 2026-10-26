@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Drawing;
@@ -417,12 +417,10 @@ namespace AppManager
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
-                using (Font tf = Theme.FontOf(11F, FontStyle.Bold))
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, tf, tb, new Rectangle(22, 18, f.Width - 44, 28));
-                using (Font mf = Theme.FontOf(9.5F))
+                    Draw.DrawStringLeft(g, title, Theme.FontOf(11F, FontStyle.Bold), tb, new Rectangle(22, 18, f.Width - 44, 28));
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, message, mf, mb, new Rectangle(22, 54, f.Width - 44, 50));
+                    Draw.DrawStringLeft(g, message, Theme.FontOf(9.5F), mb, new Rectangle(22, 54, f.Width - 44, 50));
             };
             RoundButton ok = MakeBtn("确定", true);
             ok.Bounds = new Rectangle(f.Width / 2 - 130, 124, 120, 32);
@@ -547,12 +545,10 @@ namespace AppManager
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
-                using (Font tf = Theme.FontOf(11F, FontStyle.Bold))
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, tf, tb, new Rectangle(22, 16, f.Width - 44, 26));
-                using (Font mf = Theme.FontOf(9.5F))
+                    Draw.DrawStringLeft(g, title, Theme.FontOf(11F, FontStyle.Bold), tb, new Rectangle(22, 16, f.Width - 44, 26));
                 using (SolidBrush mb = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(g, prompt, mf, mb, new Rectangle(22, 50, f.Width - 44, 22));
+                    Draw.DrawStringLeft(g, prompt, Theme.FontOf(9.5F), mb, new Rectangle(22, 50, f.Width - 44, 22));
             };
             TextBox box = MakeField(f, new Rectangle(22, 80, f.ClientSize.Width - 44, 36), defaultValue);
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);

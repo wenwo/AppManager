@@ -495,15 +495,13 @@ namespace AppManager
         {
             base.OnPaint(e);
             Graphics g = e.Graphics;
-            using (Font tf = Theme.FontOf(15F, FontStyle.Bold))
             using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "布局备份", tf, tb, new Rectangle(24, 22, 260, 30));
-            using (Font df = Theme.FontOf(9F))
+                Draw.DrawStringLeft(g, "布局备份", Theme.FontOf(15F, FontStyle.Bold), tb, new Rectangle(24, 22, 260, 30));
             using (SolidBrush db = new SolidBrush(Theme.TextSecondary))
             {
-                Draw.DrawStringLeft(g, "备份会保存分类、顺序、常用、隐藏与桌面收纳的完整状态，可保存多份。", df, db,
+                Draw.DrawStringLeft(g, "备份会保存分类、顺序、常用、隐藏与桌面收纳的完整状态，可保存多份。", Theme.FontOf(9F), db,
                     new Rectangle(24, 56, ClientSize.Width - 48, 22));
-                Draw.DrawStringLeft(g, "行内双击可恢复；当前收纳目录在恢复前会另存留底，不会直接删除。", df, db,
+                Draw.DrawStringLeft(g, "行内双击可恢复；当前收纳目录在恢复前会另存留底，不会直接删除。", Theme.FontOf(9F), db,
                     new Rectangle(24, 76, ClientSize.Width - 48, 22));
             }
             Draw.DrawShadow(g, list.Bounds, 10, 0.35f);
@@ -534,12 +532,10 @@ namespace AppManager
                     g.DrawLine(p, r.Left + 14, r.Bottom - 1, r.Right - 14, r.Bottom - 1);
             }
 
-            using (Font nf = Theme.FontOf(10F, FontStyle.Bold))
             using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, info.Name, nf, nb, new Rectangle(r.Left + 14, r.Top + 8, r.Width - 28, 20));
-            using (Font sf = Theme.FontOf(8.5F))
+                Draw.DrawStringLeft(g, info.Name, Theme.FontOf(10F, FontStyle.Bold), nb, new Rectangle(r.Left + 14, r.Top + 8, r.Width - 28, 20));
             using (SolidBrush sb = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringLeft(g, info.Summary, sf, sb, new Rectangle(r.Left + 14, r.Top + 30, r.Width - 28, 18));
+                Draw.DrawStringLeft(g, info.Summary, Theme.FontOf(8.5F), sb, new Rectangle(r.Left + 14, r.Top + 30, r.Width - 28, 18));
         }
 
         private void ReloadList()

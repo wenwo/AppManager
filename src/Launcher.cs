@@ -2,28 +2,21 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using Microsoft.VisualBasic.FileIO;
-using Microsoft.Win32;
 
 namespace AppManager
 {
     /// <summary>
     /// 应用启动与卸载入口：封装进程启动、目录打开、卸载调用。
-    /// 网址条目优先使用 Chrome 打开，Chrome 不可用时回退系统默认浏览器。
     /// 所有方法吞并异常并返回布尔，调用方据此提示用户。
     /// </summary>
     internal static class Launcher
     {
-        /// <summary>启动应用；UWP 走快捷方式 shell 解析，网址优先 Chrome，其余走目标/快捷方式。</summary>
+        /// <summary>启动应用；UWP 走快捷方式 shell 解析，其余走目标/快捷方式（浏览器网址等由系统关联程序打开）。</summary>
         public static bool Launch(AppInfo app)
         {
             if (app == null) return false;
             try
             {
-                // 网址：优先 Chrome，回退系统默认浏览器
-                if (Scanner.IsUrl(app.TargetPath))
-                {
-                    return LaunchUrl(app.TargetPath);
-                }
                 if (app.IsUwp)
                 {
                     if (!string.IsNullOrEmpty(app.ShortcutPath))
@@ -52,59 +45,6 @@ namespace AppManager
                 Debug.WriteLine("启动失败: " + ex.Message);
                 return false;
             }
-        }
-
-        /// <summary>用 Chrome 打开网址；Chrome 不存在时回退系统默认浏览器。</summary>
-        private static bool LaunchUrl(string url)
-        {
-            string chrome = FindChrome();
-            if (!string.IsNullOrEmpty(chrome))
-            {
-                try
-                {
-                    Process.Start(new ProcessStartInfo(chrome, "\"" + url + "\"") { UseShellExecute = false });
-                    return true;
-                }
-                catch (Exception ex) { Debug.WriteLine("Chrome 启动失败，回退默认浏览器: " + ex.Message); }
-            }
-            try
-            {
-                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine("网址打开失败: " + ex.Message);
-                return false;
-            }
-        }
-
-        /// <summary>查找 Chrome 可执行文件：注册表 → 常见安装路径。</summary>
-        private static string FindChrome()
-        {
-            try
-            {
-                using (RegistryKey key = Registry.LocalMachine.OpenSubKey(
-                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"))
-                {
-                    if (key != null)
-                    {
-                        string v = key.GetValue(null) as string;
-                        if (!string.IsNullOrEmpty(v) && File.Exists(v)) return v;
-                    }
-                }
-            }
-            catch { }
-            string[] candidates = new string[]
-            {
-                @"C:\Program Files\Google\Chrome\Application\chrome.exe",
-                @"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    @"Google\Chrome\Application\chrome.exe")
-            };
-            for (int i = 0; i < candidates.Length; i++)
-                if (File.Exists(candidates[i])) return candidates[i];
-            return null;
         }
 
         /// <summary>打开安装目录（或目标所在目录）。</summary>

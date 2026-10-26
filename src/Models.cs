@@ -57,7 +57,7 @@ namespace AppManager
 
     /// <summary>
     /// 分类定义：内置 9 类 + 常用 + 快捷中心 + 自定义 + 只读全集分类。
-    /// IsAllApps 表示只读置底分类（全部软件/全部文件/全部网站）。
+    /// IsAllApps 表示只读置底分类（全部软件/全部文件/全部资源）。
     /// </summary>
     public class Category
     {

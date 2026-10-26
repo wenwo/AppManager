@@ -214,13 +214,12 @@ namespace AppManager.Controls
             }
             using (SolidBrush plus = new SolidBrush(Theme.Accent))
             using (SolidBrush txt = new SolidBrush(Theme.Accent))
-            using (Font ff = Theme.FontOf(11F))
             {
                 // 加号图标
                 int cx = footRect.X + 18, cy = footRect.Y + footRect.Height / 2;
                 g.FillRectangle(plus, cx - 1, cy - 6, 2, 12);
                 g.FillRectangle(plus, cx - 6, cy - 1, 12, 2);
-                Draw.DrawStringLeft(g, "新建分类", ff, txt,
+                Draw.DrawStringLeft(g, "新建分类", Theme.FontOf(11F), txt,
                     new Rectangle(footRect.X + 34, footRect.Y, footRect.Width - 40, footRect.Height));
             }
         }

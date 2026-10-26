@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Text;
 
@@ -72,22 +73,42 @@ namespace AppManager
             "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Tahoma"
         });
 
-        /// <summary>按磅值创建 UI 字体（常规）。</summary>
+        /// <summary>
+        /// 字体缓存：字号/样式/单位组合 -> Font 实例，应用生命周期内复用不释放。
+        /// 绘制热路径（OnPaint/OnMouseMove 触发的重绘）高频取字体，重复 new 会造成
+        /// GDI 句柄与 GC 压力、界面发卡，故集中缓存；调用方不得 Dispose 返回的字体。
+        /// </summary>
+        private static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
+
+        private static Font GetFont(float size, FontStyle style, GraphicsUnit unit)
+        {
+            string key = style.ToString() + "|" + size.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + "|" + unit.ToString();
+            Font f;
+            if (!fontCache.TryGetValue(key, out f))
+            {
+                f = new Font(FontName, size, style, unit);
+                fontCache[key] = f;
+            }
+            return f;
+        }
+
+        /// <summary>按磅值取 UI 字体（常规）；返回缓存实例，调用方不得 Dispose。</summary>
         public static Font FontOf(float size)
         {
-            return new Font(FontName, size, GraphicsUnit.Point);
+            return GetFont(size, FontStyle.Regular, GraphicsUnit.Point);
         }
 
-        /// <summary>按磅值创建 UI 字体（可指定字重/样式）。</summary>
+        /// <summary>按磅值取 UI 字体（可指定字重/样式）；返回缓存实例，调用方不得 Dispose。</summary>
         public static Font FontOf(float size, FontStyle style)
         {
-            return new Font(FontName, size, style, GraphicsUnit.Point);
+            return GetFont(size, style, GraphicsUnit.Point);
         }
 
-        /// <summary>按像素值创建 UI 字体（图标占位等按像素测量的场景）。</summary>
+        /// <summary>按像素值取 UI 字体（图标占位等按像素测量的场景）；返回缓存实例，调用方不得 Dispose。</summary>
         public static Font FontPx(float size, FontStyle style)
         {
-            return new Font(FontName, size, style, GraphicsUnit.Pixel);
+            return GetFont(size, style, GraphicsUnit.Pixel);
         }
 
         private static string ResolveFamily(string[] candidates)

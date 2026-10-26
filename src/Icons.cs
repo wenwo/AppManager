@@ -647,9 +647,10 @@ namespace AppManager
                     }
                     string ch = string.IsNullOrEmpty(app.Name) ? "?" : app.Name.Substring(0, 1);
                     try { ch = ch.ToUpperInvariant(); } catch { }
-                    using (Font f = Theme.FontPx(size * 0.45f, FontStyle.Bold))
+                    // 字体来自 Theme 缓存（应用生命周期复用），不得释放
+                    Font f = Theme.FontPx(size * 0.45f, FontStyle.Bold);
+                    using (StringFormat sf = new StringFormat())
                     {
-                        StringFormat sf = new StringFormat();
                         sf.Alignment = StringAlignment.Center;
                         sf.LineAlignment = StringAlignment.Center;
                         g.DrawString(ch, f, Brushes.White, new Rectangle(0, 0, size, size), sf);

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -52,7 +52,6 @@ namespace AppManager
             Case23_IconUrlFile();
             Case24_IconFolder();
             Case25_IconWebsite();
-            Case26_AddedUrlRoundtrip();
             Case27_QuickCenterDir();
             Case28_FuzzyMatch();
             Case29_CategoryViewModeRoundtrip();
@@ -71,6 +70,7 @@ namespace AppManager
             Case42_UniqueDestSuffix();
             Case43_MoveIntoFolderRules();
             Case44_DeletePath();
+            Case45_ResourceCategoryType();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -427,7 +427,7 @@ namespace AppManager
 
         private static void Case25_IconWebsite()
         {
-            Begin("25 网址条目取 Internet 快捷方式图标");
+            Begin("25 网址目标取 Internet 快捷方式图标");
             try
             {
                 AppInfo a = new AppInfo();
@@ -438,32 +438,6 @@ namespace AppManager
                     Assert(Icons.IsValid(b), "取得有效图标");
             }
             catch (Exception ex) { Assert(false, ex.Message); }
-        }
-
-        private static void Case26_AddedUrlRoundtrip()
-        {
-            Begin("26 网址条目 IsUrl 往返一致（快捷中心/全部网站）");
-            string bak = BackupConfig();
-            try
-            {
-                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
-                AppConfig c = new AppConfig();
-                AddedEntry e = new AddedEntry();
-                e.Path = "https://example.com";
-                e.Category = "快捷中心";
-                e.IsUrl = true;
-                c.AddedItems.Add(e);
-                c.Save();
-                AppConfig r = AppConfig.Load();
-                bool ok = r.AddedItems.Count == 1
-                    && r.AddedItems[0].IsUrl
-                    && r.AddedItems[0].Category == "快捷中心"
-                    && r.AddedItems[0].Path == "https://example.com";
-                Assert(ok, "条目数=" + r.AddedItems.Count
-                    + " url=" + (r.AddedItems.Count > 0 ? r.AddedItems[0].IsUrl.ToString() : "-"));
-            }
-            catch (Exception ex) { Assert(false, ex.Message); }
-            finally { RestoreConfig(bak); }
         }
 
         private static void Case27_QuickCenterDir()
@@ -525,16 +499,14 @@ namespace AppManager
                 if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
                 AppConfig c = new AppConfig();
                 AddedEntry e = new AddedEntry();
-                e.Path = "https://example.com";
+                e.Path = @"C:\apps\tool.exe";
                 e.Category = "快捷中心";
-                e.IsUrl = true;
-                e.Name = "我的示例网站";
+                e.Name = "我的示例工具";
                 c.AddedItems.Add(e);
                 c.Save();
                 AppConfig r = AppConfig.Load();
                 bool ok = r.AddedItems.Count == 1
-                    && r.AddedItems[0].Name == "我的示例网站"
-                    && r.AddedItems[0].IsUrl;
+                    && r.AddedItems[0].Name == "我的示例工具";
                 Assert(ok, "name=" + (r.AddedItems.Count > 0 ? r.AddedItems[0].Name : "-"));
             }
             catch (Exception ex) { Assert(false, ex.Message); }
@@ -859,6 +831,38 @@ namespace AppManager
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally { TryDeleteTree(dir); }
+        }
+
+        /// <summary>资源分类的类型约束：照片只收图片、视频只收视频，文件与自建分类不限类型。</summary>
+        private static void Case45_ResourceCategoryType()
+        {
+            Begin("45 资源分类类型约束：内置分类按类型收，文件/自建分类不限");
+            bool photoOk = MediaRules.MatchCategoryExt("照片", @"C:\a\MVIMG_0001.JPG")
+                && !MediaRules.MatchCategoryExt("照片", @"C:\a\movie.mp4")
+                && !MediaRules.MatchCategoryExt("照片", @"C:\a\doc.pdf");
+            bool videoOk = MediaRules.MatchCategoryExt("视频", @"C:\a\movie.mp4")
+                && !MediaRules.MatchCategoryExt("视频", @"C:\a\song.mp3");
+            bool musicOk = MediaRules.MatchCategoryExt("音乐", @"C:\a\song.flac")
+                && !MediaRules.MatchCategoryExt("音乐", @"C:\a\movie.mkv");
+            bool docOk = MediaRules.MatchCategoryExt("文档", @"C:\a\readme.pdf")
+                && !MediaRules.MatchCategoryExt("文档", @"C:\a\pack.zip");
+            bool zipOk = MediaRules.MatchCategoryExt("压缩包", @"C:\a\pack.zip")
+                && !MediaRules.MatchCategoryExt("压缩包", @"C:\a\a.png");
+            bool idOk = MediaRules.MatchCategoryExt("证件", @"C:\a\id.jpg")
+                && MediaRules.MatchCategoryExt("证件", @"C:\a\id.pdf")
+                && !MediaRules.MatchCategoryExt("证件", @"C:\a\a.mp4");
+            bool freeOk = MediaRules.MatchCategoryExt("文件", @"C:\a\a.txt")
+                && MediaRules.MatchCategoryExt("我的照片", @"C:\a\a.txt");
+            string photoFilter = MediaRules.ResourceCategoryFilter("照片");
+            bool filterOk = photoFilter.StartsWith("照片 (*.")
+                && photoFilter.Contains("*.jpg") && photoFilter.Contains("|*.jpg")
+                && MediaRules.ResourceCategoryFilter("文件") == "所有文件 (*.*)|*.*";
+            bool nameOk = MediaRules.ResourceCategoryTypeName("视频") == "视频"
+                && MediaRules.ResourceCategoryTypeName("文件") == "文件"
+                && MediaRules.ResourceCategoryTypeName("我的照片") == "文件";
+            Assert(photoOk && videoOk && musicOk && docOk && zipOk && idOk && freeOk && filterOk && nameOk,
+                "照片=" + photoOk + " 视频=" + videoOk + " 音乐=" + musicOk + " 文档=" + docOk
+                + " 压缩包=" + zipOk + " 证件=" + idOk + " 不限=" + freeOk + " 过滤=" + filterOk + " 名称=" + nameOk);
         }
 
         /// <summary>查找与给定根不同的、就绪的本地固定卷（供跨卷搬迁用例使用），无则返回 null。</summary>

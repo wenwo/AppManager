@@ -262,18 +262,16 @@ namespace AppManager.Controls
             if (headerRect.Width <= 0) return;
 
             // 页面标题
-            using (Font tf = Theme.FontOf(16F, FontStyle.Bold))
             using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "设置", tf, tb, headerRect);
+                Draw.DrawStringLeft(g, "设置", Theme.FontOf(16F, FontStyle.Bold), tb, headerRect);
 
             // 分组标题与卡片
-            using (Font lf = Theme.FontOf(9F))
             using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
             {
                 for (int i = 0; i < sections.Count; i++)
                 {
                     Section s = sections[i];
-                    Draw.DrawStringLeft(g, s.Title, lf, lb, s.LabelRect);
+                    Draw.DrawStringLeft(g, s.Title, Theme.FontOf(9F), lb, s.LabelRect);
                     Draw.DrawShadow(g, s.CardRect, CardRadius, 0.4f);
                     using (SolidBrush cb = new SolidBrush(Theme.Card))
                         Draw.FillRoundedRect(g, cb, s.CardRect, CardRadius);
@@ -285,8 +283,8 @@ namespace AppManager.Controls
 
         private void PaintRows(Graphics g)
         {
-            using (Font titleFont = Theme.FontOf(10F))
-            using (Font subFont = Theme.FontOf(8.5F))
+            Font titleFont = Theme.FontOf(10F);
+            Font subFont = Theme.FontOf(8.5F);
             using (SolidBrush textBrush = new SolidBrush(Theme.TextPrimary))
             using (SolidBrush subBrush = new SolidBrush(Theme.TextSecondary))
             {

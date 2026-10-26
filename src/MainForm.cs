@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -29,6 +29,7 @@ namespace AppManager
         private SidebarControl sidebar;
         private AppGridControl grid;
         private SearchField search;
+        private System.Windows.Forms.Timer searchDebounce;   // 搜索输入防抖计时器
         private ToggleSwitch viewToggle;
         private Label toggleLabel;
         private RoundButton organizeBtn;
@@ -220,6 +221,12 @@ namespace AppManager
         {
             StopAutoScan();
             Application.RemoveMessageFilter(this);
+            if (searchDebounce != null)
+            {
+                searchDebounce.Stop();
+                searchDebounce.Dispose();
+                searchDebounce = null;
+            }
             base.OnFormClosed(e);
             if (tray != null)
             {
@@ -389,7 +396,6 @@ namespace AppManager
             grid.LaunchRequested += OnLaunch;
             grid.MenuRequested += OnContextMenu;
             grid.RenameRequested += RenameAddedEntry;
-            grid.EditUrlRequested += EditUrlAddress;
             grid.DeleteRequested += DeleteAddedEntry;
             grid.CategoryTextProvider = GetCategoryText;
             grid.ReorderRequested += OnGridReorder;
@@ -406,7 +412,27 @@ namespace AppManager
             Controls.Add(imageViewer);
 
             search = new SearchField();
-            search.TextChanged += delegate { RefreshGrid(); };
+            // 输入防抖：连续按键期间不反复全量刷新（RefreshGrid 遍历全集较重），停顿 250ms 后刷新一次；
+            // 清空搜索时立即刷新，保证 Esc/删空即时恢复全量列表
+            searchDebounce = new System.Windows.Forms.Timer { Interval = 250 };
+            searchDebounce.Tick += delegate
+            {
+                searchDebounce.Stop();
+                RefreshGrid();
+            };
+            search.TextChanged += delegate
+            {
+                if (string.IsNullOrEmpty(search.Text))
+                {
+                    searchDebounce.Stop();
+                    RefreshGrid();
+                }
+                else
+                {
+                    searchDebounce.Stop();
+                    searchDebounce.Start();
+                }
+            };
             Controls.Add(search);
 
             countLabel = new Label();
@@ -585,8 +611,7 @@ namespace AppManager
             // 计数标签：夹在搜索框与「网格/列表」切换簇之间，宽度按剩余空间收敛。
             // 双行后行2空间充裕，最小窗口宽度下搜索框与右侧簇也不再重叠。
             int countLeft = search.Right + 12;
-            // 网站模式隐藏网格/列表开关后，计数标签右侧延伸到操作按钮簇，不留空白
-            int countRight = (viewToggle.Visible ? viewToggle.Left : clusterLeft) - 12;
+            int countRight = viewToggle.Left - 12;
             countLabel.Location = new Point(countLeft, row1);
             countLabel.Size = new Size(Math.Max(0, countRight - countLeft), row2);
 
@@ -830,8 +855,7 @@ namespace AppManager
             // 每分类独立视图模式：切换分类时恢复该分类上次选择的网格/列表
             bool gm = GetCategoryGridMode(key);
             viewToggle.Checked = gm;   // 触发 CheckedChanged 自动落盘与应用
-            // 资源模式强制列表：切换分类不得把资源条目切回网格（与 OnModeChanged 保持一致）
-            grid.GridMode = contentMode == SidebarControl.ContentMode.Website ? false : gm;
+            grid.GridMode = gm;
             addBtn.Visible = CanEditCategory(key);
             LayoutControls();
             RefreshGrid();
@@ -839,15 +863,13 @@ namespace AppManager
 
         /// <summary>
         /// 内容模式切换（软件/资源）：重建侧栏分类并恢复各自上次选中的分类。
-        /// 资源模式强制列表视图，隐藏网格/列表开关。
+        /// 资源模式同样提供网格/列表开关，偏好按分类独立记忆。
         /// </summary>
         private void OnModeChanged(SidebarControl.ContentMode m)
         {
             contentMode = m;
             bool website = m == SidebarControl.ContentMode.Website;
             grid.ShowRowActions = website;
-            viewToggle.Visible = !website;
-            toggleLabel.Visible = !website;
             RebuildSidebar();
             if (website)
             {
@@ -862,12 +884,15 @@ namespace AppManager
             OnSidebarSelect(exists ? lastSoftwareCategory : "常用");
         }
 
-        /// <summary>取指定分类的网格/列表偏好，缺失时用全局 ViewGrid 兜底。</summary>
+        /// <summary>
+        /// 取指定分类的网格/列表偏好。已记录的按记忆值；
+        /// 未记录时软件分类用全局 ViewGrid 兜底，资源分类默认列表（保持资源模式原有外观）。
+        /// </summary>
         private bool GetCategoryGridMode(string cat)
         {
             bool v;
             if (config.CategoryViewMode.TryGetValue(cat, out v)) return v;
-            return config.ViewGrid;
+            return config.ViewGrid && contentMode != SidebarControl.ContentMode.Website;
         }
 
         /// <summary>设置指定分类的网格/列表偏好。</summary>
@@ -1103,17 +1128,16 @@ namespace AppManager
                 {
                     if (!ShouldShow(a)) continue;
                     if (!MatchesContentMode(a)) continue;
-                    // 多字段匹配：名称 / 分类 / 网址，任一命中即显示（归一化，故「vscode」可命中「VS Code」）
+                    // 多字段匹配：名称 / 分类，任一命中即显示（归一化，故「vscode」可命中「VS Code」）
                     if (Scanner.FuzzyMatch(a.Name, kw)
-                        || Scanner.FuzzyMatch(a.Category, kw)
-                        || (Scanner.IsUrl(a.TargetPath) && Scanner.FuzzyMatch(a.TargetPath, kw)))
+                        || Scanner.FuzzyMatch(a.Category, kw))
                         shown.Add(a);
                 }
                 categoryTotal = CountVisible();
             }
             else if (contentMode == SidebarControl.ContentMode.Website)
             {
-                // 资源模式：「全部资源」展示全部资源条目（网址 + 资源分类下的本地文件），其余分类按归属过滤
+                // 资源模式：「全部资源」展示全部资源条目（资源分类下的本地文件/文件夹），其余分类按归属过滤
                 foreach (AppInfo a in allApps)
                 {
                     if (!ShouldShow(a)) continue;
@@ -1128,7 +1152,6 @@ namespace AppManager
                 foreach (AppInfo a in allApps)
                 {
                     if (!ShouldShow(a)) continue;
-                    if (Scanner.IsUrl(a.TargetPath)) continue;   // 软件模式不显示网址
                     if (InCategory(a, currentCategory)) cat.Add(a);
                 }
                 categoryTotal = cat.Count;
@@ -1338,10 +1361,10 @@ namespace AppManager
             StartIconLoad();
         }
 
-        /// <summary>文档/目录条目追加「删除」项：仅限自建收录的非网址条目（软件/网址不适用）。</summary>
+        /// <summary>文档/目录条目追加「删除」项：仅限自建收录的条目（软件不适用）。</summary>
         private void AddDeleteMenu(List<MenuWindow.MenuItem> items, AppInfo app)
         {
-            if (!app.IsFile || Scanner.IsUrl(app.TargetPath)) return;
+            if (!app.IsFile) return;
             if (FindAddedEntry(app.TargetPath, currentCategory) < 0 && !IsAddedAnywhere(app.TargetPath)) return;
             items.Add(MkMenu("删除", delegate { DeleteEntryDisk(app); }));
         }
@@ -1381,12 +1404,11 @@ namespace AppManager
             StartIconLoad();
         }
 
-        /// <summary>当前内容模式下条目是否应展示：资源模式=资源条目（网址或资源分类下的本地文件），软件模式=其余条目。</summary>
+        /// <summary>当前内容模式下条目是否应展示：资源模式=资源条目（资源分类下的本地文件/文件夹），软件模式=其余条目。</summary>
         private bool MatchesContentMode(AppInfo a)
         {
-            bool isUrl = Scanner.IsUrl(a.TargetPath);
             bool resource = IsResourceEntry(a);
-            return contentMode == SidebarControl.ContentMode.Website ? resource : (!isUrl && !resource);
+            return contentMode == SidebarControl.ContentMode.Website ? resource : !resource;
         }
 
         /// <summary>可见性判定：隐藏项开关 + 显示全部已安装开关。</summary>
@@ -1416,7 +1438,7 @@ namespace AppManager
         {
             // 只读全集分类：全部软件=软件（不含文件/文件夹），全部文件=软件存储中的文件/文件夹，全部资源=资源条目
             if (category == "全部软件") return !a.IsFile;
-            if (category == "全部文件") return a.IsFile && !Scanner.IsUrl(a.TargetPath) && !IsResourceEntry(a);
+            if (category == "全部文件") return a.IsFile && !IsResourceEntry(a);
             if (category == "全部资源") return IsResourceEntry(a);
             if (category == "常用") return a.IsFavorite;
 
@@ -1456,11 +1478,10 @@ namespace AppManager
             return config.ItemCategories.TryGetValue(a.Key, out cats) && cats.Contains(category);
         }
 
-        /// <summary>资源条目判定：网址，或按资源模式收纳登记过的本地文件/文件夹。</summary>
+        /// <summary>资源条目判定：按资源模式收纳登记过的本地文件/文件夹。</summary>
         private bool IsResourceEntry(AppInfo a)
         {
             if (a == null) return false;
-            if (Scanner.IsUrl(a.TargetPath)) return true;
             if (!a.IsFile) return false;
             // 资源文件一律来自带 IsResource 标记的 AddedItems 记录（改名/移动分类只改归属，不改变该记录）
             return IsAddedAsResource(a);
@@ -1523,7 +1544,8 @@ namespace AppManager
             if (!string.IsNullOrEmpty(a.Key) && config.ItemCategories.TryGetValue(a.Key, out extra))
             {
                 for (int i = 0; i < extra.Count; i++)
-                    if (!cats.Contains(extra[i])) cats.Add(extra[i]);
+                    if (!cats.Contains(extra[i]))
+                        cats.Add(extra[i]);
             }
             // 自定义分类通过 override 已体现在 a.Category
             return string.Join(", ", cats.ToArray());
@@ -1627,9 +1649,7 @@ namespace AppManager
                 if (config.CategoryOverride[k] == category) config.CategoryOverride.Remove(k);
             foreach (AddedEntry e in config.AddedItems)
                 if (e.Category == category)
-                    e.Category = resource
-                        ? (Scanner.IsUrl(e.Path) ? "书签" : "文件")
-                        : CategoryRules.Classify(Path.GetFileName(e.Path));
+                    e.Category = resource ? "文件" : CategoryRules.Classify(Path.GetFileName(e.Path));
             // 清理指向已删分类的额外归属记录
             foreach (List<string> extra in config.ItemCategories.Values)
                 extra.Remove(category);
@@ -1652,7 +1672,7 @@ namespace AppManager
         private void OnLaunch(AppInfo app)
         {
             // 本地图片：应用内查看器直接浏览大图，不再调起系统图片查看器
-            if (app != null && !app.IsFolder && !Scanner.IsUrl(app.TargetPath)
+            if (app != null && !app.IsFolder
                 && MediaRules.IsImage(app.TargetPath) && File.Exists(app.TargetPath))
             {
                 ShowImageViewer(app);
@@ -1667,7 +1687,7 @@ namespace AppManager
             List<string> imgs = new List<string>();
             foreach (AppInfo a in shownApps)
             {
-                if (a.IsFolder || Scanner.IsUrl(a.TargetPath)) continue;
+                if (a.IsFolder) continue;
                 if (MediaRules.IsImage(a.TargetPath) && File.Exists(a.TargetPath))
                     imgs.Add(a.TargetPath);
             }
@@ -1712,15 +1732,13 @@ namespace AppManager
             {
                 if (app.IsFile)
                 {
-                    // 文件/文件夹/网址条目：打开自身 + 定位（网址同样可被资源管理器定位）
-                    items.Add(MkMenu(app.IsFolder ? "打开文件夹" : (Scanner.IsUrl(app.TargetPath) ? "打开网址" : "打开文件"), delegate { Launcher.Launch(app); }));
+                    // 文件/文件夹条目：打开自身 + 定位
+                    items.Add(MkMenu(app.IsFolder ? "打开文件夹" : "打开文件", delegate { Launcher.Launch(app); }));
                     items.Add(MkMenu("打开所在位置", delegate { Launcher.OpenFileLocation(app); }));
-                    // 用户添加的条目可改名；网址还可改地址
+                    // 用户添加的条目可改名
                     if (FindAddedEntry(app.TargetPath, currentCategory) >= 0 || IsAddedAnywhere(app.TargetPath))
                     {
                         items.Add(MkMenu("改名…", delegate { RenameAddedEntry(app); }));
-                        if (Scanner.IsUrl(app.TargetPath))
-                            items.Add(MkMenu("改地址…", delegate { EditUrlAddress(app); }));
                     }
                     AddDeleteMenu(items, app);   // 文档/目录条目可直接删除（进回收站）
                 }
@@ -1871,7 +1889,12 @@ namespace AppManager
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             for (int i = 0; i < CategoryRules.ResourceBuiltIn.Length; i++)
-                items.Add(MkMenu(CategoryRules.ResourceBuiltIn[i], MakeSetCat(app, CategoryRules.ResourceBuiltIn[i])));
+            {
+                string c = CategoryRules.ResourceBuiltIn[i];
+                MenuWindow.MenuItem m = MkMenu(c, MakeSetCat(app, c));
+                m.Disabled = !CanJoinResourceCategory(app, c);   // 类型不符的分类置灰
+                items.Add(m);
+            }
             if (config.ResourceCategories.Count > 0) items.Add(MkSep());
             for (int i = 0; i < config.ResourceCategories.Count; i++)
             {
@@ -1959,8 +1982,17 @@ namespace AppManager
         private MenuWindow.MenuItem MkAddCatMenu(AppInfo app, string category)
         {
             MenuWindow.MenuItem m = MkMenu(category, delegate { AddItemToCategory(app, category); });
-            m.Disabled = InCategory(app, category);
+            m.Disabled = InCategory(app, category) || !CanJoinResourceCategory(app, category);
             return m;
+        }
+
+        /// <summary>
+        /// 资源条目能否归入该内置分类：本地文件按分类类型约束（照片只收图片……）。
+        /// </summary>
+        private bool CanJoinResourceCategory(AppInfo app, string category)
+        {
+            if (app == null) return false;
+            return MediaRules.MatchCategoryExt(category, app.TargetPath);
         }
 
         /// <summary>构造置灰（不可点）菜单项，用作空态提示。</summary>
@@ -2007,24 +2039,24 @@ namespace AppManager
 
         // ===== 添加 / 移除条目 =====
 
-        /// <summary>点击「+ 添加」：软件模式弹出"添加软件/文件/文件夹/网址"菜单；资源模式支持文件/文件夹/网址。</summary>
+        /// <summary>
+        /// 点击「+ 添加」：软件模式弹出"添加软件/文件/文件夹"菜单；
+        /// 资源模式按当前分类自适应——照片/视频/音乐等分类分别添加对应类型。
+        /// </summary>
         private void OnAdd(object sender, EventArgs e)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             if (contentMode == SidebarControl.ContentMode.Website)
             {
-                items.Add(MkMenu("添加文件…", delegate { PickFiles(); }));
+                string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
+                items.Add(MkMenu("添加" + typeName + "…", delegate { PickFiles(); }));
                 items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
-                items.Add(MkSep());
-                items.Add(MkMenu("添加网址…", delegate { AddWebsite(); }));
             }
             else
             {
                 items.Add(MkMenu("添加软件…", delegate { PickSoftware(); }));
                 items.Add(MkMenu("添加文件…", delegate { PickFiles(); }));
                 items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
-                items.Add(MkSep());
-                items.Add(MkMenu("添加网址…", delegate { AddWebsite(); }));
             }
             MenuWindow mw = new MenuWindow(items, 180);
             mw.Location = FixLocation(addBtn.PointToScreen(new Point(0, addBtn.Height)), mw.Size);
@@ -2083,13 +2115,12 @@ namespace AppManager
             list.CheckOnClick = true;
             list.Location = new Point(20, 74);
             list.Size = new Size(440, 420);
-            // 列出所有可启动的非网址条目，排除已添加的
+            // 列出所有可启动的条目，排除已添加的
             HashSet<string> added = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (AddedEntry ae in config.AddedItems) added.Add(ae.Path);
             List<AppInfo> candidates = new List<AppInfo>();
             foreach (AppInfo a in allApps)
             {
-                if (Scanner.IsUrl(a.TargetPath)) continue;
                 if (string.IsNullOrEmpty(a.TargetPath) && string.IsNullOrEmpty(a.ShortcutPath)) continue;
                 if (added.Contains(a.TargetPath)) continue;
                 candidates.Add(a);
@@ -2139,15 +2170,25 @@ namespace AppManager
             return true;   // 无论是否选中，已提供列表选择，不再回退文件浏览器
         }
 
-        /// <summary>多选文件加入当前分类。</summary>
+        /// <summary>多选文件加入当前分类：资源模式下按分类限定文件类型（对话框过滤 + 入库前二次校验）。</summary>
         private void PickFiles()
         {
+            bool resource = contentMode == SidebarControl.ContentMode.Website;
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
-                dlg.Title = "添加文件到「" + currentCategory + "」";
+                if (resource)
+                {
+                    dlg.Title = "添加" + MediaRules.ResourceCategoryTypeName(currentCategory) + "到「" + currentCategory + "」";
+                    dlg.Filter = MediaRules.ResourceCategoryFilter(currentCategory);
+                }
+                else
+                {
+                    dlg.Title = "添加文件到「" + currentCategory + "」";
+                    dlg.Filter = "所有文件 (*.*)|*.*";
+                }
                 dlg.Multiselect = true;
-                dlg.Filter = "所有文件 (*.*)|*.*";
-                if (dlg.ShowDialog(this) == DialogResult.OK) AddPaths(dlg.FileNames, currentCategory);
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                    AddPaths(dlg.FileNames, currentCategory);
             }
         }
 
@@ -2163,39 +2204,6 @@ namespace AppManager
             }
         }
 
-        /// <summary>资源模式：输入网址后以资源条目登记，归入当前资源分类（「全部资源」下默认「书签」）。</summary>
-        private void AddWebsite()
-        {
-            string url = InputDialog.Show("添加资源", "请输入网址（http/https）：");
-            if (url == null) return;
-            url = url.Trim();
-            if (url.Length == 0) return;
-            if (url.IndexOf("://", StringComparison.Ordinal) < 0) url = "https://" + url;
-            if (!Scanner.IsUrl(url))
-            {
-                MessageBox.Show("网址格式不正确，请输入以 http:// 或 https:// 开头的地址。", "添加资源",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            // 「全部资源」下添加无明确归属，默认归入「书签」；其余按当前资源分类归入
-            AddUrl(url, currentCategory == "全部资源" ? "书签" : currentCategory);
-        }
-
-        /// <summary>把网址写入 AddedItems（按 网址+分类 去重），随后重扫并刷新。</summary>
-        private void AddUrl(string url, string category)
-        {
-            if (FindAddedEntry(url, category) >= 0) return;
-            AddedEntry e = new AddedEntry();
-            e.Path = url;
-            e.Category = category;
-            e.IsUrl = true;
-            config.AddedItems.Add(e);
-            config.Save();
-            SwapApps(scanner.ScanAll());
-            RefreshGrid();
-            StartIconLoad();
-        }
-
         /// <summary>
         /// 把路径批量写入 AddedItems（按 路径+分类 去重），并按当前模式搬运入库：
         /// 软件模式进入软件存储位置；资源模式进入资源存储位置（按分类建子目录），原文件移动后即不保留。
@@ -2205,7 +2213,33 @@ namespace AppManager
         {
             if (paths == null || paths.Length == 0) return;
             if (!CanEditCategory(category)) return;   // 只读分类不接受收录
-            MoveToCategoryAsync(paths, category, contentMode == SidebarControl.ContentMode.Website);
+            bool resource = contentMode == SidebarControl.ContentMode.Website;
+            if (resource)
+            {
+                // 资源内置分类按类型过滤：选文件对话框已限定类型，此处兜底拦截拖拽等其它入口
+                List<string> ok = new List<string>();
+                int skipped = 0;
+                for (int i = 0; i < paths.Length; i++)
+                {
+                    string p = paths[i];
+                    if (Directory.Exists(p) || MediaRules.MatchCategoryExt(category, p)) ok.Add(p);
+                    else skipped++;
+                }
+                if (skipped > 0 && ok.Count == 0)
+                {
+                    MessageBox.Show("所选文件与「" + category + "」的类型不符，未添加。", "添加资源",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                if (skipped > 0)
+                {
+                    MessageBox.Show("有 " + skipped + " 个文件与「" + category + "」的类型不符，已跳过。", "添加资源",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                if (ok.Count == 0) return;
+                paths = ok.ToArray();
+            }
+            MoveToCategoryAsync(paths, category, resource);
         }
 
         /// <summary>
@@ -2509,35 +2543,6 @@ namespace AppManager
             }
             if (!changed) return;
             app.Name = newName;
-            config.Save();
-            SwapApps(scanner.ScanAll());
-            RefreshGrid();
-            StartIconLoad();
-        }
-
-        /// <summary>改地址：修改网址条目的 URL。</summary>
-        private void EditUrlAddress(AppInfo app)
-        {
-            if (app == null) return;
-            string newUrl = InputDialog.Show("改地址", "请输入新网址：", app.TargetPath);
-            if (newUrl == null) return;
-            newUrl = newUrl.Trim();
-            if (newUrl.Length == 0) return;
-            if (newUrl.IndexOf("://", StringComparison.Ordinal) < 0) newUrl = "https://" + newUrl;
-            if (!Scanner.IsUrl(newUrl))
-            {
-                MessageBox.Show("网址格式不正确。", "改地址", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            for (int i = 0; i < config.AddedItems.Count; i++)
-            {
-                AddedEntry e = config.AddedItems[i];
-                if (string.Equals(e.Path, app.TargetPath, StringComparison.OrdinalIgnoreCase)
-                    && Scanner.IsUrl(e.Path))
-                {
-                    e.Path = newUrl;
-                }
-            }
             config.Save();
             SwapApps(scanner.ScanAll());
             RefreshGrid();
@@ -2898,9 +2903,8 @@ namespace AppManager
             search.Visible = show;
             countLabel.Visible = show;
             organizeBtn.Visible = show;
-            bool website = contentMode == SidebarControl.ContentMode.Website;
-            viewToggle.Visible = show && !website;
-            toggleLabel.Visible = show && !website;
+            viewToggle.Visible = show;
+            toggleLabel.Visible = show;
             addBtn.Visible = show && CanEditCategory(currentCategory);   // 「全部资源」等只读分类不显示
         }
 
@@ -3077,9 +3081,8 @@ namespace AppManager
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // 标题：顶栏行1（标题行）
-            using (Font f = Theme.FontOf(12F, FontStyle.Bold))
             using (SolidBrush br = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "应用中心", f, br, new Rectangle(Theme.SidebarWidth + 16, 0, 128, Theme.TitleRowHeight));
+                Draw.DrawStringLeft(g, "应用中心", Theme.FontOf(12F, FontStyle.Bold), br, new Rectangle(Theme.SidebarWidth + 16, 0, 128, Theme.TitleRowHeight));
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -3148,7 +3151,7 @@ namespace AppManager
                 search.Focus();
                 return true;
             }
-            // Esc：设置页优先返回主内容区；否则清空搜索（有内容时），符合「一处撤销」的直觉
+            // Esc：设置页优先返回主内容区；再清空搜索（有内容时）；集合详情内返回集合列表，符合「一处撤销」的直觉
             if (keyData == Keys.Escape && settingsOpen)
             {
                 CloseSettings();

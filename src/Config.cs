@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Xml;
@@ -67,7 +67,7 @@ namespace AppManager
     }
 
     /// <summary>
-    /// 用户手动添加的条目：记录路径（或网址）、归属分类、是否为文件夹/网址，
+    /// 用户手动添加的条目：记录路径、归属分类、是否为文件夹，
     /// 以及可选的显示名（改名）。用于分类/自定义/快捷中心下增删。
     /// </summary>
     public class AddedEntry
@@ -75,9 +75,8 @@ namespace AppManager
         public string Path = string.Empty;
         public string Category = string.Empty;
         public bool IsFolder;
-        public bool IsUrl;      // 网址条目（Path 存 URL，不做磁盘校验）
         public bool IsResource; // 资源模式收纳的本地文件/文件夹（仅在资源模式展示）
-        public string Name = string.Empty;   // 用户改过的显示名，空则按路径/主机名推导
+        public string Name = string.Empty;   // 用户改过的显示名，空则按路径推导
     }
 
     /// <summary>
@@ -97,7 +96,7 @@ namespace AppManager
         public List<string> Favorites = new List<string>();
         public List<string> Hidden = new List<string>();
         public List<string> CustomCategories = new List<string>();
-        // 资源模式自定义分类（照片/视频/音乐/书签之外用户自建）
+        // 资源模式自定义分类（照片/视频/音乐等内置分类之外用户自建）
         public List<string> ResourceCategories = new List<string>();
         public Dictionary<string, string> CategoryOverride = new Dictionary<string, string>();
         public List<AddedEntry> AddedItems = new List<AddedEntry>();
@@ -196,7 +195,6 @@ namespace AppManager
                     e.Path = XmlAttr(n, "path");
                     e.Category = XmlAttr(n, "category");
                     e.IsFolder = XmlAttributeBool(n, "folder", false);
-                    e.IsUrl = XmlAttributeBool(n, "url", false);
                     e.IsResource = XmlAttributeBool(n, "resource", false);
                     e.Name = XmlAttr(n, "name");
                     if (!string.IsNullOrEmpty(e.Path)) cfg.AddedItems.Add(e);
@@ -304,7 +302,6 @@ namespace AppManager
                         w.WriteAttributeString("path", e.Path ?? string.Empty);
                         w.WriteAttributeString("category", e.Category ?? string.Empty);
                         w.WriteAttributeString("folder", e.IsFolder ? "true" : "false");
-                        w.WriteAttributeString("url", e.IsUrl ? "true" : "false");
                         w.WriteAttributeString("resource", e.IsResource ? "true" : "false");
                         w.WriteAttributeString("name", e.Name ?? string.Empty);
                         w.WriteEndElement();
@@ -510,15 +507,15 @@ namespace AppManager
                 if (ids.Count > 0) cfg.ItemOrder[cat] = ids;
             }
 
-            // 旧版自定义条目（软件/文件/文件夹/网址）→ 新版「已添加条目」
+            // 旧版自定义条目（软件/文件/文件夹）→ 新版「已添加条目」；网址类条目属废弃设计，不再迁移
             foreach (XmlNode e in root.SelectNodes("custom/entry"))
             {
+                string kind = XmlAttr(e, "kind");
+                if (string.Equals(kind, "url", StringComparison.OrdinalIgnoreCase)) continue;
                 AddedEntry item = new AddedEntry();
                 item.Name = XmlAttr(e, "name");
                 item.Path = XmlAttr(e, "target");
-                string kind = XmlAttr(e, "kind");
                 item.IsFolder = string.Equals(kind, "folder", StringComparison.OrdinalIgnoreCase);
-                item.IsUrl = string.Equals(kind, "url", StringComparison.OrdinalIgnoreCase);
                 item.Category = XmlAttr(e, "category");
                 if (item.Path.Length == 0) continue;
                 if (item.Name.Length == 0) item.Name = Path.GetFileNameWithoutExtension(item.Path);
@@ -539,19 +536,7 @@ namespace AppManager
                 cfg.DesktopBackup.Add(en);
             }
 
-            // 旧版网站条目 → 新版网址条目（全部网站分类）
-            foreach (XmlNode e in root.SelectNodes("websites/entry"))
-            {
-                string url = XmlAttr(e, "url");
-                if (url.Length == 0) continue;
-                AddedEntry item = new AddedEntry();
-                item.Path = url;
-                item.IsUrl = true;
-                item.Category = "全部网站";
-                item.Name = XmlAttr(e, "name");
-                if (item.Name.Length == 0) item.Name = DisplayHost(url);
-                cfg.AddedItems.Add(item);
-            }
+            // 旧版网站条目属废弃设计，不再迁移
         }
 
         /// <summary>首次导入旧版配置时，把原文件另存一份 config.legacy.xml 供回查。</summary>
@@ -563,19 +548,6 @@ namespace AppManager
                 if (!File.Exists(bak) && File.Exists(filePath)) File.Copy(filePath, bak, false);
             }
             catch { }
-        }
-
-        /// <summary>网址域名（去掉 www.），用于缺省显示名。</summary>
-        private static string DisplayHost(string url)
-        {
-            try
-            {
-                Uri uri = new Uri(url);
-                string host = uri.Host;
-                if (host.StartsWith("www.", StringComparison.OrdinalIgnoreCase)) host = host.Substring(4);
-                return host.Length > 0 ? host : url;
-            }
-            catch { return url ?? string.Empty; }
         }
 
         // ===== 私有辅助 =====
