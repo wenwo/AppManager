@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Xml;
@@ -67,6 +67,134 @@ namespace AppManager
     }
 
     /// <summary>
+    /// 资源分类下的「集合」（相簿式分组）：仅存名称/说明/封面元数据。
+    /// 成员关系复用 ItemCategories 多归属机制（键为 col:父分类/集合名），
+    /// 不搬动实体文件；删除集合只解除归属，文件保留在父分类。
+    /// </summary>
+    public class ResourceCollection
+    {
+        public string Name = string.Empty;          // 集合名（同一父分类内唯一）
+        public string Parent = string.Empty;       // 所属资源分类（照片/视频/…/自建资源分类）
+        public string Description = string.Empty;  // 说明（集合详情栏展示）
+        public string Cover = string.Empty;        // 自定义封面图片路径；空 = 自动取首个成员缩略图
+    }
+
+    /// <summary>集合键规则：col: 前缀避免与真实分类名冲突，形如 col:照片/旅行。</summary>
+    internal static class CollectionKeys
+    {
+        public const string Prefix = "col:";
+
+        /// <summary>构造集合键（col:父分类/集合名）。</summary>
+        public static string Make(string parent, string name)
+        {
+            return Prefix + parent + "/" + name;
+        }
+
+        /// <summary>是否为集合键（用于列表「所属」列等处过滤内部标识）。</summary>
+        public static bool IsCollectionKey(string key)
+        {
+            return key != null && key.StartsWith(Prefix, StringComparison.Ordinal);
+        }
+    }
+
+    /// <summary>集合的纯配置操作：查找/成员增删/重命名与删除时的归属键迁移，供 MainForm 与自测共用。</summary>
+    internal static class CollectionOps
+    {
+        /// <summary>按父分类与名称查找集合定义；未找到返回 null。</summary>
+        public static ResourceCollection Find(AppConfig cfg, string parent, string name)
+        {
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c.Parent == parent && c.Name == name) return c;
+            }
+            return null;
+        }
+
+        /// <summary>同父分类下集合名是否已存在。</summary>
+        public static bool NameExists(AppConfig cfg, string parent, string name)
+        {
+            return Find(cfg, parent, name) != null;
+        }
+
+        /// <summary>把条目键加入集合（多归属，不搬文件）；已存在不重复添加。返回是否产生变化（供调用方决定是否落盘/刷新）。</summary>
+        public static bool AddMember(AppConfig cfg, string itemKey, string collectionKey)
+        {
+            if (string.IsNullOrEmpty(itemKey) || string.IsNullOrEmpty(collectionKey)) return false;
+            List<string> cats;
+            if (!cfg.ItemCategories.TryGetValue(itemKey, out cats))
+            {
+                cats = new List<string>();
+                cfg.ItemCategories[itemKey] = cats;
+            }
+            if (cats.Contains(collectionKey)) return false;
+            cats.Add(collectionKey);
+            return true;
+        }
+
+        /// <summary>把条目键移出集合；无变化返回 false。</summary>
+        public static bool RemoveMember(AppConfig cfg, string itemKey, string collectionKey)
+        {
+            if (string.IsNullOrEmpty(itemKey)) return false;
+            List<string> cats;
+            if (!cfg.ItemCategories.TryGetValue(itemKey, out cats) || !cats.Remove(collectionKey)) return false;
+            if (cats.Count == 0) cfg.ItemCategories.Remove(itemKey);
+            return true;
+        }
+
+        /// <summary>集合重命名：把全部条目归属中的旧集合键替换为新键。</summary>
+        public static void RenameMemberKey(AppConfig cfg, string oldKey, string newKey)
+        {
+            foreach (KeyValuePair<string, List<string>> kv in cfg.ItemCategories)
+            {
+                int idx = kv.Value.IndexOf(oldKey);
+                if (idx >= 0) kv.Value[idx] = newKey;
+            }
+        }
+
+        /// <summary>删除集合：清除全部条目归属中的该集合键（条目本身不受影响）。</summary>
+        public static void RemoveCollectionKey(AppConfig cfg, string collectionKey)
+        {
+            List<string> keysToRemove = new List<string>();
+            foreach (KeyValuePair<string, List<string>> kv in cfg.ItemCategories)
+            {
+                kv.Value.Remove(collectionKey);
+                if (kv.Value.Count == 0) keysToRemove.Add(kv.Key);
+            }
+            for (int i = 0; i < keysToRemove.Count; i++) cfg.ItemCategories.Remove(keysToRemove[i]);
+        }
+
+        /// <summary>
+        /// 资源分类改名：该分类下全部集合的父分类与成员归属键同步迁移，
+        /// 集合定义本身保留（否则改名后集合既进不去、成员计数也归零）。
+        /// </summary>
+        public static void RenameParent(AppConfig cfg, string oldParent, string newParent)
+        {
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c.Parent != oldParent) continue;
+                string oldKey = CollectionKeys.Make(oldParent, c.Name);
+                string newKey = CollectionKeys.Make(newParent, c.Name);
+                c.Parent = newParent;
+                RenameMemberKey(cfg, oldKey, newKey);
+            }
+        }
+
+        /// <summary>资源分类删除：移除其下全部集合定义，并清理条目归属中的成员键。</summary>
+        public static void RemoveByParent(AppConfig cfg, string parent)
+        {
+            for (int i = cfg.Collections.Count - 1; i >= 0; i--)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c.Parent != parent) continue;
+                RemoveCollectionKey(cfg, CollectionKeys.Make(parent, c.Name));
+                cfg.Collections.RemoveAt(i);
+            }
+        }
+    }
+
+    /// <summary>
     /// 用户手动添加的条目：记录路径、归属分类、是否为文件夹，
     /// 以及可选的显示名（改名）。用于分类/自定义/快捷中心下增删。
     /// </summary>
@@ -98,6 +226,8 @@ namespace AppManager
         public List<string> CustomCategories = new List<string>();
         // 资源模式自定义分类（照片/视频/音乐等内置分类之外用户自建）
         public List<string> ResourceCategories = new List<string>();
+        // 资源分类下的「集合」定义（成员关系在 ItemCategories，键前缀 col:）
+        public List<ResourceCollection> Collections = new List<ResourceCollection>();
         public Dictionary<string, string> CategoryOverride = new Dictionary<string, string>();
         public List<AddedEntry> AddedItems = new List<AddedEntry>();
         public List<DesktopBackupEntry> DesktopBackup = new List<DesktopBackupEntry>();
@@ -173,6 +303,15 @@ namespace AppManager
                     AddUnique(cfg.CustomCategories, n.InnerText);
                 foreach (XmlNode n in root.SelectNodes("ResourceCategories/Item"))
                     AddUnique(cfg.ResourceCategories, n.InnerText);
+                foreach (XmlNode n in root.SelectNodes("Collections/Item"))
+                {
+                    ResourceCollection c = new ResourceCollection();
+                    c.Name = XmlAttr(n, "name");
+                    c.Parent = XmlAttr(n, "parent");
+                    c.Description = XmlAttr(n, "desc");
+                    c.Cover = XmlAttr(n, "cover");
+                    if (c.Name.Length > 0 && c.Parent.Length > 0) cfg.Collections.Add(c);
+                }
                 foreach (XmlNode n in root.SelectNodes("CategoryOverrides/Item"))
                 {
                     string k = XmlAttr(n, "key");
@@ -277,6 +416,17 @@ namespace AppManager
                     WriteList(w, "Hidden", Hidden);
                     WriteList(w, "CustomCategories", CustomCategories);
                     WriteList(w, "ResourceCategories", ResourceCategories);
+                    w.WriteStartElement("Collections");
+                    foreach (ResourceCollection c in Collections)
+                    {
+                        w.WriteStartElement("Item");
+                        w.WriteAttributeString("name", c.Name ?? string.Empty);
+                        w.WriteAttributeString("parent", c.Parent ?? string.Empty);
+                        w.WriteAttributeString("desc", c.Description ?? string.Empty);
+                        w.WriteAttributeString("cover", c.Cover ?? string.Empty);
+                        w.WriteEndElement();
+                    }
+                    w.WriteEndElement();
                     w.WriteStartElement("CategoryOverrides");
                     foreach (KeyValuePair<string, string> kv in CategoryOverride)
                     {

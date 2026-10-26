@@ -300,6 +300,48 @@ namespace AppManager
             catch { return null; }   // 损坏文件/非图片内容：回退到常规图标流程
         }
 
+        /// <summary>
+        /// 封面缩略图：等比裁剪填满目标尺寸（cover 语义，无留白），带模块级缓存。
+        /// 供集合封面（侧边栏缩略图/信息页大图）使用：只解码一次并缓存小图，避免每次重绘都全量解码原图。
+        /// 非图片或解码失败返回 null，由调用方走占位绘制。
+        /// </summary>
+        public static Bitmap LoadCoverThumb(string path, int width, int height)
+        {
+            if (string.IsNullOrEmpty(path) || width <= 0 || height <= 0) return null;
+            StringBuilder stamp = new StringBuilder(64);
+            AppendFileStamp(stamp, path);
+            string key = "C" + width + "x" + height + "|" + path + "|" + stamp;
+            Bitmap hit = CacheTakeClone(key);
+            if (hit != null) return hit;
+            return CacheStore(key, TryLoadCoverThumbCore(path, width, height));
+        }
+
+        /// <summary>解码并等比裁剪填满目标尺寸（居中裁剪，类似 CSS background-size: cover）。</summary>
+        private static Bitmap TryLoadCoverThumbCore(string path, int width, int height)
+        {
+            try
+            {
+                if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
+                using (Bitmap src = new Bitmap(path))
+                {
+                    if (src.Width <= 0 || src.Height <= 0) return null;
+                    double scale = Math.Max((double)width / src.Width, (double)height / src.Height);
+                    int dw = Math.Max(1, (int)Math.Round(src.Width * scale));
+                    int dh = Math.Max(1, (int)Math.Round(src.Height * scale));
+                    Bitmap dst = new Bitmap(width, height, PixelFormat.Format32bppArgb);
+                    using (Graphics g = Graphics.FromImage(dst))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        g.DrawImage(src, new Rectangle((width - dw) / 2, (height - dh) / 2, dw, dh));
+                    }
+                    return dst;
+                }
+            }
+            catch { return null; }   // 损坏文件/非图片内容：回退到占位绘制
+        }
+
         /// <summary>检测一个 Bitmap 是否为有效图标（非空、有效像素占比 >= 2%）。</summary>
         public static bool IsValid(Bitmap b)
         {

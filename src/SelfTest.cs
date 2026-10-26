@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -71,6 +71,10 @@ namespace AppManager
             Case43_MoveIntoFolderRules();
             Case44_DeletePath();
             Case45_ResourceCategoryType();
+            Case46_CollectionKeysAndRoundtrip();
+            Case47_CollectionOpsMembers();
+            Case48_CollectionParentSync();
+            Case49_MediaTypeRules();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -865,6 +869,170 @@ namespace AppManager
                 + " 压缩包=" + zipOk + " 证件=" + idOk + " 不限=" + freeOk + " 过滤=" + filterOk + " 名称=" + nameOk);
         }
 
+        /// <summary>集合键规则与集合定义的配置往返（XML 保存/重读一致）。</summary>
+        private static void Case46_CollectionKeysAndRoundtrip()
+        {
+            Begin("46 集合键规则与 Collections 配置往返");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                ResourceCollection col = new ResourceCollection();
+                col.Name = "旅行";
+                col.Parent = "照片";
+                col.Description = "海边与山野";
+                col.Cover = @"C:\pics\cover.jpg";
+                c.Collections.Add(col);
+                c.Save();
+                AppConfig r = AppConfig.Load();
+                bool roundtrip = r.Collections.Count == 1
+                    && r.Collections[0].Name == "旅行"
+                    && r.Collections[0].Parent == "照片"
+                    && r.Collections[0].Description == "海边与山野"
+                    && r.Collections[0].Cover == @"C:\pics\cover.jpg";
+                bool keyRule = CollectionKeys.Make("照片", "旅行") == "col:照片/旅行"
+                    && CollectionKeys.IsCollectionKey("col:照片/旅行")
+                    && !CollectionKeys.IsCollectionKey("照片")
+                    && !CollectionKeys.IsCollectionKey(null);
+                Assert(roundtrip && keyRule, "往返=" + roundtrip + " 键规则=" + keyRule);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        /// <summary>集合成员操作：加入/移出/重命名迁移/删除清理（多归属不搬文件）。</summary>
+        private static void Case47_CollectionOpsMembers()
+        {
+            Begin("47 集合成员操作与归属键迁移（加入/移出/改名/删除）");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                ResourceCollection col = new ResourceCollection();
+                col.Name = "旅行";
+                col.Parent = "照片";
+                c.Collections.Add(col);
+                string key = CollectionKeys.Make(col.Parent, col.Name);
+                string item = "add:C:\\photos\\a.jpg";
+
+                // 首次加入返回 true（产生变化），重复加入返回 false（供调用方决定是否落盘/刷新）
+                bool addChanged = CollectionOps.AddMember(c, item, key);
+                bool addAgain = CollectionOps.AddMember(c, item, key);
+                bool added = addChanged && !addAgain
+                    && !CollectionOps.AddMember(c, null, key)       // 空条目键：无变化
+                    && c.ItemCategories.ContainsKey(item)
+                    && c.ItemCategories[item].Count == 1
+                    && c.ItemCategories[item][0] == key;
+
+                bool removed = CollectionOps.RemoveMember(c, item, key)
+                    && !c.ItemCategories.ContainsKey(item)          // 归属清空后条目键移除
+                    && !CollectionOps.RemoveMember(c, item, key);   // 再移出返回 false
+
+                CollectionOps.AddMember(c, item, key);
+                CollectionOps.RenameMemberKey(c, key, "col:照片/远行");
+                bool renamed = c.ItemCategories[item][0] == "col:照片/远行"
+                    && CollectionOps.Find(c, "照片", "远行") == null;   // 定义未随键改名，由调用方同步
+
+                CollectionOps.RemoveCollectionKey(c, "col:照片/远行");
+                bool cleaned = !c.ItemCategories.ContainsKey(item);
+
+                // 定义查找：同父分类名唯一，跨父分类不冲突
+                ResourceCollection other = new ResourceCollection();
+                other.Name = "旅行"; other.Parent = "证件";
+                c.Collections.Add(other);
+                bool findOk = CollectionOps.NameExists(c, "照片", "旅行")
+                    && CollectionOps.NameExists(c, "证件", "旅行")
+                    && !CollectionOps.NameExists(c, "照片", "远行");
+                Assert(added && removed && renamed && cleaned && findOk,
+                    "加入=" + added + " 移出=" + removed + " 改名迁移=" + renamed
+                    + " 删除清理=" + cleaned + " 查找=" + findOk);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        /// <summary>资源分类改名/删除时集合的联动迁移：父分类与成员键同步、孤儿集合清理。</summary>
+        private static void Case48_CollectionParentSync()
+        {
+            Begin("48 资源分类改名/删除时集合同步迁移");
+            string bak = BackupConfig();
+            try
+            {
+                if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
+                AppConfig c = new AppConfig();
+                ResourceCollection photo = new ResourceCollection();
+                photo.Name = "旅行"; photo.Parent = "照片";
+                c.Collections.Add(photo);
+                ResourceCollection doc = new ResourceCollection();
+                doc.Name = "合同"; doc.Parent = "文档";
+                c.Collections.Add(doc);
+                string photoKey = CollectionKeys.Make("照片", "旅行");
+                string docKey = CollectionKeys.Make("文档", "合同");
+                string photoItem = "add:C:\\photos\\a.jpg";
+                string docItem = "add:C:\\docs\\b.pdf";
+                CollectionOps.AddMember(c, photoItem, photoKey);
+                CollectionOps.AddMember(c, docItem, docKey);
+
+                // 改名：父分类与成员键一并迁移，其它分类的集合与成员不受影响
+                CollectionOps.RenameParent(c, "照片", "图片");
+                string newKey = CollectionKeys.Make("图片", "旅行");
+                bool renameOk = photo.Parent == "图片"
+                    && CollectionOps.Find(c, "图片", "旅行") != null
+                    && c.ItemCategories[photoItem].Contains(newKey)
+                    && !c.ItemCategories[photoItem].Contains(photoKey)
+                    && doc.Parent == "文档"
+                    && c.ItemCategories[docItem].Contains(docKey);
+
+                // 删除：该分类下的集合定义与成员键清理，其它分类保留
+                CollectionOps.RemoveByParent(c, "图片");
+                bool removeOk = c.Collections.Count == 1
+                    && c.Collections[0].Name == "合同"
+                    && !c.ItemCategories.ContainsKey(photoItem)
+                    && c.ItemCategories.ContainsKey(docItem);
+                Assert(renameOk && removeOk, "改名迁移=" + renameOk + " 删除清理=" + removeOk);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { RestoreConfig(bak); }
+        }
+
+        /// <summary>媒体类型识别：视频全格式覆盖、大小写不敏感、非同类型排除；「视频」分类过滤器只含视频扩展名。</summary>
+        private static void Case49_MediaTypeRules()
+        {
+            Begin("49 媒体类型识别与视频分类过滤器");
+            string[] videos = { ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v" };
+            string filter = MediaRules.ResourceCategoryFilter("视频");
+            bool allVideo = true;
+            bool filterAll = true;
+            for (int i = 0; i < videos.Length; i++)
+            {
+                // 大写扩展名同样命中（播放器按扩展名判定，不受大小写影响）
+                allVideo = allVideo && MediaRules.IsVideo(@"C:\a\clip" + videos[i].ToUpperInvariant());
+                filterAll = filterAll && filter.Contains("*" + videos[i]);
+            }
+            bool videoOk = allVideo
+                && !MediaRules.IsVideo(@"C:\a\song.mp3")
+                && !MediaRules.IsVideo(@"C:\a\pic.jpg")
+                && !MediaRules.IsVideo(@"C:\a\plain")
+                && !MediaRules.IsVideo(null);
+            bool imageOk = MediaRules.IsImage(@"C:\a\Photo.JPG")
+                && !MediaRules.IsImage(@"C:\a\clip.mp4");
+            bool audioOk = MediaRules.IsAudio(@"C:\a\Song.FLAC")
+                && !MediaRules.IsAudio(@"C:\a\clip.mkv");
+            bool mediaOk = MediaRules.IsMedia(@"C:\a\x.webm")
+                && MediaRules.IsMedia(@"C:\a\x.png")
+                && MediaRules.IsMedia(@"C:\a\x.m4a")
+                && !MediaRules.IsMedia(@"C:\a\x.txt");
+            bool filterOk = filter.StartsWith("视频 (*.")
+                && filter.Contains("|*.")
+                && !filter.Contains("*.jpg")
+                && !filter.Contains("*.mp3");
+            Assert(videoOk && imageOk && audioOk && mediaOk && filterOk && filterAll,
+                "视频=" + videoOk + " 图片=" + imageOk + " 音频=" + audioOk
+                + " 媒体=" + mediaOk + " 过滤=" + filterOk + " 全覆盖=" + filterAll);
+        }
+
         /// <summary>查找与给定根不同的、就绪的本地固定卷（供跨卷搬迁用例使用），无则返回 null。</summary>
         private static string OtherFixedVolume(string currentRoot)
         {
@@ -901,7 +1069,12 @@ namespace AppManager
             else { Log("  -> 失败: " + detail); }
         }
 
-        private static void Log(string s) { _log.AppendLine(s); }
+        /// <summary>追加一行并立即落盘：个别用例卡住时，可从日志末尾定位最后执行到的位置。</summary>
+        private static void Log(string s)
+        {
+            _log.AppendLine(s);
+            Flush();
+        }
 
         private static void Flush()
         {

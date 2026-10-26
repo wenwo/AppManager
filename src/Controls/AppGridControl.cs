@@ -18,6 +18,14 @@ namespace AppManager.Controls
         private bool grid = true;
         private int hoverIndex = -1;
 
+        // 多选（Ctrl 点选 / Shift 连选）：仅记录当前列表下标，换列表即清空
+        private readonly List<int> selected = new List<int>();
+        private int selectAnchor = -1;      // 连选锚点
+        private bool collapseOnUp;          // 已选多项时普通点击：未拖动则在松手时收敛为单项
+        private readonly SolidBrush selectFillBrush = new SolidBrush(Color.FromArgb(26, 0, 122, 255));
+        private readonly SolidBrush selectRowBrush = new SolidBrush(Color.FromArgb(30, 0, 122, 255));
+        private readonly Pen selectPen = new Pen(Theme.Accent, 2f);
+
         // 复用的绘制资源：避免每帧为每个条目新建画笔/字体/路径，降低 GDI 句柄抖动
         private readonly SolidBrush cardBrush = new SolidBrush(Theme.Card);
         private readonly SolidBrush hoverBrush = new SolidBrush(Theme.CardHover);
@@ -104,8 +112,8 @@ namespace AppManager.Controls
 
         /// <summary>网格内拖动条目期间持续触发（携带屏幕坐标），供外部（侧栏分类）联动高亮投放目标。</summary>
         public event Action<Point> DragMoved;
-        /// <summary>拖动条目在网格外松手时触发（条目 + 屏幕坐标）；触发后不再执行网格内排序。</summary>
-        public event Action<AppInfo, Point> DroppedOutside;
+        /// <summary>拖动条目在网格外松手时触发（拖动条目列表 + 屏幕坐标）；多选时整批携带。</summary>
+        public event Action<List<AppInfo>, Point> DroppedOutside;
 
         /// <summary>文件类型条目拖入目录类型条目：请求把条目目标（文件/文件夹）搬迁进该目录。</summary>
         public event Action<AppInfo, AppInfo> MoveIntoFolder;
@@ -168,6 +176,9 @@ namespace AppManager.Controls
                 chipBrush.Dispose();
                 headerBgBrush.Dispose();
                 headerLinePen.Dispose();
+                selectFillBrush.Dispose();
+                selectRowBrush.Dispose();
+                selectPen.Dispose();
                 pathFormat.Dispose();
                 tipFormat.Dispose();
                 tipTimer.Dispose();
@@ -199,6 +210,7 @@ namespace AppManager.Controls
         {
             apps.Clear();
             apps.AddRange(list);
+            ClearSelection();   // 列表内容变化：下标失效，选中状态一并清空
             sizeCache.Clear();
             locTextMaxW = -1;
             catTextMaxW = -1;
@@ -210,6 +222,36 @@ namespace AppManager.Controls
         public void RefreshIcons()
         {
             Invalidate();
+        }
+
+        /// <summary>当前选中条目（按选中的先后顺序）；未选中返回空列表。</summary>
+        public List<AppInfo> SelectedApps
+        {
+            get
+            {
+                List<AppInfo> list = new List<AppInfo>();
+                for (int i = 0; i < selected.Count; i++)
+                {
+                    int idx = selected[i];
+                    if (idx >= 0 && idx < apps.Count) list.Add(apps[idx]);
+                }
+                return list;
+            }
+        }
+
+        /// <summary>清空多选状态。</summary>
+        public void ClearSelection()
+        {
+            selectAnchor = -1;
+            collapseOnUp = false;
+            if (selected.Count == 0) return;
+            selected.Clear();
+            Invalidate();
+        }
+
+        private bool IsSelected(int index)
+        {
+            return selected.Contains(index);
         }
 
         private void UpdateScroll()
@@ -482,6 +524,11 @@ namespace AppManager.Controls
                 g.TranslateTransform(shadowRect.X, shadowRect.Y);
                 g.FillPath(cardBrush, gridItemPath);
                 if (hover) g.FillPath(hoverBrush, gridItemPath);
+                if (IsSelected(i))
+                {
+                    g.FillPath(selectFillBrush, gridItemPath);
+                    g.DrawPath(selectPen, gridItemPath);
+                }
 
                 AppInfo a = apps[i];
                 int iconSize = Theme.IconSize;
@@ -522,9 +569,13 @@ namespace AppManager.Controls
                 if (!clip.IsEmpty && !clip.IntersectsWith(r)) continue;
                 AppInfo a = apps[i];
 
-                // 独立卡片：白底圆角，悬停浅灰
+                // 独立卡片：白底圆角；选中强调色淡底 + 描边，悬停浅灰
+                bool sel = IsSelected(i);
                 using (GraphicsPath cp = Draw.RoundedPath(r, ListCardRadius))
-                    g.FillPath(i == hoverIndex ? rowHoverBrush : cardBrush, cp);
+                {
+                    g.FillPath(sel ? selectRowBrush : (i == hoverIndex ? rowHoverBrush : cardBrush), cp);
+                    if (sel) g.DrawPath(selectPen, cp);
+                }
 
                 // 图标：列表用 shell 小图标按 1:1 绘制（不缩放大图，避免发虚）
                 Rectangle ir = new Rectangle(r.X + 12, r.Y + (r.Height - ListIcon) / 2, ListIcon, ListIcon);
@@ -756,6 +807,15 @@ namespace AppManager.Controls
                     Action<Point> moved = DragMoved;
                     if (moved != null) moved(PointToScreen(e.Location));
 
+                    // 多选整批拖动：不做网格内排序/目录搬迁，落点只在网格外（集合/分类）
+                    if (MultiDrag)
+                    {
+                        if (dropTarget != -1) { dropTarget = -1; Invalidate(); }
+                        if (dragGap != -1) { dragGap = -1; Invalidate(); }
+                        Cursor = Cursors.Default;
+                        return;
+                    }
+
                     // 命中「可接收的目录条目」→ 高亮为搬迁目标，隐藏插入缝隙指示
                     int t = FolderDropTargetAt(e.Location);
                     if (t != dropTarget) { dropTarget = t; Invalidate(); }
@@ -890,6 +950,7 @@ namespace AppManager.Controls
             int idx = HitIndex(e.Location);
             if (idx < 0)
             {
+                ClearSelection();   // 点击空白：结束多选
                 // 空白区右键：请求新建菜单（对齐资源管理器桌面交互习惯）
                 if (e.Button == MouseButtons.Right)
                 {
@@ -900,6 +961,8 @@ namespace AppManager.Controls
             }
             if (e.Button == MouseButtons.Right)
             {
+                // 右键未选中项：先转为单选，保证菜单操作作用于当前条目；右键已选中的一项保留多选
+                if (!IsSelected(idx)) SelectSingle(idx);
                 Point sp = PointToScreen(e.Location);
                 Action<AppInfo, Point> h = MenuRequested;
                 if (h != null) h(apps[idx], sp);
@@ -946,9 +1009,38 @@ namespace AppManager.Controls
         {
             base.OnMouseDown(e);
             suppressClick = false;
-            if (e.Button == MouseButtons.Left && (allowReorder || AllowDragOut))
+            if (e.Button != MouseButtons.Left) return;
+
+            int idx = HitIndex(e.Location);
+            bool ctrl = (ModifierKeys & Keys.Control) == Keys.Control;
+            bool shift = (ModifierKeys & Keys.Shift) == Keys.Shift;
+            if (idx >= 0)
             {
-                int idx = HitIndex(e.Location);
+                if (shift)
+                {
+                    SelectRange(idx);
+                    collapseOnUp = false;
+                }
+                else if (ctrl)
+                {
+                    ToggleSelected(idx);
+                    selectAnchor = idx;
+                    collapseOnUp = false;
+                }
+                else if (!IsSelected(idx))
+                {
+                    SelectSingle(idx);
+                    collapseOnUp = false;
+                }
+                else
+                {
+                    // 已选中的多项之一：先保持，便于整批拖出；未拖动则松手时收敛为单项
+                    collapseOnUp = selected.Count > 1;
+                }
+            }
+
+            if (allowReorder || AllowDragOut)
+            {
                 if (idx >= 0)
                 {
                     dragPending = true;
@@ -958,6 +1050,49 @@ namespace AppManager.Controls
                     dragStart = e.Location;
                 }
             }
+        }
+
+        /// <summary>单选：清空后选中指定条目。</summary>
+        private void SelectSingle(int index)
+        {
+            selected.Clear();
+            selected.Add(index);
+            selectAnchor = index;
+            Invalidate();
+        }
+
+        /// <summary>Ctrl 点击：切换单项选中。</summary>
+        private void ToggleSelected(int index)
+        {
+            if (!selected.Remove(index)) selected.Add(index);
+            Invalidate();
+        }
+
+        /// <summary>Shift 点击：从锚点到当前条目连选。</summary>
+        private void SelectRange(int index)
+        {
+            if (selectAnchor < 0 || selectAnchor >= apps.Count) { SelectSingle(index); return; }
+            int from = Math.Min(selectAnchor, index);
+            int to = Math.Max(selectAnchor, index);
+            selected.Clear();
+            for (int i = from; i <= to; i++) selected.Add(i);
+            Invalidate();
+        }
+
+        /// <summary>本次拖动的条目集合：多选且拖动项在选区内时整批携带，否则单选拖动项。</summary>
+        private List<AppInfo> DragApps()
+        {
+            List<AppInfo> list = new List<AppInfo>();
+            if (dragFrom < 0 || dragFrom >= apps.Count) return list;
+            if (selected.Count > 1 && IsSelected(dragFrom)) return SelectedApps;
+            list.Add(apps[dragFrom]);
+            return list;
+        }
+
+        /// <summary>是否多选整批拖动（此时不做网格内排序/目录搬迁）。</summary>
+        private bool MultiDrag
+        {
+            get { return selected.Count > 1 && IsSelected(dragFrom); }
         }
 
         /// <summary>
@@ -980,25 +1115,27 @@ namespace AppManager.Controls
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            // 文件条目拖入目录条目：请求搬迁（优先于重排与拖出）
-            if (dragging && dropTarget >= 0 && dropTarget != dragFrom
+            // 文件条目拖入目录条目：请求搬迁（优先于重排与拖出；多选整批拖动不参与）
+            if (dragging && !MultiDrag && dropTarget >= 0 && dropTarget != dragFrom
                 && dragFrom >= 0 && dragFrom < apps.Count && dropTarget < apps.Count)
             {
                 Action<AppInfo, AppInfo> h = MoveIntoFolder;
                 if (h != null) h(apps[dragFrom], apps[dropTarget]);
+                collapseOnUp = false;
                 ResetDrag();
                 suppressClick = true;
                 Invalidate();
                 return;
             }
-            bool droppedOutside = dragging && !ClientRectangle.Contains(e.Location)
+            bool wasDrag = dragging;
+            bool droppedOutside = wasDrag && !ClientRectangle.Contains(e.Location)
                 && dragFrom >= 0 && dragFrom < apps.Count;
             if (droppedOutside)
             {
-                Action<AppInfo, Point> h = DroppedOutside;
-                if (h != null) h(apps[dragFrom], PointToScreen(e.Location));
+                Action<List<AppInfo>, Point> h = DroppedOutside;
+                if (h != null) h(DragApps(), PointToScreen(e.Location));
             }
-            else if (dragging && dragFrom >= 0 && dragGap >= 0)
+            else if (wasDrag && dragFrom >= 0 && dragGap >= 0)
             {
                 int to = dragGap > dragFrom ? dragGap - 1 : dragGap;
                 if (to != dragFrom)
@@ -1007,7 +1144,13 @@ namespace AppManager.Controls
                     if (h != null) h(dragFrom, to);
                 }
             }
-            bool wasDrag = dragging;
+            if (!wasDrag && collapseOnUp)
+            {
+                // 已选多项时普通点击（未拖动）：收敛为单项
+                int idx = HitIndex(e.Location);
+                if (idx >= 0 && IsSelected(idx)) SelectSingle(idx);
+            }
+            collapseOnUp = false;
             if (wasDrag) suppressClick = true;
             ResetDrag();
             Cursor = Cursors.Default;

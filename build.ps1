@@ -29,7 +29,8 @@ $refs = @(
   "System.Drawing.dll",
   "System.Windows.Forms.dll",
   "System.Xml.dll",
-  "Microsoft.VisualBasic.dll"
+  "Microsoft.VisualBasic.dll",
+  "Microsoft.CSharp.dll"
 )
 
 $ico = Join-Path $base "AppManager.ico"
@@ -42,6 +43,12 @@ if (Test-Path $ico) { $icoArg = @("/win32icon:$ico") }
 
 $refArgs = $refs | ForEach-Object { "/r:$_" }
 
+# Internal video player needs the mpv client library next to the exe (too large for the repo).
+$mpv = Join-Path $base "libmpv-2.dll"
+if (-not (Test-Path $mpv)) {
+  Write-Warning "libmpv-2.dll not found. The in-app video player will show a placeholder until the library is placed next to AppManager.exe."
+}
+
 Write-Host "Compiler : $csc"
 Write-Host "Sources  : $($files.Count) file(s)"
 Write-Host "Output   : $out"
@@ -53,17 +60,23 @@ if ($code -ne 0) {
   exit $code
 }
 
-# selftest
+# selftest (bounded wait so a stuck run can never hang the build)
 Write-Host "Running --selftest ..."
-$p = Start-Process -FilePath $out -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow
+$p = Start-Process -FilePath $out -ArgumentList "--selftest" -PassThru
+if (-not $p.WaitForExit(120000)) {
+  try { $p.Kill() } catch { }
+  Write-Error "Selftest timeout (120s)."
+  exit 1
+}
+$code = $p.ExitCode
 $log = Join-Path $base "selftest.log"
 if (Test-Path $log) { Get-Content $log -Raw | Write-Host }
 
 # Exit code convention: 0 = all cases passed, 1 = failure
-if ($p.ExitCode -eq 0) {
+if ($code -eq 0) {
   Write-Host "Selftest PASSED (exit code 0)."
   exit 0
 } else {
-  Write-Error ("Selftest FAILED (exit code " + $p.ExitCode + ").")
+  Write-Error ("Selftest FAILED (exit code " + $code + ").")
   exit 1
 }

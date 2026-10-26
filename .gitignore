@@ -2,12 +2,16 @@
 AppManager.exe
 AppManager.pdb
 
+# 视频播放内核（体积过大不入库，取自 mpv-dev-lgpl-x86_64 发布包）
+libmpv-2.dll
+
 # 运行时生成（日志 / 用户配置 / 收纳备份 / 快捷中心）
 selftest.log
 tidy.log
 config.xml
 DesktopBackup/
 QuickCenter/
+CollectionCovers/
 
 # 临时探测文件
 _probe_icon.png
