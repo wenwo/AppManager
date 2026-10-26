@@ -39,6 +39,7 @@ namespace AppManager
         private IconButton closeBtn;
         private SettingsPage settingsPage; // 设置页（独立页面，覆盖主内容区）
         private bool settingsOpen;         // 是否处于设置页
+        private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
         private NotifyIcon tray;          // 系统托盘图标（常驻）
         private bool exiting;             // 真正退出标志：为真时关闭不再拦截为「最小化到托盘」
         private bool trayTipShown;        // 首次最小化到托盘的气泡提示只弹一次
@@ -399,6 +400,11 @@ namespace AppManager
             grid.BlankRightClicked += OnGridBlankRightClicked;
             Controls.Add(grid);
 
+            // 图片查看器：默认隐藏，双击照片时替换列表区域（尺寸/位置与 grid 一致）
+            imageViewer = new ImageViewerControl();
+            imageViewer.CloseRequested += HideImageViewer;
+            Controls.Add(imageViewer);
+
             search = new SearchField();
             search.TextChanged += delegate { RefreshGrid(); };
             Controls.Add(search);
@@ -587,6 +593,8 @@ namespace AppManager
             int gridHeight = ClientSize.Height - top - (statusBar.Visible ? statusH : 0);
             grid.Location = new Point(sb, top);
             grid.Size = new Size(ClientSize.Width - sb, gridHeight);
+            imageViewer.Location = grid.Location;
+            imageViewer.Size = grid.Size;
 
             loadingLabel.Location = new Point(sb, top);
             loadingLabel.Size = new Size(ClientSize.Width - sb, gridHeight);
@@ -1083,6 +1091,8 @@ namespace AppManager
 
         private void RefreshGrid()
         {
+            // 列表内容即将变化（切分类/搜索/重扫），先退出图片查看器，避免浏览序列过期
+            HideImageViewer();
             string kw = (search.Text ?? string.Empty).Trim().ToLowerInvariant();
             List<AppInfo> shown = new List<AppInfo>();
 
@@ -1641,7 +1651,41 @@ namespace AppManager
 
         private void OnLaunch(AppInfo app)
         {
+            // 本地图片：应用内查看器直接浏览大图，不再调起系统图片查看器
+            if (app != null && !app.IsFolder && !Scanner.IsUrl(app.TargetPath)
+                && MediaRules.IsImage(app.TargetPath) && File.Exists(app.TargetPath))
+            {
+                ShowImageViewer(app);
+                return;
+            }
             Launcher.Launch(app);
+        }
+
+        /// <summary>双击照片：以当前列表中的全部图片为浏览序列打开查看器，隐藏列表。</summary>
+        private void ShowImageViewer(AppInfo app)
+        {
+            List<string> imgs = new List<string>();
+            foreach (AppInfo a in shownApps)
+            {
+                if (a.IsFolder || Scanner.IsUrl(a.TargetPath)) continue;
+                if (MediaRules.IsImage(a.TargetPath) && File.Exists(a.TargetPath))
+                    imgs.Add(a.TargetPath);
+            }
+            if (imgs.Count == 0) { Launcher.Launch(app); return; }
+            int idx = imgs.FindIndex(delegate(string p) { return string.Equals(p, app.TargetPath, StringComparison.OrdinalIgnoreCase); });
+            grid.Visible = false;
+            imageViewer.BringToFront();
+            imageViewer.Open(imgs, idx);
+        }
+
+        /// <summary>退出查看器：恢复列表展示；未打开时为空操作，供设置页等场景直接调用。</summary>
+        private void HideImageViewer()
+        {
+            if (!imageViewer.Visible) return;
+            imageViewer.Visible = false;
+            grid.Visible = true;
+            grid.BringToFront();
+            grid.Invalidate();
         }
 
         private void OnContextMenu(AppInfo app, Point screen)
@@ -2822,6 +2866,7 @@ namespace AppManager
         {
             if (settingsOpen) return;
             settingsOpen = true;
+            HideImageViewer();   // 查看器属于列表区域，进入设置页前先退出
             settingsPage.Bind(config.ShowHidden, config.ShowAllInstalled, config.AutoScan,
                 config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             SetMainContentVisible(false);
