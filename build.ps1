@@ -44,9 +44,19 @@ if (Test-Path $ico) { $icoArg = @("/win32icon:$ico") }
 $refArgs = $refs | ForEach-Object { "/r:$_" }
 
 # Internal video player needs the mpv client library next to the exe (too large for the repo).
+# Set APPMANAGER_SKIP_LIBMPV_FETCH=1 to skip the automatic download (offline builds).
 $mpv = Join-Path $base "libmpv-2.dll"
 if (-not (Test-Path $mpv)) {
-  Write-Warning "libmpv-2.dll not found. The in-app video player will show a placeholder until the library is placed next to AppManager.exe."
+  $fetch = Join-Path $base "tools\fetch-libmpv.ps1"
+  if ((Test-Path $fetch) -and ($env:APPMANAGER_SKIP_LIBMPV_FETCH -ne "1")) {
+    Write-Host "libmpv-2.dll missing; downloading it via tools\fetch-libmpv.ps1 ..."
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fetch
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "libmpv-2.dll download failed. The video player will show a placeholder until the library is placed next to AppManager.exe."
+    }
+  } else {
+    Write-Warning "libmpv-2.dll not found. The in-app video player will show a placeholder until the library is placed next to AppManager.exe."
+  }
 }
 
 Write-Host "Compiler : $csc"
