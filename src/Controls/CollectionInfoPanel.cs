@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Threading;
 using System.Windows.Forms;
 using AppManager;
 
@@ -28,11 +29,12 @@ namespace AppManager.Controls
         private bool editing;
         private string editCoverPath = string.Empty;
 
-        // 集合内图片缩略图（编辑态横向选择条）
+        // 集合内图片缩略图（编辑态分页选择；按原下标异步加载）
         private readonly List<string> memberPaths = new List<string>();
-        private readonly List<Bitmap> memberThumbs = new List<Bitmap>();
-        private readonly List<string> thumbPaths = new List<string>();
+        private readonly Dictionary<int, Bitmap> memberThumbs = new Dictionary<int, Bitmap>();
         private bool memberThumbsBuilt;
+        private bool thumbLoading;
+        private volatile int thumbGen;
         private int thumbPage;
         private int thumbHover = -1;
         private int thumbPress = -1;
@@ -113,6 +115,8 @@ namespace AppManager.Controls
         {
             EndEdit();
             if (cover != null) { cover.Dispose(); cover = null; }
+            thumbGen++;              // 使在途加载结果失效
+            thumbLoading = false;
             DisposeMemberThumbs();
             parent = parentCategory ?? string.Empty;
             name = collectionName ?? string.Empty;
@@ -136,6 +140,8 @@ namespace AppManager.Controls
         {
             EndEdit();
             if (cover != null) { cover.Dispose(); cover = null; }
+            thumbGen++;
+            thumbLoading = false;
             DisposeMemberThumbs();
             parent = string.Empty;
             name = string.Empty;
@@ -165,7 +171,7 @@ namespace AppManager.Controls
             descPanel.Visible = true;
             thumbPage = 0;
             thumbHover = -1;
-            EnsureMemberThumbs();
+            StartThumbLoad();   // 异步加载，避免编辑页打开时批量解码大图卡住 UI
             LayoutChrome();
             nameBox.Focus();
             nameBox.SelectAll();
@@ -181,6 +187,12 @@ namespace AppManager.Controls
             if (editPasted != null) { editPasted.Dispose(); editPasted = null; }
             if (namePanel != null) namePanel.Visible = false;
             if (descPanel != null) descPanel.Visible = false;
+            if (thumbLoading)
+            {
+                thumbGen++;          // 取消在途加载，下次编辑重新加载
+                thumbLoading = false;
+                memberThumbsBuilt = false;
+            }
             thumbPage = 0;
             thumbHover = -1;
             thumbPress = -1;
@@ -312,24 +324,61 @@ namespace AppManager.Controls
 
         private void DisposeMemberThumbs()
         {
-            for (int i = 0; i < memberThumbs.Count; i++)
-                if (memberThumbs[i] != null) memberThumbs[i].Dispose();
+            foreach (Bitmap b in memberThumbs.Values)
+                if (b != null) b.Dispose();
             memberThumbs.Clear();
-            thumbPaths.Clear();
         }
 
-        /// <summary>惰性构建集合内图片缩略图（最多 MaxMemberThumbs 张，解码失败则跳过）。</summary>
-        private void EnsureMemberThumbs()
+        /// <summary>
+        /// 异步加载集合内图片缩略图：避免在 UI 线程批量解码大图导致编辑页卡死。
+        /// 结果按原下标写入字典，加载完成后统一刷新；过期/取消的结果自动释放。
+        /// </summary>
+        private void StartThumbLoad()
         {
             if (memberThumbsBuilt) return;
             memberThumbsBuilt = true;
-            for (int i = 0; i < memberPaths.Count && memberThumbs.Count < MaxMemberThumbs; i++)
+            if (memberPaths.Count == 0) return;
+
+            int gen = ++thumbGen;
+            List<string> paths = new List<string>(memberPaths);
+            thumbLoading = true;
+            Invalidate();
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                Bitmap b = Icons.LoadCoverThumb(memberPaths[i], ThumbSize, ThumbSize);
-                if (b == null) continue;
-                memberThumbs.Add(b);
-                thumbPaths.Add(memberPaths[i]);
-            }
+                Dictionary<int, Bitmap> loaded = new Dictionary<int, Bitmap>();
+                try
+                {
+                    for (int i = 0; i < paths.Count && i < MaxMemberThumbs; i++)
+                    {
+                        if (gen != thumbGen) break;   // 已失效，尽快退出
+                        Bitmap b = Icons.LoadCoverThumb(paths[i], ThumbSize, ThumbSize);
+                        if (b != null) loaded[i] = b;
+                    }
+                }
+                catch { }
+                try
+                {
+                    BeginInvoke((Action)delegate
+                    {
+                        if (gen != thumbGen || !editing)
+                        {
+                            // 过期结果：仅释放，不改动新一轮加载的状态
+                            foreach (Bitmap b in loaded.Values) b.Dispose();
+                            Invalidate();
+                            return;
+                        }
+                        thumbLoading = false;
+                        DisposeMemberThumbs();
+                        foreach (KeyValuePair<int, Bitmap> kv in loaded)
+                            memberThumbs[kv.Key] = kv.Value;
+                        Invalidate();
+                    });
+                }
+                catch
+                {
+                    foreach (Bitmap b in loaded.Values) b.Dispose();
+                }
+            });
         }
 
         private void EnsureEditFields()
@@ -413,6 +462,7 @@ namespace AppManager.Controls
         {
             if (disposing)
             {
+                thumbGen++;          // 使在途加载结果失效
                 if (cover != null) { cover.Dispose(); cover = null; }
                 DisposeEditPreview();
                 if (editPasted != null) { editPasted.Dispose(); editPasted = null; }
@@ -465,15 +515,19 @@ namespace AppManager.Controls
                 int nameY = nameCaptionY + 18;
                 if (namePanel != null)
                 {
-                    namePanel.Bounds = new Rectangle(textColumnX, nameY, textColumnW, 40);
-                    nameBox.Bounds = new Rectangle(10, 8, textColumnW - 20, 24);
+                    Rectangle npr = new Rectangle(textColumnX, nameY, textColumnW, 40);
+                    Rectangle nbr = new Rectangle(10, 8, textColumnW - 20, 24);
+                    if (namePanel.Bounds != npr) namePanel.Bounds = npr;
+                    if (nameBox.Bounds != nbr) nameBox.Bounds = nbr;
                 }
                 descCaptionY = nameY + 40 + 12;
                 int descY = descCaptionY + 18;
                 if (descPanel != null)
                 {
-                    descPanel.Bounds = new Rectangle(textColumnX, descY, textColumnW, descH);
-                    descBox.Bounds = new Rectangle(10, 8, textColumnW - 20, descH - 16);
+                    Rectangle dpr = new Rectangle(textColumnX, descY, textColumnW, descH);
+                    Rectangle dbr = new Rectangle(10, 8, textColumnW - 20, descH - 16);
+                    if (descPanel.Bounds != dpr) descPanel.Bounds = dpr;
+                    if (descBox.Bounds != dbr) descBox.Bounds = dbr;
                 }
 
                 // 集合图片选择：标题行右侧翻页；缩略图按可用高度自动 1~3 行分页展示
@@ -537,8 +591,8 @@ namespace AppManager.Controls
         /// <summary>总页数（无图片时按 1 页处理，便于布局稳定）。</summary>
         private int ThumbPageCount()
         {
-            if (memberThumbs.Count == 0 || thumbPerPage <= 0) return 1;
-            return (memberThumbs.Count + thumbPerPage - 1) / thumbPerPage;
+            if (memberPaths.Count == 0 || thumbPerPage <= 0) return 1;
+            return (memberPaths.Count + thumbPerPage - 1) / thumbPerPage;
         }
 
         /// <summary>翻页：越界自动夹紧，翻页后清空缩略图悬停。</summary>
@@ -557,8 +611,8 @@ namespace AppManager.Controls
         /// <summary>选择集合内某张图片作为封面。</summary>
         private void SelectMemberCover(int index)
         {
-            if (index < 0 || index >= thumbPaths.Count) return;
-            SelectCoverPath(thumbPaths[index]);
+            if (index < 0 || index >= memberPaths.Count) return;
+            SelectCoverPath(memberPaths[index]);
         }
 
         private void SelectCoverPath(string path)
@@ -644,10 +698,10 @@ namespace AppManager.Controls
         {
             int perPage = thumbPerPage;
             int pages = ThumbPageCount();
-            PaintCaption(g, "从集合选择封面",
+            PaintCaption(g, thumbLoading ? "从集合选择封面 · 加载中…" : "从集合选择封面",
                 new Rectangle(thumbStartX, pickerCaptionY, Math.Max(0, thumbAreaWidth - 104), 20));
 
-            if (memberThumbs.Count == 0)
+            if (memberPaths.Count == 0)
             {
                 PaintCaption(g, "集合内暂无可选图片，可粘贴或从文件选择",
                     new Rectangle(thumbStartX, thumbsY, thumbAreaWidth, 24));
@@ -667,7 +721,7 @@ namespace AppManager.Controls
             for (int i = 0; i < perPage; i++)
             {
                 int idx = start + i;
-                if (idx >= memberThumbs.Count) break;
+                if (idx >= memberPaths.Count) break;
                 int row = thumbCols > 0 ? i / thumbCols : 0;
                 int col = thumbCols > 0 ? i % thumbCols : 0;
                 Rectangle r = new Rectangle(thumbStartX + col * (ThumbSize + ThumbGap),
@@ -678,7 +732,15 @@ namespace AppManager.Controls
                         g.FillPath(bg, cp);
                     GraphicsState ts = g.Save();
                     g.SetClip(cp);
-                    g.DrawImage(memberThumbs[idx], r);
+                    Bitmap thumb;
+                    if (memberThumbs.TryGetValue(idx, out thumb) && thumb != null)
+                        g.DrawImage(thumb, r);
+                    else
+                    {
+                        // 缩略图仍在异步加载或解码失败：浅灰占位，不阻塞界面
+                        using (SolidBrush ph = new SolidBrush(Theme.ChipBg))
+                            g.FillRectangle(ph, r);
+                    }
                     g.Restore(ts);
 
                     if (IsSelectedThumb(idx))
@@ -723,8 +785,8 @@ namespace AppManager.Controls
         {
             return editPasted == null
                 && !string.IsNullOrEmpty(editCoverPath)
-                && index >= 0 && index < thumbPaths.Count
-                && string.Equals(editCoverPath, thumbPaths[index], StringComparison.OrdinalIgnoreCase);
+                && index >= 0 && index < memberPaths.Count
+                && string.Equals(editCoverPath, memberPaths[index], StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>选中缩略图的蓝色对勾角标（iOS 选择态）。</summary>
@@ -823,7 +885,7 @@ namespace AppManager.Controls
             if (editing)
             {
                 int pages = ThumbPageCount();
-                if (memberThumbs.Count > 0 && pages > 1)
+                if (memberPaths.Count > 0 && pages > 1)
                 {
                     if (thumbPage > 0 && btnPrevPageRect.Contains(p)) return 10;
                     if (thumbPage < pages - 1 && btnNextPageRect.Contains(p)) return 11;
@@ -844,7 +906,7 @@ namespace AppManager.Controls
         /// <summary>按坐标命中当前页的缩略图下标（多行多列）；未命中返回 -1。</summary>
         private int ThumbIndexAt(Point p)
         {
-            if (!editing || memberThumbs.Count == 0 || thumbCols <= 0) return -1;
+            if (!editing || memberPaths.Count == 0 || thumbCols <= 0) return -1;
             if (p.Y < thumbsY) return -1;
             int dy = p.Y - thumbsY;
             int row = dy / (ThumbSize + ThumbGap);
@@ -856,7 +918,7 @@ namespace AppManager.Controls
             if (col < 0 || col >= thumbCols) return -1;
             if (x - col * (ThumbSize + ThumbGap) >= ThumbSize) return -1;
             int idx = thumbPage * thumbPerPage + row * thumbCols + col;
-            return idx < memberThumbs.Count ? idx : -1;
+            return idx < memberPaths.Count ? idx : -1;
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
