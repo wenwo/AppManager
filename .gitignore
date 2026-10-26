@@ -15,3 +15,8 @@ CollectionCovers/
 
 # 临时探测文件
 _probe_icon.png
+
+# 本机私有规则与说明文档（只在本机生效，不提交）
+.trae/rules/project_rules.md
+AGENTS.md
+CLAUDE.md

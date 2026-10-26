@@ -253,12 +253,6 @@ namespace AppManager
             long lp = m.LParam.ToInt64();
             Point screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
             int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
-            // 集合信息页编辑态：光标悬停集合图片选择条时横向滚动缩略图
-            if (collectionInfo != null && collectionInfo.IsEditing && collectionInfo.ThumbStripContainsScreen(screen))
-            {
-                collectionInfo.ScrollThumbStrip(delta);
-                return true;
-            }
             bool sidebarVisible = sidebar != null && sidebar.Visible;
             bool colVisible = collectionSidebar != null && collectionSidebar.Visible;
             if (!sidebarVisible && !colVisible) return false;

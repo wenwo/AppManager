@@ -33,7 +33,7 @@ namespace AppManager.Controls
         private readonly List<Bitmap> memberThumbs = new List<Bitmap>();
         private readonly List<string> thumbPaths = new List<string>();
         private bool memberThumbsBuilt;
-        private int stripScroll;
+        private int thumbPage;
         private int thumbHover = -1;
         private int thumbPress = -1;
 
@@ -45,7 +45,6 @@ namespace AppManager.Controls
 
         // 布局缓存：命中测试与绘制共用
         private Rectangle coverRect;
-        private Rectangle stripRect;
         private Rectangle btnEnterRect;
         private Rectangle btnEditRect;
         private Rectangle btnPasteRect;
@@ -53,21 +52,28 @@ namespace AppManager.Controls
         private Rectangle btnAutoRect;
         private Rectangle btnSaveRect;
         private Rectangle btnCancelRect;
+        private Rectangle btnPrevPageRect;
+        private Rectangle btnNextPageRect;
         private Rectangle nameDisplayRect;
         private Rectangle descDisplayRect;
         private Rectangle metaDisplayRect;
         private int textColumnX;
         private int textColumnW;
-        private int stripCaptionY;
+        private int pickerCaptionY;
+        private int thumbsY;
+        private int thumbStartX;
+        private int thumbAreaWidth;
+        private int thumbCols;
+        private int thumbRows;
+        private int thumbPerPage;
         private int nameCaptionY;
         private int descCaptionY;
-        private int hoverBtn = -1;          // 1 进入 2 编辑 3 从文件 4 恢复自动 5 保存 6 取消 8 粘贴
+        private int hoverBtn = -1;          // 1 进入 2 编辑 3 从文件 4 恢复自动 5 保存 6 取消 8 粘贴 10 上页 11 下页
         private int pressBtn = -1;
 
         private const int BtnH = 36;
-        private const int SmallBtnH = 30;
-        private const int ThumbSize = 48;
-        private const int ThumbGap = 8;
+        private const int ThumbSize = 72;
+        private const int ThumbGap = 10;
         private const int MaxMemberThumbs = 60;
 
         /// <summary>点击「进入」：由主窗体切换到集合内容。</summary>
@@ -121,6 +127,7 @@ namespace AppManager.Controls
                     if (!string.IsNullOrEmpty(memberImages[i])) memberPaths.Add(memberImages[i]);
             }
             memberThumbsBuilt = false;
+            thumbPage = 0;
             Invalidate();
         }
 
@@ -156,7 +163,7 @@ namespace AppManager.Controls
             descBox.Text = description;
             namePanel.Visible = true;
             descPanel.Visible = true;
-            stripScroll = 0;
+            thumbPage = 0;
             thumbHover = -1;
             EnsureMemberThumbs();
             LayoutChrome();
@@ -174,7 +181,7 @@ namespace AppManager.Controls
             if (editPasted != null) { editPasted.Dispose(); editPasted = null; }
             if (namePanel != null) namePanel.Visible = false;
             if (descPanel != null) descPanel.Visible = false;
-            stripScroll = 0;
+            thumbPage = 0;
             thumbHover = -1;
             thumbPress = -1;
             hoverBtn = -1;
@@ -425,62 +432,76 @@ namespace AppManager.Controls
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (Width > 0 && Height > 0)
-            {
-                LayoutChrome();
-                ClampStripScroll();
-            }
+            if (Width > 0 && Height > 0) LayoutChrome();
         }
 
         /// <summary>
-        /// 按当前模式计算几何：封面在左、名称/简介在右，按钮等其余元素保持原有位置与样式。
-        /// 绘制与命中测试共用。
+        /// 按当前模式计算几何：左列封面、右列名称/简介，各自在列内居中；
+        /// 按钮行（含编辑态保存/取消）横向中心对齐封面中心。绘制与命中测试共用。
         /// </summary>
         private void LayoutChrome()
         {
             int avail = Math.Min(760, Math.Max(400, Width - 96));
             int gx = (Width - avail) / 2;
-            int coverW = Math.Min(300, Math.Max(180, (int)Math.Round(avail * 0.42)));
-            int textW = Math.Max(160, avail - coverW - 24);
-            textColumnX = gx + coverW + 24;
-            textColumnW = textW;
+            int leftW = avail / 2;
+            int coverW = editing
+                ? Math.Min(320, Math.Max(220, (int)Math.Round(avail * 0.46)))
+                : Math.Min(280, Math.Max(160, leftW - 32));
+            int coverX = editing ? gx : gx + (leftW - coverW) / 2;
+            textColumnX = editing ? gx + coverW + 24 : gx + leftW + 24;
+            textColumnW = editing ? Math.Max(180, avail - coverW - 24) : Math.Max(150, avail - leftW - 48);
 
             if (editing)
             {
-                int coverH = Math.Min(170, Math.Max(110, Height - 320));
-                int topRowH = Math.Max(coverH, 124);
-                int total = topRowH + 12 + 18 + ThumbSize + 8 + SmallBtnH + 16 + BtnH;
-                int y = Math.Max(20, (Height - total) / 2);
-                coverRect = new Rectangle(gx, y + (topRowH - coverH) / 2, coverW, coverH);
+                // 编辑态：上方大封面 + 右侧名称/高简介；下方集合图片分页选择；保存/取消固定在右下角
+                int coverH = Math.Min(230, Math.Max(140, (int)Math.Round(coverW * 5.0 / 8.0)));
+                int descH = Math.Min(130, Math.Max(100, Height - 330));
+                int fieldsH = 18 + 40 + 12 + 18 + descH;
+                int topY = 24;
+                int topH = Math.Max(coverH, fieldsH);
+                coverRect = new Rectangle(coverX, topY + (topH - coverH) / 2, coverW, coverH);
 
-                // 右侧：名称/简介（与封面同一行，纵向居中）
-                nameCaptionY = y + (topRowH - 124) / 2;
+                nameCaptionY = topY + (topH - fieldsH) / 2;
                 int nameY = nameCaptionY + 18;
                 if (namePanel != null)
                 {
-                    namePanel.Bounds = new Rectangle(textColumnX, nameY, textW, 34);
-                    nameBox.Bounds = new Rectangle(10, 6, textW - 20, 22);
+                    namePanel.Bounds = new Rectangle(textColumnX, nameY, textColumnW, 40);
+                    nameBox.Bounds = new Rectangle(10, 8, textColumnW - 20, 24);
                 }
-                descCaptionY = nameY + 34 + 8;
+                descCaptionY = nameY + 40 + 12;
                 int descY = descCaptionY + 18;
                 if (descPanel != null)
                 {
-                    descPanel.Bounds = new Rectangle(textColumnX, descY, textW, 46);
-                    descBox.Bounds = new Rectangle(10, 8, textW - 20, 30);
+                    descPanel.Bounds = new Rectangle(textColumnX, descY, textColumnW, descH);
+                    descBox.Bounds = new Rectangle(10, 8, textColumnW - 20, descH - 16);
                 }
 
-                // 下方：封面来源缩略图条 + 封面操作按钮 + 保存/取消（占满可用宽度）
-                stripCaptionY = y + topRowH + 12;
-                stripRect = new Rectangle(gx, stripCaptionY + 18, avail, ThumbSize);
-                int actionsY = stripRect.Bottom + 8;
-                int actionsW = 96 + 8 + 112 + 8 + 88;
-                int ax = gx + (avail - actionsW) / 2;
-                btnPasteRect = new Rectangle(ax, actionsY, 96, SmallBtnH);
-                btnFileRect = new Rectangle(btnPasteRect.Right + 8, actionsY, 112, SmallBtnH);
-                btnAutoRect = new Rectangle(btnFileRect.Right + 8, actionsY, 88, SmallBtnH);
-                int btnY = actionsY + SmallBtnH + 16;
-                btnSaveRect = new Rectangle((Width - 104 - 8 - 88) / 2, btnY, 104, BtnH);
-                btnCancelRect = new Rectangle(btnSaveRect.Right + 8, btnY, 88, BtnH);
+                // 集合图片选择：标题行右侧翻页；缩略图按可用高度自动 1~3 行分页展示
+                thumbAreaWidth = avail;
+                thumbStartX = gx;
+                pickerCaptionY = topY + topH + 16;
+                thumbsY = pickerCaptionY + 20;
+                int bottomY = Height - 16 - BtnH;
+                int gridAvail = bottomY - 16 - thumbsY;
+                thumbCols = ThumbColumns(avail);
+                thumbRows = (gridAvail + ThumbGap) / (ThumbSize + ThumbGap);
+                if (thumbRows < 1) thumbRows = 1;
+                if (thumbRows > 3) thumbRows = 3;
+                thumbPerPage = thumbCols * thumbRows;
+                int pages = ThumbPageCount();
+                if (thumbPage > pages - 1) thumbPage = pages - 1;
+                if (thumbPage < 0) thumbPage = 0;
+                btnNextPageRect = new Rectangle(gx + avail - 22, pickerCaptionY, 22, 20);
+                btnPrevPageRect = new Rectangle(btnNextPageRect.Left - 76, pickerCaptionY, 22, 20);
+
+                // 底部操作条：左侧封面来源，右下角保存/取消
+                btnPasteRect = new Rectangle(gx, bottomY, 96, BtnH);
+                btnFileRect = new Rectangle(btnPasteRect.Right + 8, bottomY, 112, BtnH);
+                btnAutoRect = new Rectangle(btnFileRect.Right + 8, bottomY, 88, BtnH);
+                int saveW = 104, cancelW = 88, btnGap = 8;
+                int sx = Width - 16 - saveW - btnGap - cancelW;
+                btnCancelRect = new Rectangle(sx, bottomY, cancelW, BtnH);
+                btnSaveRect = new Rectangle(btnCancelRect.Right + btnGap, bottomY, saveW, BtnH);
                 return;
             }
 
@@ -488,63 +509,49 @@ namespace AppManager.Controls
             int displayRowH = Math.Max(dCoverH, 124);
             int dTotal = displayRowH + 24 + BtnH;
             int dy = Math.Max(24, (Height - dTotal) / 2);
-            coverRect = new Rectangle(gx, dy + (displayRowH - dCoverH) / 2, coverW, dCoverH);
-            stripRect = Rectangle.Empty;
+            coverRect = new Rectangle(coverX, dy + (displayRowH - dCoverH) / 2, coverW, dCoverH);
 
             int textY = dy + (displayRowH - 124) / 2;
-            nameDisplayRect = new Rectangle(textColumnX, textY, textW, 30);
-            descDisplayRect = new Rectangle(textColumnX, textY + 38, textW, 60);
-            metaDisplayRect = new Rectangle(textColumnX, textY + 104, textW, 20);
+            nameDisplayRect = new Rectangle(textColumnX, textY, textColumnW, 30);
+            descDisplayRect = new Rectangle(textColumnX, textY + 38, textColumnW, 60);
+            metaDisplayRect = new Rectangle(textColumnX, textY + 104, textColumnW, 20);
 
+            int btnW = 104 + 10 + 88;
+            int bx = Math.Max(8, Math.Min(coverRect.X + (coverRect.Width - btnW) / 2, Width - 8 - btnW));
             int btnY2 = dy + displayRowH + 24;
-            btnEnterRect = new Rectangle((Width - 104 - 10 - 88) / 2, btnY2, 104, BtnH);
+            btnEnterRect = new Rectangle(bx, btnY2, 104, BtnH);
             btnEditRect = new Rectangle(btnEnterRect.Right + 10, btnY2, 88, BtnH);
         }
 
-        // ===== 封面来源选择条 =====
+        // ===== 集合图片分页选择 =====
 
-        private int StripContentWidth
+        /// <summary>每行缩略图数量：按可用宽度自适应，3~8 张。</summary>
+        private int ThumbColumns(int avail)
         {
-            get
-            {
-                if (memberThumbs.Count == 0) return 0;
-                return memberThumbs.Count * (ThumbSize + ThumbGap) - ThumbGap;
-            }
+            int n = (avail + ThumbGap) / (ThumbSize + ThumbGap);
+            if (n < 3) n = 3;
+            if (n > 8) n = 8;
+            return n;
         }
 
-        private int MaxStripScroll
+        /// <summary>总页数（无图片时按 1 页处理，便于布局稳定）。</summary>
+        private int ThumbPageCount()
         {
-            get
-            {
-                int m = StripContentWidth - stripRect.Width;
-                return m > 0 ? m : 0;
-            }
+            if (memberThumbs.Count == 0 || thumbPerPage <= 0) return 1;
+            return (memberThumbs.Count + thumbPerPage - 1) / thumbPerPage;
         }
 
-        private void ClampStripScroll()
+        /// <summary>翻页：越界自动夹紧，翻页后清空缩略图悬停。</summary>
+        private void ChangeThumbPage(int delta)
         {
-            if (stripScroll < 0) stripScroll = 0;
-            int m = MaxStripScroll;
-            if (stripScroll > m) stripScroll = m;
-        }
-
-        /// <summary>滚轮横向滚动集合图片选择条（由主窗体滚轮路由调用）。</summary>
-        public void ScrollThumbStrip(int delta)
-        {
-            if (!editing || delta == 0) return;
-            int lines = SystemInformation.MouseWheelScrollLines;
-            if (lines <= 0) lines = 3;
-            stripScroll -= (delta / 120) * (ThumbSize + ThumbGap) * lines;
-            ClampStripScroll();
+            int pages = ThumbPageCount();
+            int p = thumbPage + delta;
+            if (p < 0) p = 0;
+            if (p > pages - 1) p = pages - 1;
+            if (p == thumbPage) return;
+            thumbPage = p;
+            thumbHover = -1;
             Invalidate();
-        }
-
-        /// <summary>屏幕坐标是否落在集合图片选择条上（供主窗体滚轮路由判定）。</summary>
-        public bool ThumbStripContainsScreen(Point screen)
-        {
-            if (!Visible || !editing || memberThumbs.Count == 0) return false;
-            Point p = PointToClient(screen);
-            return stripRect.Contains(p);
         }
 
         /// <summary>选择集合内某张图片作为封面。</summary>
@@ -603,7 +610,7 @@ namespace AppManager.Controls
 
             if (editing)
             {
-                PaintMemberStrip(g);
+                PaintMemberPicker(g);
                 bool autoActive = editPasted == null && string.IsNullOrEmpty(editCoverPath);
                 DrawButton(g, btnPasteRect, "粘贴封面", false, 8, true);
                 DrawButton(g, btnFileRect, "从文件选择…", false, 3, true);
@@ -615,74 +622,101 @@ namespace AppManager.Controls
                 return;
             }
 
-            // 封面在左，名称/简介/数量在右（文字左对齐，与 iOS 信息页一致）
+            // 封面在左、文字在右，两侧各自在列内居中
             using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, name, Theme.FontOf(16F, FontStyle.Bold), nb, nameDisplayRect);
+                Draw.DrawStringCenter(g, name, Theme.FontOf(16F, FontStyle.Bold), nb, nameDisplayRect);
 
             string desc = description.Length == 0 ? "暂无简介" : description;
             TextRenderer.DrawText(g, desc, Theme.FontOf(9.5F), descDisplayRect, Theme.TextSecondary,
-                TextFormatFlags.WordBreak | TextFormatFlags.Top | TextFormatFlags.EndEllipsis);
+                TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter | TextFormatFlags.Top
+                | TextFormatFlags.EndEllipsis);
 
             string meta = (parent.Length == 0 ? string.Empty : parent + " · ") + count + " 项资源";
             using (SolidBrush sb = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringLeft(g, meta, Theme.FontOf(9F), sb, metaDisplayRect);
+                Draw.DrawStringCenter(g, meta, Theme.FontOf(9F), sb, metaDisplayRect);
 
             DrawButton(g, btnEnterRect, "进入", true, 1, true);
             DrawButton(g, btnEditRect, "编辑", false, 2, true);
         }
 
-        /// <summary>集合内图片选择条：优先从集合内容选封面；无图片时给出粘贴/文件提示。</summary>
-        private void PaintMemberStrip(Graphics g)
+        /// <summary>集合图片分页选择：标题 + 翻页 + 1~3 行大缩略图；无图片时给出粘贴/文件提示。</summary>
+        private void PaintMemberPicker(Graphics g)
         {
-            PaintCaption(g, "从集合选择封面", new Rectangle(stripRect.X, stripCaptionY, stripRect.Width, 18));
+            int perPage = thumbPerPage;
+            int pages = ThumbPageCount();
+            PaintCaption(g, "从集合选择封面",
+                new Rectangle(thumbStartX, pickerCaptionY, Math.Max(0, thumbAreaWidth - 104), 20));
+
             if (memberThumbs.Count == 0)
             {
                 PaintCaption(g, "集合内暂无可选图片，可粘贴或从文件选择",
-                    new Rectangle(stripRect.X, stripRect.Y, stripRect.Width, ThumbSize));
+                    new Rectangle(thumbStartX, thumbsY, thumbAreaWidth, 24));
                 return;
             }
-            if (MaxStripScroll > 0)
-            {
-                using (SolidBrush hb = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringRight(g, "滚轮查看更多", Theme.FontOf(8F), hb,
-                        new Rectangle(stripRect.X, stripCaptionY, stripRect.Width, 18));
-            }
 
-            GraphicsState st = g.Save();
-            g.SetClip(stripRect);
-            int x = stripRect.X - stripScroll;
-            for (int i = 0; i < memberThumbs.Count; i++)
-            {
-                Rectangle r = new Rectangle(x, stripRect.Y, ThumbSize, ThumbSize);
-                x += ThumbSize + ThumbGap;
-                if (r.Right < stripRect.X || r.X > stripRect.Right) continue;
+            // 翻页控件：‹ 页码 ›
+            PaintPageArrow(g, btnPrevPageRect, false, thumbPage > 0);
+            PaintPageArrow(g, btnNextPageRect, true, thumbPage < pages - 1);
+            string pageText = (thumbPage + 1) + " / " + pages;
+            using (SolidBrush pb = new SolidBrush(pages > 1 ? Theme.TextSecondary : Theme.Separator))
+                Draw.DrawStringCenter(g, pageText, Theme.FontOf(8.5F), pb,
+                    new Rectangle(btnPrevPageRect.Right, pickerCaptionY,
+                        btnNextPageRect.Left - btnPrevPageRect.Right, 20));
 
-                using (GraphicsPath cp = Draw.RoundedPath(r, 8))
+            int start = thumbPage * perPage;
+            for (int i = 0; i < perPage; i++)
+            {
+                int idx = start + i;
+                if (idx >= memberThumbs.Count) break;
+                int row = thumbCols > 0 ? i / thumbCols : 0;
+                int col = thumbCols > 0 ? i % thumbCols : 0;
+                Rectangle r = new Rectangle(thumbStartX + col * (ThumbSize + ThumbGap),
+                    thumbsY + row * (ThumbSize + ThumbGap), ThumbSize, ThumbSize);
+                using (GraphicsPath cp = Draw.RoundedPath(r, 10))
                 {
                     using (SolidBrush bg = new SolidBrush(Theme.Card))
                         g.FillPath(bg, cp);
                     GraphicsState ts = g.Save();
                     g.SetClip(cp);
-                    g.DrawImage(memberThumbs[i], r);
+                    g.DrawImage(memberThumbs[idx], r);
                     g.Restore(ts);
 
-                    bool selected = editPasted == null
-                        && !string.IsNullOrEmpty(editCoverPath)
-                        && string.Equals(editCoverPath, thumbPaths[i], StringComparison.OrdinalIgnoreCase);
-                    if (selected)
+                    if (IsSelectedThumb(idx))
                     {
                         using (Pen pen = new Pen(Theme.Accent, 2.4F))
                             g.DrawPath(pen, cp);
                     }
-                    else if (i == thumbHover)
+                    else if (idx == thumbHover)
                     {
                         using (Pen pen = new Pen(Theme.Separator, 1F))
                             g.DrawPath(pen, cp);
                     }
                 }
-                if (IsSelectedThumb(i)) PaintThumbBadge(g, r);
+                if (IsSelectedThumb(idx)) PaintThumbBadge(g, r);
             }
-            g.Restore(st);
+        }
+
+        /// <summary>翻页箭头：左右朝向的小箭头，禁用时弱化。</summary>
+        private static void PaintPageArrow(Graphics g, Rectangle r, bool right, bool enabled)
+        {
+            if (r.Width <= 0) return;
+            Color c = enabled ? Theme.Accent : Theme.Separator;
+            float cx = r.X + r.Width / 2F, cy = r.Y + r.Height / 2F;
+            using (Pen p = new Pen(c, 1.8F))
+            {
+                p.StartCap = LineCap.Round;
+                p.EndCap = LineCap.Round;
+                if (right)
+                {
+                    g.DrawLine(p, cx - 3, cy - 5, cx + 2, cy);
+                    g.DrawLine(p, cx + 2, cy, cx - 3, cy + 5);
+                }
+                else
+                {
+                    g.DrawLine(p, cx + 3, cy - 5, cx - 2, cy);
+                    g.DrawLine(p, cx - 2, cy, cx + 3, cy + 5);
+                }
+            }
         }
 
         private bool IsSelectedThumb(int index)
@@ -788,6 +822,12 @@ namespace AppManager.Controls
         {
             if (editing)
             {
+                int pages = ThumbPageCount();
+                if (memberThumbs.Count > 0 && pages > 1)
+                {
+                    if (thumbPage > 0 && btnPrevPageRect.Contains(p)) return 10;
+                    if (thumbPage < pages - 1 && btnNextPageRect.Contains(p)) return 11;
+                }
                 if (!string.IsNullOrEmpty(editCoverPath) && btnAutoRect.Contains(p)) return 4;
                 if (editPasted != null && btnAutoRect.Contains(p)) return 4;
                 if (btnPasteRect.Contains(p)) return 8;
@@ -801,14 +841,21 @@ namespace AppManager.Controls
             return -1;
         }
 
-        /// <summary>按坐标命中集合图片选择条下标；未命中返回 -1。</summary>
+        /// <summary>按坐标命中当前页的缩略图下标（多行多列）；未命中返回 -1。</summary>
         private int ThumbIndexAt(Point p)
         {
-            if (!editing || memberThumbs.Count == 0 || !stripRect.Contains(p)) return -1;
-            int x = p.X - stripRect.X + stripScroll;
+            if (!editing || memberThumbs.Count == 0 || thumbCols <= 0) return -1;
+            if (p.Y < thumbsY) return -1;
+            int dy = p.Y - thumbsY;
+            int row = dy / (ThumbSize + ThumbGap);
+            if (row < 0 || row >= thumbRows) return -1;
+            if (dy - row * (ThumbSize + ThumbGap) >= ThumbSize) return -1;
+            int x = p.X - thumbStartX;
             if (x < 0) return -1;
-            int idx = x / (ThumbSize + ThumbGap);
-            if (x - idx * (ThumbSize + ThumbGap) >= ThumbSize) return -1;
+            int col = x / (ThumbSize + ThumbGap);
+            if (col < 0 || col >= thumbCols) return -1;
+            if (x - col * (ThumbSize + ThumbGap) >= ThumbSize) return -1;
+            int idx = thumbPage * thumbPerPage + row * thumbCols + col;
             return idx < memberThumbs.Count ? idx : -1;
         }
 
@@ -879,6 +926,8 @@ namespace AppManager.Controls
                 case 5: Submit(); break;
                 case 6: EndEdit(); break;
                 case 8: PasteCover(); break;
+                case 10: ChangeThumbPage(-1); break;
+                case 11: ChangeThumbPage(1); break;
             }
         }
 
@@ -888,16 +937,6 @@ namespace AppManager.Controls
             if (editing || e.Button != MouseButtons.Left) return;
             if (HitButton(e.Location) >= 0) return;   // 按钮单击已处理，忽略第二击
             EnterContents();                           // 双击信息页其它区域同样进入集合
-        }
-
-        protected override void OnMouseWheel(MouseEventArgs e)
-        {
-            if (editing && stripRect.Contains(e.Location))
-            {
-                ScrollThumbStrip(e.Delta);
-                return;
-            }
-            base.OnMouseWheel(e);
         }
 
         /// <summary>请求进入集合内容（命名避开 Control.Enter 事件，防止隐藏基类成员）。</summary>
