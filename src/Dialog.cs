@@ -611,23 +611,23 @@ namespace AppManager
     }
 
     /// <summary>
-    /// 集合编辑对话框：名称（单行）/ 说明（多行）/ 封面（预览 + 选择/清除）。
+    /// 集合新建对话框：仅名称（单行）/ 简介（多行）；封面在集合信息页内编辑。
     /// 确定（名称非空）返回填充后的 ResourceCollection；取消返回 null。
     /// </summary>
     public static class CollectionDialog
     {
-        /// <summary>编辑集合。initial 为 null 表示新建（各字段为空）。</summary>
+        /// <summary>新建集合。initial 为 null 表示各字段为空。</summary>
         public static ResourceCollection Show(string title, ResourceCollection initial)
         {
             string name0 = initial == null ? string.Empty : (initial.Name ?? string.Empty);
             string desc0 = initial == null ? string.Empty : (initial.Description ?? string.Empty);
-            string coverPath = initial == null ? string.Empty : (initial.Cover ?? string.Empty);   // 空 = 自动取首个成员
+            string coverPath = initial == null ? string.Empty : (initial.Cover ?? string.Empty);   // 新建不编辑封面，仅沿用旧值
             ResourceCollection result = null;
 
             Form f = new Form();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(400, 392);
+            f.ClientSize = new Size(400, 260);
             f.BackColor = Theme.Background;
             f.ShowInTaskbar = false;
             try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
@@ -643,14 +643,13 @@ namespace AppManager
                 using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
                 {
                     Draw.DrawStringLeft(g, "名称", Theme.FontOf(9F), lb, new Rectangle(22, 50, 120, 20));
-                    Draw.DrawStringLeft(g, "说明", Theme.FontOf(9F), lb, new Rectangle(22, 106, 120, 20));
-                    Draw.DrawStringLeft(g, "封面", Theme.FontOf(9F), lb, new Rectangle(22, 192, 120, 20));
+                    Draw.DrawStringLeft(g, "简介", Theme.FontOf(9F), lb, new Rectangle(22, 114, 120, 20));
                 }
             };
 
             TextBox nameBox = InputDialog.MakeField(f, new Rectangle(22, 72, f.ClientSize.Width - 44, 34), name0);
 
-            // 说明：多行文本，套圆角容器
+            // 简介：多行文本，套圆角容器
             TextBox descBox = new TextBox();
             descBox.Multiline = true;
             descBox.BorderStyle = BorderStyle.None;
@@ -661,7 +660,7 @@ namespace AppManager
             descBox.Text = desc0;
             Panel descPanel = new Panel();
             descPanel.BackColor = Theme.Card;
-            descPanel.Bounds = new Rectangle(22, 128, f.ClientSize.Width - 44, 58);
+            descPanel.Bounds = new Rectangle(22, 136, f.ClientSize.Width - 44, 62);
             descPanel.Paint += delegate(object s, PaintEventArgs pe)
             {
                 Graphics g = pe.Graphics;
@@ -678,47 +677,6 @@ namespace AppManager
             descBox.LostFocus += delegate { descBox.BackColor = Theme.SearchBg; descPanel.Invalidate(); };
             descPanel.Controls.Add(descBox);
             f.Controls.Add(descPanel);
-
-            // 封面预览：自定义封面显示图片，否则显示「自动」占位
-            Panel preview = new Panel();
-            preview.Bounds = new Rectangle(22, 214, 160, 96);
-            preview.BackColor = Theme.Card;
-            preview.Paint += delegate(object s, PaintEventArgs pe)
-                { PaintCoverPreview(pe.Graphics, preview.ClientRectangle, coverPath); };
-            f.Controls.Add(preview);
-
-            RoundButton pickBtn = ConfirmDialog.MakeBtn("选择封面…", false);
-            pickBtn.Bounds = new Rectangle(196, 214, 108, 32);
-            pickBtn.Click += delegate
-            {
-                using (OpenFileDialog dlg = new OpenFileDialog())
-                {
-                    dlg.Title = "选择集合封面";
-                    dlg.Filter = MediaRules.ResourceCategoryFilter("照片");
-                    if (dlg.ShowDialog(f) == DialogResult.OK)
-                    {
-                        coverPath = dlg.FileName;
-                        preview.Invalidate();
-                    }
-                }
-            };
-            f.Controls.Add(pickBtn);
-            RoundButton clearBtn = ConfirmDialog.MakeBtn("恢复自动", false);
-            clearBtn.Bounds = new Rectangle(196, 252, 108, 32);
-            clearBtn.Click += delegate
-            {
-                coverPath = string.Empty;
-                preview.Invalidate();
-            };
-            f.Controls.Add(clearBtn);
-            Label coverHint = new Label();
-            coverHint.Text = "未指定封面时自动使用集合内首个文件的缩略图";
-            coverHint.Font = Theme.FontOf(8F);
-            coverHint.ForeColor = Theme.TextSecondary;
-            coverHint.BackColor = Color.Transparent;
-            coverHint.Location = new Point(22, 316);
-            coverHint.Size = new Size(f.ClientSize.Width - 44, 18);
-            f.Controls.Add(coverHint);
 
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
             ok.Bounds = new Rectangle(f.Width / 2 - 130, f.Height - 52, 120, 32);
@@ -742,7 +700,7 @@ namespace AppManager
             cancel.Click += delegate { result = null; f.DialogResult = DialogResult.Cancel; f.Close(); };
             f.Controls.Add(ok);
             f.Controls.Add(cancel);
-            // 表单级 Esc：焦点在说明框/封面按钮等任意位置都能取消（原先仅在名称框内生效）
+            // 表单级 Esc：焦点在简介框等任意位置都能取消（原先仅在名称框内生效）
             f.KeyPreview = true;
             f.KeyDown += delegate(object s, KeyEventArgs e)
             {
@@ -756,22 +714,6 @@ namespace AppManager
             ConfirmDialog.ShowModal(f);
             f.Dispose();
             return result;
-        }
-
-        /// <summary>封面预览绘制：自定义封面等比裁剪填满（走缩略图缓存，重绘不重复解码原图）；自动模式画占位说明。</summary>
-        private static void PaintCoverPreview(Graphics g, Rectangle r, string coverPath)
-        {
-            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-            using (SolidBrush bg = new SolidBrush(Theme.SearchBg))
-                Draw.FillRoundedRect(g, bg, new Rectangle(0, 0, r.Width - 1, r.Height - 1), 10);
-            Bitmap bmp = Icons.LoadCoverThumb(coverPath, r.Width, r.Height);
-            if (bmp != null)
-            {
-                using (bmp) g.DrawImage(bmp, new Rectangle(0, 0, r.Width, r.Height));
-                return;
-            }
-            using (SolidBrush tb = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringCenter(g, "自动封面", Theme.FontOf(9F), tb, r);
         }
     }
 }

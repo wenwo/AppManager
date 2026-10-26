@@ -59,6 +59,15 @@ namespace AppManager.Controls
         private Rectangle nameDisplayRect;
         private Rectangle descDisplayRect;
         private Rectangle metaDisplayRect;
+        // 编辑态：左右卡片、预览内容与底部成员选择卡
+        private Rectangle editCardRect;
+        private Rectangle previewCardRect;
+        private Rectangle pickerCardRect;
+        private Rectangle previewCoverRect;
+        private Rectangle previewNameRect;
+        private Rectangle previewDescRect;
+        private Rectangle previewMetaRect;
+        private bool pickerVisible;
         private int textColumnX;
         private int textColumnW;
         private int pickerCaptionY;
@@ -399,6 +408,7 @@ namespace AppManager.Controls
             };
             nameBox.GotFocus += delegate { nameBox.BackColor = Color.White; namePanel.Invalidate(); };
             nameBox.LostFocus += delegate { nameBox.BackColor = Theme.SearchBg; namePanel.Invalidate(); };
+            nameBox.TextChanged += delegate { if (editing) Invalidate(); };   // 右侧预览随输入实时刷新
             namePanel.Controls.Add(nameBox);
 
             descPanel = MakeFieldPanel();
@@ -412,6 +422,7 @@ namespace AppManager.Controls
             descBox.Location = new Point(10, 8);
             descBox.GotFocus += delegate { descBox.BackColor = Color.White; descPanel.Invalidate(); };
             descBox.LostFocus += delegate { descBox.BackColor = Theme.SearchBg; descPanel.Invalidate(); };
+            descBox.TextChanged += delegate { if (editing) Invalidate(); };   // 右侧预览随输入实时刷新
             descPanel.Controls.Add(descBox);
 
             namePanel.Visible = false;
@@ -503,15 +514,46 @@ namespace AppManager.Controls
 
             if (editing)
             {
-                // 编辑态：上方大封面 + 右侧名称/高简介；下方集合图片分页选择；保存/取消固定在右下角
-                int coverH = Math.Min(230, Math.Max(140, (int)Math.Round(coverW * 5.0 / 8.0)));
-                int descH = Math.Min(130, Math.Max(100, Height - 330));
-                int fieldsH = 18 + 40 + 12 + 18 + descH;
-                int topY = 24;
-                int topH = Math.Max(coverH, fieldsH);
-                coverRect = new Rectangle(coverX, topY + (topH - coverH) / 2, coverW, coverH);
+                // 编辑态：左侧「编辑信息」卡片（封面在上、名称/简介在下），右侧「实时预览」卡片；
+                // 下方成员图片选择卡片与底部操作条。高度不足时收起成员选择卡，优先保证编辑与预览。
+                int bottomY = Height - 16 - BtnH;
+                const int labelH = 18;
+                const int labelGap = 6;
+                const int gap = 12;
+                const int topY = 16;
+                int cardTop = topY + labelH + labelGap;
+                int pickerH = 118;
+                int pickerTop = bottomY - gap - pickerH;
+                int topH = pickerTop - gap - cardTop;
+                pickerVisible = topH >= 280;
+                if (!pickerVisible)
+                {
+                    pickerH = 0;
+                    pickerTop = bottomY;
+                    topH = bottomY - gap - cardTop;
+                }
+                if (topH < 160) topH = 160;
 
-                nameCaptionY = topY + (topH - fieldsH) / 2;
+                int colGap = 16;
+                int leftW2 = (avail - colGap) / 2;
+                int rightW2 = avail - leftW2 - colGap;
+                editCardRect = new Rectangle(gx, cardTop, leftW2, topH);
+                previewCardRect = new Rectangle(gx + leftW2 + colGap, cardTop, rightW2, topH);
+                pickerCardRect = pickerVisible ? new Rectangle(gx, pickerTop, avail, pickerH) : Rectangle.Empty;
+
+                // 左卡：封面在上，名称/简介在封面下方；封面高度随窗口自适应
+                int innerW = leftW2 - 32;
+                int editCoverH = (int)Math.Round((topH - 122) * 0.58);
+                if (editCoverH < 100) editCoverH = 100;
+                if (editCoverH > 190) editCoverH = 190;
+                int editCoverW = Math.Min(innerW, (int)Math.Round(editCoverH * 8.0 / 5.0));
+                int coverX2 = gx + (leftW2 - editCoverW) / 2;
+                int coverY2 = cardTop + 16;
+                coverRect = new Rectangle(coverX2, coverY2, editCoverW, editCoverH);
+
+                textColumnX = gx + 16;
+                textColumnW = innerW;
+                nameCaptionY = coverY2 + editCoverH + 10;
                 int nameY = nameCaptionY + 18;
                 if (namePanel != null)
                 {
@@ -520,8 +562,11 @@ namespace AppManager.Controls
                     if (namePanel.Bounds != npr) namePanel.Bounds = npr;
                     if (nameBox.Bounds != nbr) nameBox.Bounds = nbr;
                 }
-                descCaptionY = nameY + 40 + 12;
+                descCaptionY = nameY + 40 + 8;
                 int descY = descCaptionY + 18;
+                int descH = cardTop + topH - 16 - descY;
+                if (descH < 44) descH = 44;
+                if (descH > 140) descH = 140;
                 if (descPanel != null)
                 {
                     Rectangle dpr = new Rectangle(textColumnX, descY, textColumnW, descH);
@@ -530,23 +575,48 @@ namespace AppManager.Controls
                     if (descBox.Bounds != dbr) descBox.Bounds = dbr;
                 }
 
-                // 集合图片选择：标题行右侧翻页；缩略图按可用高度自动 1~3 行分页展示
-                thumbAreaWidth = avail;
-                thumbStartX = gx;
-                pickerCaptionY = topY + topH + 16;
-                thumbsY = pickerCaptionY + 20;
-                int bottomY = Height - 16 - BtnH;
-                int gridAvail = bottomY - 16 - thumbsY;
-                thumbCols = ThumbColumns(avail);
-                thumbRows = (gridAvail + ThumbGap) / (ThumbSize + ThumbGap);
-                if (thumbRows < 1) thumbRows = 1;
-                if (thumbRows > 3) thumbRows = 3;
-                thumbPerPage = thumbCols * thumbRows;
-                int pages = ThumbPageCount();
-                if (thumbPage > pages - 1) thumbPage = pages - 1;
-                if (thumbPage < 0) thumbPage = 0;
-                btnNextPageRect = new Rectangle(gx + avail - 22, pickerCaptionY, 22, 20);
-                btnPrevPageRect = new Rectangle(btnNextPageRect.Left - 76, pickerCaptionY, 22, 20);
+                // 右卡：整页预览（封面 + 名称 + 简介 + 数量），内容在卡内垂直居中
+                int pInnerW = previewCardRect.Width - 56;
+                int pCoverW = Math.Min(pInnerW, 300);
+                int pCoverH = (int)Math.Round(pCoverW * 5.0 / 8.0);
+                if (pCoverH > topH - 130) pCoverH = Math.Max(80, topH - 130);
+                int contentH = pCoverH + 8 + 28 + 4 + 42 + 4 + 18;
+                int pTop = cardTop + (topH - contentH) / 2;
+                if (pTop < cardTop + 12) pTop = cardTop + 12;
+                int pCoverX = previewCardRect.X + (previewCardRect.Width - pCoverW) / 2;
+                previewCoverRect = new Rectangle(pCoverX, pTop, pCoverW, pCoverH);
+                previewNameRect = new Rectangle(previewCardRect.X + 28, previewCoverRect.Bottom + 8,
+                    previewCardRect.Width - 56, 28);
+                previewDescRect = new Rectangle(previewCardRect.X + 28, previewNameRect.Bottom + 4,
+                    previewCardRect.Width - 56, 42);
+                previewMetaRect = new Rectangle(previewCardRect.X + 28, previewDescRect.Bottom + 4,
+                    previewCardRect.Width - 56, 18);
+
+                // 底部成员图片选择卡：标题 + 翻页 + 1~3 行缩略图
+                if (pickerVisible)
+                {
+                    pickerCaptionY = pickerCardRect.Y + 10;
+                    thumbStartX = pickerCardRect.X + 16;
+                    thumbAreaWidth = pickerCardRect.Width - 32;
+                    thumbsY = pickerCaptionY + 24;
+                    thumbCols = ThumbColumns(thumbAreaWidth);
+                    int rows = (pickerCardRect.Bottom - 10 - thumbsY + ThumbGap) / (ThumbSize + ThumbGap);
+                    if (rows < 1) rows = 1;
+                    if (rows > 3) rows = 3;
+                    thumbRows = rows;
+                    thumbPerPage = thumbCols * thumbRows;
+                    int pages = ThumbPageCount();
+                    if (thumbPage > pages - 1) thumbPage = pages - 1;
+                    if (thumbPage < 0) thumbPage = 0;
+                    btnNextPageRect = new Rectangle(pickerCardRect.Right - 16 - 22, pickerCaptionY, 22, 20);
+                    btnPrevPageRect = new Rectangle(btnNextPageRect.Left - 76, pickerCaptionY, 22, 20);
+                }
+                else
+                {
+                    thumbPerPage = 0;
+                    btnPrevPageRect = Rectangle.Empty;
+                    btnNextPageRect = Rectangle.Empty;
+                }
 
                 // 底部操作条：左侧封面来源，右下角保存/取消
                 btnPasteRect = new Rectangle(gx, bottomY, 96, BtnH);
@@ -558,6 +628,7 @@ namespace AppManager.Controls
                 btnSaveRect = new Rectangle(btnCancelRect.Right + btnGap, bottomY, saveW, BtnH);
                 return;
             }
+            pickerVisible = false;
 
             int dCoverH = Math.Min(240, Math.Max(110, (int)Math.Round(coverW * 5.0 / 8.0)));
             int displayRowH = Math.Max(dCoverH, 124);
@@ -642,6 +713,7 @@ namespace AppManager.Controls
             if (name.Length == 0 && !editing) return;
 
             LayoutChrome();
+            if (editing) PaintEditChrome(g);
 
             // 封面：编辑态优先显示粘贴图片 / 已选预览，展示态显示当前封面
             Bitmap shown = cover;
@@ -664,7 +736,8 @@ namespace AppManager.Controls
 
             if (editing)
             {
-                PaintMemberPicker(g);
+                if (pickerVisible) PaintMemberPicker(g);
+                PaintEditPreview(g, shown);
                 bool autoActive = editPasted == null && string.IsNullOrEmpty(editCoverPath);
                 DrawButton(g, btnPasteRect, "粘贴封面", false, 8, true);
                 DrawButton(g, btnFileRect, "从文件选择…", false, 3, true);
@@ -691,6 +764,66 @@ namespace AppManager.Controls
 
             DrawButton(g, btnEnterRect, "进入", true, 1, true);
             DrawButton(g, btnEditRect, "编辑", false, 2, true);
+        }
+
+        /// <summary>编辑态卡片骨架：分区标题 + 左右白色圆角卡片 + 底部成员选择卡，统一 iOS 卡片化风格。</summary>
+        private void PaintEditChrome(Graphics g)
+        {
+            PaintCaption(g, "编辑信息", new Rectangle(editCardRect.X, 16, editCardRect.Width, 18));
+            PaintCaption(g, "实时预览", new Rectangle(previewCardRect.X, 16, previewCardRect.Width, 18));
+
+            Draw.DrawShadow(g, editCardRect, 14, 0.5f);
+            using (SolidBrush b = new SolidBrush(Theme.Card))
+                Draw.FillRoundedRect(g, b, editCardRect, 14);
+
+            Draw.DrawShadow(g, previewCardRect, 14, 0.5f);
+            using (SolidBrush b = new SolidBrush(Theme.Card))
+                Draw.FillRoundedRect(g, b, previewCardRect, 14);
+            // 预览区内的浅灰画布，模拟集合信息页的真实背景
+            Rectangle inset = previewCardRect;
+            inset.Inflate(-12, -12);
+            if (inset.Width > 40 && inset.Height > 40)
+                using (SolidBrush b = new SolidBrush(Theme.Background))
+                    Draw.FillRoundedRect(g, b, inset, 12);
+
+            if (pickerVisible)
+            {
+                Draw.DrawShadow(g, pickerCardRect, 14, 0.5f);
+                using (SolidBrush b = new SolidBrush(Theme.Card))
+                    Draw.FillRoundedRect(g, b, pickerCardRect, 14);
+            }
+        }
+
+        /// <summary>右侧实时预览：封面 + 名称 + 简介 + 数量，随输入即时刷新，呈现最终信息页效果。</summary>
+        private void PaintEditPreview(Graphics g, Bitmap shown)
+        {
+            Draw.DrawShadow(g, previewCoverRect, 12, 0.5f);
+            using (GraphicsPath cp = Draw.RoundedPath(previewCoverRect, 12))
+            {
+                using (SolidBrush bg = new SolidBrush(Theme.Card))
+                    g.FillPath(bg, cp);
+                GraphicsState st = g.Save();
+                g.SetClip(cp);
+                if (shown != null) DrawCoverFilled(g, shown, previewCoverRect);
+                else PaintCoverPlaceholder(g, previewCoverRect);
+                g.Restore(st);
+            }
+
+            string liveName = nameBox != null ? (nameBox.Text ?? string.Empty).Trim() : name;
+            bool noName = liveName.Length == 0;
+            if (noName) liveName = "未命名集合";
+            using (SolidBrush nb = new SolidBrush(noName ? Theme.TextSecondary : Theme.TextPrimary))
+                Draw.DrawStringCenter(g, liveName, Theme.FontOf(15F, FontStyle.Bold), nb, previewNameRect);
+
+            string liveDesc = descBox != null ? (descBox.Text ?? string.Empty).Trim() : description;
+            if (liveDesc.Length == 0) liveDesc = "暂无简介";
+            TextRenderer.DrawText(g, liveDesc, Theme.FontOf(9.5F), previewDescRect, Theme.TextSecondary,
+                TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter | TextFormatFlags.Top
+                | TextFormatFlags.EndEllipsis);
+
+            string meta = (parent.Length == 0 ? string.Empty : parent + " · ") + count + " 项资源";
+            using (SolidBrush sb = new SolidBrush(Theme.TextSecondary))
+                Draw.DrawStringCenter(g, meta, Theme.FontOf(9F), sb, previewMetaRect);
         }
 
         /// <summary>集合图片分页选择：标题 + 翻页 + 1~3 行大缩略图；无图片时给出粘贴/文件提示。</summary>
@@ -728,7 +861,7 @@ namespace AppManager.Controls
                     thumbsY + row * (ThumbSize + ThumbGap), ThumbSize, ThumbSize);
                 using (GraphicsPath cp = Draw.RoundedPath(r, 10))
                 {
-                    using (SolidBrush bg = new SolidBrush(Theme.Card))
+                    using (SolidBrush bg = new SolidBrush(Theme.SearchBg))
                         g.FillPath(bg, cp);
                     GraphicsState ts = g.Save();
                     g.SetClip(cp);
@@ -885,7 +1018,7 @@ namespace AppManager.Controls
             if (editing)
             {
                 int pages = ThumbPageCount();
-                if (memberPaths.Count > 0 && pages > 1)
+                if (pickerVisible && memberPaths.Count > 0 && pages > 1)
                 {
                     if (thumbPage > 0 && btnPrevPageRect.Contains(p)) return 10;
                     if (thumbPage < pages - 1 && btnNextPageRect.Contains(p)) return 11;
@@ -906,7 +1039,7 @@ namespace AppManager.Controls
         /// <summary>按坐标命中当前页的缩略图下标（多行多列）；未命中返回 -1。</summary>
         private int ThumbIndexAt(Point p)
         {
-            if (!editing || memberPaths.Count == 0 || thumbCols <= 0) return -1;
+            if (!editing || !pickerVisible || memberPaths.Count == 0 || thumbCols <= 0) return -1;
             if (p.Y < thumbsY) return -1;
             int dy = p.Y - thumbsY;
             int row = dy / (ThumbSize + ThumbGap);
