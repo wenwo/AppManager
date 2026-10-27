@@ -9,9 +9,10 @@ namespace AppManager.Controls
 {
     /// <summary>
     /// 应用内图片查看器：双击照片后替换列表区域展示大图（窗口其余部分不变）。
+    /// 外观与视频播放器统一：浅色底 + 顶部仅「返回」+ 黑色圆角画布 + 深色悬浮工具条 +
+    /// 底部平铺信息栏（文件名 + 当前/总数），与侧边栏底栏一致；
     /// 滚轮以光标为中心缩放、拖拽平移、双击在「适应窗口/实际大小」间切换；
-    /// 底部按钮或 ←/→ 切换上一张/下一张，Esc/返回按钮退出；顶栏显示文件名与序号。
-    /// 整体深色底 + 白色图形元素，与系统照片应用的大图浏览体验一致。
+    /// 底部按钮或 ←/→ 切换上一张/下一张，Esc/返回按钮退出。
     /// </summary>
     public class ImageViewerControl : Control
     {
@@ -38,17 +39,22 @@ namespace AppManager.Controls
 
         // 界面按钮几何：OnPaint 布局后缓存，命中测试与绘制共用
         private Rectangle backRect;
-        private Rectangle nameRect;
-        private Rectangle countRect;
+        private Rectangle canvasRect;
+        private Rectangle infoBarRect;
         private Rectangle pillRect;
         private Rectangle prevRect, zoomOutRect, zoomLabelRect, zoomInRect, nextRect;
 
-        private static readonly Color Bg = Color.FromArgb(20, 20, 22);
+        private static readonly Color Bg = Theme.Background;                    // 与主界面一致的浅色底
+        private static readonly Color CanvasBg = Color.FromArgb(20, 20, 22);   // 画布内部黑底
         private static readonly Color TextWhite = Color.White;
         private static readonly Color TextDim = Color.FromArgb(160, 255, 255, 255);
         private const int TopBarH = 44;
         private const int PillBtnW = 44;
         private const int PillH = 40;
+        private const int ChromePad = 16;       // 画布与内容区之间的留白
+        private const int CardGap = 12;         // 画布 / 工具条 / 信息栏之间的间距
+        private const int InfoBarH = 44;        // 底部信息栏高度（与侧边栏底栏一致）
+        private const int CanvasRadius = 14;    // 画布圆角
 
         public ImageViewerControl()
         {
@@ -63,10 +69,15 @@ namespace AppManager.Controls
         /// <summary>当前图片展示倍率（相对实际像素）。</summary>
         private float DisplayScale { get { return fitScale * zoomFactor; } }
 
-        /// <summary>图片绘制区：顶栏以下、底部按钮以上的全部空间。</summary>
+        /// <summary>图片画布区：顶栏以下、工具条以上的全部空间（黑色圆角卡片）。</summary>
         private Rectangle ImageArea
         {
-            get { return new Rectangle(0, TopBarH, Width, Math.Max(0, Height - TopBarH - PillH - 24)); }
+            get
+            {
+                int bottom = Height - InfoBarH - CardGap - PillH - CardGap;
+                return new Rectangle(ChromePad, TopBarH, Math.Max(0, Width - ChromePad * 2),
+                    Math.Max(0, bottom - TopBarH));
+            }
         }
 
         /// <summary>打开一组图片并定位到指定下标；外部负责显隐切换。</summary>
@@ -259,7 +270,7 @@ namespace AppManager.Controls
             // 捕获鼠标：拖出控件外松开也能正常结束平移/按下态
             Capture = true;
             if (btn >= 0) { press = btn; Invalidate(); return; }
-            if (image != null && !loadFailed)
+            if (image != null && !loadFailed && ImageArea.Contains(e.Location))
             {
                 panning = true;
                 panStart = e.Location;
@@ -319,7 +330,8 @@ namespace AppManager.Controls
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (HitButton(e.Location) < 0) ToggleFit();
+            if (!ImageArea.Contains(e.Location) || HitButton(e.Location) >= 0) return;
+            ToggleFit();
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
@@ -361,43 +373,57 @@ namespace AppManager.Controls
             g.Clear(Bg);
 
             LayoutChrome();
-            DrawImage(g);
+            DrawCanvas(g);
             DrawTopBar(g);
             DrawPill(g);
+            DrawInfoBar(g);
         }
 
         private void LayoutChrome()
         {
-            // 顶栏：返回在左，文件名居中，序号在右
-            backRect = new Rectangle(8, 6, 76, TopBarH - 12);
-            countRect = new Rectangle(Width - 96, 6, 88, TopBarH - 12);
-            nameRect = new Rectangle(backRect.Right + 8, 0,
-                Math.Max(0, countRect.Left - backRect.Right - 16), TopBarH);
+            // 顶栏：仅左侧返回（文件名/序号在底部信息栏）
+            backRect = new Rectangle(ChromePad, 6, 76, TopBarH - 12);
 
-            // 底部居中悬浮操作条
+            // 底部信息栏：平铺底栏，高度与侧边栏「新建」底栏一致
+            int infoTop = Height - InfoBarH;
+            infoBarRect = new Rectangle(0, infoTop, Width, InfoBarH);
+
+            // 底部居中悬浮工具条：上一张/缩小/比例/放大/下一张
             int pillW = PillBtnW * 5;
-            pillRect = new Rectangle((Width - pillW) / 2, Height - PillH - 16, pillW, PillH);
+            pillRect = new Rectangle((Width - pillW) / 2, infoTop - CardGap - PillH, pillW, PillH);
             prevRect = new Rectangle(pillRect.X, pillRect.Y, PillBtnW, PillH);
             zoomOutRect = new Rectangle(prevRect.Right, pillRect.Y, PillBtnW, PillH);
             zoomLabelRect = new Rectangle(zoomOutRect.Right, pillRect.Y, PillBtnW, PillH);
             zoomInRect = new Rectangle(zoomLabelRect.Right, pillRect.Y, PillBtnW, PillH);
             nextRect = new Rectangle(zoomInRect.Right, pillRect.Y, PillBtnW, PillH);
+
+            // 画布区与底部卡片共用同一留白间距
+            canvasRect = ImageArea;
         }
 
-        private void DrawImage(Graphics g)
+        /// <summary>画布：黑色圆角卡片 + 柔和投影，图片按圆角裁切绘制；加载失败时居中显示占位文案。</summary>
+        private void DrawCanvas(Graphics g)
         {
-            if (image == null)
+            if (canvasRect.Width <= 0 || canvasRect.Height <= 0) return;
+            Draw.DrawShadow(g, canvasRect, CanvasRadius, 0.6f);
+            using (GraphicsPath path = Draw.RoundedPath(canvasRect, CanvasRadius))
             {
-                if (loadFailed)
+                using (SolidBrush b = new SolidBrush(CanvasBg))
+                    g.FillPath(b, path);
+                if (image == null)
                 {
-                    using (SolidBrush b = new SolidBrush(TextDim))
-                        Draw.DrawStringCenter(g, "无法加载此图片", Theme.FontOf(10F), b, ImageArea);
+                    if (loadFailed)
+                        using (SolidBrush b = new SolidBrush(TextDim))
+                            Draw.DrawStringCenter(g, "无法加载此图片", Theme.FontOf(10F), b, canvasRect);
+                    return;
                 }
-                return;
+                GraphicsState st = g.Save();
+                g.SetClip(path);
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                g.DrawImage(image, ImageDestRect());
+                g.Restore(st);
             }
-            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-            g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-            g.DrawImage(image, ImageDestRect());
             g.InterpolationMode = InterpolationMode.Default;
             g.PixelOffsetMode = PixelOffsetMode.Default;
         }
@@ -408,7 +434,7 @@ namespace AppManager.Controls
             DrawButtonBg(g, 5, backRect);
             float cx = backRect.X + 16;
             float cy = backRect.Y + backRect.Height / 2F;
-            using (Pen pen = new Pen(TextWhite, 1.8F))
+            using (Pen pen = new Pen(Theme.TextPrimary, 1.8F))
             {
                 pen.StartCap = LineCap.Round;
                 pen.EndCap = LineCap.Round;
@@ -416,22 +442,38 @@ namespace AppManager.Controls
                 g.DrawLine(pen, cx - 3, cy, cx + 3, cy + 5);
             }
             Rectangle textR = new Rectangle(backRect.X + 24, backRect.Y, backRect.Width - 24, backRect.Height);
-            TextRenderer.DrawText(g, "返回", Theme.FontOf(9.5F), textR, TextWhite,
+            TextRenderer.DrawText(g, "返回", Theme.FontOf(9.5F), textR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+        }
 
-            // 文件名（超长省略）与「当前/总数」
+        /// <summary>底部信息栏：平铺底栏 + 顶部分隔线，左侧文件名、右侧当前/总数，与侧边栏底栏同风格。</summary>
+        private void DrawInfoBar(Graphics g)
+        {
+            if (infoBarRect.Width <= 0 || infoBarRect.Height <= 0) return;
+            using (Pen p = new Pen(Theme.Separator, 1))
+                g.DrawLine(p, 12, infoBarRect.Y, infoBarRect.Width - 12, infoBarRect.Y);
+
+            const int pad = 16;
+            const int countW = 80;
+            Rectangle countR = new Rectangle(infoBarRect.Right - pad - countW, infoBarRect.Y,
+                countW, infoBarRect.Height);
+            Rectangle nameR = new Rectangle(infoBarRect.X + pad, infoBarRect.Y,
+                Math.Max(0, countR.Left - 12 - (infoBarRect.X + pad)), infoBarRect.Height);
+
             string name = paths.Count > 0 && index < paths.Count ? Path.GetFileName(paths[index]) : string.Empty;
-            TextRenderer.DrawText(g, name, Theme.FontOf(9.5F), nameRect, TextWhite,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, name, Theme.FontOf(9.5F), nameR, Theme.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                | TextFormatFlags.SingleLine);
             string count = (index + 1) + " / " + paths.Count;
-            TextRenderer.DrawText(g, count, Theme.FontOf(9F), countRect, TextDim,
-                TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, count, Theme.FontOf(9F), countR, Theme.TextSecondary,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
         private void DrawPill(Graphics g)
         {
-            // 深色悬浮底：与背景拉开一点层次，圆角与 iOS 工具条一致
-            using (SolidBrush b = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
+            // 深色悬浮底：浅色背景上保持工具按钮的对比度，投影拉开层次
+            Draw.DrawShadow(g, pillRect, PillH / 2, 0.8f);
+            using (SolidBrush b = new SolidBrush(Theme.TooltipBg))
                 Draw.FillRoundedRect(g, b, pillRect, PillH / 2);
 
             bool single = paths.Count < 2;
@@ -445,7 +487,7 @@ namespace AppManager.Controls
         /// <summary>悬浮条图标按钮：chevron 前后切换、± 缩放；single 时前后切换弱化。</summary>
         private void DrawPillBtn(Graphics g, Rectangle r, int id, bool dim)
         {
-            DrawButtonBg(g, id, r);
+            DrawPillButtonBg(g, id, r);
             Color c = dim ? Color.FromArgb(90, 255, 255, 255) : TextWhite;
             float cx = r.X + r.Width / 2F;
             float cy = r.Y + r.Height / 2F;
@@ -477,14 +519,23 @@ namespace AppManager.Controls
         /// <summary>当前缩放比例文本，点击在「适应窗口/实际大小」间切换。</summary>
         private void DrawZoomLabel(Graphics g)
         {
-            DrawButtonBg(g, 2, zoomLabelRect);
+            DrawPillButtonBg(g, 2, zoomLabelRect);
             string text = Math.Round(DisplayScale * 100F) + "%";
             TextRenderer.DrawText(g, text, Theme.FontOf(9F), zoomLabelRect, TextWhite,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
 
-        /// <summary>按钮悬停/按下底色：仅叠加白色透明度，无描边（与标题栏按钮一致）。</summary>
+        /// <summary>浅色顶栏按钮悬停/按下底色：叠加黑色透明度，无描边（与侧边栏悬停一致）。</summary>
         private void DrawButtonBg(Graphics g, int id, Rectangle r)
+        {
+            if (press != id && hover != id) return;
+            Color fill = press == id ? Color.FromArgb(26, 0, 0, 0) : Color.FromArgb(12, 0, 0, 0);
+            using (SolidBrush b = new SolidBrush(fill))
+                Draw.FillRoundedRect(g, b, r, 10);
+        }
+
+        /// <summary>深色悬浮条按钮悬停/按下底色：叠加白色透明度，无描边。</summary>
+        private void DrawPillButtonBg(Graphics g, int id, Rectangle r)
         {
             if (press != id && hover != id) return;
             Color fill = press == id ? Color.FromArgb(60, 255, 255, 255) : Color.FromArgb(34, 255, 255, 255);

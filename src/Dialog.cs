@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Text;
 using System.Windows.Forms;
 using AppManager.Controls;
 
@@ -714,6 +717,313 @@ namespace AppManager
             ConfirmDialog.ShowModal(f);
             f.Dispose();
             return result;
+        }
+    }
+
+    /// <summary>
+    /// 资源属性对话框：左侧缩略图（照片显示真实预览，其余类型显示文件图标），右侧名称与元数据
+    /// （类型/大小/拍摄时间/尺寸/地点/位置/创建与修改时间）。
+    /// 信息组织参考 Windows「属性」、macOS「显示简介」与相册详情面板；照片的拍摄时间与 GPS 地点取自 EXIF。
+    /// </summary>
+    public static class PropertiesDialog
+    {
+        private const int DlgW = 520;
+        private const int Pad = 22;
+        private const int PreviewW = 148;
+        private const int RowH = 26;
+        private const int LabelW = 84;
+
+        public static void Show(AppInfo app)
+        {
+            if (app == null) return;
+            string path = app.TargetPath;
+            bool folder = !string.IsNullOrEmpty(path) && Directory.Exists(path);
+            bool file = !string.IsNullOrEmpty(path) && File.Exists(path);
+            if (!folder && !file) return;
+
+            Bitmap preview;
+            List<string[]> rows = BuildRows(app, path, folder, out preview);
+            int rowsBottom = 82 + rows.Count * RowH;
+            int clientH = rowsBottom + 12 + 32 + 22;
+
+            Form f = new Form();
+            f.FormBorderStyle = FormBorderStyle.None;
+            f.StartPosition = FormStartPosition.CenterParent;
+            f.ClientSize = new Size(DlgW, clientH);
+            f.BackColor = Theme.Background;
+            f.ShowInTaskbar = false;
+            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
+
+            // 克隆图标：模态期间后台静默重扫可能释放原图标，直接引用会画到已释放位图；
+            // 图标尚未加载时按需提取一次，避免属性页预览区空白
+            Bitmap icon = null;
+            try
+            {
+                icon = app.Icon != null ? new Bitmap(app.Icon) : Icons.Extract(app, Theme.IconSize);
+            }
+            catch { }
+            int rightX = Pad + PreviewW + 16;
+            int rightW = DlgW - rightX - Pad;
+            f.Paint += delegate(object s, PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (SolidBrush b = new SolidBrush(Theme.Card))
+                    Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
+                using (SolidBrush b = new SolidBrush(Theme.TextSecondary))
+                    Draw.DrawStringLeft(g, "属性", Theme.FontOf(9F), b, new Rectangle(Pad, 14, DlgW - Pad * 2, 20));
+
+                // 预览：照片用缩略图铺满圆角方块，其余类型居中绘制文件图标
+                Rectangle pv = new Rectangle(Pad, 46, PreviewW, PreviewW);
+                using (GraphicsPath p = Draw.RoundedPath(pv, 12))
+                {
+                    using (SolidBrush b = new SolidBrush(Theme.ChipBg))
+                        g.FillPath(b, p);
+                    GraphicsState st = g.Save();
+                    g.SetClip(p);
+                    if (preview != null) DrawCover(g, preview, pv);
+                    else if (icon != null)
+                        g.DrawImage(icon, new Rectangle(pv.X + (pv.Width - Theme.IconSize) / 2,
+                            pv.Y + (pv.Height - Theme.IconSize) / 2, Theme.IconSize, Theme.IconSize));
+                    g.Restore(st);
+                }
+
+                using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
+                    Draw.DrawStringLeft(g, app.DisplayName(), Theme.FontOf(11F, FontStyle.Bold), nb,
+                        new Rectangle(rightX, 46, rightW, 24));
+
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    Rectangle lr = new Rectangle(rightX, 82 + i * RowH, LabelW, RowH);
+                    Rectangle vr = new Rectangle(lr.Right + 8, lr.Y, rightW - LabelW - 8, RowH);
+                    using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
+                        Draw.DrawStringLeft(g, rows[i][0], Theme.FontOf(9F), lb, lr);
+                    using (SolidBrush vb = new SolidBrush(Theme.TextPrimary))
+                        Draw.DrawStringLeft(g, rows[i][1], Theme.FontOf(9.5F), vb, vr);
+                }
+            };
+
+            RoundButton done = ConfirmDialog.MakeBtn("完成", true);
+            done.Bounds = new Rectangle(DlgW - Pad - 96, clientH - 22 - 32, 96, 32);
+            done.Click += delegate { f.DialogResult = DialogResult.OK; f.Close(); };
+            f.Controls.Add(done);
+            f.KeyPreview = true;
+            f.KeyDown += delegate(object s, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Enter)
+                {
+                    f.DialogResult = DialogResult.OK;
+                    f.Close();
+                }
+            };
+
+            // 模态结束后统一释放位图（无论对话框如何关闭）
+            try { ConfirmDialog.ShowModal(f); }
+            finally
+            {
+                if (icon != null) icon.Dispose();
+                if (preview != null) preview.Dispose();
+                f.Dispose();
+            }
+        }
+
+        /// <summary>构建属性行：类型/大小 +（照片）拍摄时间/尺寸/地点 + 位置/创建与修改时间。</summary>
+        private static List<string[]> BuildRows(AppInfo app, string path, bool folder, out Bitmap preview)
+        {
+            preview = null;
+            List<string[]> rows = new List<string[]>();
+
+            string typeText;
+            if (folder) typeText = "文件夹";
+            else
+            {
+                string ext = Path.GetExtension(path);
+                string typeName = MediaRules.IsImage(path) ? "照片"
+                    : MediaRules.IsVideo(path) ? "视频"
+                    : MediaRules.IsAudio(path) ? "音乐" : "文件";
+                typeText = string.IsNullOrEmpty(ext)
+                    ? typeName
+                    : typeName + " · " + ext.TrimStart('.').ToUpperInvariant();
+            }
+            rows.Add(new string[] { "类型", typeText });
+
+            string size = "—";
+            if (!folder)
+            {
+                try { size = HumanSize(new FileInfo(path).Length); } catch { }
+            }
+            rows.Add(new string[] { "大小", size });
+
+            int width = 0, height = 0;
+            string taken = null, geo = null;
+            if (!folder && MediaRules.IsImage(path))
+                ReadImageInfo(path, out width, out height, out taken, out geo, out preview);
+
+            if (!string.IsNullOrEmpty(taken)) rows.Add(new string[] { "拍摄时间", taken });
+            if (width > 0) rows.Add(new string[] { "尺寸", width + " × " + height });
+            if (!string.IsNullOrEmpty(geo)) rows.Add(new string[] { "地点", geo });
+
+            string dir = string.Empty;
+            try
+            {
+                string p = folder ? path.TrimEnd(Path.DirectorySeparatorChar) : path;
+                dir = Path.GetDirectoryName(p) ?? string.Empty;
+            }
+            catch { }
+            rows.Add(new string[] { "位置", dir.Length == 0 ? path : dir });
+
+            try
+            {
+                DateTime created = folder ? Directory.GetCreationTime(path) : File.GetCreationTime(path);
+                DateTime modified = folder ? Directory.GetLastWriteTime(path) : File.GetLastWriteTime(path);
+                rows.Add(new string[] { "创建时间", created.ToString("yyyy-MM-dd HH:mm:ss") });
+                rows.Add(new string[] { "修改时间", modified.ToString("yyyy-MM-dd HH:mm:ss") });
+            }
+            catch { }
+            return rows;
+        }
+
+        /// <summary>读取图片尺寸、EXIF 拍摄时间/GPS 与缩略图；任一解析失败均静默降级。
+        /// 属性项编号采用 EXIF 标准（0x9003 拍摄时间、0x0001~0x0004 GPS 经纬度与半球）。</summary>
+        private static void ReadImageInfo(string path, out int width, out int height,
+            out string taken, out string geo, out Bitmap preview)
+        {
+            width = 0; height = 0; taken = null; geo = null; preview = null;
+            try
+            {
+                using (Image img = Image.FromFile(path))
+                {
+                    width = img.Width;
+                    height = img.Height;
+                    string dto = null, dtd = null, dt = null, latRef = null, lonRef = null;
+                    double lat = double.NaN, lon = double.NaN;
+                    int orientation = 1;
+                    PropertyItem[] props = img.PropertyItems;
+                    for (int i = 0; i < props.Length; i++)
+                    {
+                        PropertyItem p = props[i];
+                        switch (p.Id)
+                        {
+                            case 0x9003: dto = ExifDate(p.Value); break;   // DateTimeOriginal
+                            case 0x9004: dtd = ExifDate(p.Value); break;   // DateTimeDigitized
+                            case 0x0132: dt = ExifDate(p.Value); break;    // DateTime
+                            case 0x0001: lat = GpsDegree(p.Value); break;  // GPSLatitude
+                            case 0x0002: latRef = ExifAscii(p.Value); break; // GPSLatitudeRef
+                            case 0x0003: lon = GpsDegree(p.Value); break;  // GPSLongitude
+                            case 0x0004: lonRef = ExifAscii(p.Value); break; // GPSLongitudeRef
+                            case 0x0112:
+                                if (p.Value != null && p.Value.Length >= 2)
+                                    orientation = BitConverter.ToUInt16(p.Value, 0);
+                                break;
+                        }
+                    }
+                    taken = !string.IsNullOrEmpty(dto) ? dto : (!string.IsNullOrEmpty(dtd) ? dtd : dt);
+                    if (!double.IsNaN(lat) && !double.IsNaN(lon)) geo = FormatGeo(lat, latRef, lon, lonRef);
+                    preview = MakeThumb(img, orientation);
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>生成 2 倍尺寸方形缩略图（148 方块在高分屏下清晰），并按 EXIF 方向校正。
+        /// 旋转只作用于缩略图画布，不对原图整体重采样，避免大图打开属性时多一次全图处理。</summary>
+        private static Bitmap MakeThumb(Image src, int orientation)
+        {
+            const int size = 296;
+            Bitmap bmp = new Bitmap(size, size);
+            try
+            {
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    switch (orientation)
+                    {
+                        case 3: g.TranslateTransform(size, size); g.RotateTransform(180); break;
+                        case 6: g.TranslateTransform(size, 0); g.RotateTransform(90); break;
+                        case 8: g.TranslateTransform(0, size); g.RotateTransform(270); break;
+                    }
+                    DrawCover(g, src, new Rectangle(0, 0, size, size));
+                }
+                return bmp;
+            }
+            catch
+            {
+                bmp.Dispose();
+                return null;
+            }
+        }
+
+        /// <summary>等比裁剪填满目标区域（居中裁剪，类似 CSS cover）。</summary>
+        private static void DrawCover(Graphics g, Image src, Rectangle dest)
+        {
+            if (src == null || src.Width <= 0 || src.Height <= 0) return;
+            Rectangle srcRect;
+            if ((double)src.Width / src.Height > (double)dest.Width / dest.Height)
+            {
+                int w = (int)(src.Height * dest.Width / (double)dest.Height);
+                srcRect = new Rectangle((src.Width - w) / 2, 0, w, src.Height);
+            }
+            else
+            {
+                int h = (int)(src.Width * dest.Height / (double)dest.Width);
+                srcRect = new Rectangle(0, (src.Height - h) / 2, src.Width, h);
+            }
+            g.DrawImage(src, dest, srcRect, GraphicsUnit.Pixel);
+        }
+
+        /// <summary>EXIF ASCII 字段（如时间/半球）：去掉补零后返回。</summary>
+        private static string ExifAscii(byte[] value)
+        {
+            if (value == null || value.Length == 0) return string.Empty;
+            return Encoding.ASCII.GetString(value).Trim('\0', ' ');
+        }
+
+        /// <summary>EXIF 时间统一为「yyyy-MM-dd HH:mm:ss」；解析失败时保留原始文本。</summary>
+        private static string ExifDate(byte[] value)
+        {
+            string s = ExifAscii(value);
+            DateTime t;
+            if (DateTime.TryParseExact(s, "yyyy:MM:dd HH:mm:ss", CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out t))
+                return t.ToString("yyyy-MM-dd HH:mm:ss");
+            return s;
+        }
+
+        /// <summary>GPS 度分秒（3 组有理数）换算为十进制度；非法数据返回 NaN。</summary>
+        private static double GpsDegree(byte[] value)
+        {
+            if (value == null || value.Length < 24) return double.NaN;
+            double result = 0;
+            for (int i = 0; i < 3; i++)
+            {
+                uint num = BitConverter.ToUInt32(value, i * 8);
+                uint den = BitConverter.ToUInt32(value, i * 8 + 4);
+                if (den == 0) return double.NaN;
+                result += num / (double)den / Math.Pow(60, i);
+            }
+            return result;
+        }
+
+        /// <summary>经纬度文本：南纬/西经取负并按半球标注，保留 6 位小数。</summary>
+        private static string FormatGeo(double lat, string latRef, double lon, string lonRef)
+        {
+            double la = string.Equals(latRef, "S", StringComparison.OrdinalIgnoreCase) ? -lat : lat;
+            double lo = string.Equals(lonRef, "W", StringComparison.OrdinalIgnoreCase) ? -lon : lon;
+            return Math.Abs(la).ToString("0.######", CultureInfo.InvariantCulture)
+                + "° " + (la >= 0 ? "N" : "S")
+                + " · " + Math.Abs(lo).ToString("0.######", CultureInfo.InvariantCulture)
+                + "° " + (lo >= 0 ? "E" : "W");
+        }
+
+        /// <summary>文件大小文本：B/KB/MB/GB，保留至多两位小数。</summary>
+        private static string HumanSize(long bytes)
+        {
+            if (bytes < 1024) return bytes + " B";
+            double kb = bytes / 1024.0;
+            if (kb < 1024) return kb.ToString("0.#") + " KB";
+            double mb = kb / 1024.0;
+            if (mb < 1024) return mb.ToString("0.#") + " MB";
+            return (mb / 1024.0).ToString("0.##") + " GB";
         }
     }
 }

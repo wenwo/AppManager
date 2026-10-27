@@ -412,7 +412,7 @@ namespace AppManager
             grid.LaunchRequested += OnLaunch;
             grid.MenuRequested += OnContextMenu;
             grid.RenameRequested += RenameAddedEntry;
-            grid.DeleteRequested += DeleteAddedEntry;
+            grid.DeleteRequested += OnGridRowRemove;   // 集合内=移除（仅移出该集合）；分类/全部资源=删除
             grid.CategoryTextProvider = GetCategoryText;
             grid.ReorderRequested += OnGridReorder;
             grid.DragMoved += OnGridDragMoved;
@@ -943,6 +943,7 @@ namespace AppManager
             contentMode = m;
             bool website = m == SidebarControl.ContentMode.Website;
             grid.ShowRowActions = website;
+            grid.ShowTimeColumn = website;   // 资源列表额外显示创建时间列
             RebuildSidebar();
             if (website)
             {
@@ -1256,6 +1257,9 @@ namespace AppManager
             }
 
             shownApps = shown;
+            // 行内第二个按钮：进入集合后为「移除」（仅从集合移出），分类/全部资源/搜索下为「删除」
+            grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website && kw.Length == 0
+                && currentCollection != null) ? "移除" : "删除";
             grid.SetApps(shown);
             // 拖动排序仅在可排序分类的软件模式、非搜索态开放
             grid.AllowReorder = kw.Length == 0
@@ -1505,7 +1509,16 @@ namespace AppManager
         {
             if (!app.IsFile) return;
             if (FindAddedEntry(app.TargetPath, currentCategory) < 0 && !IsAddedAnywhere(app.TargetPath)) return;
-            items.Add(MkMenu("删除", delegate { DeleteEntryDisk(app); }));
+            items.Add(MkMenu("删除", delegate { ConfirmDeleteEntryDisk(app); }));
+        }
+
+        /// <summary>右键「删除」二次确认：文件进回收站可恢复，但收录记录与归属配置会一并清理。</summary>
+        private void ConfirmDeleteEntryDisk(AppInfo app)
+        {
+            if (app == null) return;
+            if (!ConfirmDialog.Show("删除文件",
+                "确认删除「" + app.DisplayName() + "」？\n文件将移入回收站，并从资源库移除。")) return;
+            DeleteEntryDisk(app);
         }
 
         /// <summary>直接删除收录的文档/目录（磁盘文件进回收站，可恢复），并清理收录与归属配置后刷新网格。
@@ -1797,10 +1810,12 @@ namespace AppManager
                 return;
             }
             int count;
-            AppInfo first = CollectionStats(currentCollection, out count);
+            List<string> images;
+            AppInfo first = CollectionSummary(currentCollection, out count, out images);
             collectionInfo.SetInfo(c.Parent, c.Name, c.Description, count, c.Cover,
+                c.CoverFocusX, c.CoverFocusY,
                 BuildCover(c, first, CollectionInfoCoverW, CollectionInfoCoverH),
-                CollectionImageMembers(currentCollection));
+                images);
             collectionInfo.Visible = true;
             collectionInfo.BringToFront();
         }
@@ -1846,13 +1861,14 @@ namespace AppManager
                 it.Key = CollectionKeys.Make(c.Parent, c.Name);
                 it.Name = c.Name;
                 AppInfo first = null;
+                AppInfo firstImage = null;
                 for (int j = 0; j < pool.Count; j++)
                 {
                     if (!IsInExtraCategory(pool[j], it.Key)) continue;
-                    first = pool[j];   // 取首个成员作自适应封面
-                    break;
+                    if (first == null) first = pool[j];   // 兜底：无图片成员时用首个成员版式化
+                    if (IsImageMember(pool[j])) { firstImage = pool[j]; break; }   // 取首个图片成员作自适应封面
                 }
-                it.Cover = BuildCover(c, first, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize);
+                it.Cover = BuildCover(c, firstImage ?? first, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize);
                 list.Add(it);
             }
             return list;
@@ -1871,57 +1887,56 @@ namespace AppManager
             return pool;
         }
 
-        /// <summary>集合内可用作封面的图片成员（按列表顺序，最多 60 张，供编辑态横向选择条）。</summary>
-        private List<string> CollectionImageMembers(string key)
-        {
-            List<string> result = new List<string>();
-            ResourceCollection c = FindCollectionByKey(key);
-            if (c == null) return result;
-            List<AppInfo> pool = VisibleResourcePool(c.Parent);
-            for (int i = 0; i < pool.Count && result.Count < 60; i++)
-            {
-                AppInfo a = pool[i];
-                if (!IsInExtraCategory(a, key)) continue;
-                if (string.IsNullOrEmpty(a.TargetPath)) continue;
-                if (!MediaRules.IsImage(a.TargetPath)) continue;
-                if (!File.Exists(a.TargetPath)) continue;
-                result.Add(a.TargetPath);
-            }
-            return result;
-        }
-
-        /// <summary>集合成员统计（与集合视图过滤同口径）：返回首个成员供封面使用，并输出可见成员数。</summary>
-        private AppInfo CollectionStats(string key, out int count)
+        /// <summary>
+        /// 集合概览（与集合视图过滤同口径，一次遍历取全）：返回封面用首个图片成员
+        /// （无图片时返回首个成员，供图标版式化）；同时输出可见成员数与图片成员路径（最多 60 张）。
+        /// </summary>
+        private AppInfo CollectionSummary(string key, out int count, out List<string> imagePaths)
         {
             count = 0;
+            imagePaths = new List<string>();
             AppInfo first = null;
+            AppInfo firstImage = null;
             ResourceCollection c = FindCollectionByKey(key);
             if (c == null) return null;
             List<AppInfo> pool = VisibleResourcePool(c.Parent);
             for (int i = 0; i < pool.Count; i++)
             {
-                if (!IsInExtraCategory(pool[i], key)) continue;
+                AppInfo a = pool[i];
+                if (!IsInExtraCategory(a, key)) continue;
                 count++;
-                if (first == null) first = pool[i];
+                if (first == null) first = a;
+                if (!IsImageMember(a)) continue;
+                if (firstImage == null) firstImage = a;
+                if (imagePaths.Count < 60) imagePaths.Add(a.TargetPath);
             }
-            return first;
+            return firstImage ?? first;
+        }
+
+        /// <summary>条目是否可作为图片封面（有效路径 + 图片扩展名 + 文件存在）。</summary>
+        private static bool IsImageMember(AppInfo a)
+        {
+            return a != null
+                && !string.IsNullOrEmpty(a.TargetPath)
+                && MediaRules.IsImage(a.TargetPath)
+                && File.Exists(a.TargetPath);
         }
 
         /// <summary>
         /// 构造集合封面位图（尺寸由调用方指定，所有权移交目标控件）：
         /// 用户自定义封面 → 首个成员的图片缩略图 → 首个成员的图标居中版式化；
-        /// 全部不可用时返回 null，由控件绘制占位图形。
+        /// 图片按集合保存的取景焦点裁剪。全部不可用时返回 null，由控件绘制占位图形。
         /// </summary>
         private static Bitmap BuildCover(ResourceCollection c, AppInfo first, int width, int height)
         {
             if (!string.IsNullOrEmpty(c.Cover))
             {
-                Bitmap custom = Icons.LoadCoverThumb(c.Cover, width, height);
+                Bitmap custom = Icons.LoadCoverThumb(c.Cover, width, height, c.CoverFocusX, c.CoverFocusY);
                 if (custom != null) return custom;
             }
             if (first == null || string.IsNullOrEmpty(first.TargetPath)) return null;
             // 图片成员：直接取裁剪填满的缩略图（与封面区等比例，无留白）
-            Bitmap photo = Icons.LoadCoverThumb(first.TargetPath, width, height);
+            Bitmap photo = Icons.LoadCoverThumb(first.TargetPath, width, height, c.CoverFocusX, c.CoverFocusY);
             if (photo != null) return photo;
             // 非图片成员（文档/压缩包等）：取文件图标居中版式化，避免在封面区露出方形缩略图留白
             Bitmap icon = null;
@@ -2061,7 +2076,8 @@ namespace AppManager
         }
 
         /// <summary>信息页「保存」：校验重名并落盘；粘贴图片写入受管封面目录；改名时迁移成员归属键。</summary>
-        private void OnCollectionEditSave(string newName, string newDescription, string newCoverPath, Bitmap pastedCover)
+        private void OnCollectionEditSave(string newName, string newDescription, string newCoverPath,
+            Bitmap pastedCover, float focusX, float focusY)
         {
             ResourceCollection c = FindCollectionByKey(currentCollection);
             if (c == null) { collectionInfo.EndEdit(); return; }
@@ -2093,6 +2109,8 @@ namespace AppManager
             c.Name = name;
             c.Description = newDescription ?? string.Empty;
             c.Cover = finalCover;
+            c.CoverFocusX = ClampFocus(focusX);
+            c.CoverFocusY = ClampFocus(focusY);
             string newKey = CollectionKeys.Make(c.Parent, c.Name);
             if (newKey != oldKey)
             {
@@ -2149,7 +2167,16 @@ namespace AppManager
             try { if (File.Exists(oldPath)) File.Delete(oldPath); } catch { }
         }
 
-        /// <summary>信息页「更换封面」：选择图片并回传预览（保存后才写入配置）。</summary>
+        /// <summary>封面取景焦点夹紧到 0~1（NaN 回退居中）。</summary>
+        private static float ClampFocus(float v)
+        {
+            if (float.IsNaN(v)) return 0.5F;
+            if (v < 0F) return 0F;
+            if (v > 1F) return 1F;
+            return v;
+        }
+
+        /// <summary>信息页「更换封面」：选择图片并回传路径（保存后才写入配置）。</summary>
         private void OnCollectionPickCover()
         {
             using (OpenFileDialog dlg = new OpenFileDialog())
@@ -2157,30 +2184,29 @@ namespace AppManager
                 dlg.Title = "选择集合封面";
                 dlg.Filter = MediaRules.ResourceCategoryFilter("照片");
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                Bitmap bmp = Icons.LoadCoverThumb(dlg.FileName, CollectionInfoCoverW, CollectionInfoCoverH);
-                if (bmp == null)
-                {
-                    MessageBox.Show(this, "无法读取该图片，请选择常见的图片格式。", "编辑集合",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                collectionInfo.SetEditCoverPreview(dlg.FileName, bmp);
+                collectionInfo.SetEditCoverPath(dlg.FileName, dlg.FileName);
             }
         }
 
-        /// <summary>信息页「恢复自动」：按首个成员缩略图重新生成预览（空集合回退占位）。</summary>
+        /// <summary>信息页「恢复自动」：按首个图片成员重新生成预览（无图片成员时回退版式化封面）。</summary>
         private void OnCollectionAutoCover()
         {
             ResourceCollection c = FindCollectionByKey(currentCollection);
             if (c == null) return;
             int count;
-            AppInfo first = CollectionStats(currentCollection, out count);
+            List<string> images;
+            AppInfo first = CollectionSummary(currentCollection, out count, out images);
+            if (images.Count > 0)
+            {
+                collectionInfo.SetEditCoverPath(string.Empty, images[0]);
+                return;
+            }
             ResourceCollection auto = new ResourceCollection();
             auto.Name = c.Name;
             auto.Parent = c.Parent;
             auto.Description = c.Description;
             auto.Cover = string.Empty;   // 忽略自定义封面，仅按成员生成
-            collectionInfo.SetEditCoverPreview(string.Empty,
+            collectionInfo.SetEditCoverBitmap(string.Empty,
                 BuildCover(auto, first, CollectionInfoCoverW, CollectionInfoCoverH));
         }
 
@@ -2552,6 +2578,8 @@ namespace AppManager
                 items.Add(MkSep());
                 items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
+                if (website && app.IsFile && IsLocalPath(app.TargetPath))
+                    items.Add(MkMenu("属性…", delegate { PropertiesDialog.Show(app); }));
                 items.Add(MkSep());
                 // 只读全集分类：以「加入」方式把条目多归属到其它分类（原归属与「全部」中的条目均不变）
                 items.Add(MkSubMenu("移动到分类…", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
@@ -2615,6 +2643,8 @@ namespace AppManager
                     items.Add(MkMenu("隐藏", delegate { SetHidden(app, true); }));
                 items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
+                if (website && app.IsFile && IsLocalPath(app.TargetPath))
+                    items.Add(MkMenu("属性…", delegate { PropertiesDialog.Show(app); }));
                 if (!website && !string.IsNullOrEmpty(app.UninstallString))
                 {
                     items.Add(MkSep());
@@ -2665,6 +2695,12 @@ namespace AppManager
             List<AppInfo> one = new List<AppInfo>();
             one.Add(clicked);
             return one;
+        }
+
+        /// <summary>资源「属性」仅对磁盘上仍存在的文件/文件夹可用。</summary>
+        private static bool IsLocalPath(string path)
+        {
+            return !string.IsNullOrEmpty(path) && (File.Exists(path) || Directory.Exists(path));
         }
 
         private static MenuWindow.MenuItem MkMenu(string text, Action action)
@@ -3422,6 +3458,22 @@ namespace AppManager
             SwapApps(scanner.ScanAll());
             RefreshGrid();
             StartIconLoad();
+        }
+
+        /// <summary>
+        /// 列表行右侧第二个按钮：进入集合后为「移除」（仅从当前集合移出，分类与「全部资源」中的归属不变）；
+        /// 分类、全部资源与搜索态为「删除」（移除收录记录，保持原有删除功能）。
+        /// </summary>
+        private void OnGridRowRemove(AppInfo app)
+        {
+            if (app == null) return;
+            if (contentMode != SidebarControl.ContentMode.Website
+                || SearchActive || currentCollection == null)
+            {
+                DeleteAddedEntry(app);
+                return;
+            }
+            RemoveItemFromCategory(app, currentCollection);
         }
 
         /// <summary>删除：移除用户添加的条目记录（不动磁盘文件）。</summary>

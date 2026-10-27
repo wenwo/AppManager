@@ -45,7 +45,8 @@ namespace AppManager.Controls
         private readonly Pen headerLinePen = new Pen(Theme.Separator);   // 列表表头底部分隔线
         private readonly StringFormat pathFormat = CreatePathFormat();   // 路径列：中间省略
         private readonly StringFormat tipFormat = CreateTipFormat();      // 悬浮信息卡：仅按 \n 换行，超宽省略
-        private readonly Dictionary<string, string> sizeCache = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);   // 大小列缓存
+        private readonly Dictionary<string, ListMeta> metaCache = new Dictionary<string, ListMeta>(StringComparer.OrdinalIgnoreCase);   // 大小/时间列缓存（一次读盘取两项）
+        private static readonly ListMeta EmptyMeta = new ListMeta();   // 非文件条目共用，避免每次重绘分配
         private int locTextMaxW = -1;   // 位置列文本最大宽度（按当前 apps 缓存，重绘不再重复测量）
         private int catTextMaxW = -1;   // 分类列胶囊组最大宽度（按当前 apps 缓存）
         private int actionReserveMax = -1;   // 整表统一预留的最大操作按钮数（保证列 X 一致）
@@ -71,11 +72,13 @@ namespace AppManager.Controls
         // 每条记录为独立卡片：卡片间距 + 圆角
         private const int ListGap = 4;
         private const int ListCardRadius = 8;
-        // 右侧三列：分类列左对齐（胶囊组左边缘固定）、大小列固定宽（数字纵向对齐）、位置列按内容宽度并贴右边缘
+        // 右侧数据列：分类列左对齐（胶囊组左边缘固定）、大小/时间固定宽、位置列按内容宽度并贴右边缘
         private const int ColGap = 18;
         private const int CatColMinW = 56;
         private const int SizeColW = 76;
+        private const int TimeColW = 78;    // 资源列表「时间」列：yyyy-MM-dd
         private const int LocColMinW = 56;
+        private const int NameColMinW = 76;   // 资源列表出现时间列时，名称列的最小可读宽度
         // 分类分段（胶囊）尺寸
         private const int ChipH = 18;
         private const int ChipPadX = 6;
@@ -135,6 +138,26 @@ namespace AppManager.Controls
         /// <summary>是否在列表行右侧显示操作按钮（改名/改地址/删除）。</summary>
         public bool ShowRowActions { get; set; }
 
+        /// <summary>列表是否显示「时间」列（资源模式显示创建日期，软件模式不占用列宽）。</summary>
+        public bool ShowTimeColumn { get; set; }
+
+        private string rowDeleteText = "删除";
+        private string[] rowActionLabels = new string[] { "改名", "删除" };
+
+        /// <summary>列表行第二个操作按钮的文案：集合内为「移除」（仅从集合移出），其余为「删除」。</summary>
+        public string RowDeleteText
+        {
+            get { return rowDeleteText; }
+            set
+            {
+                string v = string.IsNullOrEmpty(value) ? "删除" : value;
+                if (v == rowDeleteText) return;
+                rowDeleteText = v;
+                rowActionLabels = new string[] { "改名", v };
+                Invalidate();   // 文案切换立即重绘，无需依赖调用方再刷新列表
+            }
+        }
+
         /// <summary>由外部提供：返回条目「所属」分类的显示文本（多个用逗号分隔）。</summary>
         public Func<AppInfo, string> CategoryTextProvider { get; set; }
 
@@ -142,6 +165,13 @@ namespace AppManager.Controls
         private string tipText = string.Empty;
         private bool tipVisible;
         private readonly Timer tipTimer = new Timer { Interval = 450 };
+
+        /// <summary>列表「大小/时间」列缓存项：同一文件的长度与创建时间一次读取，重绘不再重复读盘。</summary>
+        private sealed class ListMeta
+        {
+            public string Size = "—";
+            public string Date = "—";
+        }
 
         public AppGridControl()
         {
@@ -211,7 +241,7 @@ namespace AppManager.Controls
             apps.Clear();
             apps.AddRange(list);
             ClearSelection();   // 列表内容变化：下标失效，选中状态一并清空
-            sizeCache.Clear();
+            metaCache.Clear();
             locTextMaxW = -1;
             catTextMaxW = -1;
             actionReserveMax = -1;
@@ -294,7 +324,8 @@ namespace AppManager.Controls
                 locTextMaxW = m;
             }
             int w2 = locTextMaxW + 2;
-            int cap = (int)(rowWidth * 0.42f);
+            // 资源列表多出「时间」列，位置列上限相应收紧，优先保证名称列可读
+            int cap = (int)(rowWidth * (ShowTimeColumn ? 0.32f : 0.42f));
             if (w2 > cap) w2 = cap;
             if (w2 < LocColMinW) w2 = LocColMinW;
             return w2;
@@ -582,8 +613,8 @@ namespace AppManager.Controls
                 DrawListIcon(g, a, ir);
 
                 // 各数据列矩形（宽度整表统一，保证各行上下对齐；与表头共用同一套几何）
-                Rectangle nameRect, catRect, sizeRect, locRect;
-                ListColumns(g, r, actionReserve, out nameRect, out catRect, out sizeRect, out locRect);
+                Rectangle nameRect, catRect, sizeRect, timeRect, locRect;
+                ListColumns(g, r, actionReserve, out nameRect, out catRect, out sizeRect, out timeRect, out locRect);
 
                 // 名称：占据图标与分类列之间的剩余宽度，超宽省略
                 Draw.DrawStringLeft(g, a.DisplayName(), Font, textBrush, nameRect);
@@ -591,8 +622,10 @@ namespace AppManager.Controls
                 // 分类（左对齐，胶囊组左边缘固定 → 上下对齐）
                 DrawCategoryChips(g, a, catRect.X, catRect.Right, r);
 
-                // 大小（右对齐，数字纵向对齐） / 实际位置（贴右边缘）
+                // 大小（右对齐，数字纵向对齐）/ 时间（资源模式，创建日期）/ 实际位置（贴右边缘）
                 Draw.DrawStringRight(g, FormatSize(a), subFont, subTextBrush, sizeRect);
+                if (ShowTimeColumn)
+                    Draw.DrawStringRight(g, FormatDate(a), subFont, subTextBrush, timeRect);
                 DrawStringPath(g, LocationText(a), locRect);
 
                 // 行右侧 iOS 文字按钮：仅悬停当前行显示（占位宽度已由 ActionReserveWidth 预留，避免列跳动）
@@ -601,23 +634,46 @@ namespace AppManager.Controls
         }
 
         /// <summary>
-        /// 计算列表一行内各数据列矩形（名称/分类/大小/位置），左侧为图标槽。
-        /// 行与表头共用，保证列 X 完全一致。
+        /// 计算列表一行内各数据列矩形（名称/分类/大小/时间/位置），左侧为图标槽。
+        /// 行与表头共用，保证列 X 完全一致；时间列仅在资源模式占位。
         /// </summary>
         private void ListColumns(Graphics g, Rectangle row, int actionReserve,
-            out Rectangle nameRect, out Rectangle catRect, out Rectangle sizeRect, out Rectangle locRect)
+            out Rectangle nameRect, out Rectangle catRect, out Rectangle sizeRect,
+            out Rectangle timeRect, out Rectangle locRect)
         {
             int rightEnd = row.Right - 12 - actionReserve;
-            int locW = LocationColumnWidth(g, row.Width);
-            locRect = new Rectangle(rightEnd - locW, row.Y, locW, row.Height);
-            sizeRect = new Rectangle(locRect.X - ColGap - SizeColW, row.Y, SizeColW, row.Height);
-            int catW = CategoryColumnWidth(g, row.Width);
-            catRect = new Rectangle(sizeRect.X - ColGap - catW, row.Y, catW, row.Height);
-
             int textLeft = row.X + 12 + ListIcon + 10;   // 与行内图标右侧的名称起点一致
-            int nameW = catRect.X - ColGap - textLeft;
-            if (nameW < 0) nameW = 0;
-            nameRect = new Rectangle(textLeft, row.Y, nameW, row.Height);
+            int catW = CategoryColumnWidth(g, row.Width);
+            int locW = LocationColumnWidth(g, row.Width);
+
+            nameRect = Rectangle.Empty;
+            timeRect = Rectangle.Empty;
+            sizeRect = Rectangle.Empty;
+            catRect = Rectangle.Empty;
+            locRect = Rectangle.Empty;
+
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                locRect = new Rectangle(rightEnd - locW, row.Y, locW, row.Height);
+                int x = locRect.X - ColGap;
+                if (ShowTimeColumn)
+                {
+                    timeRect = new Rectangle(x - TimeColW, row.Y, TimeColW, row.Height);
+                    x = timeRect.X - ColGap;
+                }
+                sizeRect = new Rectangle(x - SizeColW, row.Y, SizeColW, row.Height);
+                catRect = new Rectangle(sizeRect.X - ColGap - catW, row.Y, catW, row.Height);
+
+                int nameW = catRect.X - ColGap - textLeft;
+                if (nameW < 0) nameW = 0;
+                nameRect = new Rectangle(textLeft, row.Y, nameW, row.Height);
+
+                // 资源列表多出时间列时，优先保证名称可读：宽度不够则从位置列让位
+                if (!ShowTimeColumn || nameW >= NameColMinW) break;
+                int canShrink = locW - LocColMinW;
+                if (canShrink <= 0) break;
+                locW -= Math.Min(NameColMinW - nameW, canShrink);
+            }
         }
 
         /// <summary>列表吸顶表头：底部分隔线 + 各列栏位名（与数据列对齐）。</summary>
@@ -630,13 +686,15 @@ namespace AppManager.Controls
             // 用与数据行同宽同列的参照矩形取列几何（仅 X 相关，Y 用表头高度以垂直居中）
             Rectangle refRow = new Rectangle(ListMargin, 0, ClientSize.Width - ListMargin * 2, ListHeaderH);
             int actionReserve = ActionReserveWidth();
-            Rectangle nameRect, catRect, sizeRect, locRect;
-            ListColumns(g, refRow, actionReserve, out nameRect, out catRect, out sizeRect, out locRect);
+            Rectangle nameRect, catRect, sizeRect, timeRect, locRect;
+            ListColumns(g, refRow, actionReserve, out nameRect, out catRect, out sizeRect, out timeRect, out locRect);
 
-            // 每列栏位名与对应数据的对齐方式一致（名称/分类左对齐，大小/位置右对齐）
+            // 每列栏位名与对应数据的对齐方式一致（名称/分类左对齐，大小/时间/位置右对齐）
             Draw.DrawStringLeft(g, "名称", headerFont, subTextBrush, nameRect);
             Draw.DrawStringLeft(g, "分类", headerFont, subTextBrush, catRect);
             Draw.DrawStringRight(g, "大小", headerFont, subTextBrush, sizeRect);
+            if (ShowTimeColumn)
+                Draw.DrawStringRight(g, "时间", headerFont, subTextBrush, timeRect);
             Draw.DrawStringRight(g, "位置", headerFont, subTextBrush, locRect);
         }
 
@@ -710,24 +768,51 @@ namespace AppManager.Controls
             g.DrawString(text, subFont, subTextBrush, rect, pathFormat);
         }
 
-        /// <summary>「大小」列文本：文件显示真实大小、文件夹显示「文件夹」、软件显示 —。结果按路径缓存，避免重绘时反复读盘。</summary>
+        /// <summary>「大小」列文本：文件显示真实大小、文件夹显示「文件夹」、软件显示 —。</summary>
         private string FormatSize(AppInfo a)
         {
-            if (a.IsFolder) return "文件夹";
+            return MetaOf(a).Size;
+        }
+
+        /// <summary>「时间」列文本：文件/文件夹的创建日期（yyyy-MM-dd）。</summary>
+        private string FormatDate(AppInfo a)
+        {
+            return MetaOf(a).Date;
+        }
+
+        /// <summary>
+        /// 取条目「大小/时间」两项显示值：同一路径只读一次文件信息并缓存，
+        /// 列表重绘与两列共用同一份结果，避免逐行逐列重复读盘。
+        /// </summary>
+        private ListMeta MetaOf(AppInfo a)
+        {
+            if (a == null || !a.IsFile) return EmptyMeta;
             string path = a.TargetPath;
-            if (!a.IsFile || string.IsNullOrEmpty(path)) return "—";
+            ListMeta meta;
+            if (!string.IsNullOrEmpty(path) && metaCache.TryGetValue(path, out meta)) return meta;
 
-            string cached;
-            if (sizeCache.TryGetValue(path, out cached)) return cached;
-
-            string val = "—";
-            try
+            meta = new ListMeta();
+            if (a.IsFolder) meta.Size = "文件夹";
+            if (!string.IsNullOrEmpty(path))
             {
-                if (File.Exists(path)) val = HumanSize(new FileInfo(path).Length);
+                try
+                {
+                    if (a.IsFolder)
+                    {
+                        if (Directory.Exists(path))
+                            meta.Date = Directory.GetCreationTime(path).ToString("yyyy-MM-dd");
+                    }
+                    else if (File.Exists(path))
+                    {
+                        FileInfo fi = new FileInfo(path);
+                        meta.Size = HumanSize(fi.Length);
+                        meta.Date = fi.CreationTime.ToString("yyyy-MM-dd");
+                    }
+                }
+                catch { }
+                metaCache[path] = meta;
             }
-            catch { }
-            sizeCache[path] = val;
-            return val;
+            return meta;
         }
 
         private static string HumanSize(long bytes)
@@ -762,16 +847,16 @@ namespace AppManager.Controls
             return 2;
         }
 
-        /// <summary>行右侧绘制 iOS 文字操作按钮：改名 蓝色、删除 红色。</summary>
+        /// <summary>行右侧绘制 iOS 文字操作按钮：改名 蓝色、第二个操作（删除/移除）红色。</summary>
         private void PaintRowActions(Graphics g, AppInfo a, Rectangle r)
         {
-            string[] labels = new[] { "改名", "删除" };
+            string[] labels = rowActionLabels;
             int total = labels.Length * (ActionBtnW + ActionBtnGap) - ActionBtnGap;
             int x = r.Right - 12 - total;
             for (int bi = 0; bi < labels.Length; bi++)
             {
                 Rectangle br = new Rectangle(x + bi * (ActionBtnW + ActionBtnGap), r.Y, ActionBtnW, r.Height);
-                Brush bb = labels[bi] == "删除" ? (Brush)actionRedBrush : (Brush)actionBlueBrush;
+                Brush bb = bi == 1 ? (Brush)actionRedBrush : (Brush)actionBlueBrush;
                 Draw.DrawStringCenter(g, labels[bi], actionFont, bb, br);
             }
         }

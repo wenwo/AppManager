@@ -202,7 +202,7 @@ namespace AppManager.Controls
                     Draw.FillRoundedRect(g, tb, thumb, ScrollBarW / 2);
             }
 
-            // ===== 底部「+ 新建分类」按钮 =====
+            // ===== 底部「+ 新建分类」按钮：平铺底栏，不做卡片 =====
             int footY = ClientSize.Height - FooterHeight;
             using (Pen p = new Pen(Theme.Separator, 1))
                 g.DrawLine(p, 12, footY, ClientSize.Width - 12, footY);

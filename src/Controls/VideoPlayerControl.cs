@@ -13,7 +13,8 @@ namespace AppManager.Controls
 {
     /// <summary>
     /// 应用内视频播放器：双击视频后替换列表区域播放（窗口其余部分不变）。
-    /// 占位与框架处理与图片查看器一致：顶栏（返回/文件名/序号）+ 深色底 + 底部悬浮操作条 + 失败占位文案；
+    /// 外观沿用主界面浅色卡片风格：顶栏仅「返回」，中间为黑色圆角视频卡片 + 深色悬浮操作条，
+    /// 底部为平铺信息栏（文件名 + 当前/总数），与侧边栏底栏一致；
     /// 操作条为 上一张/播放暂停/进度条/时间/下一张/静音，Esc/返回退出，←/→ 切换视频，空格播放暂停，
     /// 滚轮调音量，单击视频区暂停/播放，双击视频区请求全屏（由主窗体切换窗体状态）。
     /// 播放内核为 libmpv（mpv 官方 C 客户端库，内置 FFmpeg）：格式/字幕/音轨/硬件解码均由 mpv 处理，
@@ -53,10 +54,13 @@ namespace AppManager.Controls
 
         // 界面按钮几何：OnPaint 布局后缓存，命中测试与绘制共用
         private Rectangle backRect;
-        private Rectangle nameRect;
-        private Rectangle countRect;
+        private Rectangle videoCardRect;
+        private Rectangle infoBarRect;
+        private Rectangle hintRect;       // 顶栏右侧的音量提示位（文件名/序号已移至底部信息栏）
         private Rectangle pillRect;
         private Rectangle prevRect, playRect, seekRect, timeRect, nextRect, volRect;
+        private Rectangle volSliderRect;   // 音量滑块：静止显示音量等级，按住拖动调节
+        private bool volDrag;              // 正在拖动音量滑块
 
         // 音量：本地缓存（0-100），滚轮/静音按钮变更并同步到 mpv；volUntil 控制音量提示条的显示时限
         private int volume = 50;
@@ -67,13 +71,19 @@ namespace AppManager.Controls
         // 第二击在间隔内则由 OnMouseDoubleClick 接管为全屏（避免双击时误触发一次暂停）
         private readonly Timer clickTimer = new Timer();
 
-        private static readonly Color Bg = Color.FromArgb(20, 20, 22);
+        private static readonly Color Bg = Theme.Background;                    // 与主界面一致的浅色底
+        private static readonly Color VideoBg = Color.FromArgb(20, 20, 22);    // 视频卡片内部黑底
         private static readonly Color TextWhite = Color.White;
         private static readonly Color TextDim = Color.FromArgb(160, 255, 255, 255);
         private const int TopBarH = 44;
         private const int PillH = 40;
         private const int PillBtnW = 44;
         private const int TimeColW = 96;
+        private const int VolSliderW = 72;
+        private const int ChromePad = 16;       // 视频卡片与内容区之间的留白
+        private const int CardGap = 12;         // 视频卡片 / 操作条 / 信息栏之间的间距
+        private const int InfoBarH = 44;        // 底部信息栏高度（与侧边栏底栏一致）
+        private const int VideoRadius = 14;     // 视频卡片圆角
 
         public VideoPlayerControl()
         {
@@ -87,10 +97,15 @@ namespace AppManager.Controls
             clickTimer.Tick += delegate { clickTimer.Stop(); TogglePlay(); };   // 间隔内无第二击：按单击处理（暂停/播放）
         }
 
-        /// <summary>视频绘制/承载区：顶栏以下、底部按钮以上的全部空间。</summary>
+        /// <summary>视频卡片区：顶栏以下、操作条以上的全部空间（同时是 mpv 渲染宿主的边界）。</summary>
         private Rectangle VideoArea
         {
-            get { return new Rectangle(0, TopBarH, Width, Math.Max(0, Height - TopBarH - PillH - 24)); }
+            get
+            {
+                int bottom = Height - InfoBarH - CardGap - PillH - CardGap;
+                return new Rectangle(ChromePad, TopBarH, Math.Max(0, Width - ChromePad * 2),
+                    Math.Max(0, bottom - TopBarH));
+            }
         }
 
         /// <summary>打开一组视频并定位到指定下标；外部负责显隐切换。</summary>
@@ -127,10 +142,11 @@ namespace AppManager.Controls
                 if (host == null)
                 {
                     host = new VideoHost();
-                    host.Bounds = VideoArea;
                     Controls.Add(host);
                     IntPtr h = host.Handle;   // 先建句柄，供 mpv 以 wid 方式嵌入渲染
                 }
+                host.Bounds = VideoArea;
+                ApplyHostRegion();
                 host.Visible = true;
                 mpv = new MpvEngine(host.Handle);
                 mpv.SetVolume(volume);
@@ -145,6 +161,16 @@ namespace AppManager.Controls
                 mpv = null;
                 return false;
             }
+        }
+
+        /// <summary>视频宿主按卡片圆角裁切：宿主是子窗口，不裁角会用黑色矩形盖住卡片圆角。</summary>
+        private void ApplyHostRegion()
+        {
+            if (host == null || host.Width <= 0 || host.Height <= 0) return;
+            Region old = host.Region;
+            using (GraphicsPath p = Draw.RoundedPath(new Rectangle(0, 0, host.Width, host.Height), VideoRadius))
+                host.Region = new Region(p);
+            if (old != null) old.Dispose();
         }
 
         /// <summary>加载当前视频并自动播放；失败进入占位态（不再回退外部播放器）。</summary>
@@ -309,6 +335,21 @@ namespace AppManager.Controls
             Invalidate();
         }
 
+        /// <summary>音量滑块拖动：按 X 位置换算 0-100，实时同步 mpv 并短提示。</summary>
+        private void SetVolumeByX(int x)
+        {
+            int w = Math.Max(1, volSliderRect.Width);
+            int v = (int)Math.Round((x - volSliderRect.X) / (double)w * 100);
+            if (v < 0) v = 0;
+            if (v > 100) v = 100;
+            volume = v;
+            muted = volume <= 0;
+            MpvEngine p = mpv;
+            if (p != null) { try { p.SetMute(muted); p.SetVolume(volume); } catch { } }
+            volUntil = DateTime.UtcNow.AddMilliseconds(900);
+            Invalidate();
+        }
+
         /// <summary>停止播放（隐藏时自动调用，避免后台继续出声）。</summary>
         private void StopPlayback()
         {
@@ -370,6 +411,12 @@ namespace AppManager.Controls
             Capture = true;
             int btn = HitButton(e.Location);
             if (btn >= 0) { press = btn; Invalidate(); return; }
+            if (HitVolumeSlider(e.Location))
+            {
+                volDrag = true;
+                SetVolumeByX(e.X);
+                return;
+            }
             if (HitSeek(e.Location))
             {
                 seeking = true;
@@ -380,16 +427,19 @@ namespace AppManager.Controls
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (volDrag) { SetVolumeByX(e.X); return; }
             if (seeking) { SeekTo(e.X); return; }
             int h = HitButton(e.Location);
             if (h != hover) { hover = h; Invalidate(); }
-            Cursor = (h >= 0 || HitSeek(e.Location)) ? Cursors.Hand : Cursors.Default;
+            Cursor = (h >= 0 || HitSeek(e.Location) || HitVolumeSlider(e.Location))
+                ? Cursors.Hand : Cursors.Default;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
             Capture = false;
+            if (volDrag) { volDrag = false; return; }
             if (seeking) { seeking = false; return; }
             if (e.Button == MouseButtons.Left && press >= 0)
             {
@@ -460,7 +510,11 @@ namespace AppManager.Controls
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (host != null) host.Bounds = VideoArea;
+            if (host != null)
+            {
+                host.Bounds = VideoArea;
+                ApplyHostRegion();
+            }
         }
 
         protected override void OnVisibleChanged(EventArgs e)
@@ -491,52 +545,60 @@ namespace AppManager.Controls
             g.Clear(Bg);
 
             LayoutChrome();
-            DrawVideoArea(g);
+            DrawVideoCard(g);
             DrawTopBar(g);
             DrawPill(g);
+            DrawInfoBar(g);
         }
 
         private void LayoutChrome()
         {
-            // 顶栏：返回在左，文件名居中，序号在右（与图片查看器一致）
-            backRect = new Rectangle(8, 6, 76, TopBarH - 12);
-            countRect = new Rectangle(Width - 96, 6, 88, TopBarH - 12);
-            nameRect = new Rectangle(backRect.Right + 8, 0,
-                Math.Max(0, countRect.Left - backRect.Right - 16), TopBarH);
+            // 顶栏：左侧返回，右侧为音量提示位（文件名/序号在底部信息栏）
+            backRect = new Rectangle(ChromePad, 6, 76, TopBarH - 12);
+            hintRect = new Rectangle(Math.Max(0, Width - ChromePad - 180), 0, 180, TopBarH);
 
-            // 底部居中悬浮操作条：上一张/播放暂停/进度条/时间/下一张/静音
-            int pillW = Math.Min(640, Math.Max(380, Width - 32));
-            pillRect = new Rectangle((Width - pillW) / 2, Height - PillH - 16, pillW, PillH);
+            // 底部信息栏：平铺底栏，高度与侧边栏「新建」底栏一致
+            int infoTop = Height - InfoBarH;
+            infoBarRect = new Rectangle(0, infoTop, Width, InfoBarH);
+
+            // 底部居中悬浮操作条：上一张/播放暂停/进度条/时间/下一张/音量滑块/静音
+            int avail = Math.Max(0, Width - ChromePad * 2);
+            int pillW = Math.Min(Math.Min(640, avail), Math.Max(360, avail - 24));
+            pillRect = new Rectangle((Width - pillW) / 2, infoTop - CardGap - PillH, pillW, PillH);
             prevRect = new Rectangle(pillRect.X + 8, pillRect.Y, PillBtnW, PillH);
             playRect = new Rectangle(prevRect.Right, pillRect.Y, PillBtnW, PillH);
             volRect = new Rectangle(pillRect.Right - 8 - PillBtnW, pillRect.Y, PillBtnW, PillH);
-            nextRect = new Rectangle(volRect.Left - PillBtnW, pillRect.Y, PillBtnW, PillH);
+            volSliderRect = new Rectangle(volRect.Left - 8 - VolSliderW, pillRect.Y + (PillH - 20) / 2,
+                VolSliderW, 20);
+            nextRect = new Rectangle(volSliderRect.Left - 8 - PillBtnW, pillRect.Y, PillBtnW, PillH);
             timeRect = new Rectangle(nextRect.Left - TimeColW, pillRect.Y, TimeColW, PillH);
             int seekX = playRect.Right + 10;
             seekRect = new Rectangle(seekX, pillRect.Y + PillH / 2 - 2,
                 Math.Max(0, timeRect.Left - 10 - seekX), 4);
+
+            // 视频卡片区与宿主边界共用同一 Geometry
+            videoCardRect = VideoArea;
         }
 
-        /// <summary>失败占位/音量提示：失败时居中浅灰文案，正常播放时短暂显示音量提示条。</summary>
-        private void DrawVideoArea(Graphics g)
+        /// <summary>音量滑块命中：纵向放宽便于按住拖动，横向不含两侧按钮。</summary>
+        private bool HitVolumeSlider(Point p)
         {
-            if (loadFailed)
-            {
-                using (SolidBrush b = new SolidBrush(TextDim))
-                    Draw.DrawStringCenter(g, failText, Theme.FontOf(10F), b, VideoArea);
-                return;
-            }
-            if (!muted && DateTime.UtcNow >= volUntil) return;
-            // 音量提示条：悬浮在操作条上方居中，随调节短暂显示
-            string text = muted ? "已静音" : "音量 " + volume + "%";
-            Font font = Theme.FontOf(9F);
-            Size sz = TextRenderer.MeasureText(text, font);
-            Rectangle chip = new Rectangle((Width - sz.Width - 24) / 2, pillRect.Y - 36,
-                sz.Width + 24, 26);
-            using (SolidBrush b = new SolidBrush(Color.FromArgb(170, 0, 0, 0)))
-                Draw.FillRoundedRect(g, b, chip, 13);
-            TextRenderer.DrawText(g, text, font, chip, TextWhite,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            if (volSliderRect.Width <= 0) return false;
+            Rectangle r = volSliderRect;
+            r.Inflate(0, 8);
+            return r.Contains(p);
+        }
+
+        /// <summary>视频卡片：黑色圆角底 + 柔和投影；加载失败时在卡片内居中显示占位文案。</summary>
+        private void DrawVideoCard(Graphics g)
+        {
+            if (videoCardRect.Width <= 0 || videoCardRect.Height <= 0) return;
+            Draw.DrawShadow(g, videoCardRect, VideoRadius, 0.6f);
+            using (SolidBrush b = new SolidBrush(VideoBg))
+                Draw.FillRoundedRect(g, b, videoCardRect, VideoRadius);
+            if (!loadFailed) return;
+            using (SolidBrush b = new SolidBrush(TextDim))
+                Draw.DrawStringCenter(g, failText, Theme.FontOf(10F), b, videoCardRect);
         }
 
         private void DrawTopBar(Graphics g)
@@ -545,7 +607,7 @@ namespace AppManager.Controls
             DrawButtonBg(g, 3, backRect);
             float cx = backRect.X + 16;
             float cy = backRect.Y + backRect.Height / 2F;
-            using (Pen pen = new Pen(TextWhite, 1.8F))
+            using (Pen pen = new Pen(Theme.TextPrimary, 1.8F))
             {
                 pen.StartCap = LineCap.Round;
                 pen.EndCap = LineCap.Round;
@@ -553,22 +615,44 @@ namespace AppManager.Controls
                 g.DrawLine(pen, cx - 3, cy, cx + 3, cy + 5);
             }
             Rectangle textR = new Rectangle(backRect.X + 24, backRect.Y, backRect.Width - 24, backRect.Height);
-            TextRenderer.DrawText(g, "返回", Theme.FontOf(9.5F), textR, TextWhite,
+            TextRenderer.DrawText(g, "返回", Theme.FontOf(9.5F), textR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
 
-            // 文件名（超长省略）与「当前/总数」
+            // 音量提示：原悬浮条上方的提示条会被视频宿主窗口遮挡，改在顶栏右侧短暂显示
+            if (!muted && DateTime.UtcNow >= volUntil) return;
+            string hint = muted ? "已静音" : "音量 " + volume + "%";
+            TextRenderer.DrawText(g, hint, Theme.FontOf(9F), hintRect, Theme.TextSecondary,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+        }
+
+        /// <summary>底部信息栏：平铺底栏 + 顶部分隔线，左侧文件名、右侧当前/总数，与侧边栏底栏同风格。</summary>
+        private void DrawInfoBar(Graphics g)
+        {
+            if (infoBarRect.Width <= 0 || infoBarRect.Height <= 0) return;
+            using (Pen p = new Pen(Theme.Separator, 1))
+                g.DrawLine(p, 12, infoBarRect.Y, infoBarRect.Width - 12, infoBarRect.Y);
+
+            const int pad = 16;
+            const int countW = 80;
+            Rectangle countR = new Rectangle(infoBarRect.Right - pad - countW, infoBarRect.Y,
+                countW, infoBarRect.Height);
+            Rectangle nameR = new Rectangle(infoBarRect.X + pad, infoBarRect.Y,
+                Math.Max(0, countR.Left - 12 - (infoBarRect.X + pad)), infoBarRect.Height);
+
             string name = paths.Count > 0 && index < paths.Count ? Path.GetFileName(paths[index]) : string.Empty;
-            TextRenderer.DrawText(g, name, Theme.FontOf(9.5F), nameRect, TextWhite,
-                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            TextRenderer.DrawText(g, name, Theme.FontOf(9.5F), nameR, Theme.TextPrimary,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                | TextFormatFlags.SingleLine);
             string count = (index + 1) + " / " + paths.Count;
-            TextRenderer.DrawText(g, count, Theme.FontOf(9F), countRect, TextDim,
-                TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
+            TextRenderer.DrawText(g, count, Theme.FontOf(9F), countR, Theme.TextSecondary,
+                TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
         private void DrawPill(Graphics g)
         {
-            // 深色悬浮底：与图片查看器工具条一致
-            using (SolidBrush b = new SolidBrush(Color.FromArgb(110, 0, 0, 0)))
+            // 深色悬浮底：浅色背景上保持播放控件的对比度，投影拉开层次
+            Draw.DrawShadow(g, pillRect, PillH / 2, 0.8f);
+            using (SolidBrush b = new SolidBrush(Theme.TooltipBg))
                 Draw.FillRoundedRect(g, b, pillRect, PillH / 2);
 
             bool single = paths.Count < 2;
@@ -577,13 +661,36 @@ namespace AppManager.Controls
             DrawSeek(g);
             DrawTime(g);
             DrawPillBtn(g, nextRect, 2, single);
+            DrawVolumeSlider(g);
             DrawVolumeBtn(g);
+        }
+
+        /// <summary>音量滑块：细轨道 + 当前音量填充 + 白色圆钮；静音时填充归零，拖动或滚轮后实时反映。</summary>
+        private void DrawVolumeSlider(Graphics g)
+        {
+            Rectangle r = volSliderRect;
+            if (r.Width <= 0 || r.Height <= 0) return;
+            int cy = r.Y + r.Height / 2;
+            Rectangle track = new Rectangle(r.X, cy - 1, r.Width, 3);
+            using (SolidBrush b = new SolidBrush(Color.FromArgb(70, 255, 255, 255)))
+                Draw.FillRoundedRect(g, b, track, 2);
+            int lvl = muted ? 0 : Math.Max(0, Math.Min(100, volume));
+            int w = (int)Math.Round(r.Width * lvl / 100.0);
+            if (w > 0)
+            {
+                Rectangle fill = new Rectangle(r.X, cy - 1, w, 3);
+                using (SolidBrush b = new SolidBrush(TextWhite))
+                    Draw.FillRoundedRect(g, b, fill, 2);
+            }
+            float kx = r.X + (float)Math.Round(r.Width * lvl / 100.0);
+            using (SolidBrush b = new SolidBrush(TextWhite))
+                g.FillEllipse(b, kx - 4F, cy - 4F, 8F, 8F);
         }
 
         /// <summary>静音按钮：喇叭主体 + 声波（静音时画 ×），与操作条其他按钮同风格。</summary>
         private void DrawVolumeBtn(Graphics g)
         {
-            DrawButtonBg(g, 4, volRect);
+            DrawPillButtonBg(g, 4, volRect);
             float cx = volRect.X + volRect.Width / 2F - 2;
             float cy = volRect.Y + volRect.Height / 2F;
             using (GraphicsPath sp = new GraphicsPath())
@@ -616,7 +723,7 @@ namespace AppManager.Controls
         /// <summary>悬浮条图标按钮：‹ › 前后切换；single 时前后切换弱化。</summary>
         private void DrawPillBtn(Graphics g, Rectangle r, int id, bool dim)
         {
-            DrawButtonBg(g, id, r);
+            DrawPillButtonBg(g, id, r);
             Color c = dim ? Color.FromArgb(90, 255, 255, 255) : TextWhite;
             float cx = r.X + r.Width / 2F;
             float cy = r.Y + r.Height / 2F;
@@ -640,7 +747,7 @@ namespace AppManager.Controls
         /// <summary>播放/暂停：播放中双竖线，其余三角（播放结束回到三角，可重播）。</summary>
         private void DrawPlayPause(Graphics g)
         {
-            DrawButtonBg(g, 1, playRect);
+            DrawPillButtonBg(g, 1, playRect);
             float cx = playRect.X + playRect.Width / 2F;
             float cy = playRect.Y + playRect.Height / 2F;
             using (SolidBrush b = new SolidBrush(TextWhite))
@@ -701,8 +808,17 @@ namespace AppManager.Controls
                 : m + ":" + ss.ToString("00");
         }
 
-        /// <summary>按钮悬停/按下底色：仅叠加白色透明度，无描边（与图片查看器一致）。</summary>
+        /// <summary>浅色顶栏按钮悬停/按下底色：叠加黑色透明度，无描边（与侧边栏悬停一致）。</summary>
         private void DrawButtonBg(Graphics g, int id, Rectangle r)
+        {
+            if (press != id && hover != id) return;
+            Color fill = press == id ? Color.FromArgb(26, 0, 0, 0) : Color.FromArgb(12, 0, 0, 0);
+            using (SolidBrush b = new SolidBrush(fill))
+                Draw.FillRoundedRect(g, b, r, 10);
+        }
+
+        /// <summary>深色悬浮条按钮悬停/按下底色：叠加白色透明度，无描边。</summary>
+        private void DrawPillButtonBg(Graphics g, int id, Rectangle r)
         {
             if (press != id && hover != id) return;
             Color fill = press == id ? Color.FromArgb(60, 255, 255, 255) : Color.FromArgb(34, 255, 255, 255);

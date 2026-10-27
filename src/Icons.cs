@@ -307,17 +307,39 @@ namespace AppManager
         /// </summary>
         public static Bitmap LoadCoverThumb(string path, int width, int height)
         {
-            if (string.IsNullOrEmpty(path) || width <= 0 || height <= 0) return null;
-            StringBuilder stamp = new StringBuilder(64);
-            AppendFileStamp(stamp, path);
-            string key = "C" + width + "x" + height + "|" + path + "|" + stamp;
-            Bitmap hit = CacheTakeClone(key);
-            if (hit != null) return hit;
-            return CacheStore(key, TryLoadCoverThumbCore(path, width, height));
+            return LoadCoverThumb(path, width, height, 0.5F, 0.5F);
         }
 
-        /// <summary>解码并等比裁剪填满目标尺寸（居中裁剪，类似 CSS background-size: cover）。</summary>
-        private static Bitmap TryLoadCoverThumbCore(string path, int width, int height)
+        /// <summary>
+        /// 带取景焦点的封面缩略图：focusX/focusY 为 0~1 的取景中心（0.5 居中），
+        /// 用于集合封面拖动调整展示区域后的稳定渲染。
+        /// </summary>
+        public static Bitmap LoadCoverThumb(string path, int width, int height, float focusX, float focusY)
+        {
+            if (string.IsNullOrEmpty(path) || width <= 0 || height <= 0) return null;
+            focusX = FocusClamp(focusX);
+            focusY = FocusClamp(focusY);
+            StringBuilder stamp = new StringBuilder(64);
+            AppendFileStamp(stamp, path);
+            string key = "C" + width + "x" + height
+                + "f" + (int)Math.Round(focusX * 100) + "x" + (int)Math.Round(focusY * 100)
+                + "|" + path + "|" + stamp;
+            Bitmap hit = CacheTakeClone(key);
+            if (hit != null) return hit;
+            return CacheStore(key, TryLoadCoverThumbCore(path, width, height, focusX, focusY));
+        }
+
+        /// <summary>取景焦点夹紧到 0~1（NaN 回退居中）。</summary>
+        private static float FocusClamp(float v)
+        {
+            if (float.IsNaN(v)) return 0.5F;
+            if (v < 0F) return 0F;
+            if (v > 1F) return 1F;
+            return v;
+        }
+
+        /// <summary>解码并等比裁剪填满目标尺寸（按取景焦点偏移，默认居中，类似 CSS background-position）。</summary>
+        private static Bitmap TryLoadCoverThumbCore(string path, int width, int height, float focusX, float focusY)
         {
             try
             {
@@ -328,18 +350,61 @@ namespace AppManager
                     double scale = Math.Max((double)width / src.Width, (double)height / src.Height);
                     int dw = Math.Max(1, (int)Math.Round(src.Width * scale));
                     int dh = Math.Max(1, (int)Math.Round(src.Height * scale));
+                    int ox = (int)Math.Round((dw - width) * focusX);
+                    int oy = (int)Math.Round((dh - height) * focusY);
                     Bitmap dst = new Bitmap(width, height, PixelFormat.Format32bppArgb);
                     using (Graphics g = Graphics.FromImage(dst))
                     {
                         g.SmoothingMode = SmoothingMode.AntiAlias;
                         g.InterpolationMode = InterpolationMode.HighQualityBicubic;
                         g.PixelOffsetMode = PixelOffsetMode.HighQuality;
-                        g.DrawImage(src, new Rectangle((width - dw) / 2, (height - dh) / 2, dw, dh));
+                        g.DrawImage(src, new Rectangle(-ox, -oy, dw, dh));
                     }
                     return dst;
                 }
             }
             catch { return null; }   // 损坏文件/非图片内容：回退到占位绘制
+        }
+
+        /// <summary>
+        /// 封面取景原图：按长边上限等比缩放但不裁剪，供编辑态拖动取景使用，带模块级缓存。
+        /// 非图片或解码失败返回 null。
+        /// </summary>
+        public static Bitmap LoadCoverSource(string path, int maxLongEdge)
+        {
+            if (string.IsNullOrEmpty(path) || maxLongEdge <= 0) return null;
+            StringBuilder stamp = new StringBuilder(64);
+            AppendFileStamp(stamp, path);
+            string key = "S" + maxLongEdge + "|" + path + "|" + stamp;
+            Bitmap hit = CacheTakeClone(key);
+            if (hit != null) return hit;
+            return CacheStore(key, TryLoadCoverSourceCore(path, maxLongEdge));
+        }
+
+        /// <summary>解码整图并按长边上限缩放（不裁剪）。</summary>
+        private static Bitmap TryLoadCoverSourceCore(string path, int maxLongEdge)
+        {
+            try
+            {
+                if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
+                using (Bitmap src = new Bitmap(path))
+                {
+                    if (src.Width <= 0 || src.Height <= 0) return null;
+                    double scale = Math.Min(1.0, (double)maxLongEdge / Math.Max(src.Width, src.Height));
+                    int dw = Math.Max(1, (int)Math.Round(src.Width * scale));
+                    int dh = Math.Max(1, (int)Math.Round(src.Height * scale));
+                    Bitmap dst = new Bitmap(dw, dh, PixelFormat.Format32bppArgb);
+                    using (Graphics g = Graphics.FromImage(dst))
+                    {
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                        g.DrawImage(src, new Rectangle(0, 0, dw, dh));
+                    }
+                    return dst;
+                }
+            }
+            catch { return null; }
         }
 
         /// <summary>检测一个 Bitmap 是否为有效图标（非空、有效像素占比 >= 2%）。</summary>

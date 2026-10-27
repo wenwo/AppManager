@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Xml;
 
@@ -77,6 +78,8 @@ namespace AppManager
         public string Parent = string.Empty;       // 所属资源分类（照片/视频/…/自建资源分类）
         public string Description = string.Empty;  // 说明（集合详情栏展示）
         public string Cover = string.Empty;        // 自定义封面图片路径；空 = 自动取首个成员缩略图
+        public float CoverFocusX = 0.5F;           // 封面取景焦点横向位置（0~1，0.5 居中）
+        public float CoverFocusY = 0.5F;           // 封面取景焦点纵向位置（0~1，0.5 居中）
     }
 
     /// <summary>集合键规则：col: 前缀避免与真实分类名冲突，形如 col:照片/旅行。</summary>
@@ -310,6 +313,8 @@ namespace AppManager
                     c.Parent = XmlAttr(n, "parent");
                     c.Description = XmlAttr(n, "desc");
                     c.Cover = XmlAttr(n, "cover");
+                    c.CoverFocusX = XmlAttributeFocus(n, "fx");
+                    c.CoverFocusY = XmlAttributeFocus(n, "fy");
                     if (c.Name.Length > 0 && c.Parent.Length > 0) cfg.Collections.Add(c);
                 }
                 foreach (XmlNode n in root.SelectNodes("CategoryOverrides/Item"))
@@ -424,6 +429,8 @@ namespace AppManager
                         w.WriteAttributeString("parent", c.Parent ?? string.Empty);
                         w.WriteAttributeString("desc", c.Description ?? string.Empty);
                         w.WriteAttributeString("cover", c.Cover ?? string.Empty);
+                        w.WriteAttributeString("fx", c.CoverFocusX.ToString("0.###", CultureInfo.InvariantCulture));
+                        w.WriteAttributeString("fy", c.CoverFocusY.ToString("0.###", CultureInfo.InvariantCulture));
                         w.WriteEndElement();
                     }
                     w.WriteEndElement();
@@ -733,6 +740,17 @@ namespace AppManager
         {
             return (node.Attributes != null && node.Attributes[attr] != null)
                 ? node.Attributes[attr].Value : string.Empty;
+        }
+
+        /// <summary>读取封面取景焦点（0~1）：缺省或非法值回退居中，越界夹紧。</summary>
+        private static float XmlAttributeFocus(XmlNode node, string attr)
+        {
+            string v = XmlAttr(node, attr);
+            float f;
+            if (!float.TryParse(v, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) return 0.5F;
+            if (f < 0F) return 0F;
+            if (f > 1F) return 1F;
+            return f;
         }
 
         private static void WriteList(XmlWriter w, string name, List<string> list)

@@ -374,6 +374,7 @@ namespace AppManager.Controls
 
         private void PaintFooter(Graphics g)
         {
+            // 底部「+ 新建集合」：平铺底栏，不做卡片
             int footY = ClientSize.Height - FooterH;
             using (Pen p = new Pen(Theme.Separator, 1))
                 g.DrawLine(p, PadX, footY, ClientSize.Width - PadX, footY);

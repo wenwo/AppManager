@@ -883,14 +883,20 @@ namespace AppManager
                 col.Parent = "照片";
                 col.Description = "海边与山野";
                 col.Cover = @"C:\pics\cover.jpg";
+                col.CoverFocusX = 0.25F;
+                col.CoverFocusY = 0.75F;
                 c.Collections.Add(col);
                 c.Save();
                 AppConfig r = AppConfig.Load();
+                float fx = r.Collections.Count == 1 ? r.Collections[0].CoverFocusX : -1F;
+                float fy = r.Collections.Count == 1 ? r.Collections[0].CoverFocusY : -1F;
                 bool roundtrip = r.Collections.Count == 1
                     && r.Collections[0].Name == "旅行"
                     && r.Collections[0].Parent == "照片"
                     && r.Collections[0].Description == "海边与山野"
-                    && r.Collections[0].Cover == @"C:\pics\cover.jpg";
+                    && r.Collections[0].Cover == @"C:\pics\cover.jpg"
+                    && Math.Abs(fx - 0.25F) < 0.001F
+                    && Math.Abs(fy - 0.75F) < 0.001F;
                 bool keyRule = CollectionKeys.Make("照片", "旅行") == "col:照片/旅行"
                     && CollectionKeys.IsCollectionKey("col:照片/旅行")
                     && !CollectionKeys.IsCollectionKey("照片")
