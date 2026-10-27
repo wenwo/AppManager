@@ -8,6 +8,7 @@ libmpv-2.dll
 # 运行时生成（日志 / 用户配置 / 收纳备份 / 快捷中心）
 selftest.log
 tidy.log
+error.log
 config.xml
 DesktopBackup/
 QuickCenter/
@@ -15,6 +16,10 @@ CollectionCovers/
 
 # 临时探测文件
 _probe_icon.png
+
+# IDE 配置（本机私有，不入库）
+.idea/
+*.iml
 
 # 本机私有规则与说明文档（只在本机生效，不提交）
 .trae/rules/project_rules.md
