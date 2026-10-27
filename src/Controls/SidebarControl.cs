@@ -406,7 +406,8 @@ namespace AppManager.Controls
         /// <summary>中间滚动区上边界（紧随顶部固定区块）。</summary>
         private int ScrollTop
         {
-            get { return ListTop + ListPad + TopCount * ItemHeight; }
+            // 顶部不再留 8px 空白：首个分类与集合表头、列表表头的起始线对齐
+            get { return ListTop + TopCount * ItemHeight; }
         }
 
         /// <summary>中间滚动区下边界（底部固定区块的上沿）。</summary>
@@ -418,7 +419,7 @@ namespace AppManager.Controls
         /// <summary>条目顶端 Y：顶部/底部固定区块不随滚动位移，中间区块随 scrollOffset 位移。</summary>
         private int ItemTop(int index)
         {
-            if (index < TopCount) return ListTop + ListPad + index * ItemHeight;
+            if (index < TopCount) return ListTop + index * ItemHeight;
             if (hasScrollBlock && index >= scrollStart && index <= scrollEnd)
                 return ScrollTop + (index - scrollStart) * ItemHeight - scrollOffset;
             return ScrollBottom + (index - scrollEnd - 1) * ItemHeight;
@@ -431,7 +432,7 @@ namespace AppManager.Controls
             // 顶部固定区块
             if (y < ScrollTop)
             {
-                int idx = (y - ListTop - ListPad) / ItemHeight;
+                int idx = (y - ListTop) / ItemHeight;
                 return idx >= 0 ? idx : -1;
             }
             // 底部固定区块

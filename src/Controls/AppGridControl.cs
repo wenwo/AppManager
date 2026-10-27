@@ -48,6 +48,8 @@ namespace AppManager.Controls
         private readonly Dictionary<string, ListMeta> metaCache = new Dictionary<string, ListMeta>(StringComparer.OrdinalIgnoreCase);   // 大小/时间列缓存（一次读盘取两项）
         private static readonly ListMeta EmptyMeta = new ListMeta();   // 非文件条目共用，避免每次重绘分配
         private int locTextMaxW = -1;   // 位置列文本最大宽度（按当前 apps 缓存，重绘不再重复测量）
+        private string sortColumn;      // 表头排序列（null=默认顺序）；仅绘制指示箭头，排序由主窗体执行
+        private bool sortAsc = true;
         private int catTextMaxW = -1;   // 分类列胶囊组最大宽度（按当前 apps 缓存）
         private int actionReserveMax = -1;   // 整表统一预留的最大操作按钮数（保证列 X 一致）
 
@@ -63,8 +65,9 @@ namespace AppManager.Controls
 
         // iOS Grouped List 尺寸（单行表格：名称靠左，分类/大小/位置 靠右且上下对齐）
         private const int ListRowH = 30;
-        private const int ListTop = 10;
-        private const int ListHeaderH = 26;   // 列表表头高度（吸顶，仅列表视图显示）
+        private const int ListTop = 0;            // 表头紧贴内容区顶部
+        internal const int ListHeaderH = 36;       // 与左侧分类行同高，保证三栏文字中心对齐
+        private const int ListBottomPad = 10;     // 列表底部留白（滚动范围）
         private const int ListMargin = 14;
         private const int ListIcon = 20;
         private const int ActionBtnW = 40;
@@ -123,6 +126,9 @@ namespace AppManager.Controls
         /// <summary>空白区右键：请求弹出新建菜单（文件夹/文本文档），携带屏幕坐标。</summary>
         public event Action<Point> BlankRightClicked;
 
+        /// <summary>列表表头点击排序请求：参数为列名（name/size/time），由主窗体决定排序语义并重刷。</summary>
+        public event Action<string> SortRequested;
+
         /// <summary>是否接受外部文件/文件夹拖入（由外部按当前分类是否可编辑设置）。</summary>
         public bool AllowExternalDrop { get; set; }
 
@@ -177,6 +183,8 @@ namespace AppManager.Controls
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
+            SetStyle(ControlStyles.Selectable, true);   // 允许接收键盘焦点（方向键/Enter/Delete 操作条目）
+            TabStop = true;
             BackColor = Theme.Background;
             AutoScroll = true;
             Font = Theme.FontOf(9F);
@@ -238,9 +246,25 @@ namespace AppManager.Controls
 
         public void SetApps(List<AppInfo> list)
         {
+            // 记录旧选中条目的稳定键，替换后按键恢复：后台重扫/刷新不应打断用户的多选
+            List<string> oldKeys = new List<string>();
+            foreach (AppInfo a in SelectedApps)
+            {
+                if (a == null) continue;
+                string k = a.DisplayKey();
+                if (!string.IsNullOrEmpty(k) && !oldKeys.Contains(k)) oldKeys.Add(k);
+            }
+            ResetDrag();   // 列表被替换后旧下标立即失效，拖动状态必须作废，避免松手时把错误条目搬进错误目录
             apps.Clear();
             apps.AddRange(list);
-            ClearSelection();   // 列表内容变化：下标失效，选中状态一并清空
+            selected.Clear();
+            selectAnchor = -1;
+            collapseOnUp = false;
+            for (int i = 0; i < apps.Count; i++)
+            {
+                string k = apps[i].DisplayKey();
+                if (!string.IsNullOrEmpty(k) && oldKeys.Contains(k)) { selected.Add(i); selectAnchor = i; }
+            }
             metaCache.Clear();
             locTextMaxW = -1;
             catTextMaxW = -1;
@@ -269,6 +293,30 @@ namespace AppManager.Controls
             }
         }
 
+        /// <summary>设置表头排序指示（null 清除）；排序本身由主窗体在 RefreshGrid 中应用。</summary>
+        public void SetSortIndicator(string column, bool asc)
+        {
+            sortColumn = column;
+            sortAsc = asc;
+            Invalidate();
+        }
+
+        /// <summary>表头点击：命中 名称/大小/时间 列则发起排序请求（列几何与表头绘制共用，保证命中区域一致）。</summary>
+        internal void HandleHeaderClick(Graphics g, Point p)
+        {
+            if (grid) return;   // 仅列表模式有表头
+            Rectangle refRow = new Rectangle(ListMargin, 0, ClientSize.Width - ListMargin * 2, ListHeaderH);
+            Rectangle nameRect, catRect, sizeRect, timeRect, locRect;
+            ListColumns(g, refRow, ActionReserveWidth(), out nameRect, out catRect, out sizeRect, out timeRect, out locRect);
+            string col = null;
+            if (nameRect.Contains(p)) col = "name";
+            else if (sizeRect.Contains(p)) col = "size";
+            else if (ShowTimeColumn && timeRect.Contains(p)) col = "time";
+            if (col == null) return;
+            Action<string> h = SortRequested;
+            if (h != null) h(col);
+        }
+
         /// <summary>清空多选状态。</summary>
         public void ClearSelection()
         {
@@ -294,8 +342,8 @@ namespace AppManager.Controls
             }
             else
             {
-                // 列表：表头高度 + 上下留白 + 各行（含卡片间距）
-                h = ListHeaderH + ListTop * 2 + apps.Count * (ListRowH + ListGap) - (apps.Count > 0 ? ListGap : 0);
+                // 列表：表头高度 + 底部留白 + 各行（含卡片间距）
+                h = ListHeaderH + ListBottomPad + apps.Count * (ListRowH + ListGap) - (apps.Count > 0 ? ListGap : 0);
             }
             AutoScrollMinSize = new Size(0, h);
         }
@@ -424,15 +472,22 @@ namespace AppManager.Controls
             // 顶部吸顶表头区域不参与命中（否则滚动后点击表头会误命中其下方被遮挡的行）
             if (!grid && client.Y < ListHeaderH) return -1;
             Point p = new Point(client.X - AutoScrollPosition.X, client.Y - AutoScrollPosition.Y);
+            // 网格/列表布局规则均固定：按坐标直接算行列并回验矩形，不再线性扫描
             if (grid)
             {
-                for (int i = 0; i < apps.Count; i++)
-                    if (GridRect(i).Contains(p)) return i;
+                int cols = Columns();
+                int col = (p.X - Theme.GridItemGap) / (Theme.GridItemWidth + Theme.GridItemGap);
+                int row = (p.Y - Theme.GridItemGap) / (Theme.GridItemHeight + Theme.GridItemGap);
+                if (col >= 0 && row >= 0 && col < cols)
+                {
+                    int idx = row * cols + col;
+                    if (idx < apps.Count && GridRect(idx).Contains(p)) return idx;
+                }
             }
             else
             {
-                for (int i = 0; i < apps.Count; i++)
-                    if (ListRowRect(i).Contains(p)) return i;
+                int row = (p.Y - ListTop - ListHeaderH) / (ListRowH + ListGap);
+                if (row >= 0 && row < apps.Count && ListRowRect(row).Contains(p)) return row;
             }
             return -1;
         }
@@ -460,15 +515,6 @@ namespace AppManager.Controls
 
             if (dragging && dragGap >= 0) PaintDropIndicator(g);
             if (dragging && dropTarget >= 0) PaintFolderDropHighlight(g);
-
-            // 列表表头：吸顶绘制（在行之后绘制以覆盖滚动到其下方的行，且不受滚动位移影响）
-            if (!grid)
-            {
-                GraphicsState st = g.Save();
-                g.ResetTransform();
-                PaintListHeader(g);
-                g.Restore(st);
-            }
 
             // 自绘悬浮信息卡（iOS 深色圆角，替代系统 ToolTip）：锚定在悬停条目下方，避免遮挡条目本身
             if (tipVisible && !string.IsNullOrEmpty(tipText))
@@ -668,33 +714,49 @@ namespace AppManager.Controls
                 if (nameW < 0) nameW = 0;
                 nameRect = new Rectangle(textLeft, row.Y, nameW, row.Height);
 
-                // 资源列表多出时间列时，优先保证名称可读：宽度不够则从位置列让位
-                if (!ShowTimeColumn || nameW >= NameColMinW) break;
+                // 名称列优先可读：宽度不够时从位置列让位（资源/软件列表同口径）
+                if (nameW >= NameColMinW) break;
                 int canShrink = locW - LocColMinW;
                 if (canShrink <= 0) break;
                 locW -= Math.Min(NameColMinW - nameW, canShrink);
             }
+
+            // 极端窄宽度：位置列已到下限名称仍不足，强制把右侧列右移，名称至少保留 NameColMinW 可读
+            if (nameRect.Width < NameColMinW)
+            {
+                int shift = NameColMinW - nameRect.Width;
+                locRect = new Rectangle(locRect.X + shift, locRect.Y, locRect.Width, locRect.Height);
+                if (ShowTimeColumn) timeRect = new Rectangle(timeRect.X + shift, timeRect.Y, timeRect.Width, timeRect.Height);
+                sizeRect = new Rectangle(sizeRect.X + shift, sizeRect.Y, sizeRect.Width, sizeRect.Height);
+                catRect = new Rectangle(catRect.X + shift, catRect.Y, catRect.Width, catRect.Height);
+                nameRect = new Rectangle(textLeft, row.Y, NameColMinW, row.Height);
+            }
         }
 
-        /// <summary>列表吸顶表头：底部分隔线 + 各列栏位名（与数据列对齐）。</summary>
-        private void PaintListHeader(Graphics g)
+        /// <summary>
+        /// 列表吸顶表头：底部分隔线 + 各列栏位名（与数据列对齐）。
+        /// 由固定在网格顶部的 ListHeaderStrip 调用（表头不参与网格滚动，见该类说明）。
+        /// </summary>
+        internal void PaintListHeader(Graphics g, int width)
         {
-            // 表头底色铺满整宽，遮住滚动到其下方的行
-            g.FillRectangle(headerBgBrush, 0, 0, ClientSize.Width, ListHeaderH);
-            g.DrawLine(headerLinePen, 0, ListHeaderH - 1, ClientSize.Width, ListHeaderH - 1);
+            // 表头底色铺满整宽，遮住其下滚动经过的行
+            g.FillRectangle(headerBgBrush, 0, 0, width, ListHeaderH);
+            g.DrawLine(headerLinePen, 0, ListHeaderH - 1, width, ListHeaderH - 1);
 
             // 用与数据行同宽同列的参照矩形取列几何（仅 X 相关，Y 用表头高度以垂直居中）
-            Rectangle refRow = new Rectangle(ListMargin, 0, ClientSize.Width - ListMargin * 2, ListHeaderH);
+            Rectangle refRow = new Rectangle(ListMargin, 0, width - ListMargin * 2, ListHeaderH);
             int actionReserve = ActionReserveWidth();
             Rectangle nameRect, catRect, sizeRect, timeRect, locRect;
             ListColumns(g, refRow, actionReserve, out nameRect, out catRect, out sizeRect, out timeRect, out locRect);
 
             // 每列栏位名与对应数据的对齐方式一致（名称/分类左对齐，大小/时间/位置右对齐）
-            Draw.DrawStringLeft(g, "名称", headerFont, subTextBrush, nameRect);
+            // 排序列名追加方向箭头（▲升序/▼降序）
+            string arrow = sortAsc ? " ▲" : " ▼";
+            Draw.DrawStringLeft(g, "名称" + (sortColumn == "name" ? arrow : string.Empty), headerFont, subTextBrush, nameRect);
             Draw.DrawStringLeft(g, "分类", headerFont, subTextBrush, catRect);
-            Draw.DrawStringRight(g, "大小", headerFont, subTextBrush, sizeRect);
+            Draw.DrawStringRight(g, "大小" + (sortColumn == "size" ? arrow : string.Empty), headerFont, subTextBrush, sizeRect);
             if (ShowTimeColumn)
-                Draw.DrawStringRight(g, "时间", headerFont, subTextBrush, timeRect);
+                Draw.DrawStringRight(g, "时间" + (sortColumn == "time" ? arrow : string.Empty), headerFont, subTextBrush, timeRect);
             Draw.DrawStringRight(g, "位置", headerFont, subTextBrush, locRect);
         }
 
@@ -835,8 +897,10 @@ namespace AppManager.Controls
             if (Scanner.IsAppsFolderTarget(t)) return "打包应用";
             try
             {
-                string dir = Path.GetDirectoryName(t.TrimEnd(Path.DirectorySeparatorChar));
-                return string.IsNullOrEmpty(dir) ? t : dir;
+                string trimmed = t.TrimEnd(Path.DirectorySeparatorChar);
+                if (trimmed.Length == 0) return "—";
+                string dir = Path.GetDirectoryName(trimmed);
+                return string.IsNullOrEmpty(dir) ? trimmed : dir;
             }
             catch { return t; }
         }
@@ -977,6 +1041,15 @@ namespace AppManager.Controls
             base.OnMouseLeave(e);
         }
 
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            int oldY = AutoScrollPosition.Y;
+            base.OnMouseWheel(e);
+            // 滚轮滚动不触发 Scroll 事件：滚动后按光标位置重算悬停项，避免高亮停留在错误条目
+            if (AutoScrollPosition.Y == oldY) return;
+            SyncHoverToCursor();
+        }
+
         protected override void OnScroll(ScrollEventArgs se)
         {
             base.OnScroll(se);
@@ -1082,6 +1155,81 @@ namespace AppManager.Controls
             return -1;
         }
 
+        /// <summary>
+        /// 键盘导航：方向键移动选中（网格按列数步进/列表按行），Enter 启动选中项，Delete 删除选中项。
+        /// 返回 true 表示按键已被网格消费，不再向外冒泡。
+        /// </summary>
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        {
+            if (apps.Count > 0)
+            {
+                int delta = 0;
+                if (keyData == Keys.Left) delta = -1;
+                else if (keyData == Keys.Right) delta = 1;
+                else if (keyData == Keys.Up) delta = grid ? -Columns() : -1;
+                else if (keyData == Keys.Down) delta = grid ? Columns() : 1;
+                else if (keyData == Keys.Return)
+                {
+                    List<AppInfo> sel = SelectedApps;
+                    if (sel.Count > 0)
+                    {
+                        Action<AppInfo> h = LaunchRequested;
+                        if (h != null) h(sel[0]);
+                    }
+                    return true;
+                }
+                else if (keyData == Keys.Delete)
+                {
+                    List<AppInfo> sel = SelectedApps;
+                    if (sel.Count > 0)
+                    {
+                        Action<AppInfo> h = DeleteRequested;
+                        if (h != null) h(sel[0]);
+                    }
+                    return true;
+                }
+                if (delta != 0)
+                {
+                    int cur = selected.Count > 0 ? selected[selected.Count - 1] : (delta > 0 ? -1 : apps.Count);
+                    int next = cur + delta;
+                    if (next < 0) next = 0;
+                    if (next >= apps.Count) next = apps.Count - 1;
+                    SelectSingle(next);
+                    EnsureVisible(next);
+                    return true;
+                }
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        /// <summary>滚动到指定条目可见（键盘导航后跟随滚动）。</summary>
+        public void EnsureVisible(int index)
+        {
+            if (index < 0 || index >= apps.Count) return;
+            Rectangle r = grid ? GridRect(index) : ListRowRect(index);
+            int top = -AutoScrollPosition.Y;
+            int view = ClientSize.Height;
+            if (view <= 0) return;
+            int y = top;
+            if (r.Top < top) y = r.Top;
+            else if (r.Bottom > top + view) y = r.Bottom - view;
+            if (y != top) AutoScrollPosition = new Point(AutoScrollPosition.X, y);
+        }
+
+        /// <summary>只失效指定条目的矩形：图标加载完成后局部刷新，避免每张图标触发整网格重绘。</summary>
+        public void InvalidateItem(AppInfo app)
+        {
+            if (app == null) return;
+            for (int i = 0; i < apps.Count; i++)
+            {
+                if (!ReferenceEquals(apps[i], app)) continue;
+                Rectangle r = grid ? GridRect(i) : ListRowRect(i);
+                r.Offset(AutoScrollPosition.X, AutoScrollPosition.Y);
+                Invalidate(r);
+                return;
+            }
+        }
+
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             int idx = HitIndex(e.Location);
@@ -1093,6 +1241,7 @@ namespace AppManager.Controls
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Left) Focus();   // 点击后获得焦点，方向键/Enter/Delete 才能作用于网格
             suppressClick = false;
             if (e.Button != MouseButtons.Left) return;
 
@@ -1327,6 +1476,45 @@ namespace AppManager.Controls
                 int y = ListTop + ListHeaderH + gap * (ListRowH + ListGap) - ListGap / 2;
                 g.DrawLine(accentPen, ListMargin + 6, y, ClientSize.Width - ListMargin - 6, y);
             }
+        }
+    }
+
+    /// <summary>
+    /// 列表栏位表头条：固定盖在网格内容区顶部的独立控件，不参与网格滚动。
+    /// 表头若绘制在滚动面内，系统滚动（ScrollWindowEx 位移像素）会把行内容带进表头带再重绘，
+    /// 表现为滚动时列名晃动/穿模；表头独立成 HWND 后，滚动位移永远影响不到列名占位。
+    /// 覆盖区域与网格顶部表头死区（HitIndex 对 Y &lt; ListHeaderH 返回 -1）完全重合，不拦截条目交互；
+    /// 不获取焦点，滚轮消息仍发给已聚焦的网格。
+    /// </summary>
+    internal sealed class ListHeaderStrip : Control
+    {
+        private readonly AppGridControl grid;
+
+        public ListHeaderStrip(AppGridControl grid)
+        {
+            this.grid = grid;
+            SetStyle(ControlStyles.Selectable, false);   // 不抢焦点：滚轮仍发给已聚焦的网格
+            // 整区自绘 + 双缓冲：网格 Invalidate 会级联触发表头重绘（见下），
+            // 无双缓冲时 FillRectangle 直绘屏幕，栏位文字会出现可见闪烁
+            SetStyle(ControlStyles.Opaque | ControlStyles.AllPaintingInWmPaint
+                | ControlStyles.OptimizedDoubleBuffer | ControlStyles.UserPaint, true);
+            BackColor = Theme.Background;
+            // 网格任何重绘（内容/尺寸/列宽变化）都同步刷新表头，保证栏位与数据列对齐
+            grid.Invalidated += delegate { if (Visible) Invalidate(); };
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            grid.PaintListHeader(e.Graphics, Width);
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            if (e.Button != MouseButtons.Left) return;
+            // 命中可排序列（名称/大小/时间）时向主窗体发起排序请求
+            using (Graphics g = CreateGraphics())
+                grid.HandleHeaderClick(g, e.Location);
         }
     }
 }

@@ -22,6 +22,10 @@ namespace AppManager
         private readonly Dictionary<string, DateTime> _ignoredDeletions =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         private readonly object _ignoreLock = new object();
+        // 监听启动时已存在的桌面快捷方式快照：用于区分「重命名已有项」（不搬运）与「新出现」（搬运）
+        private readonly System.Collections.Generic.HashSet<string> _knownDesktopShortcuts =
+            new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly object _knownLock = new object();
         private bool _disposed;
 
         /// <summary>防抖后触发一次：表示「开始菜单或桌面发生了变化」。</summary>
@@ -35,10 +39,13 @@ namespace AppManager
             _debounce.Interval = DebounceMs;
             _debounce.Tick += OnDebounceTick;
 
-            Watch(DesktopOrganizer.UserDesktop);
-            Watch(DesktopOrganizer.PublicDesktop);
-            Watch(StartMenuPrograms(true));
-            Watch(StartMenuPrograms(false));
+            // 桌面只盯顶层：子目录（工程目录等）的增删不触发重扫，也不参与自动搬运
+            Watch(DesktopOrganizer.UserDesktop, false);
+            Watch(DesktopOrganizer.PublicDesktop, false);
+            Watch(StartMenuPrograms(true), true);
+            Watch(StartMenuPrograms(false), true);
+            SnapshotDesktop(DesktopOrganizer.UserDesktop);
+            SnapshotDesktop(DesktopOrganizer.PublicDesktop);
         }
 
         private static string StartMenuPrograms(bool common)
@@ -50,13 +57,13 @@ namespace AppManager
             return Path.Combine(root, "Programs");
         }
 
-        private void Watch(string dir)
+        private void Watch(string dir, bool includeSubdirectories)
         {
             if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) { return; }
             try
             {
                 FileSystemWatcher w = new FileSystemWatcher(dir);
-                w.IncludeSubdirectories = true;
+                w.IncludeSubdirectories = includeSubdirectories;
                 w.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName;
                 // 默认 4KB 缓冲在批量安装时容易溢出（丢事件），适当放大
                 w.InternalBufferSize = 16 * 1024;
@@ -112,18 +119,43 @@ namespace AppManager
 
         // ---------- 文件系统事件（线程池线程）→ 统一切回界面线程 ----------
 
+        /// <summary>登记监听启动时桌面已有的顶层快捷方式，供重命名判定使用。</summary>
+        private void SnapshotDesktop(string dir)
+        {
+            if (string.IsNullOrEmpty(dir) || !Directory.Exists(dir)) return;
+            string[] files;
+            try { files = Directory.GetFiles(dir); }
+            catch { return; }
+            lock (_knownLock)
+            {
+                foreach (string f in files)
+                    if (DesktopOrganizer.IsShortcutFile(f)) _knownDesktopShortcuts.Add(f);
+            }
+        }
+
         private void OnCreated(object sender, FileSystemEventArgs e)
         {
+            if (IsDesktopShortcut(e.FullPath))
+                lock (_knownLock) { _knownDesktopShortcuts.Add(e.FullPath); }
             Post(e.FullPath, true);
         }
 
         private void OnRenamed(object sender, RenamedEventArgs e)
         {
-            Post(e.FullPath, true);
+            bool wasKnown;
+            lock (_knownLock)
+            {
+                wasKnown = _knownDesktopShortcuts.Remove(e.OldFullPath);
+                if (IsDesktopShortcut(e.FullPath)) _knownDesktopShortcuts.Add(e.FullPath);
+            }
+            // 重命名一个监听前已存在的桌面快捷方式 ≠ 新出现：不搬运，只触发重扫
+            if (wasKnown) Post(string.Empty, false);
+            else Post(e.FullPath, true);
         }
 
         private void OnDeleted(object sender, FileSystemEventArgs e)
         {
+            lock (_knownLock) { _knownDesktopShortcuts.Remove(e.FullPath); }
             if (ConsumeIgnoredDeletion(e.FullPath)) { return; }
             Post(string.Empty, false);
         }

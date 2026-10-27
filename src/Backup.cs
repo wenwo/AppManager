@@ -245,8 +245,20 @@ namespace AppManager
                 Directory.CreateDirectory(temp);
                 WriteSnapshot(temp, showName, created);
 
-                if (Directory.Exists(target)) { Directory.Delete(target, true); }
-                Directory.Move(temp, target);
+                // 先把旧备份整体挪到 .old 留底，再换入新快照；换入失败则回滚，任何时刻都有一份完整备份
+                string old = target + ".old";
+                if (Directory.Exists(old)) { Directory.Delete(old, true); }
+                if (Directory.Exists(target)) { Directory.Move(target, old); }
+                try
+                {
+                    Directory.Move(temp, target);
+                }
+                catch
+                {
+                    if (!Directory.Exists(target) && Directory.Exists(old)) Directory.Move(old, target);
+                    throw;
+                }
+                if (Directory.Exists(old)) { Directory.Delete(old, true); }
                 return true;
             }
             catch (Exception ex)

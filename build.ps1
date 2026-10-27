@@ -41,6 +41,10 @@ if (-not (Test-Path $ico)) {
 }
 if (Test-Path $ico) { $icoArg = @("/win32icon:$ico") }
 
+$manifest = Join-Path $base "app.manifest"
+$manifestArg = @()
+if (Test-Path $manifest) { $manifestArg = @("/win32manifest:$manifest") }
+
 $refArgs = $refs | ForEach-Object { "/r:$_" }
 
 # Internal video player needs the mpv client library next to the exe (too large for the repo).
@@ -63,7 +67,7 @@ Write-Host "Compiler : $csc"
 Write-Host "Sources  : $($files.Count) file(s)"
 Write-Host "Output   : $out"
 
-& $csc /nologo /target:winexe /utf8output /out:$out @icoArg @refArgs $files
+& $csc /nologo /target:winexe /utf8output /out:$out @icoArg @manifestArg @refArgs $files
 $code = $LASTEXITCODE
 if ($code -ne 0) {
   Write-Error "Build failed (exit $code)"

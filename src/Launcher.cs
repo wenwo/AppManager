@@ -133,15 +133,25 @@ namespace AppManager
                 }
                 else
                 {
-                    int sp = u.IndexOf(' ');
-                    if (sp > 0)
+                    // 未加引号且路径含空格时，优先按 .exe 边界切分，避免把路径在空格处截断
+                    int exeEnd = ExeBoundaryEnd(u);
+                    if (exeEnd > 0)
                     {
-                        psi.FileName = u.Substring(0, sp);
-                        psi.Arguments = u.Substring(sp + 1);
+                        psi.FileName = u.Substring(0, exeEnd);
+                        psi.Arguments = u.Substring(exeEnd).Trim();
                     }
                     else
                     {
-                        psi.FileName = u;
+                        int sp = u.IndexOf(' ');
+                        if (sp > 0)
+                        {
+                            psi.FileName = u.Substring(0, sp);
+                            psi.Arguments = u.Substring(sp + 1);
+                        }
+                        else
+                        {
+                            psi.FileName = u;
+                        }
                     }
                 }
                 Process.Start(psi);
@@ -151,6 +161,20 @@ namespace AppManager
             {
                 Debug.WriteLine("卸载失败: " + ex.Message);
                 return false;
+            }
+        }
+
+        /// <summary>未加引号命令行中 .exe 的结束下标（其后为空白或结尾）；未找到返回 -1。</summary>
+        private static int ExeBoundaryEnd(string s)
+        {
+            int at = 0;
+            for (;;)
+            {
+                int hit = s.IndexOf(".exe", at, StringComparison.OrdinalIgnoreCase);
+                if (hit < 0) return -1;
+                int end = hit + 4;
+                if (end >= s.Length || s[end] == ' ' || s[end] == '\t') return end;
+                at = end;
             }
         }
 

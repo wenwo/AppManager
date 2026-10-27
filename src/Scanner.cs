@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
 using Microsoft.Win32;
+using System.Xml;
 
 namespace AppManager
 {
@@ -56,9 +57,13 @@ namespace AppManager
 
         public Scanner(AppConfig cfg) { config = cfg; }
 
+        // 按名称去重的索引（NormalizeEntryName → 条目）：MergeByName 由 O(n²) 遍历改为 O(1) 查找
+        private Dictionary<string, AppInfo> nameIndex;
+
         /// <summary>执行全量扫描，返回去重后的应用列表。</summary>
         public List<AppInfo> ScanAll()
         {
+            nameIndex = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
             Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
             ScanDesktop(dict);          // 桌面快捷方式（快捷中心来源）
             ScanDesktopBackup(dict);    // 已收纳备份（快捷中心来源）
@@ -118,7 +123,7 @@ namespace AppManager
             catch (Exception ex) { Paths.LogError(ex); }
         }
 
-        private static void AddManaged(Dictionary<string, AppInfo> dict, string path, bool isFolder)
+        private void AddManaged(Dictionary<string, AppInfo> dict, string path, bool isFolder)
         {
             AppInfo a = new AppInfo();
             a.Name = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
@@ -370,12 +375,18 @@ namespace AppManager
             if (dict.Count == 0) return;
             Dictionary<string, AppInfo> byName = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
             RegistryHive[] hives = new RegistryHive[] { RegistryHive.LocalMachine, RegistryHive.CurrentUser };
-            RegistryView[] views = new RegistryView[] { RegistryView.Registry64, RegistryView.Registry32 };
-            string[] paths = new string[]
-            {
-                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-                @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-            };
+            // 64 位系统：Registry64 视图下两个路径已分别覆盖 64/32 位卸载键，
+            // 再开 Registry32 视图只是重复枚举同一批键（32 位视图 + 普通路径 ≡ 64 位视图 + WOW6432Node）
+            RegistryView[] views = Environment.Is64BitOperatingSystem
+                ? new RegistryView[] { RegistryView.Registry64 }
+                : new RegistryView[] { RegistryView.Registry32 };
+            string[] paths = Environment.Is64BitOperatingSystem
+                ? new string[]
+                {
+                    @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+                    @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
+                }
+                : new string[] { @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" };
             foreach (RegistryHive hive in hives)
             {
                 foreach (RegistryView view in views)
@@ -459,19 +470,19 @@ namespace AppManager
         {
             string user = Environment.GetFolderPath(Environment.SpecialFolder.StartMenu);
             string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu);
-            ScanShortcuts(user, dict, "StartMenu");
-            ScanShortcuts(common, dict, "StartMenu");
+            ScanShortcuts(user, dict, "StartMenu", true);
+            ScanShortcuts(common, dict, "StartMenu", true);
         }
 
         /// <summary>
         /// 扫描目录内快捷方式并收录，按名称去重（同名合并且保留有效启动目标），
         /// 避免同一软件经桌面/开始菜单/收纳目录等多来源重复出现。
         /// </summary>
-        private void ScanShortcuts(string folder, Dictionary<string, AppInfo> dict, string source)
+        private void ScanShortcuts(string folder, Dictionary<string, AppInfo> dict, string source, bool recursive)
         {
             if (!Directory.Exists(folder)) return;
             string[] files;
-            try { files = Directory.GetFiles(folder, "*.*", SearchOption.AllDirectories); }
+            try { files = Directory.GetFiles(folder, "*.*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly); }
             catch { return; }
             foreach (string f in files)
             {
@@ -602,22 +613,23 @@ namespace AppManager
         {
             string desk = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
             string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
-            ScanShortcuts(desk, dict, "Desktop");
-            ScanShortcuts(common, dict, "Desktop");
+            // 桌面只扫顶层：递归遍历会把用户放在桌面的工程目录整棵扫进来，耗时且产生噪音条目
+            ScanShortcuts(desk, dict, "Desktop", false);
+            ScanShortcuts(common, dict, "Desktop", false);
         }
 
         private void ScanDesktopBackup(Dictionary<string, AppInfo> dict)
         {
             // 新版收纳目录 + 旧版 DesktopStash（升级后旧收纳的快捷方式也要能在快捷中心看到）
             if (Directory.Exists(Paths.DesktopBackupDir))
-                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop");
+                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop", true);
             if (Directory.Exists(Paths.LegacyStashDir))
-                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop");
+                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop", true);
         }
 
         // ===== 去重与配置 =====
 
-        private static void Merge(Dictionary<string, AppInfo> dict, AppInfo app)
+        private void Merge(Dictionary<string, AppInfo> dict, AppInfo app)
         {
             string k = app.DisplayKey();
             AppInfo exist;
@@ -633,6 +645,7 @@ namespace AppManager
             else
             {
                 dict[k] = app;
+                RegisterNameIndex(app);
             }
         }
 
@@ -640,14 +653,14 @@ namespace AppManager
         /// 按名称收录（收纳目录专用）：与已有条目同名（忽略大小写与重名后缀）时不新增条目，
         /// 仅把缺失的卸载/安装信息与桌面来源标记合并到已有条目，避免同一软件出现两条。
         /// </summary>
-        private static void MergeByName(Dictionary<string, AppInfo> dict, AppInfo app)
+        private void MergeByName(Dictionary<string, AppInfo> dict, AppInfo app)
         {
             string name = NormalizeEntryName(app.Name);
             if (name.Length > 0)
             {
-                foreach (AppInfo exist in dict.Values)
+                AppInfo exist;
+                if (nameIndex != null && nameIndex.TryGetValue(name, out exist))
                 {
-                    if (NormalizeEntryName(exist.Name) != name) continue;
                     if (string.IsNullOrEmpty(exist.UninstallString) && !string.IsNullOrEmpty(app.UninstallString))
                         exist.UninstallString = app.UninstallString;
                     if (string.IsNullOrEmpty(exist.InstallLocation) && !string.IsNullOrEmpty(app.InstallLocation))
@@ -660,6 +673,15 @@ namespace AppManager
                 }
             }
             dict[app.DisplayKey()] = app;
+            RegisterNameIndex(app);
+        }
+
+        /// <summary>把条目登记到名称去重索引（首个同名条目优先，与 MergeByName 的顺序语义一致）。</summary>
+        private void RegisterNameIndex(AppInfo app)
+        {
+            if (nameIndex == null || app == null) return;
+            string name = NormalizeEntryName(app.Name);
+            if (name.Length > 0 && !nameIndex.ContainsKey(name)) nameIndex[name] = app;
         }
 
         /// <summary>条目名称归一化（去重比较用）：先剔除重名后缀，再转小写去符号。</summary>
@@ -725,7 +747,7 @@ namespace AppManager
             return true;
         }
 
-        private void ApplyConfig(List<AppInfo> list)
+        internal void ApplyConfig(List<AppInfo> list)
         {
             foreach (AppInfo a in list)
             {
@@ -750,6 +772,95 @@ namespace AppManager
         {
             string n = name.ToLowerInvariant();
             return n.Contains("update") || n.Contains("security") || n.Contains("修补") || n.Contains("更新");
+        }
+    }
+
+    /// <summary>
+    /// 扫描结果磁盘缓存：把最近一次全量扫描的条目写到 scan.cache.xml，
+    /// 启动时先展示缓存数据再后台重扫，避免首屏长时间空等。
+    /// 写入走 .tmp + File.Replace 原子替换；读取失败直接放弃，不影响正常启动。
+    /// 收藏/隐藏/分类覆盖等配置不在这里持久化，加载后由 Scanner.ApplyConfig 重新套用。
+    /// </summary>
+    internal static class ScanCache
+    {
+        private static string CachePath { get { return Path.Combine(Paths.DataDir, "scan.cache.xml"); } }
+
+        public static List<AppInfo> Load()
+        {
+            List<AppInfo> list = new List<AppInfo>();
+            try
+            {
+                string path = CachePath;
+                if (!File.Exists(path)) return list;
+                XmlDocument doc = new XmlDocument();
+                doc.Load(path);
+                XmlNodeList nodes = doc.SelectNodes("/scan/app");
+                if (nodes == null) return list;
+                foreach (XmlNode node in nodes)
+                {
+                    XmlElement el = node as XmlElement;
+                    if (el == null) continue;
+                    AppInfo a = new AppInfo();
+                    a.Name = el.GetAttribute("name");
+                    a.TargetPath = el.GetAttribute("target");
+                    a.ShortcutPath = el.GetAttribute("shortcut");
+                    a.InstallLocation = el.GetAttribute("install");
+                    a.UninstallString = el.GetAttribute("uninstall");
+                    a.DisplayIcon = el.GetAttribute("icon");
+                    a.Category = el.GetAttribute("category");
+                    a.Source = el.GetAttribute("source");
+                    a.Key = el.GetAttribute("key");
+                    a.IsUwp = el.GetAttribute("uwp") == "1";
+                    a.IsDesktop = el.GetAttribute("desktop") == "1";
+                    a.IsFile = el.GetAttribute("file") == "1";
+                    a.IsFolder = el.GetAttribute("folder") == "1";
+                    if (!string.IsNullOrEmpty(a.Name)) list.Add(a);
+                }
+            }
+            catch (Exception ex) { Paths.LogError(ex); list.Clear(); }
+            return list;
+        }
+
+        public static void Save(List<AppInfo> list)
+        {
+            if (list == null) return;
+            try
+            {
+                string path = CachePath;
+                string tmp = path + ".tmp";
+                XmlWriterSettings settings = new XmlWriterSettings();
+                settings.Indent = false;
+                settings.Encoding = new UTF8Encoding(false);
+                using (XmlWriter w = XmlWriter.Create(tmp, settings))
+                {
+                    w.WriteStartDocument();
+                    w.WriteStartElement("scan");
+                    foreach (AppInfo a in list)
+                    {
+                        if (a == null || string.IsNullOrEmpty(a.Name)) continue;
+                        w.WriteStartElement("app");
+                        w.WriteAttributeString("name", a.Name);
+                        if (!string.IsNullOrEmpty(a.TargetPath)) w.WriteAttributeString("target", a.TargetPath);
+                        if (!string.IsNullOrEmpty(a.ShortcutPath)) w.WriteAttributeString("shortcut", a.ShortcutPath);
+                        if (!string.IsNullOrEmpty(a.InstallLocation)) w.WriteAttributeString("install", a.InstallLocation);
+                        if (!string.IsNullOrEmpty(a.UninstallString)) w.WriteAttributeString("uninstall", a.UninstallString);
+                        if (!string.IsNullOrEmpty(a.DisplayIcon)) w.WriteAttributeString("icon", a.DisplayIcon);
+                        if (!string.IsNullOrEmpty(a.Category)) w.WriteAttributeString("category", a.Category);
+                        if (!string.IsNullOrEmpty(a.Source)) w.WriteAttributeString("source", a.Source);
+                        if (!string.IsNullOrEmpty(a.Key)) w.WriteAttributeString("key", a.Key);
+                        if (a.IsUwp) w.WriteAttributeString("uwp", "1");
+                        if (a.IsDesktop) w.WriteAttributeString("desktop", "1");
+                        if (a.IsFile) w.WriteAttributeString("file", "1");
+                        if (a.IsFolder) w.WriteAttributeString("folder", "1");
+                        w.WriteEndElement();
+                    }
+                    w.WriteEndElement();
+                    w.WriteEndDocument();
+                }
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
+            }
+            catch (Exception ex) { Paths.LogError(ex); }
         }
     }
 }

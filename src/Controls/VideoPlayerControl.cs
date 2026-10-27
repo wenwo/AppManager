@@ -520,7 +520,14 @@ namespace AppManager.Controls
         protected override void OnVisibleChanged(EventArgs e)
         {
             base.OnVisibleChanged(e);
-            if (!Visible) StopPlayback();
+            if (!Visible) { StopPlayback(); ReleaseEngine(); }   // 关闭播放器即释放 mpv 内核，不常驻到进程退出
+        }
+
+        /// <summary>释放 mpv 内核与宿主窗口；下次播放由 EnsureEngine 惰性重建（mpvUnavailable 语义不变）。</summary>
+        private void ReleaseEngine()
+        {
+            if (mpv != null) { try { mpv.Dispose(); } catch { } mpv = null; }
+            if (host != null) { Controls.Remove(host); host.Dispose(); host = null; }
         }
 
         protected override void Dispose(bool disposing)
@@ -929,36 +936,44 @@ namespace AppManager.Controls
             /// <summary>创建并初始化内核；wid 为渲染宿主窗口句柄。失败时抛异常（DLL 缺失/选项或初始化失败）。</summary>
             public MpvEngine(IntPtr wid)
             {
-                ctx = mpv_create();
-                if (ctx == IntPtr.Zero) throw new InvalidOperationException("mpv_create 失败");
-                try
+                // vo=gpu 在部分显卡驱动/远程桌面下初始化失败：按候选顺序回退渲染后端
+                string[] voCandidates = { "gpu", "win" };
+                Exception last = null;
+                for (int vi = 0; vi < voCandidates.Length; vi++)
                 {
-                    // 绑定渲染窗口（必须在 initialize 之前设置），并关闭所有自带交互/界面：
-                    // 鼠标键盘输入全部由本控件接管，OSC/OSD 不显示
-                    if (SetOption("wid", wid.ToInt64().ToString(CultureInfo.InvariantCulture)) < 0)
-                        throw new InvalidOperationException("mpv 绑定渲染窗口失败");
-                    SetOption("vo", "gpu");
-                    SetOption("hwdec", "auto-safe");
-                    SetOption("keep-open", "yes");
-                    SetOption("idle", "yes");
-                    SetOption("terminal", "no");
-                    SetOption("config", "no");
-                    SetOption("osc", "no");
-                    SetOption("osd-level", "0");
-                    SetOption("input-default-bindings", "no");
-                    SetOption("input-vo-keyboard", "no");
-                    SetOption("input-cursor", "no");
-                    SetOption("input-media-keys", "no");
-                    int r = mpv_initialize(ctx);
-                    if (r < 0) throw new InvalidOperationException("mpv_initialize 失败: " + r);
-                    mpv_request_log_messages(ctx, "no");
+                    ctx = mpv_create();
+                    if (ctx == IntPtr.Zero) { last = new InvalidOperationException("mpv_create 失败"); continue; }
+                    try
+                    {
+                        // 绑定渲染窗口（必须在 initialize 之前设置），并关闭所有自带交互/界面：
+                        // 鼠标键盘输入全部由本控件接管，OSC/OSD 不显示
+                        if (SetOption("wid", wid.ToInt64().ToString(CultureInfo.InvariantCulture)) < 0)
+                            throw new InvalidOperationException("mpv 绑定渲染窗口失败");
+                        SetOption("vo", voCandidates[vi]);
+                        SetOption("hwdec", "auto-safe");
+                        SetOption("keep-open", "yes");
+                        SetOption("idle", "yes");
+                        SetOption("terminal", "no");
+                        SetOption("config", "no");
+                        SetOption("osc", "no");
+                        SetOption("osd-level", "0");
+                        SetOption("input-default-bindings", "no");
+                        SetOption("input-vo-keyboard", "no");
+                        SetOption("input-cursor", "no");
+                        SetOption("input-media-keys", "no");
+                        int r = mpv_initialize(ctx);
+                        if (r < 0) throw new InvalidOperationException("mpv_initialize 失败(vo=" + voCandidates[vi] + "): " + r);
+                        mpv_request_log_messages(ctx, "no");
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        last = ex;
+                        mpv_terminate_destroy(ctx);
+                        ctx = IntPtr.Zero;
+                    }
                 }
-                catch
-                {
-                    mpv_terminate_destroy(ctx);
-                    ctx = IntPtr.Zero;
-                    throw;
-                }
+                throw last ?? new InvalidOperationException("mpv 初始化失败");
             }
 
             public void LoadFile(string path) { Command("loadfile", path); }

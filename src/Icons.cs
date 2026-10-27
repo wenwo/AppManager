@@ -329,6 +329,23 @@ namespace AppManager
             return CacheStore(key, TryLoadCoverThumbCore(path, width, height, focusX, focusY));
         }
 
+        /// <summary>
+        /// 只查缓存不解码：与 LoadCoverThumb 相同的键规则，命中返回副本，未命中返回 null。
+        /// 供 UI 线程判断封面是否已就绪；未就绪时由调用方走后台解码，避免在绘制路径同步解码原图。
+        /// </summary>
+        public static Bitmap TryGetCachedCoverThumb(string path, int width, int height, float focusX, float focusY)
+        {
+            if (string.IsNullOrEmpty(path) || width <= 0 || height <= 0) return null;
+            focusX = FocusClamp(focusX);
+            focusY = FocusClamp(focusY);
+            StringBuilder stamp = new StringBuilder(64);
+            AppendFileStamp(stamp, path);
+            string key = "C" + width + "x" + height
+                + "f" + (int)Math.Round(focusX * 100) + "x" + (int)Math.Round(focusY * 100)
+                + "|" + path + "|" + stamp;
+            return CacheTakeClone(key);
+        }
+
         /// <summary>取景焦点夹紧到 0~1（NaN 回退居中）。</summary>
         private static float FocusClamp(float v)
         {
@@ -415,21 +432,22 @@ namespace AppManager
             {
                 int w = b.Width, h = b.Height;
                 if (w <= 0 || h <= 0) return false;
-                int step = (w >= 64 || h >= 64) ? 2 : 1;
+                // 大图按 4 像素网格采样（>=64 按 2），且只把采样行逐行拷入托管数组：
+                // 256px 图标不再整图拷贝，热点路径（逐条目校验）的 CPU/内存占用大幅下降
+                int step = (w >= 128 || h >= 128) ? 4 : ((w >= 64 || h >= 64) ? 2 : 1);
                 long total = 0, valid = 0;
                 BitmapData d = b.LockBits(new Rectangle(0, 0, w, h),
                     ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
                 try
                 {
                     int stride = d.Stride;
-                    byte[] buf = new byte[stride * h];
-                    Marshal.Copy(d.Scan0, buf, 0, buf.Length);
+                    byte[] buf = new byte[w * 4];
                     for (int y = 0; y < h; y += step)
                     {
-                        int row = y * stride;
+                        Marshal.Copy(IntPtr.Add(d.Scan0, y * stride), buf, 0, buf.Length);
                         for (int x = 0; x < w; x += step)
                         {
-                            int o = row + x * 4;
+                            int o = x * 4;
                             byte a = buf[o + 3];
                             byte r = buf[o + 2];
                             byte g = buf[o + 1];

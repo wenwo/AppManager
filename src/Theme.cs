@@ -79,18 +79,23 @@ namespace AppManager
         /// GDI 句柄与 GC 压力、界面发卡，故集中缓存；调用方不得 Dispose 返回的字体。
         /// </summary>
         private static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
+        // 图标线程在后台构建占位图时也会取字体：缓存读写必须加锁，避免跨线程竞争
+        private static readonly object fontCacheLock = new object();
 
         private static Font GetFont(float size, FontStyle style, GraphicsUnit unit)
         {
             string key = style.ToString() + "|" + size.ToString(System.Globalization.CultureInfo.InvariantCulture)
                 + "|" + unit.ToString();
-            Font f;
-            if (!fontCache.TryGetValue(key, out f))
+            lock (fontCacheLock)
             {
-                f = new Font(FontName, size, style, unit);
-                fontCache[key] = f;
+                Font f;
+                if (!fontCache.TryGetValue(key, out f))
+                {
+                    f = new Font(FontName, size, style, unit);
+                    fontCache[key] = f;
+                }
+                return f;
             }
-            return f;
         }
 
         /// <summary>按磅值取 UI 字体（常规）；返回缓存实例，调用方不得 Dispose。</summary>
@@ -113,22 +118,39 @@ namespace AppManager
 
         private static string ResolveFamily(string[] candidates)
         {
-            try
+            HashSet<string> set = InstalledFamilies;
+            foreach (string name in candidates)
+                if (set.Contains(name)) return name;
+            return FontFamily.GenericSansSerif.Name;
+        }
+
+        private static readonly object familiesLock = new object();
+        private static HashSet<string> installedFamilies;
+
+        /// <summary>
+        /// 已安装字体家族名集合：进程内只枚举一次 InstalledFontCollection（百毫秒级开销），
+        /// Theme 与 IconButton 等字体探测共用，避免重复枚举。
+        /// </summary>
+        internal static HashSet<string> InstalledFamilies
+        {
+            get
             {
-                using (InstalledFontCollection col = new InstalledFontCollection())
+                lock (familiesLock)
                 {
-                    foreach (string name in candidates)
+                    if (installedFamilies == null)
                     {
-                        foreach (FontFamily f in col.Families)
+                        HashSet<string> set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        try
                         {
-                            if (string.Equals(f.Name, name, StringComparison.OrdinalIgnoreCase))
-                                return name;
+                            using (InstalledFontCollection col = new InstalledFontCollection())
+                                foreach (FontFamily f in col.Families) set.Add(f.Name);
                         }
+                        catch { }
+                        installedFamilies = set;
                     }
+                    return installedFamilies;
                 }
             }
-            catch { }
-            return FontFamily.GenericSansSerif.Name;
         }
     }
 }

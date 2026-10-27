@@ -28,7 +28,7 @@ namespace AppManager.Controls
         /// <summary>集合封面缩略图边长（外部构建封面位图时按此尺寸）。</summary>
         public const int ThumbSize = 26;
 
-        private const int HeaderH = 34;
+        private const int HeaderH = 36;   // 与列表表头/左侧分类行同高，三栏文字中心对齐
         private const int RowH = 38;
         private const int ItemH = 36;
         private const int PadX = 10;
@@ -84,9 +84,45 @@ namespace AppManager.Controls
         /// <summary>设置集合列表；旧封面位图由本控件释放。</summary>
         public void SetItems(List<Item> list)
         {
+            SetItems(list, null);
+        }
+
+        /// <summary>设置集合列表并保留指定键的旧封面（避免编辑中当前集合封面被释放重建）。</summary>
+        public void SetItems(List<Item> list, string preserveCoverKey)
+        {
+            Bitmap preserved = null;
+            if (!string.IsNullOrEmpty(preserveCoverKey))
+            {
+                for (int i = 0; i < items.Count; i++)
+                {
+                    Item it = items[i];
+                    if (it.Key == preserveCoverKey && it.Cover != null)
+                    {
+                        preserved = it.Cover;
+                        it.Cover = null;   // 摘出，避免被下方 DisposeCovers 释放
+                        break;
+                    }
+                }
+            }
             DisposeCovers();
             items.Clear();
-            if (list != null) items.AddRange(list);
+            if (list != null)
+            {
+                items.AddRange(list);
+                if (preserved != null)
+                {
+                    for (int i = 0; i < items.Count; i++)
+                    {
+                        if (items[i].Key == preserveCoverKey && items[i].Cover == null)
+                        {
+                            items[i].Cover = preserved;
+                            preserved = null;
+                            break;
+                        }
+                    }
+                    if (preserved != null) preserved.Dispose();   // 列表中已无该键，避免泄漏
+                }
+            }
             externalDragIndex = -1;
             hoverIndex = -1;
             ClampScroll();
@@ -233,13 +269,11 @@ namespace AppManager.Controls
             ClampScroll();
         }
 
-        /// <summary>滚轮滚动（供主窗体滚轮路由调用）。</summary>
+        /// <summary>滚轮滚动（供主窗体滚轮路由调用）：每次滚动一行，避免集合行高 38px × 系统行数造成跳动过大。</summary>
         public void ScrollByWheel(int delta)
         {
             if (delta == 0 || MaxScroll <= 0) return;
-            int lines = SystemInformation.MouseWheelScrollLines;
-            if (lines <= 0) lines = 3;
-            SetScroll(scrollOffset - (delta / 120) * RowH * lines);
+            SetScroll(scrollOffset - (delta / 120) * RowH);
         }
 
         private void SetScroll(int offset)
@@ -258,11 +292,14 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Theme.SidebarBg);
 
-            // 标题 + 右侧分隔线：与主侧栏形成「二级栏」层次
+            // 标题 + 右侧/底部分隔线：表头文字与列表表头、左侧首个分类垂直居中于同一水平线
             Draw.DrawStringLeft(g, "集合", Theme.FontOf(9F), subBrush,
-                new Rectangle(PadX + 4, 6, ClientSize.Width - PadX * 2, HeaderH - 8));
+                new Rectangle(PadX + 4, 0, ClientSize.Width - PadX * 2, HeaderH));
             using (Pen sep = new Pen(Theme.Separator, 1))
+            {
                 g.DrawLine(sep, ClientSize.Width - 1, 0, ClientSize.Width - 1, ClientSize.Height);
+                g.DrawLine(sep, 0, HeaderH - 1, ClientSize.Width, HeaderH - 1);
+            }
 
             // 集合行（裁剪到列表视口，随滚动位移）
             GraphicsState st = g.Save();

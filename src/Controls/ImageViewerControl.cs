@@ -2,7 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace AppManager.Controls
@@ -30,6 +32,8 @@ namespace AppManager.Controls
         private float zoomFactor = 1F;
         private PointF pan;
         private bool panning;
+        private int loadSeq;           // 异步解码序号：切图后递增，过期解码结果直接丢弃
+        private int wheelRemainder;    // 高精度滚轮余量累积（delta 不足一档时不丢缩放）
         private Point panStart;
         private PointF panOrigin;
 
@@ -105,21 +109,88 @@ namespace AppManager.Controls
             ReleaseImage();
             loadFailed = false;
             string path = paths[index];
-            try
-            {
-                if (!File.Exists(path)) loadFailed = true;
-                else image = Image.FromFile(path);
-            }
-            catch (Exception ex)
-            {
-                DebugWrite("图片加载失败 " + path + ": " + ex.Message);
-                loadFailed = true;
-            }
+            int seq = ++loadSeq;
             // 换图后缩放/平移复位，回到「适应窗口」
             zoomFactor = 1F;
             pan = PointF.Empty;
             RecomputeFit();
             Invalidate();
+            if (!File.Exists(path)) { loadFailed = true; Invalidate(); return; }
+            // 大图解码放后台线程，避免同步解码卡 UI；完成后按序号校验，过期结果丢弃
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                Image decoded = null;
+                try { decoded = PrepareImage(path); }
+                catch (Exception ex) { DebugWrite("图片加载失败 " + path + ": " + ex.Message); }
+                if (IsDisposed) { if (decoded != null) decoded.Dispose(); return; }
+                try
+                {
+                    BeginInvoke((Action)delegate
+                    {
+                        if (seq != loadSeq) { if (decoded != null) decoded.Dispose(); return; }
+                        if (decoded == null) loadFailed = true;
+                        else image = decoded;
+                        RecomputeFit();
+                        ClampPan();
+                        Invalidate();
+                    });
+                }
+                catch { if (decoded != null && !ReferenceEquals(decoded, image)) decoded.Dispose(); }
+            });
+        }
+
+        /// <summary>
+        /// 后台解码：按 EXIF Orientation 校正方向；长边超过 3200 像素时生成降采样工作位图，
+        /// 之后拖动/缩放每帧缩放的是该位图而非原图，显著降低大图操作卡顿。
+        /// 返回的位图已脱离原文件流，文件句柄随 using 释放。
+        /// </summary>
+        private static Image PrepareImage(string path)
+        {
+            using (Image raw = Image.FromFile(path))
+            {
+                ApplyExifOrientation(raw);
+                int maxSide = Math.Max(raw.Width, raw.Height);
+                if (maxSide > 3200)
+                {
+                    float k = 3200F / maxSide;
+                    int w = Math.Max(1, (int)Math.Round(raw.Width * k));
+                    int h = Math.Max(1, (int)Math.Round(raw.Height * k));
+                    Bitmap small = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
+                    using (Graphics g = Graphics.FromImage(small))
+                    {
+                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                        g.DrawImage(raw, 0, 0, w, h);
+                    }
+                    return small;
+                }
+                Bitmap copy = new Bitmap(raw.Width, raw.Height, PixelFormat.Format32bppPArgb);
+                using (Graphics g2 = Graphics.FromImage(copy))
+                    g2.DrawImage(raw, 0, 0, raw.Width, raw.Height);
+                return copy;
+            }
+        }
+
+        /// <summary>按 EXIF Orientation(0x0112) 旋转/翻转，手机竖拍照片不再横躺显示。</summary>
+        private static void ApplyExifOrientation(Image img)
+        {
+            try
+            {
+                const int OrientationId = 0x0112;
+                if (Array.IndexOf(img.PropertyIdList, OrientationId) < 0) return;
+                int v = img.GetPropertyItem(OrientationId).Value[0];
+                switch (v)
+                {
+                    case 2: img.RotateFlip(RotateFlipType.RotateNoneFlipX); break;
+                    case 3: img.RotateFlip(RotateFlipType.Rotate180FlipNone); break;
+                    case 4: img.RotateFlip(RotateFlipType.Rotate180FlipX); break;
+                    case 5: img.RotateFlip(RotateFlipType.Rotate90FlipX); break;
+                    case 6: img.RotateFlip(RotateFlipType.Rotate90FlipNone); break;
+                    case 7: img.RotateFlip(RotateFlipType.Rotate270FlipX); break;
+                    case 8: img.RotateFlip(RotateFlipType.Rotate270FlipNone); break;
+                }
+                try { img.RemovePropertyItem(OrientationId); } catch { }
+            }
+            catch { }
         }
 
         private void ReleaseImage()
@@ -323,8 +394,15 @@ namespace AppManager.Controls
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
-            int steps = e.Delta / SystemInformation.MouseWheelScrollDelta;
-            if (steps != 0) ZoomAt(e.Location, steps);
+            // 高精度触摸板/滚轮单次 delta 可能不足一档：累积余量，凑满一档再缩放
+            wheelRemainder += e.Delta;
+            int unit = SystemInformation.MouseWheelScrollDelta;
+            int steps = wheelRemainder / unit;
+            if (steps != 0)
+            {
+                wheelRemainder -= steps * unit;
+                ZoomAt(e.Location, steps);
+            }
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
@@ -412,14 +490,14 @@ namespace AppManager.Controls
                     g.FillPath(b, path);
                 if (image == null)
                 {
-                    if (loadFailed)
-                        using (SolidBrush b = new SolidBrush(TextDim))
-                            Draw.DrawStringCenter(g, "无法加载此图片", Theme.FontOf(10F), b, canvasRect);
+                    using (SolidBrush b = new SolidBrush(TextDim))
+                        Draw.DrawStringCenter(g, loadFailed ? "无法加载此图片" : "正在加载…", Theme.FontOf(10F), b, canvasRect);
                     return;
                 }
                 GraphicsState st = g.Save();
                 g.SetClip(path);
-                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                // 拖动过程中降到双线性插值，大图平移每帧不再做高质量三次采样
+                g.InterpolationMode = panning ? InterpolationMode.Bilinear : InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.DrawImage(image, ImageDestRect());
                 g.Restore(st);

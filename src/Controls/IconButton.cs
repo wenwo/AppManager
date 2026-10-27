@@ -211,25 +211,11 @@ namespace AppManager.Controls
         {
             string[] candidates = { "Segoe Fluent Icons", "Segoe MDL2 Assets", "Segoe UI Symbol" };
             string name = null;
-            try
+            // 复用 Theme 的进程级字体集合，不再各自枚举 InstalledFontCollection
+            foreach (string candidate in candidates)
             {
-                using (InstalledFontCollection col = new InstalledFontCollection())
-                {
-                    foreach (string candidate in candidates)
-                    {
-                        foreach (FontFamily f in col.Families)
-                        {
-                            if (string.Equals(f.Name, candidate, StringComparison.OrdinalIgnoreCase))
-                            {
-                                name = candidate;
-                                break;
-                            }
-                        }
-                        if (name != null) break;
-                    }
-                }
+                if (Theme.InstalledFamilies.Contains(candidate)) { name = candidate; break; }
             }
-            catch { }
             if (name == null) name = Theme.FontName;
             return new Font(name, GlyphEmSize, FontStyle.Regular, GraphicsUnit.Pixel);
         }

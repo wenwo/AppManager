@@ -46,11 +46,44 @@ namespace AppManager
                 if (kws == null) continue;
                 for (int j = 0; j < kws.Length; j++)
                 {
-                    if (lower.IndexOf(kws[j], StringComparison.Ordinal) >= 0)
+                    if (MatchesKeyword(lower, kws[j]))
                         return BuiltIn[i];
                 }
             }
             return "其他";
+        }
+
+        /// <summary>
+        /// 关键词命中判定：纯 ASCII 字母数字词按词边界匹配（避免 tim 命中 Optimize、obs 命中 Obsidian），
+        /// 其余（含中文、空格、符号的词）按子串匹配。
+        /// </summary>
+        private static bool MatchesKeyword(string lowerName, string keyword)
+        {
+            string kw = keyword.Trim();
+            if (kw.Length == 0) return false;
+            bool asciiWord = true;
+            for (int i = 0; i < kw.Length; i++)
+            {
+                char ch = kw[i];
+                if (!IsAsciiAlnum(ch)) { asciiWord = false; break; }
+            }
+            if (!asciiWord) return lowerName.IndexOf(kw, StringComparison.Ordinal) >= 0;
+            int at = 0;
+            for (;;)
+            {
+                int hit = lowerName.IndexOf(kw, at, StringComparison.Ordinal);
+                if (hit < 0) return false;
+                int end = hit + kw.Length;
+                bool leftOk = hit == 0 || !IsAsciiAlnum(lowerName[hit - 1]);
+                bool rightOk = end >= lowerName.Length || !IsAsciiAlnum(lowerName[end]);
+                if (leftOk && rightOk) return true;
+                at = hit + 1;
+            }
+        }
+
+        private static bool IsAsciiAlnum(char ch)
+        {
+            return (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9');
         }
     }
 }

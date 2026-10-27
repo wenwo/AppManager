@@ -45,7 +45,6 @@ namespace AppManager.Controls
 
         private readonly RoundButton backBtn;
         private readonly ToggleSwitch showHiddenToggle;
-        private readonly ToggleSwitch showAllToggle;
         private readonly ToggleSwitch autoScanToggle;
         private readonly ToggleSwitch closeToTrayToggle;
 
@@ -61,7 +60,6 @@ namespace AppManager.Controls
 
         public event EventHandler BackRequested;
         public event EventHandler ShowHiddenChanged;
-        public event EventHandler ShowAllInstalledChanged;
         public event EventHandler AutoScanChanged;
         public event EventHandler CloseToTrayChanged;
         public event EventHandler StorageLocationRequested;
@@ -84,7 +82,6 @@ namespace AppManager.Controls
             Controls.Add(backBtn);
 
             showHiddenToggle = MakeToggle(delegate { Raise(ShowHiddenChanged); });
-            showAllToggle = MakeToggle(delegate { Raise(ShowAllInstalledChanged); });
             autoScanToggle = MakeToggle(delegate { Raise(AutoScanChanged); });
             closeToTrayToggle = MakeToggle(delegate { Raise(CloseToTrayChanged); });
         }
@@ -92,17 +89,15 @@ namespace AppManager.Controls
         // ===== 对外状态 =====
 
         public bool ShowHidden { get { return showHiddenToggle.Checked; } }
-        public bool ShowAllInstalled { get { return showAllToggle.Checked; } }
         public bool AutoScan { get { return autoScanToggle.Checked; } }
         public bool CloseToTray { get { return closeToTrayToggle.Checked; } }
 
         /// <summary>回填页面状态（开关与存储路径）。绑定过程中不触发变更事件。</summary>
-        public void Bind(bool showHidden, bool showAllInstalled, bool autoScan, bool closeToTray,
+        public void Bind(bool showHidden, bool autoScan, bool closeToTray,
             string folderStorePath, string fileStorePath, string resourceStorePath)
         {
             syncing = true;
             showHiddenToggle.Checked = showHidden;
-            showAllToggle.Checked = showAllInstalled;
             autoScanToggle.Checked = autoScan;
             closeToTrayToggle.Checked = closeToTray;
             syncing = false;
@@ -160,8 +155,7 @@ namespace AppManager.Controls
             y = AddSection("常规", left, colW, y, new Row[]
             {
                 MakeToggleRow("显示隐藏项", showHiddenToggle),
-                MakeToggleRow("显示全部已安装", showAllToggle),
-                MakeToggleRow("启动自动扫描", autoScanToggle)
+                MakeToggleRow("自动收录桌面新快捷方式", autoScanToggle)
             });
             y += GapY;
             y = AddSection("关闭主窗口", left, colW, y, new Row[]

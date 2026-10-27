@@ -167,7 +167,13 @@ namespace AppManager
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory)
             };
             if (!Directory.Exists(BackupDir)) Directory.CreateDirectory(BackupDir);
-            config.DesktopBackup.Clear();
+            // 合并而非清空：保留历史收纳记录（二次收纳不丢上一批的还原信息），
+            // 只剔除备份文件已被手动删除/还原的旧记录
+            config.DesktopBackup.RemoveAll(delegate(DesktopBackupEntry e)
+            {
+                if (e == null || string.IsNullOrEmpty(e.CurrentPath)) return true;
+                return e.IsDir ? !Directory.Exists(e.CurrentPath) : !File.Exists(e.CurrentPath);
+            });
             int count = 0;
             foreach (string desk in desktops)
             {
@@ -257,6 +263,13 @@ namespace AppManager
 
         private void Record(string original, string current, bool isDir, bool isShortcut, bool isCopy)
         {
+            // 同一当前路径只保留最新记录，避免合并模式下重复登记
+            for (int i = config.DesktopBackup.Count - 1; i >= 0; i--)
+            {
+                DesktopBackupEntry ex = config.DesktopBackup[i];
+                if (ex != null && string.Equals(ex.CurrentPath, current, StringComparison.OrdinalIgnoreCase))
+                    config.DesktopBackup.RemoveAt(i);
+            }
             DesktopBackupEntry e = new DesktopBackupEntry();
             e.OriginalPath = original;
             e.CurrentPath = current;
@@ -504,8 +517,11 @@ namespace AppManager
             ne.IsShortcut = isShortcut;
             ne.IsDir = isDir;
             ne.IsCopy = config.OrganizeCopy;
-            string desk = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            ne.OriginalPath = Path.Combine(desk, Path.GetFileName(path));
+            // 原路径只能靠猜：公共桌面存在同名项时优先猜公共桌面，否则猜用户桌面
+            string name = Path.GetFileName(path);
+            string userGuess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), name);
+            string pubGuess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), name);
+            ne.OriginalPath = (File.Exists(pubGuess) || Directory.Exists(pubGuess)) ? pubGuess : userGuess;
             return ne;
         }
     }

@@ -22,7 +22,33 @@ namespace AppManager
         private static StringBuilder _log = new StringBuilder();
 
         /// <summary>运行全部用例，返回通过数；同时落盘 selftest.log。</summary>
+        private static readonly object RunLock = new object();
+        private static bool _running;
+
         public static int Run()
+        {
+            lock (RunLock)
+            {
+                if (_running) return -1;   // 拒绝并发/重入：用例共享静态状态，互相污染会误判
+                _running = true;
+            }
+            // 配置路径隔离：用例读写临时目录里的 config.xml，绝不触碰真实配置
+            string prevOverride = Paths.ConfigFileOverride;
+            string isolatedDir = Path.Combine(Path.GetTempPath(), "AppManagerSelfTest_" + Guid.NewGuid().ToString("N"));
+            Paths.ConfigFileOverride = Path.Combine(isolatedDir, "config.xml");
+            try
+            {
+                return RunCore();
+            }
+            finally
+            {
+                Paths.ConfigFileOverride = prevOverride;
+                try { if (Directory.Exists(isolatedDir)) Directory.Delete(isolatedDir, true); } catch { }
+                lock (RunLock) { _running = false; }
+            }
+        }
+
+        private static int RunCore()
         {
             _pass = 0; _total = 0; _log = new StringBuilder();
             Log("==== AppManager 自测开始 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " ====");
@@ -1094,7 +1120,7 @@ namespace AppManager
 
         private static string ConfigFilePath()
         {
-            return Path.Combine(AppDir, "config.xml");
+            return Paths.ConfigFile;   // 跟随隔离注入：自测期间指向临时目录
         }
 
         /// <summary>临时文件路径（供导出/导入等用例使用，用后即删，避免副作用）。</summary>

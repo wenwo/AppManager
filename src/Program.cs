@@ -51,7 +51,20 @@ namespace AppManager
 
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+                // 全局异常兜底：UI 线程与后台线程异常都写入 error.log，避免无声崩溃
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += delegate(object s, ThreadExceptionEventArgs te) { Paths.LogError(te.Exception); };
+                AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs ue)
+                {
+                    Exception err = ue.ExceptionObject as Exception;
+                    if (err != null) Paths.LogError(err);
+                };
                 AppConfig config = AppConfig.Load();
+                if (config.LoadFailed)
+                {
+                    MessageBox.Show("配置文件读取失败，原文件已另存为 config.xml.corrupt-时间戳 留底。\n本次运行按默认配置显示，且不会覆盖原配置文件。", "应用中心",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
                 Application.Run(new MainForm(config));
             }
             return 0;

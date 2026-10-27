@@ -20,7 +20,13 @@ namespace AppManager
             }
         }
 
-        public static string ConfigFile { get { return Path.Combine(DataDir, "config.xml"); } }
+        /// <summary>自测注入的配置文件路径；非空时替代默认 config.xml，避免用例触碰真实配置。</summary>
+        internal static string ConfigFileOverride;
+
+        public static string ConfigFile
+        {
+            get { return ConfigFileOverride ?? Path.Combine(DataDir, "config.xml"); }
+        }
 
         /// <summary>新版桌面收纳目录。</summary>
         public static string DesktopBackupDir { get { return Path.Combine(DataDir, "DesktopBackup"); } }
@@ -216,6 +222,9 @@ namespace AppManager
     /// </summary>
     public class AppConfig
     {
+        /// <summary>读取失败标志：配置文件损坏/被占用时为真；本次会话禁止覆盖保存，避免默认配置回写冲掉用户数据。</summary>
+        internal bool LoadFailed;
+
         // 开关：视图模式 + 显示隐藏 + 显示全部已安装 + 启动扫描
         public bool ViewGrid = true;
         public bool ShowHidden = false;
@@ -380,7 +389,15 @@ namespace AppManager
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("配置读取失败: " + ex.Message);
+                cfg.LoadFailed = true;
+                Paths.LogError(ex);
+                // 坏文件另存留底，便于用户找回收藏/分类/收纳记录等数据
+                try
+                {
+                    if (File.Exists(filePath))
+                        File.Copy(filePath, filePath + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"), true);
+                }
+                catch { }
             }
             return cfg;
         }
@@ -388,6 +405,12 @@ namespace AppManager
         /// <summary>保存配置；目录不存在自动创建，异常仅写日志不抛出。</summary>
         public void Save()
         {
+            if (LoadFailed)
+            {
+                // 读取失败的会话禁止覆盖保存：防止默认配置把用户原配置整体冲掉
+                Paths.LogError(new InvalidOperationException("配置读取失败后拒绝覆盖保存: " + FilePath));
+                return;
+            }
             SaveTo(FilePath);
         }
 
