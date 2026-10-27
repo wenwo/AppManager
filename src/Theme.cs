@@ -64,6 +64,16 @@ namespace AppManager
         // ===== 字体 =====
 
         /// <summary>
+        /// 字体缓存：字号/样式/单位组合 -> Font 实例，应用生命周期内复用不释放。
+        /// 绘制热路径（OnPaint/OnMouseMove 触发的重绘）高频取字体，重复 new 会造成
+        /// GDI 句柄与 GC 压力、界面发卡，故集中缓存；调用方不得 Dispose 返回的字体。
+        /// 注意：必须在 FontName 之前初始化（FontName 的 ResolveFamily 会调用 GetFont）。
+        /// </summary>
+        private static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
+        // 图标线程在后台构建占位图时也会取字体：缓存读写必须加锁，避免跨线程竞争
+        private static readonly object fontCacheLock = new object();
+
+        /// <summary>
         /// UI 字体族名：优先「微软雅黑 UI」（中文渲染清晰、与 Windows 中文系统一致），
         /// 依次回退雅黑 / Segoe UI / Tahoma，均不可用时用系统默认无衬线字体。
         /// 集中解析一次，避免各控件硬编码 "Segoe UI" 导致中文回退字体不一致、发虚。
@@ -72,15 +82,6 @@ namespace AppManager
         {
             "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Tahoma"
         });
-
-        /// <summary>
-        /// 字体缓存：字号/样式/单位组合 -> Font 实例，应用生命周期内复用不释放。
-        /// 绘制热路径（OnPaint/OnMouseMove 触发的重绘）高频取字体，重复 new 会造成
-        /// GDI 句柄与 GC 压力、界面发卡，故集中缓存；调用方不得 Dispose 返回的字体。
-        /// </summary>
-        private static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
-        // 图标线程在后台构建占位图时也会取字体：缓存读写必须加锁，避免跨线程竞争
-        private static readonly object fontCacheLock = new object();
 
         private static Font GetFont(float size, FontStyle style, GraphicsUnit unit)
         {
