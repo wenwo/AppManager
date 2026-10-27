@@ -46,6 +46,7 @@ namespace AppManager.Controls
         private readonly RoundButton backBtn;
         private readonly ToggleSwitch showHiddenToggle;
         private readonly ToggleSwitch autoScanToggle;
+        private readonly ToggleSwitch autoOrganizeDesktopToggle;
         private readonly ToggleSwitch closeToTrayToggle;
 
         private readonly List<Section> sections = new List<Section>();
@@ -61,6 +62,7 @@ namespace AppManager.Controls
         public event EventHandler BackRequested;
         public event EventHandler ShowHiddenChanged;
         public event EventHandler AutoScanChanged;
+        public event EventHandler AutoOrganizeDesktopChanged;
         public event EventHandler CloseToTrayChanged;
         public event EventHandler StorageLocationRequested;
         public event EventHandler RescanRequested;
@@ -83,6 +85,7 @@ namespace AppManager.Controls
 
             showHiddenToggle = MakeToggle(delegate { Raise(ShowHiddenChanged); });
             autoScanToggle = MakeToggle(delegate { Raise(AutoScanChanged); });
+            autoOrganizeDesktopToggle = MakeToggle(delegate { Raise(AutoOrganizeDesktopChanged); });
             closeToTrayToggle = MakeToggle(delegate { Raise(CloseToTrayChanged); });
         }
 
@@ -90,15 +93,17 @@ namespace AppManager.Controls
 
         public bool ShowHidden { get { return showHiddenToggle.Checked; } }
         public bool AutoScan { get { return autoScanToggle.Checked; } }
+        public bool AutoOrganizeDesktop { get { return autoOrganizeDesktopToggle.Checked; } }
         public bool CloseToTray { get { return closeToTrayToggle.Checked; } }
 
         /// <summary>回填页面状态（开关与存储路径）。绑定过程中不触发变更事件。</summary>
-        public void Bind(bool showHidden, bool autoScan, bool closeToTray,
+        public void Bind(bool showHidden, bool autoScan, bool autoOrganizeDesktop, bool closeToTray,
             string folderStorePath, string fileStorePath, string resourceStorePath)
         {
             syncing = true;
             showHiddenToggle.Checked = showHidden;
             autoScanToggle.Checked = autoScan;
+            autoOrganizeDesktopToggle.Checked = autoOrganizeDesktop;
             closeToTrayToggle.Checked = closeToTray;
             syncing = false;
             folderPath = folderStorePath ?? string.Empty;
@@ -155,7 +160,8 @@ namespace AppManager.Controls
             y = AddSection("常规", left, colW, y, new Row[]
             {
                 MakeToggleRow("显示隐藏项", showHiddenToggle),
-                MakeToggleRow("自动收录桌面新快捷方式", autoScanToggle)
+                MakeToggleRow("自动扫描应用与桌面变化", autoScanToggle),
+                MakeSubtitleRow("自动收纳桌面新快捷方式", "关闭时只更新列表，不移动桌面文件。", autoOrganizeDesktopToggle)
             });
             y += GapY;
             y = AddSection("关闭主窗口", left, colW, y, new Row[]
@@ -260,13 +266,13 @@ namespace AppManager.Controls
                 Draw.DrawStringLeft(g, "设置", Theme.FontOf(16F, FontStyle.Bold), tb, headerRect);
 
             // 分组标题与卡片
-            using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
+            using (SolidBrush lb = new SolidBrush(Theme.TextTertiary))
             {
                 for (int i = 0; i < sections.Count; i++)
                 {
                     Section s = sections[i];
-                    Draw.DrawStringLeft(g, s.Title, Theme.FontOf(9F), lb, s.LabelRect);
-                    Draw.DrawShadow(g, s.CardRect, CardRadius, 0.4f);
+                Draw.DrawStringLeft(g, s.Title, Theme.CaptionFont, lb, s.LabelRect);
+                Draw.DrawShadow(g, s.CardRect, CardRadius, 0.18f);
                     using (SolidBrush cb = new SolidBrush(Theme.Card))
                         Draw.FillRoundedRect(g, cb, s.CardRect, CardRadius);
                 }
@@ -277,8 +283,8 @@ namespace AppManager.Controls
 
         private void PaintRows(Graphics g)
         {
-            Font titleFont = Theme.FontOf(10F);
-            Font subFont = Theme.FontOf(8.5F);
+            Font titleFont = Theme.BodyFont;
+            Font subFont = Theme.CaptionFont;
             using (SolidBrush textBrush = new SolidBrush(Theme.TextPrimary))
             using (SolidBrush subBrush = new SolidBrush(Theme.TextSecondary))
             {

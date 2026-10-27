@@ -22,8 +22,8 @@ namespace AppManager.Controls
         private readonly List<int> selected = new List<int>();
         private int selectAnchor = -1;      // 连选锚点
         private bool collapseOnUp;          // 已选多项时普通点击：未拖动则在松手时收敛为单项
-        private readonly SolidBrush selectFillBrush = new SolidBrush(Color.FromArgb(26, 0, 122, 255));
-        private readonly SolidBrush selectRowBrush = new SolidBrush(Color.FromArgb(30, 0, 122, 255));
+        private readonly SolidBrush selectFillBrush = new SolidBrush(Color.FromArgb(24, Theme.Accent));
+        private readonly SolidBrush selectRowBrush = new SolidBrush(Color.FromArgb(24, Theme.Accent));
         private readonly Pen selectPen = new Pen(Theme.Accent, 2f);
 
         // 复用的绘制资源：避免每帧为每个条目新建画笔/字体/路径，降低 GDI 句柄抖动
@@ -43,6 +43,7 @@ namespace AppManager.Controls
         private readonly SolidBrush chipBrush = new SolidBrush(Theme.ChipBg);   // 分类分段底色
         private readonly SolidBrush headerBgBrush = new SolidBrush(Theme.Background);   // 列表表头底色（吸顶，覆盖滚动到其下方的行）
         private readonly Pen headerLinePen = new Pen(Theme.Separator);   // 列表表头底部分隔线
+        private readonly Pen cardBorderPen = new Pen(Theme.Separator);
         private readonly StringFormat pathFormat = CreatePathFormat();   // 路径列：中间省略
         private readonly StringFormat tipFormat = CreateTipFormat();      // 悬浮信息卡：仅按 \n 换行，超宽省略
         private readonly Dictionary<string, ListMeta> metaCache = new Dictionary<string, ListMeta>(StringComparer.OrdinalIgnoreCase);   // 大小/时间列缓存（一次读盘取两项）
@@ -187,11 +188,11 @@ namespace AppManager.Controls
             TabStop = true;
             BackColor = Theme.Background;
             AutoScroll = true;
-            Font = Theme.FontOf(9F);
+            Font = Theme.BodyFont;
             DoubleBuffered = true;
-            subFont = Theme.FontOf(8F);
-            actionFont = Theme.FontOf(9F);
-            headerFont = Theme.FontOf(8F, FontStyle.Bold);
+            subFont = Theme.CaptionFont;
+            actionFont = Theme.ButtonFont;
+            headerFont = Theme.FontOf(8.5F, FontStyle.Bold);
             tipTimer.Tick += delegate { tipVisible = true; tipTimer.Stop(); Invalidate(); };
             AllowDrop = true;   // 接受外部文件/文件夹拖入（是否放行由 AllowExternalDrop 决定）
         }
@@ -214,6 +215,7 @@ namespace AppManager.Controls
                 chipBrush.Dispose();
                 headerBgBrush.Dispose();
                 headerLinePen.Dispose();
+                cardBorderPen.Dispose();
                 selectFillBrush.Dispose();
                 selectRowBrush.Dispose();
                 selectPen.Dispose();
@@ -593,14 +595,18 @@ namespace AppManager.Controls
                 if (!clip.IsEmpty && !clip.IntersectsWith(r)) continue;
                 bool hover = (i == hoverIndex);
 
-                // 轻阴影 + 悬停上浮
+                // 默认平面卡片，仅悬停时轻微上浮并显示弱阴影
                 Rectangle shadowRect = r;
-                if (hover) shadowRect.Offset(0, -2);
-                Draw.DrawShadow(g, shadowRect, Theme.CornerRadius - 4, 0.55f);
+                if (hover)
+                {
+                    shadowRect.Offset(0, -1);
+                    Draw.DrawShadow(g, shadowRect, Theme.CornerRadius - 4, 0.22f);
+                }
 
                 g.TranslateTransform(shadowRect.X, shadowRect.Y);
                 g.FillPath(cardBrush, gridItemPath);
                 if (hover) g.FillPath(hoverBrush, gridItemPath);
+                g.DrawPath(cardBorderPen, gridItemPath);
                 if (IsSelected(i))
                 {
                     g.FillPath(selectFillBrush, gridItemPath);
@@ -651,7 +657,7 @@ namespace AppManager.Controls
                 using (GraphicsPath cp = Draw.RoundedPath(r, ListCardRadius))
                 {
                     g.FillPath(sel ? selectRowBrush : (i == hoverIndex ? rowHoverBrush : cardBrush), cp);
-                    if (sel) g.DrawPath(selectPen, cp);
+                    g.DrawPath(sel ? selectPen : cardBorderPen, cp);
                 }
 
                 // 图标：列表用 shell 小图标按 1:1 绘制（不缩放大图，避免发虚）
@@ -862,13 +868,16 @@ namespace AppManager.Controls
                     if (a.IsFolder)
                     {
                         if (Directory.Exists(path))
-                            meta.Date = Directory.GetCreationTime(path).ToString("yyyy-MM-dd");
+                            meta.Date = Directory.GetLastWriteTime(path).ToString("yyyy-MM-dd");
                     }
                     else if (File.Exists(path))
                     {
                         FileInfo fi = new FileInfo(path);
                         meta.Size = HumanSize(fi.Length);
-                        meta.Date = fi.CreationTime.ToString("yyyy-MM-dd");
+                        // 媒体文件优先显示拍摄时间（照片EXIF、视频mvhd），失败回退修改时间
+                        DateTime taken;
+                        DateTime t = MediaInfo.TryGetTakenDate(path, out taken) ? taken : fi.LastWriteTime;
+                        meta.Date = t.ToString("yyyy-MM-dd");
                     }
                 }
                 catch { }

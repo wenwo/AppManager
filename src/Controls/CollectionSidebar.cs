@@ -346,7 +346,8 @@ namespace AppManager.Controls
             }
 
             Rectangle textRect = new Rectangle(cover.Right + CoverGap, r.Y, r.Right - cover.Right - CoverGap - 8, r.Height);
-            Draw.DrawStringLeft(g, item.Name, Theme.FontOf(9.5F), active ? accentBrush : textBrush, textRect);
+            Draw.DrawStringLeft(g, item.Name, active ? Theme.SectionTitleFont : Theme.BodyFont,
+                active ? accentBrush : textBrush, textRect);
         }
 
         /// <summary>「全部」图标：浅底圆角 + 2x2 网格点，选中时强调色。</summary>

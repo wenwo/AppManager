@@ -88,7 +88,7 @@ namespace AppManager.Controls
                 | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Theme.SidebarBg;
             AutoScroll = false;
-            Font = Theme.FontOf(10F);
+            Font = Theme.NavigationFont;
             DoubleBuffered = true;
             AllowDrop = true;
         }
@@ -145,13 +145,13 @@ namespace AppManager.Controls
             // ===== 顶部分段控件（软件 | 资源）：位于顶栏行2 =====
             Rectangle segRect = SegRect;
             using (SolidBrush bg = new SolidBrush(Theme.SegmentBg))
-                Draw.FillRoundedRect(g, bg, segRect, 9);
+                Draw.FillRoundedRect(g, bg, segRect, 7);
             int segW = segRect.Width / 2;
             Rectangle activeRect = (mode == ContentMode.Software)
                 ? new Rectangle(segRect.X, segRect.Y, segW, segRect.Height)
                 : new Rectangle(segRect.X + segW, segRect.Y, segRect.Width - segW, segRect.Height);
             using (SolidBrush active = new SolidBrush(Color.White))
-                Draw.FillRoundedRect(g, active, activeRect, 8);
+                Draw.FillRoundedRect(g, active, activeRect, 6);
             string[] labels = { "软件", "资源" };
             for (int i = 0; i < 2; i++)
             {
@@ -238,21 +238,22 @@ namespace AppManager.Controls
             if (it.Active)
             {
                 using (SolidBrush b = new SolidBrush(Theme.SelectionBg))
-                    Draw.FillRoundedRect(g, b, r, 8);
+                    Draw.FillRoundedRect(g, b, r, 6);
             }
             else if (index == hoverIndex)
             {
-                using (SolidBrush b = new SolidBrush(Color.FromArgb(120, 255, 255, 255)))
-                    Draw.FillRoundedRect(g, b, r, 8);
+                using (SolidBrush b = new SolidBrush(Theme.RowHover))
+                    Draw.FillRoundedRect(g, b, r, 6);
             }
             if ((index == dragIndex || index == externalDragIndex) && it.DropTarget)
             {
                 using (Pen p = new Pen(Theme.Accent, 2))
-                    Draw.DrawRoundedRect(g, p, r, 8);
+                    Draw.DrawRoundedRect(g, p, r, 6);
             }
             Color tc = it.Active ? Theme.Accent : Theme.TextPrimary;
             using (SolidBrush br = new SolidBrush(tc))
-                Draw.DrawStringLeft(g, it.Text, Font, br, new Rectangle(r.X + 12, r.Y, r.Width - 16, r.Height));
+                Draw.DrawStringLeft(g, it.Text, it.Active ? Theme.SectionTitleFont : Font, br,
+                    new Rectangle(r.X + 12, r.Y, r.Width - 16, r.Height));
         }
 
         protected override void OnMouseMove(MouseEventArgs e)

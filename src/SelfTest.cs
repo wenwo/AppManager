@@ -34,7 +34,9 @@ namespace AppManager
             }
             // 配置路径隔离：用例读写临时目录里的 config.xml，绝不触碰真实配置
             string prevOverride = Paths.ConfigFileOverride;
+            string prevDataOverride = Paths.DataDirOverride;
             string isolatedDir = Path.Combine(Path.GetTempPath(), "AppManagerSelfTest_" + Guid.NewGuid().ToString("N"));
+            Paths.DataDirOverride = isolatedDir;
             Paths.ConfigFileOverride = Path.Combine(isolatedDir, "config.xml");
             try
             {
@@ -43,6 +45,7 @@ namespace AppManager
             finally
             {
                 Paths.ConfigFileOverride = prevOverride;
+                Paths.DataDirOverride = prevDataOverride;
                 try { if (Directory.Exists(isolatedDir)) Directory.Delete(isolatedDir, true); } catch { }
                 lock (RunLock) { _running = false; }
             }
@@ -101,6 +104,11 @@ namespace AppManager
             Case47_CollectionOpsMembers();
             Case48_CollectionParentSync();
             Case49_MediaTypeRules();
+            Case50_CorruptConfigProtection();
+            Case51_LayoutRestoreRollback();
+            Case52_SaveFailureKeepsOriginal();
+            Case53_TakenDatePhotoExif();
+            Case54_TakenDateVideoMvhd();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -351,13 +359,12 @@ namespace AppManager
 
         private static void Case19_AddedItemsRoundtrip()
         {
-            Begin("19 用户添加项与显示全部已安装开关往返一致");
+            Begin("19 用户添加项配置往返一致");
             string bak = BackupConfig();
             try
             {
                 if (File.Exists(ConfigFilePath())) File.Delete(ConfigFilePath());
                 AppConfig c = new AppConfig();
-                c.ShowAllInstalled = true;
                 AddedEntry e = new AddedEntry();
                 e.Path = @"C:\Windows\System32\notepad.exe";
                 e.Category = "开发工具";
@@ -365,12 +372,11 @@ namespace AppManager
                 c.AddedItems.Add(e);
                 c.Save();
                 AppConfig r = AppConfig.Load();
-                bool ok = r.ShowAllInstalled
-                    && r.AddedItems.Count == 1
+                bool ok = r.AddedItems.Count == 1
                     && r.AddedItems[0].Path == e.Path
                     && r.AddedItems[0].Category == "开发工具"
                     && !r.AddedItems[0].IsFolder;
-                Assert(ok, "开关=" + r.ShowAllInstalled + " 条目数=" + r.AddedItems.Count);
+                Assert(ok, "条目数=" + r.AddedItems.Count);
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally { RestoreConfig(bak); }
@@ -605,9 +611,11 @@ namespace AppManager
                 c.OrganizeShortcut = false;
                 c.OrganizeFile = true;
                 c.OrganizeDir = false;
+                c.AutoOrganizeDesktop = true;
                 c.SaveTo(tmp);
                 AppConfig r = AppConfig.LoadFrom(tmp);
-                bool ok = r.OrganizeCopy && !r.OrganizeShortcut && r.OrganizeFile && !r.OrganizeDir;
+                bool ok = r.OrganizeCopy && !r.OrganizeShortcut && r.OrganizeFile && !r.OrganizeDir
+                    && r.AutoOrganizeDesktop && !new AppConfig().AutoOrganizeDesktop;
                 Assert(ok, "copy=" + r.OrganizeCopy + " sc=" + r.OrganizeShortcut
                     + " file=" + r.OrganizeFile + " dir=" + r.OrganizeDir);
             }
@@ -701,12 +709,21 @@ namespace AppManager
                 Directory.CreateDirectory(Path.Combine(xsrc, "deep"));
                 File.WriteAllText(Path.Combine(xsrc, "deep", "c.txt"), "z");
                 DesktopOrganizer.MoveDirectory(xsrc, xdest);
+                string sourceFile = Path.Combine(baseTmp, "move-file.txt");
+                string destFile = xdest + ".txt";
+                File.WriteAllText(sourceFile, "cross-volume");
+                DesktopOrganizer.MoveFile(sourceFile, destFile);
                 bool ok = !Directory.Exists(xsrc)
-                    && File.Exists(Path.Combine(xdest, "deep", "c.txt"));
+                    && File.Exists(Path.Combine(xdest, "deep", "c.txt"))
+                    && !File.Exists(sourceFile) && File.ReadAllText(destFile) == "cross-volume";
                 Assert(ok, "源残留=" + Directory.Exists(xsrc) + " 目标=" + Directory.Exists(xdest) + " 卷=" + other);
             }
             catch (Exception ex) { Assert(false, ex.Message); }
-            finally { TryDeleteTree(baseTmp); TryDeleteTree(xdest); }
+            finally
+            {
+                TryDeleteTree(baseTmp); TryDeleteTree(xdest);
+                try { if (File.Exists(xdest + ".txt")) File.Delete(xdest + ".txt"); } catch { }
+            }
         }
 
         private static void Case39_CloseToTrayRoundtrip()
@@ -1063,6 +1080,190 @@ namespace AppManager
             Assert(videoOk && imageOk && audioOk && mediaOk && filterOk && filterAll,
                 "视频=" + videoOk + " 图片=" + imageOk + " 音频=" + audioOk
                 + " 媒体=" + mediaOk + " 过滤=" + filterOk + " 全覆盖=" + filterAll);
+        }
+
+        private static void Case50_CorruptConfigProtection()
+        {
+            Begin("50 配置损坏：禁止默认对象覆盖原文件");
+            string path = ConfigFilePath();
+            const string brokenXml = "<AppManagerConfig><broken>";
+            try
+            {
+                File.WriteAllText(path, brokenXml);
+                AppConfig broken = AppConfig.Load();
+                broken.CustomCategories.Add("不应保存");
+                bool saved = broken.Save();
+                Assert(broken.LoadFailed && !saved && File.ReadAllText(path) == brokenXml,
+                    "loadFailed=" + broken.LoadFailed + " saved=" + saved);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case51_LayoutRestoreRollback()
+        {
+            Begin("51 布局恢复：预复制失败不改现场，成功后完整替换");
+            string id = "restore-test";
+            string snapshot = Path.Combine(LayoutBackup.RootDir, id);
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(snapshot, "DesktopBackup"));
+                AppConfig backup = new AppConfig();
+                backup.CustomCategories.Add("备份分类");
+                backup.SaveTo(Path.Combine(snapshot, "config.xml"));
+                string snapshotFile = Path.Combine(snapshot, "DesktopBackup", "backup.txt");
+                File.WriteAllText(snapshotFile, "backup-data");
+                Directory.CreateDirectory(Paths.DesktopBackupDir);
+                string liveFile = Path.Combine(Paths.DesktopBackupDir, "live.txt");
+                File.WriteAllText(liveFile, "live-data");
+                AppConfig live = new AppConfig();
+                live.CustomCategories.Add("现场分类");
+                live.Save();
+
+                string error;
+                bool rollbackOk;
+                using (FileStream locked = new FileStream(snapshotFile, FileMode.Open, FileAccess.Read, FileShare.None))
+                {
+                    bool restored = LayoutBackup.Restore(id, out error);
+                    bool unchanged = !restored && File.ReadAllText(liveFile) == "live-data"
+                        && AppConfig.Load().CustomCategories.Contains("现场分类");
+                    rollbackOk = unchanged;
+                }
+                bool success = LayoutBackup.Restore(id, out error);
+                bool replaced = success && File.ReadAllText(Path.Combine(Paths.DesktopBackupDir, "backup.txt")) == "backup-data"
+                    && !File.Exists(liveFile) && AppConfig.Load().CustomCategories.Contains("备份分类");
+                Assert(rollbackOk && replaced, "失败回滚=" + rollbackOk + " 成功提交=" + replaced + " error=" + error);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case52_SaveFailureKeepsOriginal()
+        {
+            Begin("52 配置保存失败：原文件保持完整");
+            string path = TempFile(".xml");
+            const string original = "original-config";
+            try
+            {
+                File.WriteAllText(path, original);
+                bool saved;
+                using (FileStream locked = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    AppConfig config = new AppConfig();
+                    saved = config.SaveTo(path);
+                }
+                Assert(!saved && File.ReadAllText(path) == original, "saved=" + saved);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally
+            {
+                try { if (File.Exists(path)) File.Delete(path); } catch { }
+                try { if (File.Exists(path + ".tmp")) File.Delete(path + ".tmp"); } catch { }
+                try { if (File.Exists(path + ".previous")) File.Delete(path + ".previous"); } catch { }
+            }
+        }
+
+        /// <summary>照片拍摄时间：EXIF DateTimeOriginal 优先于文件系统时间；损坏文件回退 false。</summary>
+        private static void Case53_TakenDatePhotoExif()
+        {
+            Begin("53 拍摄时间：照片读 EXIF DateTimeOriginal");
+            string path = TempFile(".jpg");
+            try
+            {
+                // 造一张最小 JPEG：1x1 像素，EXIF 写入 DateTimeOriginal=2020-01-02 03:04:05
+                using (Bitmap bmp = new Bitmap(1, 1))
+                {
+                    // 0x9003 PropertyItem 不能直接 new，借现有项改造
+                    PropertyItem pi = (PropertyItem)System.Runtime.Serialization.FormatterServices
+                        .GetUninitializedObject(typeof(PropertyItem));
+                    pi.Id = 0x9003;
+                    pi.Type = 2; // ASCII
+                    string text = "2020:01:02 03:04:05\0";
+                    pi.Value = System.Text.Encoding.ASCII.GetBytes(text);
+                    pi.Len = pi.Value.Length;
+                    bmp.SetPropertyItem(pi);
+                    bmp.Save(path, ImageFormat.Jpeg);
+                }
+                DateTime taken;
+                bool ok = MediaInfo.TryGetTakenDate(path, out taken)
+                    && taken.Year == 2020 && taken.Month == 1 && taken.Day == 2
+                    && taken.Hour == 3 && taken.Minute == 4 && taken.Second == 5;
+                // 非媒体文件返回 false
+                string txt = TempFile(".txt");
+                File.WriteAllText(txt, "x");
+                DateTime dt;
+                bool notMedia = !MediaInfo.TryGetTakenDate(txt, out dt);
+                try { File.Delete(txt); } catch { }
+                Assert(ok && notMedia, "exif=" + ok + " 非媒体=" + notMedia);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(path)) File.Delete(path); } catch { } }
+        }
+
+        /// <summary>视频拍摄时间：mp4 mvhd creation_time 解析；损坏文件返回 false。</summary>
+        private static void Case54_TakenDateVideoMvhd()
+        {
+            Begin("54 拍摄时间：视频解析 mp4 mvhd creation_time");
+            string path = TempFile(".mp4");
+            try
+            {
+                // 手工构造最小 mp4：ftyp + moov(mvhd)
+                // mvhd version=0，creation_time = (2024-03-22 10:30:00 UTC) - 1904-01-01 的秒数
+                DateTime want = new DateTime(2024, 3, 22, 10, 30, 0, DateTimeKind.Utc);
+                uint secs = (uint)(want - new DateTime(1904, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
+                using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write))
+                {
+                    WriteBox(fs, "ftyp", new byte[] { 0x69, 0x73, 0x6F, 0x6D, 0, 0, 0, 1 });  // "isom" + version
+                    byte[] mvhdPayload = new byte[100];
+                    mvhdPayload[0] = 0; // version
+                    // flags[1..3] = 0
+                    WriteU32BE(mvhdPayload, 4, secs);
+                    WriteU32BE(mvhdPayload, 8, secs);   // modification_time
+                    WriteU32BE(mvhdPayload, 12, 1000);  // timescale
+                    WriteU32BE(mvhdPayload, 16, 5000);  // duration
+                    WriteBox(fs, "moov", Box("mvhd", mvhdPayload));
+                }
+                DateTime taken;
+                bool ok = MediaInfo.TryGetTakenDate(path, out taken);
+                // 转成本地时区后比较：本地时间可能因时区有偏移，换算回 UTC 再比
+                DateTime backUtc = taken.ToUniversalTime();
+                bool timeOk = ok && Math.Abs((backUtc - want).TotalSeconds) < 1;
+                // 空文件应失败
+                string bad = TempFile(".mp4");
+                File.WriteAllBytes(bad, new byte[0]);
+                DateTime dt;
+                bool badOk = !MediaInfo.TryGetTakenDate(bad, out dt);
+                try { File.Delete(bad); } catch { }
+                Assert(timeOk && badOk, "mvhd=" + timeOk + " 损坏=" + badOk);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(path)) File.Delete(path); } catch { } }
+        }
+
+        private static void WriteBox(Stream s, string type, byte[] payload)
+        {
+            byte[] header = new byte[8];
+            WriteU32BE(header, 0, (uint)(8 + payload.Length));
+            header[4] = (byte)type[0]; header[5] = (byte)type[1];
+            header[6] = (byte)type[2]; header[7] = (byte)type[3];
+            s.Write(header, 0, 8);
+            s.Write(payload, 0, payload.Length);
+        }
+
+        private static byte[] Box(string type, byte[] payload)
+        {
+            byte[] buf = new byte[8 + payload.Length];
+            WriteU32BE(buf, 0, (uint)buf.Length);
+            buf[4] = (byte)type[0]; buf[5] = (byte)type[1];
+            buf[6] = (byte)type[2]; buf[7] = (byte)type[3];
+            Array.Copy(payload, 0, buf, 8, payload.Length);
+            return buf;
+        }
+
+        private static void WriteU32BE(byte[] buf, int offset, uint v)
+        {
+            buf[offset] = (byte)(v >> 24);
+            buf[offset + 1] = (byte)(v >> 16);
+            buf[offset + 2] = (byte)(v >> 8);
+            buf[offset + 3] = (byte)v;
         }
 
         /// <summary>查找与给定根不同的、就绪的本地固定卷（供跨卷搬迁用例使用），无则返回 null。</summary>

@@ -10,7 +10,7 @@ Windows 桌面应用管理器：应用列表、资源分类与集合、图片查
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe`，随后运行内置自测（`--selftest`，当前 48 项），日志写入 `selftest.log`。
+`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe`，随后运行内置自测（`--selftest`，当前 53 项），日志写入 `selftest.log`。
 
 ## 视频播放器依赖（libmpv-2.dll）
 

@@ -7,11 +7,12 @@ using AppManager;
 namespace AppManager.Controls
 {
     /// <summary>
-    /// 搜索框：iOS 风格圆角白底 + 放大镜图标 + 占位文本；内嵌无框 TextBox 复用输入能力。
+    /// 搜索框：中性灰圆角底 + 放大镜图标 + 占位文本；内嵌无框 TextBox 复用输入能力。
     /// </summary>
     public class SearchField : UserControl
     {
         private readonly TextBox box = new TextBox();
+        private readonly Label placeholderLabel = new Label();
         private string placeholder = "搜索应用…";
 
         public SearchField()
@@ -23,17 +24,28 @@ namespace AppManager.Controls
             box.BorderStyle = BorderStyle.None;
             box.BackColor = Theme.SearchBg;
             box.ForeColor = Theme.TextPrimary;
-            box.Font = Theme.FontOf(10F);
+            box.Font = Theme.BodyFont;
             box.TabStop = true;
             box.TextChanged += delegate(object s, EventArgs e)
             {
+                UpdatePlaceholder();
                 Invalidate();
                 EventHandler h = TextChanged;
                 if (h != null) h(this, e);
             };
-            box.GotFocus += delegate { box.BackColor = Color.White; Invalidate(); };
-            box.LostFocus += delegate { box.BackColor = Theme.SearchBg; Invalidate(); };
+            box.GotFocus += delegate { box.BackColor = Color.White; UpdatePlaceholder(); Invalidate(); };
+            box.LostFocus += delegate { box.BackColor = Theme.SearchBg; UpdatePlaceholder(); Invalidate(); };
             Controls.Add(box);
+            placeholderLabel.BackColor = Color.Transparent;
+            placeholderLabel.ForeColor = Theme.TextTertiary;
+            placeholderLabel.Font = box.Font;
+            placeholderLabel.Text = placeholder;
+            placeholderLabel.TextAlign = ContentAlignment.MiddleLeft;
+            placeholderLabel.Cursor = Cursors.IBeam;
+            placeholderLabel.Click += delegate { box.Focus(); };
+            Controls.Add(placeholderLabel);
+            placeholderLabel.BringToFront();
+            UpdatePlaceholder();
         }
 
         public override string Text { get { return box.Text; } set { box.Text = value; } }
@@ -45,7 +57,7 @@ namespace AppManager.Controls
         public string Placeholder
         {
             get { return placeholder; }
-            set { placeholder = value; Invalidate(); }
+            set { placeholder = value; placeholderLabel.Text = value; UpdatePlaceholder(); Invalidate(); }
         }
 
         protected override void OnResize(EventArgs e)
@@ -55,6 +67,12 @@ namespace AppManager.Controls
             int iconArea = 24;
             box.Location = new Point(pad + iconArea, (Height - box.PreferredHeight) / 2);
             box.Width = Math.Max(10, Width - box.Left - pad);
+            placeholderLabel.SetBounds(box.Left, 0, Math.Max(0, box.Width), Height);
+        }
+
+        private void UpdatePlaceholder()
+        {
+            placeholderLabel.Visible = string.IsNullOrEmpty(box.Text) && !box.Focused;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -63,25 +81,19 @@ namespace AppManager.Controls
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             Rectangle r = ClientRectangle;
             r.Inflate(-1, -1);
-            // iOS 搜索框：灰底圆角、无边框；聚焦时白底 + 蓝色描边
+            // 默认灰底无边框，聚焦时白底蓝色描边
             Color bg = box.Focused ? Color.White : Theme.SearchBg;
-            using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 10);
+            using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 8);
             if (box.Focused)
             {
-                using (Pen p = new Pen(Theme.Accent, 1.5F)) Draw.DrawRoundedRect(g, p, r, 10);
+                using (Pen p = new Pen(Theme.Accent, 1.2F)) Draw.DrawRoundedRect(g, p, r, 8);
             }
             // 放大镜
             int cx = 13, cy = Height / 2;
-            using (Pen mp = new Pen(Theme.TextSecondary, 1.6F))
+            using (Pen mp = new Pen(Theme.TextTertiary, 1.5F))
             {
                 g.DrawEllipse(mp, cx, cy - 6, 11, 11);
                 g.DrawLine(mp, cx + 9, cy + 3, cx + 15, cy + 9);
-            }
-            if (string.IsNullOrEmpty(box.Text) && !box.Focused)
-            {
-                Rectangle tr = new Rectangle(38, 0, r.Width - 44, r.Height);
-                using (SolidBrush br = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(g, placeholder, box.Font, br, tr);
             }
         }
     }

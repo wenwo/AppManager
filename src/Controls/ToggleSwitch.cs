@@ -53,7 +53,7 @@ namespace AppManager.Controls
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle r = new Rectangle(0, 2, Width - 1, Height - 4);
-            Color track = _checked ? Theme.ToggleGreen : Theme.SegmentBg; // iOS 绿/灰
+            Color track = _checked ? Theme.ToggleOn : Theme.SegmentBg;
             using (SolidBrush b = new SolidBrush(track)) Draw.FillRoundedRect(g, b, r, r.Height);
             // 轨道内阴影（顶部 1px 深色，模拟凹陷）
             using (Pen ip = new Pen(Color.FromArgb(12, 0, 0, 0), 1))

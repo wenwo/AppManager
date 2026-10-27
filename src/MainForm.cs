@@ -78,12 +78,14 @@ namespace AppManager
         private int refreshPending = 0; // 图标重绘合并标志，0=无待处理请求
         private System.Windows.Forms.Timer iconFlushTimer;               // 图标局部刷新合并定时器（80ms）
         private readonly List<AppInfo> iconDirty = new List<AppInfo>();  // 待局部刷新的图标条目
+        private readonly HashSet<Tuple<AppInfo, bool>> iconQueued = new HashSet<Tuple<AppInfo, bool>>();
 
         // 集合封面后台解码：进行中/已失败（本会话）去重，避免每张封面在 UI 线程同步解码原图
         private readonly HashSet<string> coverPending = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> coverFailed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private bool selfTestRunning;   // 设置页自测防重入
+        private bool desktopOperationRunning;
         private FormWindowState preTrayWindowState = FormWindowState.Normal;   // 收托盘前的窗口状态（用于恢复最大化）
 
         // 当前网格展示的条目顺序（拖拽排序的落盘依据）＋ 侧栏条目快照（分类重排的下标映射）
@@ -174,7 +176,6 @@ namespace AppManager
                 scanner.ApplyConfig(cached);
                 SwapApps(cached);
                 RefreshGrid();
-                StartIconLoad();
                 StartScan(false, true);
             }
             else
@@ -525,7 +526,8 @@ namespace AppManager
             countLabel = new Label();
             countLabel.AutoSize = false;
             countLabel.BackColor = Color.Transparent;
-            countLabel.Font = Theme.FontOf(9F);
+            countLabel.Font = Theme.CaptionFont;
+            countLabel.ForeColor = Theme.TextTertiary;
             countLabel.ForeColor = Theme.TextSecondary;
             countLabel.TextAlign = ContentAlignment.MiddleRight;
             Controls.Add(countLabel);
@@ -537,6 +539,7 @@ namespace AppManager
                 SetCategoryGridMode(currentCategory, viewToggle.Checked);
                 config.Save();
                 grid.GridMode = viewToggle.Checked;
+                StartIconLoad();
                 SyncHeaderStrip();
                 UpdateToggleLabel();
             };
@@ -546,7 +549,7 @@ namespace AppManager
             toggleLabel.Text = "网格";
             toggleLabel.AutoSize = true;
             toggleLabel.BackColor = Color.Transparent;
-            toggleLabel.Font = Theme.FontOf(9F);
+            toggleLabel.Font = Theme.BodyFont;
             toggleLabel.ForeColor = Theme.TextSecondary;
             toggleLabel.Click += delegate { viewToggle.Checked = !viewToggle.Checked; };
             Controls.Add(toggleLabel);
@@ -603,12 +606,17 @@ namespace AppManager
                 if (config.AutoScan) StartAutoScan();
                 else StopAutoScan();
             };
+            settingsPage.AutoOrganizeDesktopChanged += delegate
+            {
+                config.AutoOrganizeDesktop = settingsPage.AutoOrganizeDesktop;
+                config.Save();
+            };
             settingsPage.CloseToTrayChanged += delegate { SetCloseToTray(settingsPage.CloseToTray); };
             settingsPage.StorageLocationRequested += delegate
             {
                 ShowStorageLocationDialog();
                 // 对话框可能改了存储目录，回到页面后刷新展示的路径
-                settingsPage.Bind(config.ShowHidden, config.AutoScan,
+                settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                     config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             };
             settingsPage.RescanRequested += delegate { StartScan(); };
@@ -635,7 +643,7 @@ namespace AppManager
             statusLabel = new Label();
             statusLabel.AutoSize = false;
             statusLabel.BackColor = Color.Transparent;
-            statusLabel.Font = Theme.FontOf(9F);
+            statusLabel.Font = Theme.BodyFont;
             statusLabel.ForeColor = Theme.TextPrimary;
             statusLabel.TextAlign = ContentAlignment.MiddleLeft;
             statusBar.Controls.Add(statusLabel);
@@ -644,8 +652,8 @@ namespace AppManager
             statusDetail = new Label();
             statusDetail.AutoSize = false;
             statusDetail.BackColor = Color.Transparent;
-            statusDetail.Font = Theme.FontOf(8.5F);
-            statusDetail.ForeColor = Theme.TextSecondary;
+            statusDetail.Font = Theme.CaptionFont;
+            statusDetail.ForeColor = Theme.TextTertiary;
             statusDetail.TextAlign = ContentAlignment.MiddleLeft;
             statusBar.Controls.Add(statusDetail);
 
@@ -1082,7 +1090,7 @@ namespace AppManager
         {
             if (config == null || !config.AutoScan || autoScan == null) return;
             List<string> fresh = autoScan.TakeNewDesktopFiles();
-            if (fresh.Count > 0 && !config.OrganizeCopy && config.OrganizeShortcut)
+            if (fresh.Count > 0 && config.AutoOrganizeDesktop && !config.OrganizeCopy && config.OrganizeShortcut)
             {
                 // 先登记「这些删除是我们自己造成的」，避免搬运后再白扫一遍
                 autoScan.IgnoreDeletions(fresh);
@@ -1123,19 +1131,25 @@ namespace AppManager
             scanRunning = true;
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
-                List<AppInfo> result;
+                List<AppInfo> result = null;
                 try { result = scanner.ScanAll(); }
-                catch { result = new List<AppInfo>(); }
-                try { ScanCache.Save(result); } catch { }   // 落盘扫描缓存，下次启动先展示旧数据
+                catch (Exception ex) { Paths.LogError(ex); }
+                if (result != null)
+                {
+                    try { ScanCache.Save(result); } catch { }
+                }
                 try
                 {
                     BeginInvoke((Action)delegate
                     {
                         // 换列表与释放旧图标必须在 UI 线程完成，避免与绘制/图标加载竞态
                         scanRunning = false;
-                        SwapApps(result);
-                        RefreshGrid(keepViewers);
-                        StartIconLoad();
+                        if (result != null)
+                        {
+                            SwapApps(result);
+                            RefreshGrid(keepViewers);
+                        }
+                        else countLabel.Text = "扫描失败，已保留当前列表";
                         if (scanPending)
                         {
                             scanPending = false;
@@ -1158,6 +1172,7 @@ namespace AppManager
         private void SwapApps(List<AppInfo> newList)
         {
             iconGen++;
+            lock (iconQueued) iconQueued.Clear();
             DisposeIcons(allApps);
             allApps = newList ?? new List<AppInfo>();
         }
@@ -1185,16 +1200,28 @@ namespace AppManager
         private void StartIconLoad()
         {
             int gen = iconGen;
-            List<AppInfo> snapshot = allApps;
+            bool loadGrid = grid.GridMode;
+            List<AppInfo> pending = new List<AppInfo>();
+            lock (iconQueued)
+            {
+                foreach (AppInfo app in shownApps)
+                {
+                    Tuple<AppInfo, bool> request = Tuple.Create(app, loadGrid);
+                    if (app == null || iconQueued.Contains(request)) continue;
+                    if (loadGrid ? app.Icon != null : app.SmallIcon != null) continue;
+                    iconQueued.Add(request);
+                    pending.Add(app);
+                }
+            }
+            if (pending.Count == 0) return;
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
-                for (int i = 0; i < snapshot.Count; i++)
+                for (int i = 0; i < pending.Count; i++)
                 {
                     if (gen != iconGen) return; // 已被新一轮扫描取代，放弃
-                    AppInfo a = snapshot[i];
+                    AppInfo a = pending[i];
                     bool changed = false;
-                    // 网格大图标
-                    if (a.Icon == null)
+                    if (loadGrid && a.Icon == null)
                     {
                         Bitmap bmp = null;
                         try { bmp = Icons.Extract(a, Theme.IconSize); }
@@ -1203,8 +1230,7 @@ namespace AppManager
                         a.Icon = bmp;
                         changed = true;
                     }
-                    // 列表小图标（shell 16x16 原图，对齐资源管理器，避免大图缩小发虚）
-                    if (a.SmallIcon == null)
+                    if (!loadGrid && a.SmallIcon == null)
                     {
                         Bitmap sm = null;
                         try { sm = Icons.ExtractSmall(a, Theme.ListIconSize); }
@@ -1346,6 +1372,7 @@ namespace AppManager
 
             if (listSortColumn != null) SortShown(shown, listSortColumn, listSortAsc);
             shownApps = shown;
+            StartIconLoad();
             // 行内第二个按钮：进入集合后为「移除」（仅从集合移出），分类/全部资源/搜索下为「删除」
             grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website && kw.Length == 0
                 && currentCollection != null) ? "移除" : "删除";
@@ -1514,7 +1541,7 @@ namespace AppManager
             try
             {
                 if (srcIsDir) DesktopOrganizer.MoveDirectory(sp, dest);   // 同卷 Move / 跨卷 复制+删除
-                else File.Move(sp, dest);
+                else DesktopOrganizer.MoveFile(sp, dest);
             }
             catch (Exception ex)
             {
@@ -1726,7 +1753,7 @@ namespace AppManager
             return contentMode == SidebarControl.ContentMode.Website ? resource : !resource;
         }
 
-        /// <summary>可见性判定：仅受「显示隐藏项」开关影响（注册表不作来源后，原「显示全部已安装」开关已无实际过滤对象，随设置页一并移除）。</summary>
+        /// <summary>可见性判定：仅受「显示隐藏项」开关影响。</summary>
         private bool ShouldShow(AppInfo a)
         {
             return !a.IsHidden || config.ShowHidden;
@@ -1772,7 +1799,7 @@ namespace AppManager
             return v;
         }
 
-        /// <summary>排序用创建时间（与列表「时间」列同口径）：读取失败记 DateTime.MinValue。</summary>
+        /// <summary>排序用修改时间（与列表「时间」列同口径）：读取失败记 DateTime.MinValue。</summary>
         private static DateTime MetaTime(Dictionary<string, DateTime> cache, AppInfo a)
         {
             string p = a == null ? null : a.TargetPath;
@@ -1782,7 +1809,10 @@ namespace AppManager
             v = DateTime.MinValue;
             try
             {
-                if (File.Exists(p) || Directory.Exists(p)) v = File.GetCreationTime(p);
+                // 媒体文件优先用拍摄时间（与列表时间列同口径），失败回退修改时间
+                DateTime taken;
+                if (MediaInfo.TryGetTakenDate(p, out taken)) v = taken;
+                else if (File.Exists(p) || Directory.Exists(p)) v = File.GetLastWriteTime(p);
             }
             catch { }
             cache[p] = v;
@@ -2712,7 +2742,7 @@ namespace AppManager
                 && (MediaRules.IsImage(app.TargetPath) || MediaRules.IsVideo(app.TargetPath));
         }
 
-        /// <summary>双击照片：打开查看器。资源模式下浏览序列为资源库全部图片（不限当前分类，各分类查看体验一致）。</summary>
+        /// <summary>双击照片：在当前列表的图片序列中打开查看器。</summary>
         private void ShowImageViewer(AppInfo app)
         {
             List<string> imgs = MediaSequence(MediaRules.IsImage);
@@ -2732,7 +2762,7 @@ namespace AppManager
             grid.Invalidate();
         }
 
-        /// <summary>双击视频：打开内置播放器。资源模式下播放序列为资源库全部视频（不限当前分类，各分类查看体验一致）。</summary>
+        /// <summary>双击视频：在当前列表的视频序列中打开内置播放器。</summary>
         private void ShowVideoPlayer(AppInfo app)
         {
             List<string> vids = MediaSequence(MediaRules.IsVideo);
@@ -2750,31 +2780,16 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 媒体浏览序列：资源模式取资源库全部同类媒体（跨分类统一，双击来源必在其中）；
-        /// 软件模式取当前列表内同类媒体（保持原有行为）。
+        /// 媒体浏览序列限定当前列表，避免在集合内浏览时跳到其它分类。
         /// </summary>
         private List<string> MediaSequence(Func<string, bool> typeMatch)
         {
             List<string> result = new List<string>();
-            if (contentMode == SidebarControl.ContentMode.Website)
+            foreach (AppInfo a in shownApps)
             {
-                foreach (AppInfo a in allApps)
-                {
-                    if (!IsResourceEntry(a)) continue;
-                    if (!ShouldShow(a)) continue;   // 隐藏项不进浏览序列，与列表可见性一致
-                    if (a.IsFolder) continue;
-                    if (typeMatch(a.TargetPath) && File.Exists(a.TargetPath))
-                        result.Add(a.TargetPath);
-                }
-            }
-            else
-            {
-                foreach (AppInfo a in shownApps)
-                {
-                    if (a.IsFolder) continue;
-                    if (typeMatch(a.TargetPath) && File.Exists(a.TargetPath))
-                        result.Add(a.TargetPath);
-                }
+                if (a.IsFolder) continue;
+                if (typeMatch(a.TargetPath) && File.Exists(a.TargetPath))
+                    result.Add(a.TargetPath);
             }
             return result;
         }
@@ -3618,6 +3633,7 @@ namespace AppManager
             int total = valid.Length;
             ShowStatusBar("正在移入「" + category + "」…", 0, total);
             List<string> storedList = new List<string>();
+            int failed = 0;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 for (int i = 0; i < total; i++)
@@ -3626,12 +3642,14 @@ namespace AppManager
                     string name = Path.GetFileName(p);
                     UpdateStatus(i, total, name);
                     string stored = StoreIntoCategory(p, category, resource);
-                    lock (storedList) storedList.Add(stored);
+                    if (stored == null) failed++;
+                    else lock (storedList) storedList.Add(stored);
                 }
                 RunOnUi((Action)delegate
                 {
                     int added = 0;
                     bool changed = false;   // 是否产生配置变化（新增登记或补集合归属）
+                    bool configSaved = true;
                     foreach (string stored in storedList)
                     {
                         if (FindAddedEntry(stored, category) < 0)
@@ -3654,18 +3672,25 @@ namespace AppManager
                     if (added > 0)
                     {
                         InvalidateAddedIndex();
-                        config.Save();
-                        StartScan(false);
+                        configSaved = config.Save();
+                        if (configSaved) StartScan(false);
                     }
                     else if (changed)
                     {
                         // 全部条目已登记、仅补集合归属：无需重扫，落盘并刷新集合侧边栏/网格即可
-                        config.Save();
-                        RefreshGrid();
+                        configSaved = config.Save();
+                        if (configSaved) RefreshGrid();
                     }
                     // 完成态短暂停留再收起：避免进度一闪而过用户看不到结果
                     statusLabel.Text = "已入库 " + added + " 项到「" + category + "」";
-                    statusDetail.Text = string.Empty;
+                    statusDetail.Text = failed > 0 ? failed + " 项搬运失败，未登记" : string.Empty;
+                    if (!configSaved)
+                    {
+                        HideStatusBar();
+                        MessageBox.Show("文件已搬运，但收录配置保存失败。请检查磁盘空间和目录权限。",
+                            "添加入库", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
                     System.Windows.Forms.Timer doneTimer = new System.Windows.Forms.Timer { Interval = 900 };
                     doneTimer.Tick += delegate { doneTimer.Stop(); doneTimer.Dispose(); HideStatusBar(); };
                     doneTimer.Start();
@@ -3676,7 +3701,7 @@ namespace AppManager
         /// <summary>
         /// 入库规则：软件模式下文件夹/文件收进配置的统一存储位置（.exe 只登记不搬）；
         /// 资源模式收进「资源存储位置」下按分类建立的子目录，所有文件（含 .exe）均实体移动。
-        /// 未配置时回退 ManageRoot（H:\Manage）。已在目标目录内或搬运失败时返回原路径，保证条目不丢失。
+        /// 未配置时回退 ManageRoot（H:\Manage）。已在目标目录内返回原路径，搬运失败返回 null。
         /// </summary>
         private string StoreIntoCategory(string path, string category, bool resource)
         {
@@ -3691,13 +3716,13 @@ namespace AppManager
                 if (!Directory.Exists(destDir)) Directory.CreateDirectory(destDir);
                 string name = Path.GetFileName(path);
                 string dest = UniqueDest(destDir, name);
-                if (isFolder) DesktopOrganizer.MoveDirectory(path, dest); else File.Move(path, dest);
+                if (isFolder) DesktopOrganizer.MoveDirectory(path, dest); else DesktopOrganizer.MoveFile(path, dest);
                 return dest;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine("分类入库失败 " + category + " " + path + ": " + ex.Message);
-                return path;
+                return null;
             }
         }
 
@@ -4146,22 +4171,45 @@ namespace AppManager
 
         private void DoOrganize()
         {
-            int n = 0;
-            try { n = organizer.TidyDesktop(Application.ExecutablePath); }
-            catch { }
-            ReloadLibrary();
-            MessageBox.Show("已收纳 " + n + " 个桌面条目（" + (config.OrganizeCopy ? "副本模式" : "搬家模式") + "）。",
-                "整理桌面", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            bool copy = config.OrganizeCopy;
+            RunDesktopOperation("正在整理桌面…", delegate { return organizer.TidyDesktop(Application.ExecutablePath); },
+                delegate(int n) { return "已收纳 " + n + " 个桌面条目（" + (copy ? "副本模式" : "搬家模式") + "）。"; });
         }
 
         private void DoRestore()
         {
-            int n = 0;
-            try { n = organizer.RestoreAll(); }
-            catch { }
-            ReloadLibrary();
-            MessageBox.Show("已还原 " + n + " 个条目到桌面。", "整理桌面",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            RunDesktopOperation("正在还原桌面…", delegate { return organizer.RestoreAll(); },
+                delegate(int n) { return "已还原 " + n + " 个条目到桌面。"; });
+        }
+
+        private void RunDesktopOperation(string status, Func<int> operation, Func<int, string> successText)
+        {
+            if (desktopOperationRunning) return;
+            desktopOperationRunning = true;
+            organizeBtn.Enabled = false;
+            ShowStatusBar(status, 0, 0);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                int count = 0;
+                Exception failure = null;
+                try { count = operation(); }
+                catch (Exception ex) { failure = ex; Paths.LogError(ex); }
+                RunOnUi(delegate
+                {
+                    desktopOperationRunning = false;
+                    organizeBtn.Enabled = true;
+                    HideStatusBar();
+                    if (failure != null)
+                    {
+                        MessageBox.Show("操作失败：" + failure.Message, "整理桌面",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    ReloadLibrary();
+                    MessageBox.Show(successText(count), "整理桌面",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                });
+            });
         }
 
         /// <summary>桌面备份清单：列出条目，支持单条还原/移除、全部还原。</summary>
@@ -4297,7 +4345,7 @@ namespace AppManager
             organizer = new DesktopOrganizer(config);
             grid.GridMode = GetCategoryGridMode(currentCategory);
             SyncHeaderStrip();
-            settingsPage.Bind(config.ShowHidden, config.AutoScan,
+            settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                 config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             StartAutoScan();
             RebuildSidebar();
@@ -4416,7 +4464,7 @@ namespace AppManager
             settingsOpen = true;
             HideImageViewer();   // 查看器/播放器属于列表区域，进入设置页前先退出
             HideVideoPlayer();
-            settingsPage.Bind(config.ShowHidden, config.AutoScan,
+            settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                 config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             SetMainContentVisible(false);
             settingsBtn.Visible = false;
@@ -4593,7 +4641,7 @@ namespace AppManager
         // ===== 绘制与拖动 =====
 
         /// <summary>
-        /// 背景绘制放入 OnPaintBackground：顶栏渐变/分隔线属于背景层，
+        /// 背景绘制放入 OnPaintBackground：明暗分层/分隔线属于背景层，
         /// 透明子控件（Label/侧栏）可正确透出，避免系统灰底。
         /// </summary>
         protected override void OnPaintBackground(PaintEventArgs e)
@@ -4605,21 +4653,21 @@ namespace AppManager
                 g.FillRectangle(b, ClientRectangle);
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
 
-            // 顶栏：iOS 导航栏渐变（白 → 极浅灰），横跨全宽（含侧栏上方，macOS 风格）
-            Rectangle topBar = new Rectangle(0, 0, ClientSize.Width, Theme.TopBarHeight);
-            using (LinearGradientBrush gb = new LinearGradientBrush(
-                topBar, Color.FromArgb(255, 255, 255), Color.FromArgb(248, 248, 250), LinearGradientMode.Vertical))
-                g.FillRectangle(gb, topBar);
+            // 侧栏使用低一层的中性灰，内容顶栏保持白色，形成稳定的三段式明暗层次
+            using (SolidBrush sb = new SolidBrush(Theme.SidebarBg))
+                g.FillRectangle(sb, new Rectangle(0, 0, Theme.SidebarWidth, ClientSize.Height));
+            Rectangle topBar = new Rectangle(Theme.SidebarWidth, 0,
+                ClientSize.Width - Theme.SidebarWidth, Theme.TopBarHeight);
+            using (SolidBrush tb = new SolidBrush(Theme.TopBarBg))
+                g.FillRectangle(tb, topBar);
 
-            // 顶栏底部分隔线（1px 实色 + 1px 投影，iOS 磨砂玻璃质感）
+            // 仅以 1px 分隔线划区，避免渐变和投影造成视觉噪音
             using (Pen p1 = new Pen(Theme.Separator, 1))
-                g.DrawLine(p1, 0, Theme.TopBarHeight, ClientSize.Width, Theme.TopBarHeight);
-            using (Pen p2 = new Pen(Color.FromArgb(20, 0, 0, 0), 1))
-                g.DrawLine(p2, 0, Theme.TopBarHeight + 1, ClientSize.Width, Theme.TopBarHeight + 1);
+                g.DrawLine(p1, Theme.SidebarWidth, Theme.TopBarHeight - 1, ClientSize.Width, Theme.TopBarHeight - 1);
 
-            // 侧栏右侧分隔线（仅顶栏以下）
+            // 侧栏分隔线贯通顶栏与内容区
             using (Pen ps = new Pen(Theme.Separator, 1))
-                g.DrawLine(ps, Theme.SidebarWidth, Theme.TopBarHeight, Theme.SidebarWidth, ClientSize.Height);
+                g.DrawLine(ps, Theme.SidebarWidth - 1, 0, Theme.SidebarWidth - 1, ClientSize.Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)

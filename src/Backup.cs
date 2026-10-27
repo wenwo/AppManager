@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
+using System.Threading;
 using System.Windows.Forms;
 using System.Xml;
 using AppManager.Controls;
@@ -178,7 +179,9 @@ namespace AppManager
         {
             // 先把内存配置落盘，保证快照与当前界面一致
             AppConfig cfg = AppConfig.Load();
-            cfg.SaveTo(Path.Combine(dir, "config.xml"));
+            if (cfg.LoadFailed) throw new InvalidDataException("当前配置读取失败，已取消备份。");
+            if (!cfg.SaveTo(Path.Combine(dir, "config.xml")))
+                throw new IOException("无法写入备份配置。");
 
             CopyDir(Paths.DesktopBackupDir, Path.Combine(dir, "DesktopBackup"));
             CopyDir(Paths.LegacyStashDir, Path.Combine(dir, "DesktopStash"));
@@ -276,6 +279,7 @@ namespace AppManager
         public static bool Restore(string id, out string error)
         {
             error = null;
+            string transaction = null;
             try
             {
                 string dir = Path.Combine(RootDir, id);
@@ -285,28 +289,76 @@ namespace AppManager
                     error = "备份不完整（缺少 config.xml）。";
                     return false;
                 }
-
-                // 当前配置另存一份，便于回退
-                try
+                AppConfig restoredConfig = AppConfig.ImportFrom(cfgFile);
+                if (restoredConfig == null || restoredConfig.LoadFailed)
                 {
-                    if (File.Exists(Paths.ConfigFile))
-                        File.Copy(Paths.ConfigFile,
-                            Path.Combine(Paths.DataDir, "config.before-restore.xml"), true);
+                    error = "备份配置已损坏，已取消恢复。";
+                    return false;
                 }
-                catch { }
 
-                File.Copy(cfgFile, Paths.ConfigFile, true);
-
-                // 旧版备份把收纳目录命名为 stash；新版拆成 DesktopBackup / DesktopStash 两部分
                 string snapStash = Path.Combine(dir, "DesktopStash");
                 if (!Directory.Exists(snapStash) && Directory.Exists(Path.Combine(dir, "stash")))
                     snapStash = Path.Combine(dir, "stash");
+                string snapDesktop = Path.Combine(dir, "DesktopBackup");
+                bool replaceDesktop = Directory.Exists(snapDesktop);
+                bool replaceStash = Directory.Exists(snapStash);
 
-                string keep = Path.Combine(Paths.BackupsDir, "_prerestore_" + DateTime.Now.ToString("yyyyMMdd-HHmmss"));
-                // 备份里没有对应目录时保持现状，避免把本次没备份过的内容当成「空」清掉
-                ApplyDir(Path.Combine(dir, "DesktopBackup"), Paths.DesktopBackupDir,
-                    Path.Combine(keep, "DesktopBackup"));
-                ApplyDir(snapStash, Paths.LegacyStashDir, Path.Combine(keep, "DesktopStash"));
+                transaction = Path.Combine(RootDir, "_prerestore_" + DateTime.Now.ToString("yyyyMMdd-HHmmss")
+                    + "-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(transaction);
+                string oldConfig = Path.Combine(transaction, "config.xml");
+                bool hadConfig = File.Exists(Paths.ConfigFile);
+                if (hadConfig) File.Copy(Paths.ConfigFile, oldConfig, true);
+
+                string newDesktop = Path.Combine(transaction, "newDesktopBackup");
+                string newStash = Path.Combine(transaction, "newDesktopStash");
+                if (replaceDesktop) CopyDir(snapDesktop, newDesktop);
+                if (replaceStash) CopyDir(snapStash, newStash);
+
+                string oldDesktop = Path.Combine(transaction, "DesktopBackup");
+                string oldStash = Path.Combine(transaction, "DesktopStash");
+                bool desktopAside = false, desktopInstalled = false;
+                bool stashAside = false, stashInstalled = false;
+                try
+                {
+                    if (replaceDesktop)
+                    {
+                        if (Directory.Exists(Paths.DesktopBackupDir))
+                        {
+                            Directory.Move(Paths.DesktopBackupDir, oldDesktop);
+                            desktopAside = true;
+                        }
+                        Directory.Move(newDesktop, Paths.DesktopBackupDir);
+                        desktopInstalled = true;
+                    }
+                    if (replaceStash)
+                    {
+                        if (Directory.Exists(Paths.LegacyStashDir))
+                        {
+                            Directory.Move(Paths.LegacyStashDir, oldStash);
+                            stashAside = true;
+                        }
+                        Directory.Move(newStash, Paths.LegacyStashDir);
+                        stashInstalled = true;
+                    }
+                    File.Copy(cfgFile, Paths.ConfigFile, true);
+                    if (hadConfig)
+                        File.Copy(oldConfig, Path.Combine(Paths.DataDir, "config.before-restore.xml"), true);
+                }
+                catch
+                {
+                    if (desktopInstalled && Directory.Exists(Paths.DesktopBackupDir))
+                        Directory.Delete(Paths.DesktopBackupDir, true);
+                    if (desktopAside && Directory.Exists(oldDesktop) && !Directory.Exists(Paths.DesktopBackupDir))
+                        Directory.Move(oldDesktop, Paths.DesktopBackupDir);
+                    if (stashInstalled && Directory.Exists(Paths.LegacyStashDir))
+                        Directory.Delete(Paths.LegacyStashDir, true);
+                    if (stashAside && Directory.Exists(oldStash) && !Directory.Exists(Paths.LegacyStashDir))
+                        Directory.Move(oldStash, Paths.LegacyStashDir);
+                    if (hadConfig && File.Exists(oldConfig)) File.Copy(oldConfig, Paths.ConfigFile, true);
+                    else if (!hadConfig && File.Exists(Paths.ConfigFile)) File.Delete(Paths.ConfigFile);
+                    throw;
+                }
                 return true;
             }
             catch (Exception ex)
@@ -382,39 +434,12 @@ namespace AppManager
             }
         }
 
-        /// <summary>把备份里的目录放回原位：备份包含该目录时，先把当前目录挪走留底，再整份复制回来。</summary>
-        private static void ApplyDir(string snapshotDir, string liveDir, string asideDir)
-        {
-            if (string.IsNullOrEmpty(snapshotDir) || !Directory.Exists(snapshotDir)) return;
-            MoveDirAside(liveDir, asideDir);
-            CopyDir(snapshotDir, liveDir);
-        }
-
-        /// <summary>把已有目录整体挪走留底（同名已存在时追加序号）。</summary>
-        private static void MoveDirAside(string source, string dest)
-        {
-            try
-            {
-                if (!Directory.Exists(source)) return;
-                string parent = Path.GetDirectoryName(dest);
-                if (!string.IsNullOrEmpty(parent) && !Directory.Exists(parent)) Directory.CreateDirectory(parent);
-                string target = dest;
-                int i = 2;
-                while (Directory.Exists(target)) { target = dest + "-" + i; i++; }
-                Directory.Move(source, target);
-            }
-            catch (Exception ex) { Paths.LogError(ex); }
-        }
-
         private static void CopyDir(string from, string to)
         {
             if (string.IsNullOrEmpty(from) || !Directory.Exists(from)) return;
             if (!Directory.Exists(to)) Directory.CreateDirectory(to);
             foreach (string f in Directory.GetFiles(from))
-            {
-                try { File.Copy(f, Path.Combine(to, Path.GetFileName(f)), true); }
-                catch (Exception ex) { Paths.LogError(ex); }
-            }
+                File.Copy(f, Path.Combine(to, Path.GetFileName(f)), true);
             foreach (string d in Directory.GetDirectories(from))
             {
                 CopyDir(d, Path.Combine(to, Path.GetFileName(d)));
@@ -431,6 +456,7 @@ namespace AppManager
         private readonly RoundButton btnUpdate;
         private readonly RoundButton btnRename;
         private readonly RoundButton btnDelete;
+        private bool operationRunning;
 
         /// <summary>是否执行过恢复（主窗口据此重载配置与重扫）。</summary>
         public bool Restored;
@@ -566,11 +592,17 @@ namespace AppManager
 
         private void UpdateButtons()
         {
-            bool has = Selected != null;
+            bool has = Selected != null && !operationRunning;
             btnRestore.Enabled = has;
             btnUpdate.Enabled = has;
             btnRename.Enabled = has;
             btnDelete.Enabled = has;
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (operationRunning) e.Cancel = true;
+            base.OnFormClosing(e);
         }
 
         private LayoutBackupInfo Selected
@@ -589,21 +621,23 @@ namespace AppManager
             string name = InputDialog.Show("新建备份", "给这份布局起个名字（留空则按时间命名）。", LayoutBackup.DefaultName());
             if (name == null) return;   // 取消
 
-            string id, error;
-            if (!LayoutBackup.Create(name, out id, out error))
+            string id = null;
+            RunBackupOperation(delegate
             {
-                MessageBox.Show(this, "备份失败：" + error, "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            ReloadList();
-            for (int i = 0; i < items.Count; i++)
+                string error;
+                return LayoutBackup.Create(name, out id, out error) ? null : error;
+            }, delegate
             {
-                if (string.Equals(items[i].Id, id, StringComparison.OrdinalIgnoreCase))
+                ReloadList();
+                for (int i = 0; i < items.Count; i++)
                 {
-                    list.SelectedIndex = i;
-                    break;
+                    if (string.Equals(items[i].Id, id, StringComparison.OrdinalIgnoreCase))
+                    {
+                        list.SelectedIndex = i;
+                        break;
+                    }
                 }
-            }
+            });
         }
 
         private void UpdateBackup()
@@ -613,13 +647,11 @@ namespace AppManager
             if (!ConfirmDialog.Show("更新备份", "用当前布局刷新备份「" + info.Name + "」？\r\n\r\n" +
                 "备份里的内容会被当前状态覆盖，名称与创建时间保持不变。")) return;
 
-            string error;
-            if (!LayoutBackup.Update(info.Id, out error))
+            RunBackupOperation(delegate
             {
-                MessageBox.Show(this, "更新失败：" + error, "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            ReloadList();
+                string error;
+                return LayoutBackup.Update(info.Id, out error) ? null : error;
+            }, ReloadList);
         }
 
         private void RestoreSelected()
@@ -629,16 +661,17 @@ namespace AppManager
             if (!ConfirmDialog.Show("恢复备份", "恢复备份「" + info.Name + "」？\r\n\r\n" + info.Summary +
                 "\r\n\r\n当前布局会被换成备份时的状态，列表内容与桌面收纳都会一起回到那个时间点。")) return;
 
-            string error;
-            if (!LayoutBackup.Restore(info.Id, out error))
+            RunBackupOperation(delegate
             {
-                MessageBox.Show(this, "恢复失败：" + error, "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            Restored = true;
-            MessageBox.Show(this, "已恢复到「" + info.Name + "」。\r\n桌面收纳与分类布局已回到备份时的状态。",
-                "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            ReloadList();
+                string error;
+                return LayoutBackup.Restore(info.Id, out error) ? null : error;
+            }, delegate
+            {
+                Restored = true;
+                MessageBox.Show(this, "已恢复到「" + info.Name + "」。\r\n桌面收纳与分类布局已回到备份时的状态。",
+                    "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                ReloadList();
+            });
         }
 
         private void RenameBackup()
@@ -648,13 +681,11 @@ namespace AppManager
             string name = InputDialog.Show("重命名备份", "输入新的备份名称。", info.Name);
             if (name == null) return;
 
-            string error;
-            if (!LayoutBackup.Rename(info.Id, name, out error))
+            RunBackupOperation(delegate
             {
-                MessageBox.Show(this, "重命名失败：" + error, "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            ReloadList();
+                string error;
+                return LayoutBackup.Rename(info.Id, name, out error) ? null : error;
+            }, ReloadList);
         }
 
         private void DeleteBackup()
@@ -664,13 +695,46 @@ namespace AppManager
             if (!ConfirmDialog.Show("删除备份", "删除备份「" + info.Name + "」？\r\n\r\n" + info.Summary +
                 "\r\n\r\n备份文件会被永久删除，已经恢复过的布局不受影响。")) return;
 
-            string error;
-            if (!LayoutBackup.Delete(info.Id, out error))
+            RunBackupOperation(delegate
             {
-                MessageBox.Show(this, "删除失败：" + error, "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-            ReloadList();
+                string error;
+                return LayoutBackup.Delete(info.Id, out error) ? null : error;
+            }, ReloadList);
+        }
+
+        private void RunBackupOperation(Func<string> operation, Action onSuccess)
+        {
+            if (operationRunning) return;
+            operationRunning = true;
+            list.Enabled = false;
+            UseWaitCursor = true;
+            UpdateButtons();
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string error = null;
+                try { error = operation(); }
+                catch (Exception ex) { error = ex.Message; Paths.LogError(ex); }
+                if (IsDisposed) return;
+                try
+                {
+                    BeginInvoke((Action)delegate
+                    {
+                        operationRunning = false;
+                        list.Enabled = true;
+                        UseWaitCursor = false;
+                        UpdateButtons();
+                        if (error != null)
+                        {
+                            MessageBox.Show(this, "操作失败：" + error, "布局备份",
+                                MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            return;
+                        }
+                        onSuccess();
+                    });
+                }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
+            });
         }
     }
 }

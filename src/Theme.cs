@@ -6,48 +6,51 @@ using System.Drawing.Text;
 namespace AppManager
 {
     /// <summary>
-    /// iOS 风格主题常量：配色、圆角、尺寸、字体集中管理，避免散落硬编码。
+    /// 桌面效率工具主题：中性灰明暗分层、蓝色强调、轻量圆角与语义化字体。
     /// </summary>
     internal static class Theme
     {
         // 背景与卡片
-        public static readonly Color Background = Color.FromArgb(242, 242, 247); // #F2F2F7
+        public static readonly Color Background = Color.FromArgb(247, 248, 250); // #F7F8FA 内容区底色
         public static readonly Color Card = Color.White;
-        public static readonly Color CardHover = Color.FromArgb(245, 245, 250);
-        public static readonly Color SearchBg = Color.FromArgb(230, 230, 235);   // iOS 搜索框灰底
-        public static readonly Color RowHover = Color.FromArgb(240, 240, 243);   // 列表行悬停
-        public static readonly Color SelectionBg = Color.FromArgb(20, 0, 122, 255); // 侧栏选中胶囊
+        public static readonly Color TopBarBg = Color.White;
+        public static readonly Color CardHover = Color.FromArgb(245, 247, 250);
+        public static readonly Color SearchBg = Color.FromArgb(240, 242, 245);
+        public static readonly Color RowHover = Color.FromArgb(237, 240, 244);
+        public static readonly Color SelectionBg = Color.FromArgb(230, 240, 255);
 
         // 强调色
-        public static readonly Color Accent = Color.FromArgb(0, 122, 255); // #007AFF
-        public static readonly Color AccentRipple = Color.FromArgb(40, 0, 122, 255);
+        public static readonly Color Accent = Color.FromArgb(22, 119, 255); // #1677FF
+        public static readonly Color AccentRipple = Color.FromArgb(32, 22, 119, 255);
 
         // 文字
-        public static readonly Color TextPrimary = Color.FromArgb(28, 28, 30);    // #1C1C1E
-        public static readonly Color TextSecondary = Color.FromArgb(142, 142, 147); // #8E8E93
-        public static readonly Color Separator = Color.FromArgb(229, 229, 234);   // #E5E5EA
+        public static readonly Color TextPrimary = Color.FromArgb(31, 35, 41);
+        public static readonly Color TextSecondary = Color.FromArgb(100, 106, 115);
+        public static readonly Color TextTertiary = Color.FromArgb(143, 149, 158);
+        public static readonly Color Separator = Color.FromArgb(229, 230, 235);
 
         // 语义色：危险/成功/状态等，集中管理避免魔法值散落
-        public static readonly Color DeleteRed = Color.FromArgb(255, 59, 48);    // iOS systemRed（删除/危险操作）
-        public static readonly Color ToggleGreen = Color.FromArgb(52, 199, 89);  // iOS systemGreen（开关开态）
-        public static readonly Color SegmentBg = Color.FromArgb(230, 230, 235);  // 分段控件灰底 / 开关关态轨道
-        public static readonly Color ChipBg = Color.FromArgb(239, 239, 241);     // 列表分类胶囊底色
-        public static readonly Color StatusBarBg = Color.FromArgb(248, 248, 250); // 底部状态栏底色
+        public static readonly Color DeleteRed = Color.FromArgb(245, 74, 69);
+        public static readonly Color ToggleGreen = Color.FromArgb(52, 199, 89);
+        public static readonly Color ToggleOn = Accent;
+        public static readonly Color SegmentBg = Color.FromArgb(233, 236, 241);
+        public static readonly Color ChipBg = Color.FromArgb(239, 241, 245);
+        public static readonly Color StatusBarBg = Color.FromArgb(250, 251, 252);
         public static readonly Color TooltipBg = Color.FromArgb(235, 30, 30, 32); // 悬浮信息卡深底
 
         // 菜单：白底 + 分隔线色描边（MenuWindow.OnPaint 内绘制），与底层内容形成清晰边界
         public static readonly Color MenuBg = Color.White;
         // iOS 上下文菜单悬停：浅灰高亮 + 保持深色文字（非 macOS 蓝底白字）
-        public static readonly Color MenuHover = Color.FromArgb(230, 230, 235);
+        public static readonly Color MenuHover = Color.FromArgb(240, 242, 245);
 
         // 侧栏：比窗口背景深一档，形成「侧栏 < 内容底 < 卡片」三级色阶层次
-        public static readonly Color SidebarBg = Color.FromArgb(236, 236, 241);
+        public static readonly Color SidebarBg = Color.FromArgb(240, 241, 243);
 
         // 模态遮罩：弹窗外区域压暗程度（0~1），参考 Fluent ContentDialog 浅色主题的遮罩强度
         public const double ModalScrimOpacity = 0.32;
 
         // 尺寸
-        public const int CornerRadius = 18;
+        public const int CornerRadius = 12;
         public const int IconSize = 56;
         public const int ListIconSize = 16;   // 列表小图标：与资源管理器一致，取 shell 16x16 原图不缩放
         public const int SidebarWidth = 200;
@@ -72,6 +75,12 @@ namespace AppManager
         private static readonly Dictionary<string, Font> fontCache = new Dictionary<string, Font>();
         // 图标线程在后台构建占位图时也会取字体：缓存读写必须加锁，避免跨线程竞争
         private static readonly object fontCacheLock = new object();
+
+        // 字体家族缓存与其锁：必须在 FontName 之前初始化——
+        // FontName 的 ResolveFamily 会调用 InstalledFamilies，内部要 lock(familiesLock)，
+        // 若锁对象尚为 null 会抛 ArgumentNullException，导致 Theme 类型初始化失败、启动即崩。
+        private static readonly object familiesLock = new object();
+        private static HashSet<string> installedFamilies;
 
         /// <summary>
         /// UI 字体族名：优先「微软雅黑 UI」（中文渲染清晰、与 Windows 中文系统一致），
@@ -117,6 +126,13 @@ namespace AppManager
             return GetFont(size, style, GraphicsUnit.Pixel);
         }
 
+        public static Font PageTitleFont { get { return FontOf(13F, FontStyle.Bold); } }
+        public static Font SectionTitleFont { get { return FontOf(10F, FontStyle.Bold); } }
+        public static Font BodyFont { get { return FontOf(9.5F); } }
+        public static Font CaptionFont { get { return FontOf(8.5F); } }
+        public static Font ButtonFont { get { return FontOf(9F); } }
+        public static Font NavigationFont { get { return FontOf(10F); } }
+
         private static string ResolveFamily(string[] candidates)
         {
             HashSet<string> set = InstalledFamilies;
@@ -124,9 +140,6 @@ namespace AppManager
                 if (set.Contains(name)) return name;
             return FontFamily.GenericSansSerif.Name;
         }
-
-        private static readonly object familiesLock = new object();
-        private static HashSet<string> installedFamilies;
 
         /// <summary>
         /// 已安装字体家族名集合：进程内只枚举一次 InstalledFontCollection（百毫秒级开销），

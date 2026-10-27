@@ -13,7 +13,7 @@ namespace AppManager
         {
             get
             {
-                string dir = Path.Combine(
+                string dir = DataDirOverride ?? Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
                 Directory.CreateDirectory(dir);
                 return dir;
@@ -22,6 +22,7 @@ namespace AppManager
 
         /// <summary>自测注入的配置文件路径；非空时替代默认 config.xml，避免用例触碰真实配置。</summary>
         internal static string ConfigFileOverride;
+        internal static string DataDirOverride;
 
         public static string ConfigFile
         {
@@ -222,14 +223,16 @@ namespace AppManager
     /// </summary>
     public class AppConfig
     {
+        private readonly object saveLock = new object();
+
         /// <summary>读取失败标志：配置文件损坏/被占用时为真；本次会话禁止覆盖保存，避免默认配置回写冲掉用户数据。</summary>
         internal bool LoadFailed;
 
-        // 开关：视图模式 + 显示隐藏 + 显示全部已安装 + 启动扫描
+        // 开关：视图模式 + 显示隐藏 + 启动扫描
         public bool ViewGrid = true;
         public bool ShowHidden = false;
-        public bool ShowAllInstalled = false;
         public bool AutoScan = true;
+        public bool AutoOrganizeDesktop = false;
         // 关闭主窗口行为：false=彻底退出（默认），true=最小化到系统托盘
         public bool CloseToTray = false;
 
@@ -303,8 +306,8 @@ namespace AppManager
 
                 cfg.ViewGrid = XmlElementBool(root, "ViewGrid", true);
                 cfg.ShowHidden = XmlElementBool(root, "ShowHidden", false);
-                cfg.ShowAllInstalled = XmlElementBool(root, "ShowAllInstalled", false);
                 cfg.AutoScan = XmlElementBool(root, "AutoScan", true);
+                cfg.AutoOrganizeDesktop = XmlElementBool(root, "AutoOrganizeDesktop", false);
                 cfg.CloseToTray = XmlElementBool(root, "CloseToTray", false);
 
                 foreach (XmlNode n in root.SelectNodes("Favorites/Item"))
@@ -403,22 +406,30 @@ namespace AppManager
         }
 
         /// <summary>保存配置；目录不存在自动创建，异常仅写日志不抛出。</summary>
-        public void Save()
+        public bool Save()
         {
             if (LoadFailed)
             {
                 // 读取失败的会话禁止覆盖保存：防止默认配置把用户原配置整体冲掉
                 Paths.LogError(new InvalidOperationException("配置读取失败后拒绝覆盖保存: " + FilePath));
-                return;
+                return false;
             }
-            SaveTo(FilePath);
+            return SaveTo(FilePath);
         }
 
         /// <summary>
         /// 保存配置到指定文件；目录不存在自动创建，异常仅写日志不抛出。
         /// 采用「先写临时文件再原子替换」，避免写入中途崩溃/断电损坏原配置。
         /// </summary>
-        public void SaveTo(string filePath)
+        public bool SaveTo(string filePath)
+        {
+            lock (saveLock)
+            {
+                return SaveToLocked(filePath);
+            }
+        }
+
+        private bool SaveToLocked(string filePath)
         {
             try
             {
@@ -433,8 +444,8 @@ namespace AppManager
                     w.WriteStartElement("AppManagerConfig");
                     w.WriteElementString("ViewGrid", ViewGrid ? "true" : "false");
                     w.WriteElementString("ShowHidden", ShowHidden ? "true" : "false");
-                    w.WriteElementString("ShowAllInstalled", ShowAllInstalled ? "true" : "false");
                     w.WriteElementString("AutoScan", AutoScan ? "true" : "false");
+                    w.WriteElementString("AutoOrganizeDesktop", AutoOrganizeDesktop ? "true" : "false");
                     w.WriteElementString("CloseToTray", CloseToTray ? "true" : "false");
                     w.WriteElementString("ManageRootPath", ManageRootPath ?? string.Empty);
                     w.WriteElementString("FolderStorePath", FolderStorePath ?? string.Empty);
@@ -527,29 +538,45 @@ namespace AppManager
                     w.WriteEndElement();
                 }
                 ReplaceAtomic(tmp, filePath);
+                return true;
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("配置保存失败: " + ex.Message);
+                Paths.LogError(new IOException("配置保存失败: " + filePath, ex));
+                return false;
             }
         }
 
         /// <summary>
         /// 用临时文件原子替换目标文件：同卷优先 File.Replace（保留原文件属性并支持回滚），
-        /// 目标不存在或替换失败时退化为移动。
+        /// 目标不支持 Replace 时先把原文件移到旁路备份，再换入新文件；失败会回滚，绝不先删原文件。
         /// </summary>
         private static void ReplaceAtomic(string tmp, string target)
         {
+            if (!File.Exists(target))
+            {
+                File.Move(tmp, target);
+                return;
+            }
             try
             {
-                if (File.Exists(target)) File.Replace(tmp, target, null);
-                else File.Move(tmp, target);
+                File.Replace(tmp, target, null);
+                return;
+            }
+            catch { }
+
+            string previous = target + ".previous";
+            if (File.Exists(previous)) File.Delete(previous);
+            File.Move(target, previous);
+            try
+            {
+                File.Move(tmp, target);
+                File.Delete(previous);
             }
             catch
             {
-                try { if (File.Exists(target)) File.Delete(target); }
-                catch { }
-                File.Move(tmp, target);
+                if (!File.Exists(target) && File.Exists(previous)) File.Move(previous, target);
+                throw;
             }
         }
 
@@ -566,8 +593,7 @@ namespace AppManager
             {
                 if (!Directory.Exists(Dir)) Directory.CreateDirectory(Dir);
                 string bak = Path.Combine(Dir, "config.xml.bak-" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
-                SaveTo(bak);
-                return bak;
+                return SaveTo(bak) ? bak : null;
             }
             catch (Exception ex)
             {
@@ -609,7 +635,6 @@ namespace AppManager
             XmlNode settings = root.SelectSingleNode("settings");
             if (settings != null)
             {
-                cfg.ShowAllInstalled = XmlAttributeBool(settings, "displayAll", false);
                 cfg.ShowHidden = XmlAttributeBool(settings, "showHidden", false);
                 cfg.AutoScan = XmlAttributeBool(settings, "autoscan", true);
                 cfg.CloseToTray = XmlAttributeBool(settings, "closetotray", true);

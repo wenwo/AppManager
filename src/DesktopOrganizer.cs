@@ -14,10 +14,8 @@ namespace AppManager
     internal class DesktopOrganizer
     {
         private readonly AppConfig config;
-        private static readonly string AppDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
-        private static readonly string BackupDir = Path.Combine(AppDir, "DesktopBackup");
-        private static readonly string QuickCenterDirPath = Path.Combine(AppDir, "QuickCenter");
+        private static string BackupDir { get { return Paths.DesktopBackupDir; } }
+        private static string QuickCenterDirPath { get { return Path.Combine(Paths.DataDir, "QuickCenter"); } }
 
         private const string FilesSub = "Files";
         private const string FoldersSub = "Folders";
@@ -248,8 +246,8 @@ namespace AppManager
                 else
                 {
                     if (destExists) dest = UniquePath(destDir, name, isDir);
-                    if (isDir) Directory.Move(source, dest);
-                    else File.Move(source, dest);
+                    if (isDir) MoveDirectory(source, dest);
+                    else MoveFile(source, dest);
                 }
                 Record(source, dest, isDir, isShortcut, config.OrganizeCopy);
                 return 1;
@@ -370,6 +368,28 @@ namespace AppManager
             }
         }
 
+        internal static void MoveFile(string source, string dest)
+        {
+            string srcRoot = Path.GetPathRoot(Path.GetFullPath(source));
+            string dstRoot = Path.GetPathRoot(Path.GetFullPath(dest));
+            if (string.Equals(srcRoot, dstRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                File.Move(source, dest);
+                return;
+            }
+            try
+            {
+                File.Copy(source, dest, false);
+            }
+            catch
+            {
+                try { if (File.Exists(dest)) File.Delete(dest); } catch { }
+                throw;
+            }
+            try { File.Delete(source); }
+            catch (Exception ex) { Paths.LogError(new IOException("跨卷移动已复制但源文件删除失败: " + source, ex)); }
+        }
+
         /// <summary>尽力删除目录，失败静默（用于清理搬迁残留）。</summary>
         private static void TryDeleteDir(string dir)
         {
@@ -418,8 +438,8 @@ namespace AppManager
                 string dir = Path.GetDirectoryName(e.OriginalPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 string dest = UniqueRestoreTarget(e);
-                if (e.IsDir) Directory.Move(e.CurrentPath, dest);
-                else File.Move(e.CurrentPath, dest);
+                if (e.IsDir) MoveDirectory(e.CurrentPath, dest);
+                else MoveFile(e.CurrentPath, dest);
                 return true;
             }
             catch (Exception ex)

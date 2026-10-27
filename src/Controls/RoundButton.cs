@@ -8,7 +8,7 @@ using AppManager;
 namespace AppManager.Controls
 {
     /// <summary>
-    /// 圆角按钮：iOS 风格，强调/普通两态，悬停/按下反馈。
+    /// 圆角按钮：扁平蓝色主按钮与中性灰次按钮，提供清晰的悬停/按下反馈。
     /// </summary>
     public class RoundButton : Control
     {
@@ -22,7 +22,7 @@ namespace AppManager.Controls
                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
                 | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
-            Font = Theme.FontOf(9F);
+            Font = Theme.ButtonFont;
             Cursor = Cursors.Hand;
             Size = new Size(90, 34);
         }
@@ -45,29 +45,21 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle r = ClientRectangle;
             r.Inflate(-1, -1);
-            // 按下时整体下移 1px，模拟物理按压
-            if (_pressed) r.Offset(0, 1);
-
             if (_accent)
             {
-                // iOS 强调按钮：纵向渐变 + 底部深色边，增加体积感
-                Color top = Blend(Theme.Accent, Color.White, 0.12f);
-                Color bottom = Theme.Accent;
-                if (_hover) { top = Blend(top, Color.White, 0.08f); bottom = Blend(bottom, Color.White, 0.08f); }
-                if (_pressed) { top = Blend(top, Color.Black, 0.15f); bottom = Blend(bottom, Color.Black, 0.15f); }
-                using (LinearGradientBrush gb = new LinearGradientBrush(r, top, bottom, LinearGradientMode.Vertical))
-                    Draw.FillRoundedRect(g, gb, r, 10);
-                using (Pen p = new Pen(Blend(Theme.Accent, Color.Black, 0.18f), 1))
-                    Draw.DrawRoundedRect(g, p, r, 10);
+                Color bg = Theme.Accent;
+                if (_pressed) bg = Blend(bg, Color.Black, 0.12f);
+                else if (_hover) bg = Blend(bg, Color.White, 0.10f);
+                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 8);
             }
             else
             {
                 Color bg = Theme.Card;
-                if (_pressed) bg = Blend(bg, Color.Black, 0.08f);
-                else if (_hover) bg = Blend(bg, Theme.Accent, 0.06f);
-                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 10);
+                if (_pressed) bg = Blend(bg, Color.Black, 0.06f);
+                else if (_hover) bg = Theme.CardHover;
+                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 8);
                 Color border = _hover ? Blend(Theme.Separator, Theme.Accent, 0.3f) : Theme.Separator;
-                using (Pen p = new Pen(border, 1)) Draw.DrawRoundedRect(g, p, r, 10);
+                using (Pen p = new Pen(border, 1)) Draw.DrawRoundedRect(g, p, r, 8);
             }
             Color tc = _accent ? Color.White : Theme.TextPrimary;
             using (SolidBrush br = new SolidBrush(tc)) Draw.DrawStringCenter(g, Text, Font, br, r);
