@@ -5,12 +5,71 @@ using System.Drawing.Drawing2D;
 
 namespace AppManager
 {
+    public enum UiIconKind
+    {
+        Add,
+        Organize,
+        Back,
+        Search,
+        List,
+        PanelLeftClose,
+        PanelLeftOpen
+    }
+
     /// <summary>
     /// 自绘工具集：圆角矩形、柔和阴影、文本渲染等 GDI+ 原语。
     /// 集中提供绘制函数，保证全站 UI 风格一致。
     /// </summary>
     internal static class Draw
     {
+        public static void DrawIcon(Graphics g, UiIconKind kind, Rectangle rect, Color color)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (Pen pen = new Pen(color, 1.8F))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                pen.LineJoin = LineJoin.Round;
+                float cx = rect.X + rect.Width / 2F;
+                float cy = rect.Y + rect.Height / 2F;
+                switch (kind)
+                {
+                    case UiIconKind.Add:
+                        g.DrawLine(pen, cx - 5F, cy, cx + 5F, cy);
+                        g.DrawLine(pen, cx, cy - 5F, cx, cy + 5F);
+                        break;
+                    case UiIconKind.Organize:
+                        g.DrawRectangle(pen, cx - 7F, cy - 7F, 5F, 5F);
+                        g.DrawRectangle(pen, cx + 2F, cy - 7F, 5F, 5F);
+                        g.DrawRectangle(pen, cx - 7F, cy + 2F, 5F, 5F);
+                        g.DrawRectangle(pen, cx + 2F, cy + 2F, 5F, 5F);
+                        break;
+                    case UiIconKind.Back:
+                        g.DrawLine(pen, cx + 3F, cy - 5F, cx - 3F, cy);
+                        g.DrawLine(pen, cx - 3F, cy, cx + 3F, cy + 5F);
+                        break;
+                    case UiIconKind.Search:
+                        g.DrawEllipse(pen, cx - 6F, cy - 6F, 10F, 10F);
+                        g.DrawLine(pen, cx + 3F, cy + 3F, cx + 7F, cy + 7F);
+                        break;
+                    case UiIconKind.List:
+                        for (int row = -1; row <= 1; row++)
+                        {
+                            float y = cy + row * 5F;
+                            g.DrawLine(pen, cx - 6F, y, cx - 5F, y);
+                            g.DrawLine(pen, cx - 1F, y, cx + 6F, y);
+                        }
+                        break;
+                    case UiIconKind.PanelLeftClose:
+                    case UiIconKind.PanelLeftOpen:
+                        Rectangle panel = new Rectangle((int)(cx - 7F), (int)(cy - 8F), 14, 16);
+                        DrawRoundedRect(g, pen, panel, 3);
+                        g.DrawLine(pen, panel.X + 4, panel.Y + 4, panel.X + 4, panel.Bottom - 4);
+                        break;
+                }
+            }
+        }
+
         // 共享 StringFormat（绘制参数固定，仅用于绘制调用；避免每行每帧重复创建/泄漏）
         private static readonly StringFormat FmtCenter = MakeFormat(StringAlignment.Center);
         private static readonly StringFormat FmtLeft = MakeFormat(StringAlignment.Near);

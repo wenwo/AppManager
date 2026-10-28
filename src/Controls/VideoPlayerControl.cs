@@ -22,6 +22,7 @@ namespace AppManager.Controls
     /// </summary>
     public class VideoPlayerControl : Control
     {
+        public event Action PlaybackStarting;
         /// <summary>请求退出播放器（Esc / 返回按钮），由主窗体恢复列表。</summary>
         public event Action CloseRequested;
         /// <summary>双击视频区：请求切换全屏（主窗体负责窗体状态与布局）。</summary>
@@ -191,6 +192,8 @@ namespace AppManager.Controls
             }
             try
             {
+                Action starting = PlaybackStarting;
+                if (starting != null) starting();
                 mpv.LoadFile(path);
                 mpv.SetPause(false);
                 loadDeadline = DateTime.UtcNow.AddSeconds(12);
@@ -265,6 +268,11 @@ namespace AppManager.Controls
             if (p == null) return;
             try
             {
+                if (!playing || eofReached)
+                {
+                    Action starting = PlaybackStarting;
+                    if (starting != null) starting();
+                }
                 if (eofReached)
                 {
                     // 播放结束停在终点：重新播放从头开始
@@ -612,15 +620,8 @@ namespace AppManager.Controls
         {
             // 返回：chevron + 文案，悬停/按下给浅色圆角底
             DrawButtonBg(g, 3, backRect);
-            float cx = backRect.X + 16;
-            float cy = backRect.Y + backRect.Height / 2F;
-            using (Pen pen = new Pen(Theme.TextPrimary, 1.8F))
-            {
-                pen.StartCap = LineCap.Round;
-                pen.EndCap = LineCap.Round;
-                g.DrawLine(pen, cx + 3, cy - 5, cx - 3, cy);
-                g.DrawLine(pen, cx - 3, cy, cx + 3, cy + 5);
-            }
+            Draw.DrawIcon(g, UiIconKind.Back,
+                new Rectangle(backRect.X + 6, backRect.Y + (backRect.Height - 20) / 2, 20, 20), Theme.IconColor);
             Rectangle textR = new Rectangle(backRect.X + 24, backRect.Y, backRect.Width - 24, backRect.Height);
             TextRenderer.DrawText(g, "返回", Theme.ButtonFont, textR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
@@ -821,7 +822,7 @@ namespace AppManager.Controls
             if (press != id && hover != id) return;
             Color fill = press == id ? Color.FromArgb(26, 0, 0, 0) : Color.FromArgb(12, 0, 0, 0);
             using (SolidBrush b = new SolidBrush(fill))
-                Draw.FillRoundedRect(g, b, r, 10);
+                Draw.FillRoundedRect(g, b, r, 6);
         }
 
         /// <summary>深色悬浮条按钮悬停/按下底色：叠加白色透明度，无描边。</summary>

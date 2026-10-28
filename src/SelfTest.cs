@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace AppManager
@@ -109,6 +110,11 @@ namespace AppManager
             Case52_SaveFailureKeepsOriginal();
             Case53_TakenDatePhotoExif();
             Case54_TakenDateVideoMvhd();
+            Case55_MusicLyrics();
+            Case56_MusicMetadata();
+            Case57_MusicMenuGrouping();
+            Case58_CategoryIconKeys();
+            Case59_LyricsReadLimit();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1068,6 +1074,8 @@ namespace AppManager
             bool imageOk = MediaRules.IsImage(@"C:\a\Photo.JPG")
                 && !MediaRules.IsImage(@"C:\a\clip.mp4");
             bool audioOk = MediaRules.IsAudio(@"C:\a\Song.FLAC")
+                && MediaRules.IsAudio(@"C:\a\Song.APE")
+                && MediaRules.IsAudio(@"C:\a\Song.DSF")
                 && !MediaRules.IsAudio(@"C:\a\clip.mkv");
             bool mediaOk = MediaRules.IsMedia(@"C:\a\x.webm")
                 && MediaRules.IsMedia(@"C:\a\x.png")
@@ -1236,6 +1244,138 @@ namespace AppManager
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally { try { if (File.Exists(path)) File.Delete(path); } catch { } }
+        }
+
+        private static void Case55_MusicLyrics()
+        {
+            Begin("55 音乐同步歌词解析与排序");
+            List<LyricLine> lines = MusicMetadata.ParseLyrics(
+                "[ti:示例]\r\n[00:12.50][00:02.25]重复时间戳\r\n[bad]忽略\r\n[01:03.750]下一行\r\n普通文本");
+            bool ok = lines.Count == 3
+                && Math.Abs(lines[0].Time - 2.25) < 0.001
+                && lines[0].Text == "重复时间戳"
+                && Math.Abs(lines[1].Time - 12.5) < 0.001
+                && Math.Abs(lines[2].Time - 63.75) < 0.001
+                && lines[2].Text == "下一行"
+                && MusicMetadata.ParseLyrics("").Count == 0;
+            Assert(ok, "行数=" + lines.Count + " 多时间戳=True 排序=True 无效行忽略=True");
+        }
+
+        private static void Case56_MusicMetadata()
+        {
+            Begin("56 音乐 ID3 标题、内嵌封面与同名歌词");
+            string path = TempFile(".mp3");
+            try
+            {
+                byte[] title = Id3Frame("TIT2", new byte[] { 3 }.Concat(Encoding.UTF8.GetBytes("测试歌曲")).ToArray());
+                List<byte> picture = new List<byte>();
+                picture.Add(3);
+                picture.AddRange(Encoding.ASCII.GetBytes("image/png\0"));
+                picture.Add(3);
+                picture.Add(0);
+                picture.AddRange(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="));
+                byte[] cover = Id3Frame("APIC", picture.ToArray());
+                int tagSize = title.Length + cover.Length;
+                using (FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write))
+                {
+                    stream.Write(Encoding.ASCII.GetBytes("ID3"), 0, 3);
+                    stream.Write(new byte[] { 3, 0, 0, (byte)(tagSize >> 21), (byte)(tagSize >> 14), (byte)(tagSize >> 7), (byte)tagSize }, 0, 7);
+                    stream.Write(title, 0, title.Length);
+                    stream.Write(cover, 0, cover.Length);
+                }
+                File.WriteAllText(Path.ChangeExtension(path, ".lrc"), "[00:01.00]测试歌词", new UTF8Encoding(false));
+                MusicTrackInfo info = MusicMetadata.Read(path);
+                bool ok = info.Title == "测试歌曲" && info.Cover != null
+                    && MusicMetadata.ParseLyrics(info.Lyrics).Count == 1;
+                info.Dispose();
+                Assert(ok, "标题=True 封面=True 同名LRC=True");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally
+            {
+                try { File.Delete(path); } catch { }
+                try { File.Delete(Path.ChangeExtension(path, ".lrc")); } catch { }
+            }
+        }
+
+        private static byte[] Id3Frame(string id, byte[] payload)
+        {
+            byte[] result = new byte[10 + payload.Length];
+            Array.Copy(Encoding.ASCII.GetBytes(id), result, 4);
+            WriteU32BE(result, 4, (uint)payload.Length);
+            Array.Copy(payload, 0, result, 10, payload.Length);
+            return result;
+        }
+
+        private static void Case57_MusicMenuGrouping()
+        {
+            Begin("57 音乐菜单分组有界且歌曲索引完整");
+            List<string> songs = new List<string>();
+            for (int i = 0; i < 300; i++) songs.Add(@"C:\music\" + i.ToString("000") + ".mp3");
+            int selected = -1;
+            List<MenuWindow.MenuItem> root = MainForm.MiniMusicSongItems("", "全部音乐", songs,
+                delegate(string key, string name, int index) { selected = index; });
+            int maxItems = 0;
+            List<MenuWindow.MenuItem> leaves = new List<MenuWindow.MenuItem>();
+            CollectMenuLeaves(root, leaves, ref maxItems);
+            if (leaves.Count > 0 && leaves[leaves.Count - 1].Action != null) leaves[leaves.Count - 1].Action();
+            bool ok = root.Count <= 16 && maxItems <= 16 && leaves.Count == songs.Count && selected == 299;
+            Assert(ok, "根分组=" + root.Count + " 最大菜单=" + maxItems + " 歌曲=" + leaves.Count + " 索引=" + selected);
+        }
+
+        private static void CollectMenuLeaves(List<MenuWindow.MenuItem> items,
+            List<MenuWindow.MenuItem> leaves, ref int maxItems)
+        {
+            maxItems = Math.Max(maxItems, items.Count);
+            foreach (MenuWindow.MenuItem item in items)
+            {
+                if (item.SubItems != null && item.SubItems.Count > 0) CollectMenuLeaves(item.SubItems, leaves, ref maxItems);
+                else leaves.Add(item);
+            }
+        }
+
+        private static void Case58_CategoryIconKeys()
+        {
+            Begin("58 软件与资源同名分类图标独立持久化");
+            string tmp = TempFile(".xml");
+            try
+            {
+                string softwareKey = CategoryIcons.ConfigKey(false, "同名");
+                string resourceKey = CategoryIcons.ConfigKey(true, "同名");
+                AppConfig config = new AppConfig();
+                config.CategoryIconNames[softwareKey] = CategoryIconKind.Code.ToString();
+                config.CategoryIconNames[resourceKey] = CategoryIconKind.Photo.ToString();
+                config.SaveTo(tmp);
+                AppConfig loaded = AppConfig.LoadFrom(tmp);
+                bool ok = softwareKey != resourceKey
+                    && loaded.CategoryIconNames[softwareKey] == CategoryIconKind.Code.ToString()
+                    && loaded.CategoryIconNames[resourceKey] == CategoryIconKind.Photo.ToString();
+                Assert(ok, "软件=" + loaded.CategoryIconNames[softwareKey] + " 资源=" + loaded.CategoryIconNames[resourceKey]);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(tmp)) File.Delete(tmp); } catch { } }
+        }
+
+        private static void Case59_LyricsReadLimit()
+        {
+            Begin("59 超大歌词文件按上限读取");
+            string path = TempFile(".mp3");
+            string lyricPath = Path.ChangeExtension(path, ".lrc");
+            try
+            {
+                File.WriteAllBytes(path, new byte[0]);
+                File.WriteAllText(lyricPath, new string('a', MusicMetadata.MaxLyricsChars + 4096), Encoding.UTF8);
+                MusicTrackInfo info = MusicMetadata.Read(path);
+                bool ok = info.Lyrics != null && info.Lyrics.Length == MusicMetadata.MaxLyricsChars;
+                info.Dispose();
+                Assert(ok, "读取字符=" + (info.Lyrics == null ? -1 : info.Lyrics.Length));
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally
+            {
+                try { if (File.Exists(path)) File.Delete(path); } catch { }
+                try { if (File.Exists(lyricPath)) File.Delete(lyricPath); } catch { }
+            }
         }
 
         private static void WriteBox(Stream s, string type, byte[] payload)

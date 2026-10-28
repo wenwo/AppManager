@@ -13,7 +13,7 @@ namespace AppManager
         // 背景与卡片
         public static readonly Color Background = Color.FromArgb(247, 248, 250); // #F7F8FA 内容区底色
         public static readonly Color Card = Color.White;
-        public static readonly Color TopBarBg = Color.White;
+        public static readonly Color TopBarBg = Color.FromArgb(242, 244, 247);
         public static readonly Color CardHover = Color.FromArgb(245, 247, 250);
         public static readonly Color SearchBg = Color.FromArgb(240, 242, 245);
         public static readonly Color RowHover = Color.FromArgb(237, 240, 244);
@@ -25,9 +25,11 @@ namespace AppManager
         public static readonly Color AccentRipple = Color.FromArgb(32, 22, 119, 255);
 
         // 文字：主文字近黑；次文字保证小字号可读；第三级仅用于占位与禁用
-        public static readonly Color TextPrimary = Color.FromArgb(31, 35, 41);
-        public static readonly Color TextSecondary = Color.FromArgb(78, 89, 105);
+        public static readonly Color TextPrimary = Color.FromArgb(32, 33, 36);
+        public static readonly Color TextSecondary = Color.FromArgb(95, 99, 104);
         public static readonly Color TextTertiary = Color.FromArgb(143, 149, 158);
+        public static readonly Color IconColor = Color.FromArgb(70, 74, 80);
+        public static readonly Color ControlBorder = Color.FromArgb(218, 220, 224);
         public static readonly Color Separator = Color.FromArgb(229, 230, 235);
 
         // 语义色：危险/成功/状态等，集中管理避免魔法值散落
@@ -127,14 +129,15 @@ namespace AppManager
             return GetFont(size, style, GraphicsUnit.Pixel);
         }
 
-        public static Font WindowTitleFont { get { return FontOf(13F, FontStyle.Bold); } }
-        public static Font PageTitleFont { get { return FontOf(16F, FontStyle.Bold); } }
-        public static Font DialogTitleFont { get { return FontOf(12F, FontStyle.Bold); } }
-        public static Font SectionTitleFont { get { return FontOf(10.5F, FontStyle.Bold); } }
-        public static Font NavigationFont { get { return FontOf(10.5F); } }
-        public static Font BodyFont { get { return FontOf(10F); } }
+        public static Font WindowTitleFont { get { return FontOf(12.5F, FontStyle.Bold); } }
+        public static Font PageTitleFont { get { return FontOf(15F, FontStyle.Bold); } }
+        public static Font DialogTitleFont { get { return FontOf(13F, FontStyle.Bold); } }
+        public static Font SectionTitleFont { get { return FontOf(10F, FontStyle.Bold); } }
+        public static Font NavigationFont { get { return FontOf(10F, FontStyle.Bold); } }
+        public static Font BodyFont { get { return FontOf(9.5F); } }
         public static Font CaptionFont { get { return FontOf(9F); } }
-        public static Font ButtonFont { get { return FontOf(9.5F); } }
+        public static Font ButtonFont { get { return FontOf(9.5F, FontStyle.Bold); } }
+        public static Font MenuFont { get { return FontOf(9F, FontStyle.Regular); } }
 
         private static string ResolveFamily(string[] candidates)
         {

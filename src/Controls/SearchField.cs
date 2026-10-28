@@ -81,20 +81,12 @@ namespace AppManager.Controls
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             Rectangle r = ClientRectangle;
             r.Inflate(-1, -1);
-            // 默认灰底无边框，聚焦时白底蓝色描边
+            // 默认保留清晰边界，聚焦时使用蓝色描边
             Color bg = box.Focused ? Color.White : Theme.SearchBg;
-            using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 8);
-            if (box.Focused)
-            {
-                using (Pen p = new Pen(Theme.Accent, 1.2F)) Draw.DrawRoundedRect(g, p, r, 8);
-            }
-            // 放大镜
-            int cx = 13, cy = Height / 2;
-            using (Pen mp = new Pen(Theme.TextTertiary, 1.5F))
-            {
-                g.DrawEllipse(mp, cx, cy - 6, 11, 11);
-                g.DrawLine(mp, cx + 9, cy + 3, cx + 15, cy + 9);
-            }
+            using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 6);
+            using (Pen p = new Pen(box.Focused ? Theme.Accent : Theme.ControlBorder, box.Focused ? 1.4F : 1F))
+                Draw.DrawRoundedRect(g, p, r, 6);
+            Draw.DrawIcon(g, UiIconKind.Search, new Rectangle(6, (Height - 20) / 2, 20, 20), Theme.IconColor);
         }
     }
 }

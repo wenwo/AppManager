@@ -212,7 +212,7 @@ namespace AppManager.Controls
             DoubleBuffered = true;
             subFont = Theme.CaptionFont;
             actionFont = Theme.ButtonFont;
-            headerFont = Theme.CaptionFont;
+            headerFont = Theme.SectionTitleFont;
             tipTimer.Tick += delegate { tipVisible = true; tipTimer.Stop(); Invalidate(); };
             AllowDrop = true;   // 接受外部文件/文件夹拖入（是否放行由 AllowExternalDrop 决定）
         }

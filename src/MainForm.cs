@@ -36,6 +36,7 @@ namespace AppManager
         private string currentCollection;   // 当前选中的集合键（col:父分类/集合名）；空 = 「全部」
         private bool collectionEntered;     // 是否已进入集合内容（false = 停留集合信息页）
         private SearchField search;
+        private MiniMusicPlayerControl miniMusic;
         private System.Windows.Forms.Timer searchDebounce;   // 搜索输入防抖计时器
         private ToggleSwitch viewToggle;
         private Label toggleLabel;
@@ -49,6 +50,7 @@ namespace AppManager
         private bool settingsOpen;         // 是否处于设置页
         private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
         private VideoPlayerControl videoPlayer;  // 视频播放器：双击视频后替换列表区域播放
+        private MusicPlayerControl musicPlayer;  // 音乐播放器：双击音乐后在列表区域直接播放
         private NotifyIcon tray;          // 系统托盘图标（常驻）
         private bool exiting;             // 真正退出标志：为真时关闭不再拦截为「最小化到托盘」
         private bool trayTipShown;        // 首次最小化到托盘的气泡提示只弹一次
@@ -358,6 +360,8 @@ namespace AppManager
         private void HideToTray()
         {
             HideVideoPlayer();   // 窗体隐藏不触发子控件 VisibleChanged，先收起播放器，避免托盘后台继续出声
+            HideMusicPlayer();
+            miniMusic.Stop();
             if (WindowState != FormWindowState.Minimized) preTrayWindowState = WindowState;   // 记录最大化等状态
             Hide();
             if (!trayTipShown && tray != null)
@@ -428,6 +432,7 @@ namespace AppManager
             sidebar.SelectedChanged += OnSidebarSelect;
             sidebar.FilesDropped += OnFilesDroppedToCategory;
             sidebar.ModeChanged += OnModeChanged;
+            sidebar.CollapsedChanged += delegate { LayoutControls(); Invalidate(); };
             sidebar.AddCategoryRequested += OnAddCategory;
             sidebar.CategoryContextRequested += OnCategoryContext;
             sidebar.ReorderRequested += OnSidebarReorder;
@@ -469,6 +474,7 @@ namespace AppManager
             collectionSidebar.ItemActivated += EnterCollection;
             collectionSidebar.ContextRequested += ShowCollectionMenu;
             collectionSidebar.CreateRequested += delegate { OnCreateCollection(null); };
+            collectionSidebar.CollapsedChanged += delegate { LayoutControls(); Invalidate(); };
             collectionSidebar.FilesDropped += OnCollectionFilesDropped;   // 外部文件拖到集合行 = 加入该集合
             // 集合侧边栏空白区可拖动窗体（行/底部按钮/滚动条除外）
             collectionSidebar.MouseDown += delegate(object s, MouseEventArgs e)
@@ -498,7 +504,14 @@ namespace AppManager
             videoPlayer = new VideoPlayerControl();
             videoPlayer.CloseRequested += OnVideoCloseRequested;     // 全屏时先退全屏再退播放器
             videoPlayer.FullscreenRequested += ToggleVideoFullscreen;
+            videoPlayer.PlaybackStarting += delegate { miniMusic.Stop(); HideMusicPlayer(); };
             Controls.Add(videoPlayer);
+
+            musicPlayer = new MusicPlayerControl();
+            musicPlayer.CloseRequested += HideMusicPlayer;
+            musicPlayer.PlaybackStarting += delegate { miniMusic.Stop(); HideVideoPlayer(); };
+            musicPlayer.PlaybackStateChanged += SyncMiniMusicState;
+            Controls.Add(musicPlayer);
 
             search = new SearchField();
             // 输入防抖：连续按键期间不反复全量刷新（RefreshGrid 遍历全集较重），停顿 250ms 后刷新一次；
@@ -524,11 +537,20 @@ namespace AppManager
             };
             Controls.Add(search);
 
+            miniMusic = new MiniMusicPlayerControl();
+            miniMusic.CollectionRequested += ShowMiniMusicCollections;
+            miniMusic.DefaultPlayRequested += PlayDefaultMiniMusic;
+            miniMusic.ExpandRequested += ExpandMiniMusicPlayer;
+            miniMusic.ToggleRequested += delegate { if (musicPlayer.Visible) musicPlayer.ToggleFromMiniPlayer(); };
+            miniMusic.TrackStepRequested += delegate(int step) { if (musicPlayer.Visible) musicPlayer.StepFromMiniPlayer(step); };
+            miniMusic.PlaybackStarting += delegate { HideVideoPlayer(); HideMusicPlayer(); };
+            Controls.Add(miniMusic);
+
             countLabel = new Label();
             countLabel.AutoSize = false;
             countLabel.BackColor = Color.Transparent;
-            countLabel.Font = Theme.CaptionFont;
-            countLabel.ForeColor = Theme.TextSecondary;
+            countLabel.Font = Theme.ButtonFont;
+            countLabel.ForeColor = Theme.TextPrimary;
             countLabel.TextAlign = ContentAlignment.MiddleRight;
             Controls.Add(countLabel);
 
@@ -549,22 +571,24 @@ namespace AppManager
             toggleLabel.Text = "网格";
             toggleLabel.AutoSize = true;
             toggleLabel.BackColor = Color.Transparent;
-            toggleLabel.Font = Theme.BodyFont;
-            toggleLabel.ForeColor = Theme.TextSecondary;
+            toggleLabel.Font = Theme.ButtonFont;
+            toggleLabel.ForeColor = Theme.TextPrimary;
             toggleLabel.Click += delegate { viewToggle.Checked = !viewToggle.Checked; };
             Controls.Add(toggleLabel);
 
             organizeBtn = new RoundButton();
             organizeBtn.Text = "整理桌面";
+            organizeBtn.Icon = UiIconKind.Organize;
             organizeBtn.Accent = false;
-            organizeBtn.Size = new Size(80, 32);
+            organizeBtn.Size = new Size(98, 32);
             organizeBtn.Click += OnOrganize;
             Controls.Add(organizeBtn);
 
             addBtn = new RoundButton();
-            addBtn.Text = "+ 添加";
+            addBtn.Text = "添加";
+            addBtn.Icon = UiIconKind.Add;
             addBtn.Accent = false;
-            addBtn.Size = new Size(72, 32);
+            addBtn.Size = new Size(76, 32);
             addBtn.Visible = false;   // 仅在内置/自定义分类显示
             addBtn.Click += OnAdd;
             Controls.Add(addBtn);
@@ -671,7 +695,7 @@ namespace AppManager
             int top = Theme.TopBarHeight;
             int row1 = Theme.TitleRowHeight;    // 行1：标题 + 窗口按钮
             int row2 = Theme.ToolbarRowHeight;  // 行2：搜索/计数 + 视图切换 + 操作按钮
-            int sb = Theme.SidebarWidth;
+            int sb = sidebar.CurrentWidth;
             int statusH = 34;
 
             sidebar.Location = new Point(0, 0);
@@ -698,10 +722,14 @@ namespace AppManager
             toggleLabel.Location = new Point(clusterLeft - toggleLabel.PreferredWidth - 10, row1 + (row2 - toggleLabel.Height) / 2);
             viewToggle.Location = new Point(toggleLabel.Left - viewToggle.Width - 6, row1 + (row2 - viewToggle.Height) / 2);
 
-            // 计数标签：夹在搜索框与「网格/列表」切换簇之间，宽度按剩余空间收敛。
-            // 双行后行2空间充裕，最小窗口宽度下搜索框与右侧簇也不再重叠。
-            int countLeft = search.Right + 12;
+            int miniLeft = search.Right + 12;
             int countRight = viewToggle.Left - 12;
+            int miniAvailable = Math.Max(0, countRight - miniLeft - 68);
+            int miniWidth = Math.Min((int)((ClientSize.Width - sb) * 0.42), miniAvailable);
+            miniMusic.Location = new Point(miniLeft, row1 + (row2 - 34) / 2);
+            miniMusic.Size = new Size(miniWidth, 34);
+            miniMusic.Visible = !settingsOpen && miniWidth >= 190;
+            int countLeft = miniMusic.Visible ? miniMusic.Right + 8 : miniLeft;
             countLabel.Location = new Point(countLeft, row1);
             countLabel.Size = new Size(Math.Max(0, countRight - countLeft), row2);
 
@@ -710,7 +738,7 @@ namespace AppManager
             int colW = 0;
             if (collectionSidebar != null)
             {
-                colW = collectionSidebar.Visible ? CollectionSidebar.PreferredWidth : 0;
+                colW = collectionSidebar.Visible ? collectionSidebar.CurrentWidth : 0;
                 collectionSidebar.Location = new Point(sb, top);
                 collectionSidebar.Size = new Size(colW, gridHeight);
             }
@@ -728,6 +756,8 @@ namespace AppManager
             imageViewer.Size = new Size(contentW, gridHeight);
             videoPlayer.Location = contentLoc;
             videoPlayer.Size = new Size(contentW, gridHeight);
+            musicPlayer.Location = contentLoc;
+            musicPlayer.Size = new Size(contentW, gridHeight);
             collectionInfo.Location = contentLoc;
             collectionInfo.Size = new Size(contentW, gridHeight);
 
@@ -937,27 +967,50 @@ namespace AppManager
             return n;
         }
 
-        private static SidebarControl.SidebarItem MkItem(string text, string key)
+        private SidebarControl.SidebarItem MkItem(string text, string key)
         {
             return MkItem(text, key, false);
         }
 
-        private static SidebarControl.SidebarItem MkItem(string text, string key, bool dropTarget)
+        private SidebarControl.SidebarItem MkItem(string text, string key, bool dropTarget)
         {
             return MkItem(text, key, dropTarget, false);
         }
 
-        private static SidebarControl.SidebarItem MkItem(string text, string key, bool dropTarget, bool orderable)
+        private SidebarControl.SidebarItem MkItem(string text, string key, bool dropTarget, bool orderable)
         {
             return MkItem(text, key, dropTarget, orderable, 0);
         }
 
-        private static SidebarControl.SidebarItem MkItem(string text, string key, bool dropTarget, bool orderable, int orderGroup)
+        private SidebarControl.SidebarItem MkItem(string text, string key, bool dropTarget, bool orderable, int orderGroup)
         {
             SidebarControl.SidebarItem it = new SidebarControl.SidebarItem();
             it.Text = text; it.Key = key; it.DropTarget = dropTarget;
             it.Orderable = orderable; it.OrderGroup = orderGroup;
+            it.Icon = GetCategoryIcon(key);
             return it;
+        }
+
+        private string CategoryIconKey(string category)
+        {
+            return CategoryIcons.ConfigKey(contentMode == SidebarControl.ContentMode.Website, category);
+        }
+
+        private CategoryIconKind GetCategoryIcon(string category)
+        {
+            string iconName;
+            if (config.CategoryIconNames.TryGetValue(CategoryIconKey(category), out iconName)
+                || config.CategoryIconNames.TryGetValue(category, out iconName))
+                return CategoryIcons.Parse(iconName, CategoryIcons.ForCategory(category));
+            return CategoryIcons.ForCategory(category);
+        }
+
+        private void RemoveLegacyCategoryIconIfUnused(string category)
+        {
+            bool otherModeUsesCategory = contentMode == SidebarControl.ContentMode.Website
+                ? config.CustomCategories.Contains(category)
+                : config.ResourceCategories.Contains(category);
+            if (!otherModeUsesCategory) config.CategoryIconNames.Remove(category);
         }
         private static SidebarControl.SidebarItem Sep()
         {
@@ -1343,6 +1396,7 @@ namespace AppManager
                 // 列表内容即将变化（切分类/搜索/手动重扫），先退出图片/视频查看器，避免浏览序列过期
                 HideImageViewer();
                 HideVideoPlayer();
+                HideMusicPlayer();
             }
             string kw = (search.Text ?? string.Empty).Trim().ToLowerInvariant();
             List<AppInfo> shown = new List<AppInfo>();
@@ -1423,7 +1477,7 @@ namespace AppManager
         {
             if (settingsOpen) return;
             bool showGrid = !(collectionInfo != null && collectionInfo.Visible)
-                && !imageViewer.Visible && !videoPlayer.Visible;
+                && !imageViewer.Visible && !videoPlayer.Visible && !musicPlayer.Visible;
             if (showGrid)
             {
                 if (!grid.Visible) grid.Visible = true;
@@ -2595,10 +2649,10 @@ namespace AppManager
         /// <summary>侧栏底部「+ 新建分类」：按当前内容模式创建软件自定义分类或资源自定义分类。</summary>
         private void OnAddCategory()
         {
-            string name = InputDialog.Show("新建分类", "请输入分类名称：");
-            if (string.IsNullOrEmpty(name)) return;
-            name = name.Trim();
-            if (name.Length == 0) return;
+            CategoryEditDialog.Result edit = CategoryEditDialog.Show(
+                "新建分类", "分类名称", null, CategoryIconKind.Folder);
+            if (edit == null) return;
+            string name = edit.Name;
             bool resource = contentMode == SidebarControl.ContentMode.Website;
             List<string> cats = resource ? config.ResourceCategories : config.CustomCategories;
             if (cats.Contains(name)
@@ -2609,6 +2663,7 @@ namespace AppManager
                 return;
             }
             cats.Add(name);
+            config.CategoryIconNames[CategoryIconKey(name)] = edit.Icon.ToString();
             config.Save();
             RebuildSidebar();
             OnSidebarSelect(name);
@@ -2623,22 +2678,35 @@ namespace AppManager
             if (!custom) return;
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             items.Add(MkMenu("重命名…", delegate { RenameCategory(category); }));
+            items.Add(MkMenu("更改图标…", delegate { ChangeCategoryIcon(category); }));
             items.Add(MkMenu("删除分类", delegate { DeleteCategory(category); }));
             MenuWindow mw = new MenuWindow(items, 160);
             mw.Location = FixLocation(screen, mw.Size);
             mw.Show(this);
         }
 
+        private void ChangeCategoryIcon(string category)
+        {
+            CategoryIconKind current = GetCategoryIcon(category);
+            CategoryIconKind? selected = CategoryIconDialog.Show(current);
+            if (!selected.HasValue) return;
+            config.CategoryIconNames[CategoryIconKey(category)] = selected.Value.ToString();
+            config.Save();
+            RebuildSidebar();
+        }
+
         /// <summary>重命名自定义分类（软件/资源按当前内容模式），并同步所有引用该分类的配置。</summary>
         private void RenameCategory(string oldName)
         {
-            string name = InputDialog.Show("重命名分类", "请输入新名称：", oldName);
-            if (string.IsNullOrEmpty(name)) return;
-            name = name.Trim();
-            if (name.Length == 0 || name == oldName) return;
+            CategoryIconKind oldIcon = GetCategoryIcon(oldName);
+            CategoryEditDialog.Result edit = CategoryEditDialog.Show(
+                "重命名分类", "分类名称", oldName, oldIcon);
+            if (edit == null) return;
+            string name = edit.Name;
+            if (name == oldName && edit.Icon == oldIcon) return;
             bool resource = contentMode == SidebarControl.ContentMode.Website;
             List<string> cats = resource ? config.ResourceCategories : config.CustomCategories;
-            if (cats.Contains(name))
+            if (name != oldName && cats.Contains(name))
             {
                 MessageBox.Show("分类「" + name + "」已存在。", "重命名分类",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -2646,6 +2714,18 @@ namespace AppManager
             }
             int idx = cats.IndexOf(oldName);
             if (idx >= 0) cats[idx] = name;
+            string oldIconKey = CategoryIconKey(oldName);
+            string newIconKey = CategoryIconKey(name);
+            string savedIconName;
+            if (config.CategoryIconNames.TryGetValue(oldIconKey, out savedIconName))
+            {
+                config.CategoryIconNames[newIconKey] = savedIconName;
+                config.CategoryIconNames.Remove(oldIconKey);
+            }
+            else if (config.CategoryIconNames.TryGetValue(oldName, out savedIconName))
+                config.CategoryIconNames[newIconKey] = savedIconName;
+            config.CategoryIconNames[newIconKey] = edit.Icon.ToString();
+            RemoveLegacyCategoryIconIfUnused(oldName);
             // 同步所有指向旧分类的 override 与 added items
             List<string> keys = new List<string>(config.CategoryOverride.Keys);
             foreach (string k in keys)
@@ -2696,6 +2776,8 @@ namespace AppManager
             foreach (List<string> extra in config.ItemCategories.Values)
                 extra.Remove(category);
             config.ItemOrder.Remove(category);
+            config.CategoryIconNames.Remove(CategoryIconKey(category));
+            RemoveLegacyCategoryIconIfUnused(category);
             if (!resource) config.SidebarOrder.Remove(category);
             // 清理该分类下的集合定义与成员归属键，避免留下无法进入的孤儿集合
             if (resource) CollectionOps.RemoveByParent(config, category);
@@ -2727,6 +2809,12 @@ namespace AppManager
                 && MediaRules.IsVideo(app.TargetPath) && File.Exists(app.TargetPath))
             {
                 ShowVideoPlayer(app);
+                return;
+            }
+            if (app != null && !app.IsFolder
+                && MediaRules.IsAudio(app.TargetPath) && File.Exists(app.TargetPath))
+            {
+                ShowMusicPlayer(app);
                 return;
             }
             Launcher.Launch(app);
@@ -2762,7 +2850,7 @@ namespace AppManager
         private static bool IsEmbeddedMedia(AppInfo app)
         {
             return app != null && !app.IsFolder && !string.IsNullOrEmpty(app.TargetPath)
-                && (MediaRules.IsImage(app.TargetPath) || MediaRules.IsVideo(app.TargetPath));
+                && (MediaRules.IsImage(app.TargetPath) || MediaRules.IsVideo(app.TargetPath) || MediaRules.IsAudio(app.TargetPath));
         }
 
         /// <summary>双击照片：在当前列表的图片序列中打开查看器。</summary>
@@ -2788,6 +2876,7 @@ namespace AppManager
         /// <summary>双击视频：在当前列表的视频序列中打开内置播放器。</summary>
         private void ShowVideoPlayer(AppInfo app)
         {
+            miniMusic.Stop();
             List<string> vids = MediaSequence(MediaRules.IsVideo);
             if (vids.Count == 0) { Launcher.Launch(app); return; }
             int idx = vids.FindIndex(delegate(string p) { return string.Equals(p, app.TargetPath, StringComparison.OrdinalIgnoreCase); });
@@ -2815,6 +2904,135 @@ namespace AppManager
                     result.Add(a.TargetPath);
             }
             return result;
+        }
+
+        private void ShowMiniMusicCollections(Point screen)
+        {
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            MenuWindow.MenuItem all = MkMenu("全部音乐", delegate { LoadMiniMusicCollection("", "全部音乐", 0); });
+            all.SubItemsFactory = delegate { return MiniMusicSongItems("", "全部音乐", MiniMusicSongs(""), LoadMiniMusicCollection); };
+            all.Checked = miniMusic.CollectionKey == "";
+            items.Add(all);
+            List<ResourceCollection> collections = new List<ResourceCollection>();
+            foreach (ResourceCollection collection in config.Collections)
+                if (collection.Parent == "音乐") collections.Add(collection);
+            collections.Sort(delegate(ResourceCollection a, ResourceCollection b) { return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase); });
+            if (collections.Count > 0) items.Add(MkSep());
+            foreach (ResourceCollection collection in collections)
+            {
+                string key = CollectionKeys.Make(collection.Parent, collection.Name);
+                string name = collection.Name;
+                MenuWindow.MenuItem item = MkMenu(name, delegate { LoadMiniMusicCollection(key, name, 0); });
+                item.SubItemsFactory = delegate { return MiniMusicSongItems(key, name, MiniMusicSongs(key), LoadMiniMusicCollection); };
+                item.Checked = miniMusic.CollectionKey == key;
+                items.Add(item);
+            }
+            MenuWindow menu = new MenuWindow(items, 190);
+            screen.X -= menu.Width;
+            menu.Location = FixLocation(screen, menu.Size);
+            menu.Show(this);
+        }
+
+        private void PlayDefaultMiniMusic()
+        {
+            LoadMiniMusicCollection("", "全部音乐", 0);
+        }
+
+        private List<string> MiniMusicSongs(string key)
+        {
+            List<string> songs = new List<string>();
+            foreach (AppInfo app in allApps)
+            {
+                if (app == null || app.IsFolder || !MediaRules.IsAudio(app.TargetPath) || !File.Exists(app.TargetPath)) continue;
+                if (key.Length > 0 && !IsInExtraCategory(app, key)) continue;
+                songs.Add(app.TargetPath);
+            }
+            return songs;
+        }
+
+        internal static List<MenuWindow.MenuItem> MiniMusicSongItems(
+            string key, string name, List<string> songs, Action<string, string, int> load)
+        {
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            if (songs.Count == 0)
+            {
+                MenuWindow.MenuItem empty = MkMenu("集合中暂无音乐", null);
+                empty.Disabled = true;
+                items.Add(empty);
+                return items;
+            }
+            return MiniMusicSongItems(key, name, songs, 0, songs.Count, load);
+        }
+
+        private static List<MenuWindow.MenuItem> MiniMusicSongItems(
+            string key, string name, List<string> songs, int start, int count, Action<string, string, int> load)
+        {
+            const int pageSize = 16;
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            if (count > pageSize)
+            {
+                int groupSize = count <= pageSize * pageSize ? pageSize : (count + pageSize - 1) / pageSize;
+                for (int groupStart = start; groupStart < start + count; groupStart += groupSize)
+                {
+                    int groupCount = Math.Min(groupSize, start + count - groupStart);
+                    string range = (groupStart + 1) + " - " + (groupStart + groupCount);
+                    items.Add(MkSubMenu(range, MiniMusicSongItems(key, name, songs, groupStart, groupCount, load)));
+                }
+                return items;
+            }
+            for (int i = start; i < start + count; i++)
+            {
+                int songIndex = i;
+                MenuWindow.MenuItem song = MkMenu(Path.GetFileNameWithoutExtension(songs[i]),
+                    delegate { load(key, name, songIndex); });
+                items.Add(song);
+            }
+            return items;
+        }
+
+        private void LoadMiniMusicCollection(string key, string name, int startIndex)
+        {
+            miniMusic.LoadPlaylist(MiniMusicSongs(key), name, key, startIndex);
+        }
+
+        private void SyncMiniMusicState(string songPath, bool playing)
+        {
+            if (musicPlayer.Visible) miniMusic.SyncExternalState(songPath, playing);
+        }
+
+        private void ExpandMiniMusicPlayer(int songIndex)
+        {
+            List<string> songs = MiniMusicSongs(miniMusic.CollectionKey);
+            if (songs.Count == 0) return;
+            songIndex = Math.Max(0, Math.Min(songIndex, songs.Count - 1));
+            miniMusic.Stop();
+            grid.Visible = false;
+            musicPlayer.BringToFront();
+            musicPlayer.Open(songs, songIndex);
+        }
+
+        private void ShowMusicPlayer(AppInfo app)
+        {
+            miniMusic.Stop();
+            List<string> songs = MediaSequence(MediaRules.IsAudio);
+            if (songs.Count == 0) { Launcher.Launch(app); return; }
+            int songIndex = songs.FindIndex(delegate(string path)
+            {
+                return string.Equals(path, app.TargetPath, StringComparison.OrdinalIgnoreCase);
+            });
+            if (songIndex < 0) { songs.Insert(0, app.TargetPath); songIndex = 0; }
+            grid.Visible = false;
+            musicPlayer.BringToFront();
+            musicPlayer.Open(songs, songIndex);
+        }
+
+        private void HideMusicPlayer()
+        {
+            if (!musicPlayer.Visible) return;
+            musicPlayer.Visible = false;
+            miniMusic.ClearExternalState();
+            SyncContentVisibility();
+            grid.Invalidate();
         }
 
         /// <summary>退出播放器：先恢复全屏状态，再恢复列表展示并停止播放；未打开时为空操作。</summary>
@@ -3384,13 +3602,15 @@ namespace AppManager
         /// <summary>「新建自定义分类…」：新建后把条目「加入」该分类（多归属，保留原分类）。</summary>
         private void AddToCustom(AppInfo app)
         {
-            string name = InputDialog.Show("添加到自定义", "请输入自定义分类名称：");
-            if (string.IsNullOrEmpty(name)) return;
-            name = name.Trim();
+            CategoryEditDialog.Result edit = CategoryEditDialog.Show(
+                "添加到自定义", "分类名称", null, CategoryIconKind.Folder);
+            if (edit == null) return;
+            string name = edit.Name;
             if (!config.CustomCategories.Contains(name))
             {
                 config.CustomCategories.Add(name);
             }
+            config.CategoryIconNames[CategoryIconKey(name)] = edit.Icon.ToString();
             AddItemToCategory(app, name);
             RebuildSidebar();
             RefreshGrid();
@@ -3481,7 +3701,7 @@ namespace AppManager
         /// </summary>
         private bool PickFromAppList()
         {
-            Form f = new Form();
+            Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
             f.ClientSize = new Size(480, 560);
@@ -4238,7 +4458,7 @@ namespace AppManager
         /// <summary>桌面备份清单：列出条目，支持单条还原/移除、全部还原。</summary>
         private void ShowBackupListDialog()
         {
-            using (Form f = new Form())
+            using (Form f = new BufferedDialogForm())
             {
                 f.FormBorderStyle = FormBorderStyle.None;
                 f.StartPosition = FormStartPosition.CenterParent;
@@ -4487,6 +4707,8 @@ namespace AppManager
             settingsOpen = true;
             HideImageViewer();   // 查看器/播放器属于列表区域，进入设置页前先退出
             HideVideoPlayer();
+            HideMusicPlayer();
+            miniMusic.Stop();
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                 config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             SetMainContentVisible(false);
@@ -4516,6 +4738,7 @@ namespace AppManager
             sidebar.Visible = show;
             grid.Visible = show;
             search.Visible = show;
+            miniMusic.Visible = show && miniMusic.Width >= 190;
             countLabel.Visible = show;
             organizeBtn.Visible = show;
             viewToggle.Visible = show;
@@ -4534,7 +4757,7 @@ namespace AppManager
             string filePath = FileStoreOf();
             string resourcePath = ResourceStoreRoot();
 
-            using (Form f = new Form())
+            using (Form f = new BufferedDialogForm())
             {
                 f.FormBorderStyle = FormBorderStyle.None;
                 f.StartPosition = FormStartPosition.CenterParent;
@@ -4677,20 +4900,21 @@ namespace AppManager
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
 
             // 侧栏使用低一层的中性灰，内容顶栏保持白色，形成稳定的三段式明暗层次
+            int sidebarWidth = sidebar.CurrentWidth;
             using (SolidBrush sb = new SolidBrush(Theme.SidebarBg))
-                g.FillRectangle(sb, new Rectangle(0, 0, Theme.SidebarWidth, ClientSize.Height));
-            Rectangle topBar = new Rectangle(Theme.SidebarWidth, 0,
-                ClientSize.Width - Theme.SidebarWidth, Theme.TopBarHeight);
+                g.FillRectangle(sb, new Rectangle(0, 0, sidebarWidth, ClientSize.Height));
+            Rectangle topBar = new Rectangle(sidebarWidth, 0,
+                ClientSize.Width - sidebarWidth, Theme.TopBarHeight);
             using (SolidBrush tb = new SolidBrush(Theme.TopBarBg))
                 g.FillRectangle(tb, topBar);
 
             // 仅以 1px 分隔线划区，避免渐变和投影造成视觉噪音
             using (Pen p1 = new Pen(Theme.Separator, 1))
-                g.DrawLine(p1, Theme.SidebarWidth, Theme.TopBarHeight - 1, ClientSize.Width, Theme.TopBarHeight - 1);
+                g.DrawLine(p1, sidebarWidth, Theme.TopBarHeight - 1, ClientSize.Width, Theme.TopBarHeight - 1);
 
             // 侧栏分隔线贯通顶栏与内容区
             using (Pen ps = new Pen(Theme.Separator, 1))
-                g.DrawLine(ps, Theme.SidebarWidth - 1, 0, Theme.SidebarWidth - 1, ClientSize.Height);
+                g.DrawLine(ps, sidebarWidth - 1, 0, sidebarWidth - 1, ClientSize.Height);
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -4701,7 +4925,7 @@ namespace AppManager
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // 标题：顶栏行1（标题行）
             using (SolidBrush br = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "应用中心", Theme.WindowTitleFont, br, new Rectangle(Theme.SidebarWidth + 16, 0, 128, Theme.TitleRowHeight));
+                Draw.DrawStringLeft(g, "应用中心", Theme.WindowTitleFont, br, new Rectangle(sidebar.CurrentWidth + 16, 0, 128, Theme.TitleRowHeight));
 
             // ===== 内容区底部留白：与左右侧栏底部按钮栏同高，并显示当前集合名称与数量 =====
             Rectangle footer = ContentFooterRect();
@@ -4729,8 +4953,8 @@ namespace AppManager
         {
             int statusH = statusBar != null && statusBar.Visible ? 34 : 0;
             int footerTop = ClientSize.Height - statusH - ContentFooterH;
-            int sb = Theme.SidebarWidth;
-            int colW = collectionSidebar != null && collectionSidebar.Visible ? CollectionSidebar.PreferredWidth : 0;
+            int sb = sidebar.CurrentWidth;
+            int colW = collectionSidebar != null && collectionSidebar.Visible ? collectionSidebar.CurrentWidth : 0;
             int contentX = sb + colW;
             int contentW = ClientSize.Width - contentX;
             if (contentW <= 0 || footerTop <= Theme.TopBarHeight) return Rectangle.Empty;
@@ -4758,7 +4982,7 @@ namespace AppManager
         {
             if (btn != MouseButtons.Left) return;
             bool inTopBar = y < Theme.TopBarHeight;
-            bool inSidebar = x <= Theme.SidebarWidth && y >= Theme.TopBarHeight;
+            bool inSidebar = x <= sidebar.CurrentWidth && y >= Theme.TopBarHeight;
             if (!inTopBar && !inSidebar) return;
             // 顶栏内：命中搜索框、视图切换、操作按钮、窗口按钮时不拖动
             if (inTopBar && HitsTopBarControl(x, y)) return;
@@ -4794,7 +5018,7 @@ namespace AppManager
                 if (c is RoundButton || c is IconButton || c is ToggleSwitch || c is SearchField
                     || c is IosProgressBar || c is CheckedListBox || c is TextBox
                     || c is SidebarControl || c is AppGridControl || c is SettingsPage
-                    || c is ImageViewerControl || c is VideoPlayerControl
+                    || c is ImageViewerControl || c is VideoPlayerControl || c is MusicPlayerControl || c is MiniMusicPlayerControl
                     || c is CollectionInfoPanel || c is CollectionSidebar || c is ListHeaderStrip)
                     continue;
                 c.MouseDown += delegate(object s, MouseEventArgs e)

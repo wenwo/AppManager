@@ -78,8 +78,9 @@ namespace AppManager.Controls
 
             backBtn = new RoundButton();
             backBtn.Text = "返回";
+            backBtn.Icon = UiIconKind.Back;
             backBtn.Accent = false;
-            backBtn.Size = new Size(64, 30);
+            backBtn.Size = new Size(74, 30);
             backBtn.Click += delegate { Raise(BackRequested); };
             Controls.Add(backBtn);
 
@@ -148,8 +149,8 @@ namespace AppManager.Controls
             int left = (Width - contentW) / 2;
             int top = 22;
             // 标题靠左、返回按钮靠右，两端分别与卡片区左右边缘对齐
-            headerRect = new Rectangle(left, top, contentW - 78, 30);
-            backBtn.Bounds = new Rectangle(left + contentW - 64, top, 64, 30);
+            headerRect = new Rectangle(left, top, contentW - 88, 30);
+            backBtn.Bounds = new Rectangle(left + contentW - 74, top, 74, 30);
 
             int colGap = 24;
             int colW = (contentW - colGap) / 2;

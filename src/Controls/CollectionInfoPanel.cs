@@ -995,7 +995,7 @@ namespace AppManager.Controls
                 Draw.DrawStringLeft(g, text, Theme.CaptionFont, b, r);
         }
 
-        /// <summary>统一按钮绘制：主按钮强调色实底，次按钮白底描边 + 强调色文字。</summary>
+        /// <summary>统一按钮绘制：主按钮强调色实底，次按钮白底细描边 + 正文文字。</summary>
         private void DrawButton(Graphics g, Rectangle r, string text, bool primary, int id, bool enabled)
         {
             Color fill;
@@ -1011,13 +1011,13 @@ namespace AppManager.Controls
                     : (hoverBtn == id ? Theme.CardHover : Theme.Card);
             }
             using (SolidBrush b = new SolidBrush(fill))
-                Draw.FillRoundedRect(g, b, r, 10);
+                Draw.FillRoundedRect(g, b, r, 6);
             if (!primary)
             {
-                using (Pen p = new Pen(Theme.Separator, 1F))
-                    Draw.DrawRoundedRect(g, p, r, 10);
+                using (Pen p = new Pen(Theme.ControlBorder, 1F))
+                    Draw.DrawRoundedRect(g, p, r, 6);
             }
-            Color tc = primary ? Color.White : (enabled ? Theme.AccentText : Theme.TextTertiary);
+            Color tc = primary ? Color.White : (enabled ? Theme.TextPrimary : Theme.TextTertiary);
             using (SolidBrush tb = new SolidBrush(tc))
                 Draw.DrawStringCenter(g, text, Theme.ButtonFont, tb, r);
         }

@@ -18,6 +18,7 @@ namespace AppManager.Controls
         {
             public string Text = string.Empty;
             public string Key = string.Empty;
+            public CategoryIconKind Icon = CategoryIconKind.Folder;
             public bool Active;
             public bool Separator;
             public bool DropTarget;   // 可接收拖放（文件/文件夹）
@@ -35,13 +36,17 @@ namespace AppManager.Controls
         private const int ItemHeight = 36;
         private const int SegHeight = 28;      // 顶部分段控件（软件/网站）高度
         private static readonly int HeaderHeight = Theme.TopBarHeight;   // 顶栏总高：分类列表从其下开始
+        private const int CategoryHeaderHeight = Theme.TitleRowHeight;
         private const int FooterHeight = 44;   // 底部「+ 新建分类」按钮高度
+        public const int CollapsedWidth = 44;
         private const int ListPad = 8;         // 分类列表上下留白
         private const int ScrollBarW = 4;      // 滚动条绘制宽度（iOS 细条）
         private const int ScrollHitW = 12;     // 滚动条命中区宽度（比可视条宽，便于抓取）
         private ContentMode mode = ContentMode.Software;
         private int hoverSegment = -1;         // 分段悬停：0=软件 1=网站
         private int hoverFooter = -1;          // 底部按钮悬停：0=新建分类
+        private bool collapsed;
+        private bool hoverCollapse;
 
         // 分类列表滚动（顶部分段控件与底部按钮固定，仅中间列表区滚动）
         private int scrollOffset;              // 列表滚动偏移（>=0）
@@ -74,6 +79,11 @@ namespace AppManager.Controls
         public event Action<string, Point> CategoryContextRequested;
         /// <summary>分类拖动排序完成：from=源索引，to=目标索引（均为 items 下标）。</summary>
         public event Action<int, int> ReorderRequested;
+        /// <summary>分类栏收起或展开后触发，供主窗体重新布局。</summary>
+        public event Action CollapsedChanged;
+
+        public bool Collapsed { get { return collapsed; } }
+        public int CurrentWidth { get { return collapsed ? CollapsedWidth : Theme.SidebarWidth; } }
 
         public ContentMode Mode
         {
@@ -141,6 +151,14 @@ namespace AppManager.Controls
         {
             Graphics g = e.Graphics;
             g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            if (collapsed)
+            {
+                PaintCategoryHeader(g);
+                PaintCollapsedItems(g);
+                return;
+            }
 
             // ===== 顶部分段控件（软件 | 资源）：位于顶栏行2 =====
             Rectangle segRect = SegRect;
@@ -160,6 +178,8 @@ namespace AppManager.Controls
                 using (SolidBrush br = new SolidBrush(tc))
                     Draw.DrawStringCenter(g, labels[i], Font, br, r);
             }
+
+            PaintCategoryHeader(g);
 
             // ===== 分类列表（顶部分段/底部按钮固定；列表内顶部/底部区块亦固定，仅中间区块随 scrollOffset 位移并裁剪）=====
             if (ListBottom > ListTop)
@@ -212,27 +232,76 @@ namespace AppManager.Controls
                 using (SolidBrush b = new SolidBrush(Theme.CardHover))
                     Draw.FillRoundedRect(g, b, footRect, 8);
             }
-            using (SolidBrush plus = new SolidBrush(Theme.Accent))
-            using (SolidBrush txt = new SolidBrush(Theme.AccentText))
+            using (SolidBrush txt = new SolidBrush(Theme.TextPrimary))
             {
-                // 加号图标
-                int cx = footRect.X + 18, cy = footRect.Y + footRect.Height / 2;
-                g.FillRectangle(plus, cx - 1, cy - 6, 2, 12);
-                g.FillRectangle(plus, cx - 6, cy - 1, 12, 2);
+                Draw.DrawIcon(g, UiIconKind.Add,
+                    new Rectangle(footRect.X + 9, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor);
                 Draw.DrawStringLeft(g, "新建分类", Theme.ButtonFont, txt,
                     new Rectangle(footRect.X + 34, footRect.Y, footRect.Width - 40, footRect.Height));
             }
+        }
+
+        private Rectangle CollapseRect
+        {
+            get
+            {
+                int x = collapsed ? (ClientSize.Width - 26) / 2 : ClientSize.Width - 34;
+                return new Rectangle(x, (CategoryHeaderHeight - 26) / 2, 26, 26);
+            }
+        }
+
+        private void PaintCategoryHeader(Graphics g)
+        {
+            if (!collapsed)
+            {
+                using (SolidBrush text = new SolidBrush(Theme.TextPrimary))
+                    Draw.DrawStringLeft(g, "分类", Theme.ButtonFont, text,
+                        new Rectangle(14, 0, Math.Max(0, CollapseRect.Left - 20), CategoryHeaderHeight));
+            }
+            using (Pen separator = new Pen(Theme.Separator, 1))
+                g.DrawLine(separator, 0, HeaderHeight - 1, ClientSize.Width, HeaderHeight - 1);
+            if (hoverCollapse)
+            {
+                using (SolidBrush hover = new SolidBrush(Theme.CardHover))
+                    Draw.FillRoundedRect(g, hover, CollapseRect, 6);
+            }
+            Draw.DrawIcon(g, collapsed ? UiIconKind.PanelLeftOpen : UiIconKind.PanelLeftClose,
+                CollapseRect, Theme.IconColor);
+        }
+
+        private void ToggleCollapsed()
+        {
+            collapsed = !collapsed;
+            hoverIndex = -1;
+            hoverSegment = -1;
+            hoverFooter = -1;
+            scrollbarHot = false;
+            Invalidate();
+            Action handler = CollapsedChanged;
+            if (handler != null) handler();
+        }
+
+        private void ChangeMode(ContentMode newMode)
+        {
+            if (newMode == mode) return;
+            mode = newMode;
+            Invalidate();
+            Action<ContentMode> handler = ModeChanged;
+            if (handler != null) handler(mode);
         }
 
         /// <summary>绘制单个分类项（分隔线 / 选中 / 悬停 / 投放高亮 + 文本），位置由 ItemTop 决定。</summary>
         private void PaintItem(Graphics g, int index)
         {
             SidebarItem it = items[index];
-            Rectangle r = new Rectangle(10, ItemTop(index), ClientSize.Width - 20, ItemHeight);
+            Rectangle r = collapsed
+                ? new Rectangle(4, ItemTop(index), ClientSize.Width - 8, ItemHeight)
+                : new Rectangle(8, ItemTop(index), ClientSize.Width - 16, ItemHeight);
             if (it.Separator)
             {
                 int y = r.Y + ItemHeight / 2;
-                using (Pen p = new Pen(Theme.Separator, 1)) g.DrawLine(p, r.X, y, r.Right, y);
+                using (Pen p = new Pen(Theme.Separator, 1))
+                    g.DrawLine(p, collapsed ? 13 : r.X + 4, y, collapsed ? r.Right - 13 : r.Right - 4, y);
                 return;
             }
             if (it.Active)
@@ -251,14 +320,59 @@ namespace AppManager.Controls
                     Draw.DrawRoundedRect(g, p, r, 6);
             }
             Color tc = it.Active ? Theme.AccentText : Theme.TextPrimary;
+            CategoryIcons.DrawIcon(g, it.Icon,
+                new Rectangle(r.X + 8, r.Y + 8, 20, 20),
+                it.Active ? Theme.AccentText : Theme.IconColor);
+            if (collapsed) return;
             using (SolidBrush br = new SolidBrush(tc))
                 Draw.DrawStringLeft(g, it.Text, Font, br,
-                    new Rectangle(r.X + 12, r.Y, r.Width - 16, r.Height));
+                    new Rectangle(r.X + 36, r.Y, r.Width - 44, r.Height));
+        }
+
+        private void PaintCollapsedItems(Graphics g)
+        {
+            if (ListBottom <= ListTop) return;
+            for (int index = 0; index < TopCount; index++) PaintItem(g, index);
+            for (int index = items.Count - BottomCount; index < items.Count; index++) PaintItem(g, index);
+            if (!hasScrollBlock) return;
+            GraphicsState state = g.Save();
+            g.SetClip(new Rectangle(0, ScrollTop, ClientSize.Width, ScrollViewportHeight), CombineMode.Intersect);
+            for (int index = scrollStart; index <= scrollEnd; index++)
+            {
+                int itemTop = ItemTop(index);
+                if (itemTop + ItemHeight <= ScrollTop) continue;
+                if (itemTop >= ScrollBottom) break;
+                PaintItem(g, index);
+            }
+            g.Restore(state);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+
+            bool overCollapse = CollapseRect.Contains(e.Location);
+            if (hoverCollapse != overCollapse) { hoverCollapse = overCollapse; Invalidate(); }
+            if (overCollapse)
+            {
+                hoverIndex = -1;
+                hoverSegment = -1;
+                hoverFooter = -1;
+                Cursor = Cursors.Hand;
+                return;
+            }
+            if (collapsed)
+            {
+                int collapsedIndex = IndexAt(e.Y);
+                if (hoverIndex != collapsedIndex)
+                {
+                    hoverIndex = collapsedIndex;
+                    Invalidate();
+                }
+                Cursor = collapsedIndex >= 0 && !items[collapsedIndex].Separator
+                    ? Cursors.Hand : Cursors.Default;
+                return;
+            }
 
             // 拖动排序：越过系统阈值才开始，避免与单击冲突
             if (dragPending && (e.Button & MouseButtons.Left) == MouseButtons.Left)
@@ -337,6 +451,7 @@ namespace AppManager.Controls
             hoverIndex = -1;
             hoverSegment = -1;
             hoverFooter = -1;
+            hoverCollapse = false;
             scrollbarHot = false;
             Invalidate();
             base.OnMouseLeave(e);
@@ -345,8 +460,12 @@ namespace AppManager.Controls
         protected override void OnMouseClick(MouseEventArgs e)
         {
             if (suppressClick) { suppressClick = false; return; }
-            // 底部「+ 新建分类」
-            if (e.Y >= ClientSize.Height - FooterHeight)
+            if (CollapseRect.Contains(e.Location))
+            {
+                if (e.Button == MouseButtons.Left) ToggleCollapsed();
+                return;
+            }
+            if (!collapsed && e.Y >= ClientSize.Height - FooterHeight)
             {
                 if (e.Button == MouseButtons.Left)
                 {
@@ -355,17 +474,11 @@ namespace AppManager.Controls
                 }
                 return;
             }
-            if (SegRect.Contains(e.Location))
+            if (!collapsed && SegRect.Contains(e.Location))
             {
                 int seg = e.X < ClientSize.Width / 2 ? 0 : 1;
                 ContentMode newMode = seg == 0 ? ContentMode.Software : ContentMode.Website;
-                if (newMode != mode)
-                {
-                    mode = newMode;
-                    Invalidate();
-                    Action<ContentMode> h = ModeChanged;
-                    if (h != null) h(mode);
-                }
+                ChangeMode(newMode);
                 return;
             }
             int idx = IndexAt(e.Y);
@@ -392,7 +505,7 @@ namespace AppManager.Controls
             }
         }
 
-        /// <summary>分类列表可视区上边界（顶部分段控件之下）。</summary>
+        /// <summary>分类列表可视区上边界（分类表头之下）。</summary>
         private int ListTop
         {
             get { return HeaderHeight; }
@@ -580,6 +693,7 @@ namespace AppManager.Controls
             base.OnMouseDown(e);
             suppressClick = false;
             if (e.Button != MouseButtons.Left) return;
+            if (collapsed || CollapseRect.Contains(e.Location)) return;
 
             // 滚动条：命中滑块纵向范围则抓取拖动；否则滑块跳到点击处并进入拖动
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location))
@@ -650,6 +764,12 @@ namespace AppManager.Controls
         /// <summary>是否为空白区（非分段头/非条目/非底部按钮/非滚动条），供窗体拖动判定。</summary>
         public bool IsBlankArea(Point p)
         {
+            if (CollapseRect.Contains(p)) return false;
+            if (collapsed)
+            {
+                int index = IndexAt(p.Y);
+                return index < 0 || items[index].Separator;
+            }
             // 顶栏区域内：分段控件不可拖动，其余空白（行1标题区等）可拖动窗体
             if (p.Y < HeaderHeight) return !SegRect.Contains(p);
             if (p.Y >= ClientSize.Height - FooterHeight) return false;
@@ -665,6 +785,7 @@ namespace AppManager.Controls
         /// <summary>按屏幕坐标返回命中的可投放分类 key；未命中（非分类/分隔/只读/常用）返回 null。</summary>
         public string DropCategoryAtScreen(Point screen)
         {
+            if (collapsed) return null;
             Point p = PointToClient(screen);
             if (p.X < 0 || p.X > ClientSize.Width) return null;
             int idx = IndexAt(p.Y);

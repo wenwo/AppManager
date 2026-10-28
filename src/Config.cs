@@ -249,6 +249,7 @@ namespace AppManager
 
         // 每分类独立视图模式：分类名 -> true(网格)/false(列表)，缺失则用 ViewGrid 兜底
         public Dictionary<string, bool> CategoryViewMode = new Dictionary<string, bool>();
+        public Dictionary<string, string> CategoryIconNames = new Dictionary<string, string>();
         // 管理根路径：文件夹/文件搬入时的目标根目录（默认 H:\Manage，不可用时回退本地收纳目录）
         public string ManageRootPath = string.Empty;
         // 文件/文件夹各自的存储位置（留空时按 ManageRootPath 与 ManageRootPath\Files 兜底）
@@ -340,6 +341,11 @@ namespace AppManager
                     bool v;
                     if (!string.IsNullOrEmpty(k) && bool.TryParse(n.InnerText, out v))
                         cfg.CategoryViewMode[k] = v;
+                }
+                foreach (XmlNode n in root.SelectNodes("CategoryIconNames/Item"))
+                {
+                    string key = XmlAttr(n, "cat");
+                    if (!string.IsNullOrEmpty(key)) cfg.CategoryIconNames[key] = n.InnerText;
                 }
                 cfg.ManageRootPath = XmlElementText(root, "ManageRootPath", string.Empty);
                 cfg.FolderStorePath = XmlElementText(root, "FolderStorePath", string.Empty);
@@ -483,6 +489,15 @@ namespace AppManager
                         w.WriteStartElement("Item");
                         w.WriteAttributeString("cat", kv.Key);
                         w.WriteString(kv.Value ? "true" : "false");
+                        w.WriteEndElement();
+                    }
+                    w.WriteEndElement();
+                    w.WriteStartElement("CategoryIconNames");
+                    foreach (KeyValuePair<string, string> kv in CategoryIconNames)
+                    {
+                        w.WriteStartElement("Item");
+                        w.WriteAttributeString("cat", kv.Key);
+                        w.WriteString(kv.Value ?? string.Empty);
                         w.WriteEndElement();
                     }
                     w.WriteEndElement();

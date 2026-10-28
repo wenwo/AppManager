@@ -25,6 +25,7 @@ namespace AppManager.Controls
 
         /// <summary>侧边栏固定宽度（外部布局按此预留）。</summary>
         public const int PreferredWidth = 176;
+        public const int CollapsedWidth = 44;
         /// <summary>集合封面缩略图边长（外部构建封面位图时按此尺寸）。</summary>
         public const int ThumbSize = 26;
 
@@ -47,6 +48,8 @@ namespace AppManager.Controls
         private bool scrollDragging;
         private int scrollGrabDy;
         private int externalDragIndex = -1;    // 主内容区拖动时的投放高亮行
+        private bool collapsed;
+        private bool hoverCollapse;
 
         private readonly SolidBrush activeBrush = new SolidBrush(Theme.SelectionBg);
         private readonly SolidBrush hoverBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
@@ -68,6 +71,11 @@ namespace AppManager.Controls
         public event Action CreateRequested;
         /// <summary>外部文件拖放到集合行：集合键 + 路径数组。</summary>
         public event Action<string, string[]> FilesDropped;
+        /// <summary>集合栏收起或展开后触发，供主窗体重新布局。</summary>
+        public event Action CollapsedChanged;
+
+        public bool Collapsed { get { return collapsed; } }
+        public int CurrentWidth { get { return collapsed ? CollapsedWidth : PreferredWidth; } }
 
         public CollectionSidebar()
         {
@@ -165,7 +173,7 @@ namespace AppManager.Controls
         /// <summary>按屏幕坐标返回命中的自定义集合键；未命中或命中「全部」返回 null。</summary>
         public string DropCollectionAtScreen(Point screen)
         {
-            if (!Visible) return null;
+            if (!Visible || collapsed) return null;
             Point p = PointToClient(screen);
             if (p.X < 0 || p.X > ClientSize.Width) return null;
             int idx = IndexAt(p.Y);
@@ -272,7 +280,7 @@ namespace AppManager.Controls
         /// <summary>滚轮滚动（供主窗体滚轮路由调用）：每次滚动一行，避免集合行高 38px × 系统行数造成跳动过大。</summary>
         public void ScrollByWheel(int delta)
         {
-            if (delta == 0 || MaxScroll <= 0) return;
+            if (collapsed || delta == 0 || MaxScroll <= 0) return;
             SetScroll(scrollOffset - (delta / 120) * RowH);
         }
 
@@ -293,13 +301,16 @@ namespace AppManager.Controls
             g.Clear(Theme.SidebarBg);
 
             // 标题 + 右侧/底部分隔线：表头文字与列表表头、左侧首个分类垂直居中于同一水平线
-            Draw.DrawStringLeft(g, "集合", Theme.CaptionFont, subBrush,
-                new Rectangle(PadX + 4, 0, ClientSize.Width - PadX * 2, HeaderH));
+            if (!collapsed)
+                Draw.DrawStringLeft(g, "集合", Theme.ButtonFont, textBrush,
+                    new Rectangle(PadX + 4, 0, Math.Max(0, CollapseRect.Left - PadX - 10), HeaderH));
+            PaintCollapseButton(g);
             using (Pen sep = new Pen(Theme.Separator, 1))
             {
                 g.DrawLine(sep, ClientSize.Width - 1, 0, ClientSize.Width - 1, ClientSize.Height);
                 g.DrawLine(sep, 0, HeaderH - 1, ClientSize.Width, HeaderH - 1);
             }
+            if (collapsed) return;
 
             // 集合行（裁剪到列表视口，随滚动位移）
             GraphicsState st = g.Save();
@@ -317,6 +328,38 @@ namespace AppManager.Controls
 
             // 底部「+ 新建集合」
             PaintFooter(g);
+        }
+
+        private Rectangle CollapseRect
+        {
+            get
+            {
+                int x = collapsed ? (ClientSize.Width - 26) / 2 : ClientSize.Width - 34;
+                return new Rectangle(x, 5, 26, 26);
+            }
+        }
+
+        private void PaintCollapseButton(Graphics g)
+        {
+            if (hoverCollapse)
+            {
+                using (SolidBrush hover = new SolidBrush(Theme.CardHover))
+                    Draw.FillRoundedRect(g, hover, CollapseRect, 6);
+            }
+            Draw.DrawIcon(g, collapsed ? UiIconKind.PanelLeftOpen : UiIconKind.PanelLeftClose,
+                CollapseRect, Theme.IconColor);
+        }
+
+        private void ToggleCollapsed()
+        {
+            collapsed = !collapsed;
+            hoverIndex = -1;
+            hoverFooter = false;
+            scrollbarHot = false;
+            SetExternalDropHighlight(null);
+            Invalidate();
+            Action handler = CollapsedChanged;
+            if (handler != null) handler();
         }
 
         private void PaintItem(Graphics g, Item item, int index, Rectangle r)
@@ -422,10 +465,9 @@ namespace AppManager.Controls
                 using (SolidBrush b = new SolidBrush(Theme.CardHover))
                     Draw.FillRoundedRect(g, b, footRect, Radius);
             }
-            int cx = footRect.X + 16, cy = footRect.Y + footRect.Height / 2;
-            g.FillRectangle(accentBrush, cx - 1, cy - 6, 2, 12);
-            g.FillRectangle(accentBrush, cx - 6, cy - 1, 12, 2);
-            Draw.DrawStringLeft(g, "新建集合", Theme.ButtonFont, accentBrush,
+            Draw.DrawIcon(g, UiIconKind.Add,
+                new Rectangle(footRect.X + 7, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor);
+            Draw.DrawStringLeft(g, "新建集合", Theme.ButtonFont, textBrush,
                 new Rectangle(footRect.X + 32, footRect.Y, footRect.Width - 36, footRect.Height));
         }
 
@@ -434,6 +476,22 @@ namespace AppManager.Controls
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+
+            bool overCollapse = CollapseRect.Contains(e.Location);
+            if (hoverCollapse != overCollapse) { hoverCollapse = overCollapse; Invalidate(); }
+            if (overCollapse)
+            {
+                hoverIndex = -1;
+                hoverFooter = false;
+                Cursor = Cursors.Hand;
+                return;
+            }
+            if (collapsed)
+            {
+                hoverIndex = -1;
+                Cursor = Cursors.Default;
+                return;
+            }
 
             if (scrollDragging)
             {
@@ -479,9 +537,10 @@ namespace AppManager.Controls
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            bool dirty = hoverIndex != -1 || hoverFooter || scrollbarHot;
+            bool dirty = hoverIndex != -1 || hoverFooter || hoverCollapse || scrollbarHot;
             hoverIndex = -1;
             hoverFooter = false;
+            hoverCollapse = false;
             scrollbarHot = false;
             if (dirty) Invalidate();
         }
@@ -490,6 +549,7 @@ namespace AppManager.Controls
         {
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
+            if (collapsed || CollapseRect.Contains(e.Location)) return;
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location))
             {
                 Rectangle thumb = ScrollThumbRect();
@@ -521,6 +581,12 @@ namespace AppManager.Controls
         protected override void OnMouseClick(MouseEventArgs e)
         {
             base.OnMouseClick(e);
+            if (CollapseRect.Contains(e.Location))
+            {
+                if (e.Button == MouseButtons.Left) ToggleCollapsed();
+                return;
+            }
+            if (collapsed) return;
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location)) return;   // 滚动条区域不触发选中
             if (e.Y >= ClientSize.Height - FooterH)
             {
@@ -550,6 +616,7 @@ namespace AppManager.Controls
         {
             base.OnMouseDoubleClick(e);
             if (e.Button != MouseButtons.Left) return;
+            if (collapsed || CollapseRect.Contains(e.Location)) return;
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location)) return;
             if (e.Y >= ClientSize.Height - FooterH) return;
             int idx = IndexAt(e.Y);
@@ -567,6 +634,8 @@ namespace AppManager.Controls
         /// <summary>是否为空白区（非行/非底部按钮/非滚动条），供窗体拖动判定。</summary>
         public bool IsBlankArea(Point p)
         {
+            if (CollapseRect.Contains(p)) return false;
+            if (collapsed) return true;
             if (p.Y >= ClientSize.Height - FooterH) return false;
             if (MaxScroll > 0 && ScrollHitRect().Contains(p)) return false;
             return IndexAt(p.Y) < 0;

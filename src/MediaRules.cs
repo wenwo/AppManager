@@ -24,7 +24,8 @@ namespace AppManager
         /// <summary>音频扩展名（小写、含点）。</summary>
         public static readonly string[] AudioExt =
         {
-            ".mp3", ".wav", ".flac", ".m4a", ".ogg", ".wma", ".aac"
+            ".mp3", ".wav", ".flac", ".m4a", ".ogg", ".wma", ".aac", ".ape",
+            ".opus", ".aiff", ".aif", ".alac", ".dsf", ".dff"
         };
 
         /// <summary>文档扩展名（小写、含点）。</summary>

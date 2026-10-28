@@ -28,6 +28,8 @@ namespace AppManager
             public bool Checked;
             /// <summary>非空即视为父项：悬停时在右侧展开级联子菜单，父项自身不响应点击执行。</summary>
             public List<MenuItem> SubItems;
+            public Func<List<MenuItem>> SubItemsFactory;
+            public Action DoubleClickAction;
         }
 
         private readonly List<MenuItem> items;
@@ -70,7 +72,7 @@ namespace AppManager
             StartPosition = FormStartPosition.Manual;
             BackColor = Theme.MenuBg;
             DoubleBuffered = true;
-            font = Theme.BodyFont;
+            font = Theme.MenuFont;
             int h = 8;
             for (int i = 0; i < items.Count; i++)
                 h += items[i].Separator ? 9 : ItemH;
@@ -140,7 +142,7 @@ namespace AppManager
                     using (SolidBrush b = new SolidBrush(Theme.MenuHover))
                         Draw.FillRoundedRect(g, b, r, 6);
                 }
-                bool hasSub = !it.Disabled && it.SubItems != null && it.SubItems.Count > 0;
+                bool hasSub = !it.Disabled && HasSubItems(it);
                 bool hasCheck = it.Checked;
                 // iOS 上下文菜单：悬停浅灰高亮，文字保持深色（选中态不反白）
                 Color tc = it.Disabled ? Theme.TextTertiary : Theme.TextPrimary;
@@ -223,8 +225,15 @@ namespace AppManager
             if (idx < 0 || idx >= items.Count) { CloseChain(); return; }
             MenuItem it = items[idx];
             if (it.Separator || it.Disabled) return;
-            if (it.SubItems != null && it.SubItems.Count > 0)
+            if (HasSubItems(it))
             {
+                if (it.Action != null)
+                {
+                    Action select = it.Action;
+                    CloseChain();
+                    select();
+                    return;
+                }
                 // 父项：点击仅展开/保持子菜单，不执行动作（联动展开由悬停负责）
                 UpdateChild(idx);
                 return;
@@ -232,6 +241,18 @@ namespace AppManager
             Action a = it.Action;
             CloseChain();
             if (a != null) a();
+        }
+
+        protected override void OnMouseDoubleClick(MouseEventArgs e)
+        {
+            if (IsDisposed) return;
+            int idx = IndexAt(e.Y);
+            if (idx < 0 || idx >= items.Count) return;
+            MenuItem it = items[idx];
+            if (it.Separator || it.Disabled || it.DoubleClickAction == null) return;
+            Action action = it.DoubleClickAction;
+            CloseChain();
+            action();
         }
 
         protected override void OnDeactivate(EventArgs e)
@@ -264,7 +285,7 @@ namespace AppManager
         private void UpdateChild(int idx)
         {
             if (idx >= 0 && idx < items.Count && !items[idx].Separator && !items[idx].Disabled
-                && items[idx].SubItems != null && items[idx].SubItems.Count > 0)
+                && HasSubItems(items[idx]))
             {
                 OpenChild(idx);
                 return;
@@ -279,6 +300,11 @@ namespace AppManager
             if (child != null && childIndex == index) return;
             CloseChild();
             MenuItem it = items[index];
+            if (it.SubItems == null && it.SubItemsFactory != null)
+            {
+                try { it.SubItems = it.SubItemsFactory(); }
+                catch { it.SubItems = null; }
+            }
             if (it.SubItems == null || it.SubItems.Count == 0) return;
             MenuWindow c = new MenuWindow(it.SubItems, SubWidth, true);
             c.parentMenu = this;
@@ -310,6 +336,11 @@ namespace AppManager
             }
             child = c;
             childIndex = index;
+        }
+
+        private static bool HasSubItems(MenuItem item)
+        {
+            return item.SubItemsFactory != null || item.SubItems != null && item.SubItems.Count > 0;
         }
 
         /// <summary>收起当前子菜单（并递归关闭其后代）。</summary>
@@ -399,6 +430,16 @@ namespace AppManager
         }
     }
 
+    internal class BufferedDialogForm : Form
+    {
+        public BufferedDialogForm()
+        {
+            DoubleBuffered = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.ResizeRedraw, true);
+        }
+    }
+
     /// <summary>
     /// 自绘确认对话框（是/否），圆角卡片 + 自绘按钮。模态且归属当前窗口，随应用一同置前/退后。
     /// </summary>
@@ -407,11 +448,11 @@ namespace AppManager
         public static bool Show(string title, string message)
         {
             bool result = false;
-            Form f = new Form();
+            Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(360, 168);
-            f.BackColor = Theme.Background;
+            f.ClientSize = new Size(400, 200);
+            f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
             try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
@@ -420,16 +461,18 @@ namespace AppManager
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
+                using (Pen border = new Pen(Theme.ControlBorder, 1F))
+                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - 1, f.Height - 1), 18);
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(22, 18, f.Width - 44, 28));
+                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(24, 18, f.Width - 48, 30));
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(22, 54, f.Width - 44, 50));
+                    Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(24, 60, f.Width - 48, 60));
             };
             RoundButton ok = MakeBtn("确定", true);
-            ok.Bounds = new Rectangle(f.Width / 2 - 130, 124, 120, 32);
+            ok.Bounds = new Rectangle(192, 142, 84, 34);
             ok.Click += delegate { result = true; f.DialogResult = DialogResult.OK; f.Close(); };
             RoundButton cancel = MakeBtn("取消", false);
-            cancel.Bounds = new Rectangle(f.Width / 2 + 10, 124, 120, 32);
+            cancel.Bounds = new Rectangle(292, 142, 84, 34);
             cancel.Click += delegate { result = false; f.DialogResult = DialogResult.Cancel; f.Close(); };
             f.Controls.Add(ok);
             f.Controls.Add(cancel);
@@ -525,6 +568,226 @@ namespace AppManager
     /// <summary>
     /// 自绘输入对话框（单行文本），回车确认；输入框为 iOS 风格圆角灰底、无边框，聚焦时白底 + 强调色描边。
     /// </summary>
+    public static class CategoryIconDialog
+    {
+        public static CategoryIconKind? Show(CategoryIconKind initial)
+        {
+            CategoryIconKind selected = initial;
+            CategoryIconKind? result = null;
+            int hover = -1;
+            Form form = new BufferedDialogForm();
+            form.FormBorderStyle = FormBorderStyle.None;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.ClientSize = new Size(400, 286);
+            form.BackColor = Theme.Card;
+            form.ShowInTaskbar = false;
+            form.KeyPreview = true;
+            try { form.Region = new Region(Draw.RoundedPath(form.ClientRectangle, 18)); } catch { }
+            form.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                Graphics graphics = e.Graphics;
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (SolidBrush background = new SolidBrush(Theme.Card))
+                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, 18);
+                using (SolidBrush title = new SolidBrush(Theme.TextPrimary))
+                    Draw.DrawStringLeft(graphics, "选择分类图标", Theme.DialogTitleFont, title,
+                        new Rectangle(22, 14, 250, 28));
+                for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
+                {
+                    Rectangle cell = CellBounds(index);
+                    if (index == hover || CategoryIcons.PickerKinds[index] == selected)
+                    {
+                        using (SolidBrush background = new SolidBrush(CategoryIcons.PickerKinds[index] == selected
+                            ? Theme.SelectionBg : Theme.RowHover))
+                            Draw.FillRoundedRect(graphics, background, cell, 9);
+                    }
+                    if (CategoryIcons.PickerKinds[index] == selected)
+                    {
+                        using (Pen border = new Pen(Theme.Accent, 1.5F))
+                            Draw.DrawRoundedRect(graphics, border, cell, 9);
+                    }
+                    CategoryIcons.DrawIcon(graphics, CategoryIcons.PickerKinds[index],
+                        new Rectangle(cell.X + 15, cell.Y + 12, 26, 26),
+                        CategoryIcons.PickerKinds[index] == selected ? Theme.AccentText : Theme.TextPrimary);
+                }
+                using (SolidBrush caption = new SolidBrush(Theme.TextSecondary))
+                    Draw.DrawStringLeft(graphics, CategoryIcons.DisplayName(selected), Theme.BodyFont, caption,
+                        new Rectangle(24, 216, 200, 24));
+            };
+            form.MouseMove += delegate(object sender, MouseEventArgs e)
+            {
+                int index = IconAt(e.Location);
+                if (index == hover) return;
+                hover = index;
+                form.Invalidate();
+            };
+            form.MouseLeave += delegate { hover = -1; form.Invalidate(); };
+            form.MouseClick += delegate(object sender, MouseEventArgs e)
+            {
+                int index = IconAt(e.Location);
+                if (index < 0) return;
+                selected = CategoryIcons.PickerKinds[index];
+                form.Invalidate();
+            };
+            form.MouseDoubleClick += delegate(object sender, MouseEventArgs e)
+            {
+                int index = IconAt(e.Location);
+                if (index < 0) return;
+                result = CategoryIcons.PickerKinds[index];
+                form.DialogResult = DialogResult.OK;
+                form.Close();
+            };
+            form.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode != Keys.Escape) return;
+                result = null;
+                form.Close();
+            };
+            RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
+            ok.Bounds = new Rectangle(204, 242, 78, 30);
+            ok.Click += delegate { result = selected; form.DialogResult = DialogResult.OK; form.Close(); };
+            RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
+            cancel.Bounds = new Rectangle(296, 242, 78, 30);
+            cancel.Click += delegate { result = null; form.DialogResult = DialogResult.Cancel; form.Close(); };
+            form.Controls.Add(ok);
+            form.Controls.Add(cancel);
+            ConfirmDialog.ShowModal(form);
+            form.Dispose();
+            return result;
+        }
+
+        private static Rectangle CellBounds(int index)
+        {
+            return new Rectangle(22 + (index % 6) * 59, 54 + (index / 6) * 53, 54, 48);
+        }
+
+        private static int IconAt(Point point)
+        {
+            for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
+                if (CellBounds(index).Contains(point)) return index;
+            return -1;
+        }
+    }
+
+    public static class CategoryEditDialog
+    {
+        public class Result
+        {
+            public string Name = string.Empty;
+            public CategoryIconKind Icon = CategoryIconKind.Folder;
+        }
+
+        public static Result Show(string title, string prompt, string defaultName, CategoryIconKind initialIcon)
+        {
+            Result result = null;
+            CategoryIconKind selected = initialIcon;
+            int hover = -1;
+            Form form = new BufferedDialogForm();
+            form.FormBorderStyle = FormBorderStyle.None;
+            form.StartPosition = FormStartPosition.CenterParent;
+            form.ClientSize = new Size(420, 324);
+            form.BackColor = Theme.Card;
+            form.ShowInTaskbar = false;
+            try { form.Region = new Region(Draw.RoundedPath(form.ClientRectangle, 18)); } catch { }
+            form.Paint += delegate(object sender, PaintEventArgs e)
+            {
+                Graphics graphics = e.Graphics;
+                graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                using (SolidBrush background = new SolidBrush(Theme.Card))
+                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, 18);
+                using (Pen border = new Pen(Theme.ControlBorder, 1F))
+                    Draw.DrawRoundedRect(graphics, border, new Rectangle(0, 0, form.Width - 1, form.Height - 1), 18);
+                using (SolidBrush titleBrush = new SolidBrush(Theme.TextPrimary))
+                {
+                    Draw.DrawStringLeft(graphics, title, Theme.FontOf(13F, FontStyle.Bold), titleBrush,
+                        new Rectangle(24, 16, form.Width - 48, 30));
+                    Draw.DrawStringLeft(graphics, prompt, Theme.ButtonFont, titleBrush,
+                        new Rectangle(24, 54, form.Width - 48, 22));
+                    Draw.DrawStringLeft(graphics, "图标", Theme.ButtonFont, titleBrush,
+                        new Rectangle(24, 134, 60, 22));
+                }
+                using (SolidBrush selectedBrush = new SolidBrush(Theme.TextSecondary))
+                    Draw.DrawStringLeft(graphics, CategoryIcons.DisplayName(selected), Theme.BodyFont, selectedBrush,
+                        new Rectangle(76, 134, 160, 22));
+                for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
+                {
+                    Rectangle cell = CellBounds(index);
+                    bool active = CategoryIcons.PickerKinds[index] == selected;
+                    if (active || index == hover)
+                    {
+                        using (SolidBrush background = new SolidBrush(active ? Theme.SelectionBg : Theme.RowHover))
+                            Draw.FillRoundedRect(graphics, background, cell, 8);
+                    }
+                    if (active)
+                    {
+                        using (Pen border = new Pen(Theme.Accent, 1.5F))
+                            Draw.DrawRoundedRect(graphics, border, cell, 8);
+                    }
+                    CategoryIcons.DrawIcon(graphics, CategoryIcons.PickerKinds[index],
+                        new Rectangle(cell.X + 9, cell.Y + 9, 20, 20),
+                        active ? Theme.AccentText : Theme.IconColor);
+                }
+            };
+            TextBox box = InputDialog.MakeField(form, new Rectangle(24, 80, 372, 40), defaultName);
+            form.MouseMove += delegate(object sender, MouseEventArgs e)
+            {
+                int index = IconAt(e.Location);
+                if (index == hover) return;
+                hover = index;
+                form.Invalidate();
+            };
+            form.MouseLeave += delegate { hover = -1; form.Invalidate(); };
+            form.MouseClick += delegate(object sender, MouseEventArgs e)
+            {
+                int index = IconAt(e.Location);
+                if (index < 0) return;
+                selected = CategoryIcons.PickerKinds[index];
+                form.Invalidate();
+            };
+            RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
+            ok.Bounds = new Rectangle(216, 272, 84, 34);
+            ok.Click += delegate
+            {
+                if (string.IsNullOrWhiteSpace(box.Text)) { box.Focus(); return; }
+                result = new Result { Name = box.Text.Trim(), Icon = selected };
+                form.DialogResult = DialogResult.OK;
+                form.Close();
+            };
+            RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
+            cancel.Bounds = new Rectangle(312, 272, 84, 34);
+            cancel.Click += delegate { result = null; form.DialogResult = DialogResult.Cancel; form.Close(); };
+            form.Controls.Add(ok);
+            form.Controls.Add(cancel);
+            box.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter && !string.IsNullOrWhiteSpace(box.Text))
+                {
+                    result = new Result { Name = box.Text.Trim(), Icon = selected };
+                    form.DialogResult = DialogResult.OK;
+                    form.Close();
+                }
+                if (e.KeyCode == Keys.Escape) { result = null; form.Close(); }
+            };
+            box.SelectAll();
+            form.ActiveControl = box;
+            ConfirmDialog.ShowModal(form);
+            form.Dispose();
+            return result;
+        }
+
+        private static Rectangle CellBounds(int index)
+        {
+            return new Rectangle(24 + (index % 9) * 41, 160 + (index / 9) * 44, 38, 40);
+        }
+
+        private static int IconAt(Point point)
+        {
+            for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
+                if (CellBounds(index).Contains(point)) return index;
+            return -1;
+        }
+    }
+
     public static class InputDialog
     {
         public static string Show(string title, string prompt)
@@ -535,11 +798,11 @@ namespace AppManager
         public static string Show(string title, string prompt, string defaultValue)
         {
             string result = null;
-            Form f = new Form();
+            Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(360, 184);
-            f.BackColor = Theme.Background;
+            f.ClientSize = new Size(400, 218);
+            f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
             try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
@@ -548,17 +811,19 @@ namespace AppManager
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
+                using (Pen border = new Pen(Theme.ControlBorder, 1F))
+                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - 1, f.Height - 1), 18);
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(22, 16, f.Width - 44, 26));
-                using (SolidBrush mb = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(g, prompt, Theme.BodyFont, mb, new Rectangle(22, 50, f.Width - 44, 22));
+                    Draw.DrawStringLeft(g, title, Theme.FontOf(13F, FontStyle.Bold), tb, new Rectangle(24, 18, f.Width - 48, 30));
+                using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
+                    Draw.DrawStringLeft(g, prompt, Theme.ButtonFont, mb, new Rectangle(24, 58, f.Width - 48, 22));
             };
-            TextBox box = MakeField(f, new Rectangle(22, 80, f.ClientSize.Width - 44, 36), defaultValue);
+            TextBox box = MakeField(f, new Rectangle(24, 86, f.ClientSize.Width - 48, 40), defaultValue);
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
-            ok.Bounds = new Rectangle(f.Width / 2 - 130, 128, 120, 32);
+            ok.Bounds = new Rectangle(192, 158, 84, 34);
             ok.Click += delegate { result = box.Text; f.DialogResult = DialogResult.OK; f.Close(); };
             RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
-            cancel.Bounds = new Rectangle(f.Width / 2 + 10, 128, 120, 32);
+            cancel.Bounds = new Rectangle(292, 158, 84, 34);
             cancel.Click += delegate { result = null; f.DialogResult = DialogResult.Cancel; f.Close(); };
             f.Controls.Add(ok);
             f.Controls.Add(cancel);
@@ -627,7 +892,7 @@ namespace AppManager
             string coverPath = initial == null ? string.Empty : (initial.Cover ?? string.Empty);   // 新建不编辑封面，仅沿用旧值
             ResourceCollection result = null;
 
-            Form f = new Form();
+            Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
             f.ClientSize = new Size(400, 260);
@@ -746,7 +1011,7 @@ namespace AppManager
             int rowsBottom = 82 + rows.Count * RowH;
             int clientH = rowsBottom + 12 + 32 + 22;
 
-            Form f = new Form();
+            Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
             f.ClientSize = new Size(DlgW, clientH);

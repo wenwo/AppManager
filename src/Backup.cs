@@ -448,7 +448,7 @@ namespace AppManager
     }
 
     /// <summary>布局备份管理对话框：列表 + 新建 / 更新 / 重命名 / 删除 / 恢复。</summary>
-    internal class BackupForm : Form
+    internal class BackupForm : BufferedDialogForm
     {
         private readonly ListBox list;
         private readonly List<LayoutBackupInfo> items = new List<LayoutBackupInfo>();
