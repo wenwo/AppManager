@@ -20,12 +20,13 @@ namespace AppManager
         public static readonly Color SelectionBg = Color.FromArgb(230, 240, 255);
 
         // 强调色
-        public static readonly Color Accent = Color.FromArgb(22, 119, 255); // #1677FF
+        public static readonly Color Accent = Color.FromArgb(22, 119, 255); // #1677FF，图标/描边/实底按钮
+        public static readonly Color AccentText = Color.FromArgb(9, 88, 217); // #0958D9，浅底小字号文字专用高对比蓝
         public static readonly Color AccentRipple = Color.FromArgb(32, 22, 119, 255);
 
-        // 文字
+        // 文字：主文字近黑；次文字保证小字号可读；第三级仅用于占位与禁用
         public static readonly Color TextPrimary = Color.FromArgb(31, 35, 41);
-        public static readonly Color TextSecondary = Color.FromArgb(100, 106, 115);
+        public static readonly Color TextSecondary = Color.FromArgb(78, 89, 105);
         public static readonly Color TextTertiary = Color.FromArgb(143, 149, 158);
         public static readonly Color Separator = Color.FromArgb(229, 230, 235);
 
@@ -126,12 +127,14 @@ namespace AppManager
             return GetFont(size, style, GraphicsUnit.Pixel);
         }
 
-        public static Font PageTitleFont { get { return FontOf(13F, FontStyle.Bold); } }
-        public static Font SectionTitleFont { get { return FontOf(10F, FontStyle.Bold); } }
-        public static Font BodyFont { get { return FontOf(9.5F); } }
-        public static Font CaptionFont { get { return FontOf(8.5F); } }
-        public static Font ButtonFont { get { return FontOf(9F); } }
-        public static Font NavigationFont { get { return FontOf(10F); } }
+        public static Font WindowTitleFont { get { return FontOf(13F, FontStyle.Bold); } }
+        public static Font PageTitleFont { get { return FontOf(16F, FontStyle.Bold); } }
+        public static Font DialogTitleFont { get { return FontOf(12F, FontStyle.Bold); } }
+        public static Font SectionTitleFont { get { return FontOf(10.5F, FontStyle.Bold); } }
+        public static Font NavigationFont { get { return FontOf(10.5F); } }
+        public static Font BodyFont { get { return FontOf(10F); } }
+        public static Font CaptionFont { get { return FontOf(9F); } }
+        public static Font ButtonFont { get { return FontOf(9.5F); } }
 
         private static string ResolveFamily(string[] candidates)
         {

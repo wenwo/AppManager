@@ -263,16 +263,16 @@ namespace AppManager.Controls
 
             // 页面标题
             using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "设置", Theme.FontOf(16F, FontStyle.Bold), tb, headerRect);
+                Draw.DrawStringLeft(g, "设置", Theme.PageTitleFont, tb, headerRect);
 
             // 分组标题与卡片
-            using (SolidBrush lb = new SolidBrush(Theme.TextTertiary))
+            using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
             {
                 for (int i = 0; i < sections.Count; i++)
                 {
                     Section s = sections[i];
-                Draw.DrawStringLeft(g, s.Title, Theme.CaptionFont, lb, s.LabelRect);
-                Draw.DrawShadow(g, s.CardRect, CardRadius, 0.18f);
+                    Draw.DrawStringLeft(g, s.Title, Theme.SectionTitleFont, lb, s.LabelRect);
+                    Draw.DrawShadow(g, s.CardRect, CardRadius, 0.18f);
                     using (SolidBrush cb = new SolidBrush(Theme.Card))
                         Draw.FillRoundedRect(g, cb, s.CardRect, CardRadius);
                 }

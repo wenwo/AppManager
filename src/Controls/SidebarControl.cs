@@ -156,7 +156,7 @@ namespace AppManager.Controls
             for (int i = 0; i < 2; i++)
             {
                 Rectangle r = new Rectangle(segRect.X + i * segW, segRect.Y, segW, segRect.Height);
-                Color tc = (i == (int)mode) ? Theme.Accent : Theme.TextSecondary;
+                Color tc = (i == (int)mode) ? Theme.AccentText : Theme.TextSecondary;
                 using (SolidBrush br = new SolidBrush(tc))
                     Draw.DrawStringCenter(g, labels[i], Font, br, r);
             }
@@ -213,13 +213,13 @@ namespace AppManager.Controls
                     Draw.FillRoundedRect(g, b, footRect, 8);
             }
             using (SolidBrush plus = new SolidBrush(Theme.Accent))
-            using (SolidBrush txt = new SolidBrush(Theme.Accent))
+            using (SolidBrush txt = new SolidBrush(Theme.AccentText))
             {
                 // 加号图标
                 int cx = footRect.X + 18, cy = footRect.Y + footRect.Height / 2;
                 g.FillRectangle(plus, cx - 1, cy - 6, 2, 12);
                 g.FillRectangle(plus, cx - 6, cy - 1, 12, 2);
-                Draw.DrawStringLeft(g, "新建分类", Theme.FontOf(11F), txt,
+                Draw.DrawStringLeft(g, "新建分类", Theme.ButtonFont, txt,
                     new Rectangle(footRect.X + 34, footRect.Y, footRect.Width - 40, footRect.Height));
             }
         }
@@ -250,9 +250,9 @@ namespace AppManager.Controls
                 using (Pen p = new Pen(Theme.Accent, 2))
                     Draw.DrawRoundedRect(g, p, r, 6);
             }
-            Color tc = it.Active ? Theme.Accent : Theme.TextPrimary;
+            Color tc = it.Active ? Theme.AccentText : Theme.TextPrimary;
             using (SolidBrush br = new SolidBrush(tc))
-                Draw.DrawStringLeft(g, it.Text, it.Active ? Theme.SectionTitleFont : Font, br,
+                Draw.DrawStringLeft(g, it.Text, Font, br,
                     new Rectangle(r.X + 12, r.Y, r.Width - 16, r.Height));
         }
 

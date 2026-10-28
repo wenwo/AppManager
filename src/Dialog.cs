@@ -70,7 +70,7 @@ namespace AppManager
             StartPosition = FormStartPosition.Manual;
             BackColor = Theme.MenuBg;
             DoubleBuffered = true;
-            font = Theme.FontOf(9F);
+            font = Theme.BodyFont;
             int h = 8;
             for (int i = 0; i < items.Count; i++)
                 h += items[i].Separator ? 9 : ItemH;
@@ -143,7 +143,7 @@ namespace AppManager
                 bool hasSub = !it.Disabled && it.SubItems != null && it.SubItems.Count > 0;
                 bool hasCheck = it.Checked;
                 // iOS 上下文菜单：悬停浅灰高亮，文字保持深色（选中态不反白）
-                Color tc = it.Disabled ? Theme.TextSecondary : Theme.TextPrimary;
+                Color tc = it.Disabled ? Theme.TextTertiary : Theme.TextPrimary;
                 // 勾选态在左侧预留 checkmark 占位，文字整体右移
                 int leftPad = PadX + (hasCheck ? 18 : 0);
                 int tw = r.Width - leftPad - PadX - (hasSub ? ArrowW : 0);
@@ -421,9 +421,9 @@ namespace AppManager
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.FontOf(11F, FontStyle.Bold), tb, new Rectangle(22, 18, f.Width - 44, 28));
+                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(22, 18, f.Width - 44, 28));
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, message, Theme.FontOf(9.5F), mb, new Rectangle(22, 54, f.Width - 44, 50));
+                    Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(22, 54, f.Width - 44, 50));
             };
             RoundButton ok = MakeBtn("确定", true);
             ok.Bounds = new Rectangle(f.Width / 2 - 130, 124, 120, 32);
@@ -549,9 +549,9 @@ namespace AppManager
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.FontOf(11F, FontStyle.Bold), tb, new Rectangle(22, 16, f.Width - 44, 26));
+                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(22, 16, f.Width - 44, 26));
                 using (SolidBrush mb = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(g, prompt, Theme.FontOf(9.5F), mb, new Rectangle(22, 50, f.Width - 44, 22));
+                    Draw.DrawStringLeft(g, prompt, Theme.BodyFont, mb, new Rectangle(22, 50, f.Width - 44, 22));
             };
             TextBox box = MakeField(f, new Rectangle(22, 80, f.ClientSize.Width - 44, 36), defaultValue);
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
@@ -582,7 +582,7 @@ namespace AppManager
         {
             TextBox box = new TextBox();
             box.BorderStyle = BorderStyle.None;
-            box.Font = Theme.FontOf(10F);
+            box.Font = Theme.BodyFont;
             box.ForeColor = Theme.TextPrimary;
             box.BackColor = Theme.SearchBg;
             if (!string.IsNullOrEmpty(value)) box.Text = value;
@@ -641,12 +641,12 @@ namespace AppManager
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.FontOf(11F, FontStyle.Bold), tb,
+                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb,
                         new Rectangle(22, 16, f.Width - 44, 26));
                 using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
                 {
-                    Draw.DrawStringLeft(g, "名称", Theme.FontOf(9F), lb, new Rectangle(22, 50, 120, 20));
-                    Draw.DrawStringLeft(g, "简介", Theme.FontOf(9F), lb, new Rectangle(22, 114, 120, 20));
+                    Draw.DrawStringLeft(g, "名称", Theme.CaptionFont, lb, new Rectangle(22, 50, 120, 20));
+                    Draw.DrawStringLeft(g, "简介", Theme.CaptionFont, lb, new Rectangle(22, 114, 120, 20));
                 }
             };
 
@@ -656,7 +656,7 @@ namespace AppManager
             TextBox descBox = new TextBox();
             descBox.Multiline = true;
             descBox.BorderStyle = BorderStyle.None;
-            descBox.Font = Theme.FontOf(9.5F);
+            descBox.Font = Theme.BodyFont;
             descBox.ForeColor = Theme.TextPrimary;
             descBox.BackColor = Theme.SearchBg;
             descBox.ScrollBars = ScrollBars.Vertical;
@@ -771,7 +771,7 @@ namespace AppManager
                 using (SolidBrush b = new SolidBrush(Theme.Card))
                     Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
                 using (SolidBrush b = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(g, "属性", Theme.FontOf(9F), b, new Rectangle(Pad, 14, DlgW - Pad * 2, 20));
+                    Draw.DrawStringLeft(g, "属性", Theme.CaptionFont, b, new Rectangle(Pad, 14, DlgW - Pad * 2, 20));
 
                 // 预览：照片用缩略图铺满圆角方块，其余类型居中绘制文件图标
                 Rectangle pv = new Rectangle(Pad, 46, PreviewW, PreviewW);
@@ -789,7 +789,7 @@ namespace AppManager
                 }
 
                 using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, app.DisplayName(), Theme.FontOf(11F, FontStyle.Bold), nb,
+                    Draw.DrawStringLeft(g, app.DisplayName(), Theme.DialogTitleFont, nb,
                         new Rectangle(rightX, 46, rightW, 24));
 
                 for (int i = 0; i < rows.Count; i++)
@@ -797,9 +797,9 @@ namespace AppManager
                     Rectangle lr = new Rectangle(rightX, 82 + i * RowH, LabelW, RowH);
                     Rectangle vr = new Rectangle(lr.Right + 8, lr.Y, rightW - LabelW - 8, RowH);
                     using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
-                        Draw.DrawStringLeft(g, rows[i][0], Theme.FontOf(9F), lb, lr);
+                        Draw.DrawStringLeft(g, rows[i][0], Theme.CaptionFont, lb, lr);
                     using (SolidBrush vb = new SolidBrush(Theme.TextPrimary))
-                        Draw.DrawStringLeft(g, rows[i][1], Theme.FontOf(9.5F), vb, vr);
+                        Draw.DrawStringLeft(g, rows[i][1], Theme.BodyFont, vb, vr);
                 }
             };
 

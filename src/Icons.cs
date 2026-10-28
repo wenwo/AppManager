@@ -73,6 +73,9 @@ namespace AppManager
         private static readonly object CacheLock = new object();
         private static readonly Dictionary<string, Bitmap> Cache =
             new Dictionary<string, Bitmap>(StringComparer.Ordinal);
+        // 封面基础键 → 当前完整缓存键：UI 只查内存映射，文件时间戳由后台加载时刷新。
+        private static readonly Dictionary<string, string> CoverCacheKeys =
+            new Dictionary<string, string>(StringComparer.Ordinal);
         private const int CacheCap = 2000;
 
         /// <summary>缓存键：涵盖影响提取结果的全部字段（含 Name，用于占位图首字母区分），并追加图标来源时间戳。</summary>
@@ -152,6 +155,7 @@ namespace AppManager
                 {
                     foreach (Bitmap v in Cache.Values) { try { v.Dispose(); } catch { } }
                     Cache.Clear();
+                    CoverCacheKeys.Clear();
                 }
                 Cache[key] = bmp;
                 return SafeClone(bmp);
@@ -316,33 +320,70 @@ namespace AppManager
         /// </summary>
         public static Bitmap LoadCoverThumb(string path, int width, int height, float focusX, float focusY)
         {
+            bool cacheHit;
+            return LoadCoverThumb(path, width, height, focusX, focusY, out cacheHit);
+        }
+
+        /// <summary>后台加载并校验文件时间戳；cacheHit=true 表示内容未变化，调用方无需再刷新 UI。</summary>
+        public static Bitmap LoadCoverThumb(string path, int width, int height, float focusX, float focusY, out bool cacheHit)
+        {
+            cacheHit = false;
             if (string.IsNullOrEmpty(path) || width <= 0 || height <= 0) return null;
             focusX = FocusClamp(focusX);
             focusY = FocusClamp(focusY);
+            string baseKey = CoverBaseKey(path, width, height, focusX, focusY);
             StringBuilder stamp = new StringBuilder(64);
             AppendFileStamp(stamp, path);
-            string key = "C" + width + "x" + height
-                + "f" + (int)Math.Round(focusX * 100) + "x" + (int)Math.Round(focusY * 100)
-                + "|" + path + "|" + stamp;
+            string key = baseKey + stamp;
             Bitmap hit = CacheTakeClone(key);
-            if (hit != null) return hit;
-            return CacheStore(key, TryLoadCoverThumbCore(path, width, height, focusX, focusY));
+            if (hit != null)
+            {
+                cacheHit = true;
+                RememberCoverCacheKey(baseKey, key);
+                return hit;
+            }
+            Bitmap loaded = CacheStore(key, TryLoadCoverThumbCore(path, width, height, focusX, focusY));
+            if (loaded != null) RememberCoverCacheKey(baseKey, key);
+            else ForgetCoverCacheKey(baseKey, key);
+            return loaded;
+        }
+
+        private static string CoverBaseKey(string path, int width, int height, float focusX, float focusY)
+        {
+            return "C" + width + "x" + height
+                + "f" + (int)Math.Round(focusX * 100) + "x" + (int)Math.Round(focusY * 100)
+                + "|" + path + "|";
+        }
+
+        private static void RememberCoverCacheKey(string baseKey, string key)
+        {
+            lock (CacheLock) CoverCacheKeys[baseKey] = key;
+        }
+
+        private static void ForgetCoverCacheKey(string baseKey, string key)
+        {
+            lock (CacheLock)
+            {
+                string current;
+                if (CoverCacheKeys.TryGetValue(baseKey, out current) && current == key)
+                    CoverCacheKeys.Remove(baseKey);
+            }
         }
 
         /// <summary>
-        /// 只查缓存不解码：与 LoadCoverThumb 相同的键规则，命中返回副本，未命中返回 null。
-        /// 供 UI 线程判断封面是否已就绪；未就绪时由调用方走后台解码，避免在绘制路径同步解码原图。
+        /// 只查内存缓存，不读盘也不解码；后台 LoadCoverThumb 会校验时间戳并更新映射。
         /// </summary>
         public static Bitmap TryGetCachedCoverThumb(string path, int width, int height, float focusX, float focusY)
         {
             if (string.IsNullOrEmpty(path) || width <= 0 || height <= 0) return null;
             focusX = FocusClamp(focusX);
             focusY = FocusClamp(focusY);
-            StringBuilder stamp = new StringBuilder(64);
-            AppendFileStamp(stamp, path);
-            string key = "C" + width + "x" + height
-                + "f" + (int)Math.Round(focusX * 100) + "x" + (int)Math.Round(focusY * 100)
-                + "|" + path + "|" + stamp;
+            string baseKey = CoverBaseKey(path, width, height, focusX, focusY);
+            string key;
+            lock (CacheLock)
+            {
+                if (!CoverCacheKeys.TryGetValue(baseKey, out key)) return null;
+            }
             return CacheTakeClone(key);
         }
 

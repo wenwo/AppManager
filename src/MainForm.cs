@@ -74,7 +74,7 @@ namespace AppManager
         private string lastSoftwareCategory = "常用";
         private bool _ready = false;
         private int categoryTotal = 0;
-        private int iconGen = 0;        // 图标加载代号：换列表即自增，使旧加载任务自动失效
+        private volatile int iconGen = 0;   // 图标加载代号：换列表即自增，使旧加载任务自动失效
         private int refreshPending = 0; // 图标重绘合并标志，0=无待处理请求
         private System.Windows.Forms.Timer iconFlushTimer;               // 图标局部刷新合并定时器（80ms）
         private readonly List<AppInfo> iconDirty = new List<AppInfo>();  // 待局部刷新的图标条目
@@ -151,7 +151,7 @@ namespace AppManager
             ClientSize = new Size(1080, 680);
             BackColor = Theme.Background;
             DoubleBuffered = true;
-            Font = Theme.FontOf(9F);
+            Font = Theme.BodyFont;
             Text = "应用中心";
             AllowDrop = true;   // 窗体空白区（顶栏等）也接受外部拖入
         }
@@ -455,6 +455,7 @@ namespace AppManager
             grid.MoveIntoFolder += OnGridMoveIntoFolder;
             grid.BlankRightClicked += OnGridBlankRightClicked;
             grid.SortRequested += OnGridSortRequested;   // 列表表头点击排序（名称/大小/时间）
+            grid.MetadataReady += OnGridMetadataReady;
             Controls.Add(grid);
 
             // 列表栏位表头：盖在网格顶部的固定条（独立 HWND 不参与滚动），根治滚动时列名晃动/穿模
@@ -527,7 +528,6 @@ namespace AppManager
             countLabel.AutoSize = false;
             countLabel.BackColor = Color.Transparent;
             countLabel.Font = Theme.CaptionFont;
-            countLabel.ForeColor = Theme.TextTertiary;
             countLabel.ForeColor = Theme.TextSecondary;
             countLabel.TextAlign = ContentAlignment.MiddleRight;
             Controls.Add(countLabel);
@@ -628,7 +628,7 @@ namespace AppManager
             loadingLabel = new Label();
             loadingLabel.AutoSize = false;
             loadingLabel.BackColor = Theme.Background;
-            loadingLabel.Font = Theme.FontOf(11F);
+            loadingLabel.Font = Theme.BodyFont;
             loadingLabel.ForeColor = Theme.TextSecondary;
             loadingLabel.TextAlign = ContentAlignment.MiddleCenter;
             loadingLabel.Text = "正在扫描应用…";
@@ -653,7 +653,7 @@ namespace AppManager
             statusDetail.AutoSize = false;
             statusDetail.BackColor = Color.Transparent;
             statusDetail.Font = Theme.CaptionFont;
-            statusDetail.ForeColor = Theme.TextTertiary;
+            statusDetail.ForeColor = Theme.TextSecondary;
             statusDetail.TextAlign = ContentAlignment.MiddleLeft;
             statusBar.Controls.Add(statusDetail);
 
@@ -997,7 +997,7 @@ namespace AppManager
             if (website)
             {
                 lastSoftwareCategory = currentCategory;
-                OnSidebarSelect("全部资源");
+                OnSidebarSelect("照片");   // 默认聚焦单一分类，避免进入资源即加载全部条目
                 return;
             }
             // 切回软件模式：恢复上次选中的软件分类，已不存在时回退「常用」
@@ -1171,9 +1171,13 @@ namespace AppManager
         /// </summary>
         private void SwapApps(List<AppInfo> newList)
         {
-            iconGen++;
-            lock (iconQueued) iconQueued.Clear();
-            DisposeIcons(allApps);
+            lock (iconQueued)
+            {
+                iconGen++;
+                iconQueued.Clear();
+                DisposeIcons(allApps);   // 与后台图标赋值同锁，避免销毁后回写及位图泄漏
+            }
+            grid.ClearMetadataCache();
             allApps = newList ?? new List<AppInfo>();
         }
 
@@ -1202,9 +1206,18 @@ namespace AppManager
             int gen = iconGen;
             bool loadGrid = grid.GridMode;
             List<AppInfo> pending = new List<AppInfo>();
+            List<AppInfo> ordered = grid.GetAppsVisibleFirst();
+            // 集合内容/搜索视图只显示部分成员，但集合侧栏其他封面仍需异步取得成员图标。
+            if (contentMode == SidebarControl.ContentMode.Website && CanShowCollectionSidebar)
+            {
+                List<AppInfo> coverPool = VisibleResourcePool(currentCategory);
+                HashSet<AppInfo> included = new HashSet<AppInfo>(ordered);
+                for (int i = 0; i < coverPool.Count; i++)
+                    if (included.Add(coverPool[i])) ordered.Add(coverPool[i]);
+            }
             lock (iconQueued)
             {
-                foreach (AppInfo app in shownApps)
+                foreach (AppInfo app in ordered)
                 {
                     Tuple<AppInfo, bool> request = Tuple.Create(app, loadGrid);
                     if (app == null || iconQueued.Contains(request)) continue;
@@ -1226,18 +1239,24 @@ namespace AppManager
                         Bitmap bmp = null;
                         try { bmp = Icons.Extract(a, Theme.IconSize); }
                         catch { bmp = null; }
-                        if (gen != iconGen) { if (bmp != null) bmp.Dispose(); return; }
-                        a.Icon = bmp;
-                        changed = true;
+                        lock (iconQueued)
+                        {
+                            if (gen != iconGen) { if (bmp != null) bmp.Dispose(); return; }
+                            if (a.Icon == null) { a.Icon = bmp; bmp = null; changed = true; }
+                        }
+                        if (bmp != null) bmp.Dispose();   // 并发现已填好时丢弃重复结果
                     }
                     if (!loadGrid && a.SmallIcon == null)
                     {
                         Bitmap sm = null;
                         try { sm = Icons.ExtractSmall(a, Theme.ListIconSize); }
                         catch { sm = null; }
-                        if (gen != iconGen) { if (sm != null) sm.Dispose(); return; }
-                        a.SmallIcon = sm;
-                        changed = true;
+                        lock (iconQueued)
+                        {
+                            if (gen != iconGen) { if (sm != null) sm.Dispose(); return; }
+                            if (a.SmallIcon == null) { a.SmallIcon = sm; sm = null; changed = true; }
+                        }
+                        if (sm != null) sm.Dispose();
                     }
                     if (changed) RequestIconRefresh(a);   // 按条目登记局部刷新，不再每张图标整网格重绘
                 }
@@ -1293,6 +1312,8 @@ namespace AppManager
             List<AppInfo> batch;
             lock (iconDirty) { batch = new List<AppInfo>(iconDirty); iconDirty.Clear(); }
             for (int i = 0; i < batch.Count; i++) grid.InvalidateItem(batch[i]);
+            // 非图片集合封面复用已异步加载的文件图标，图标到位后只重建当前集合 UI。
+            if (collectionSidebar != null && collectionSidebar.Visible) UpdateCollectionUi();
         }
 
         /// <summary>后台线程回 UI 的安全入口：窗口已销毁/句柄未创建时静默丢弃，避免关闭路径抛异常。</summary>
@@ -1314,6 +1335,8 @@ namespace AppManager
         /// <summary>刷新列表；keepViewers=true 时保留打开中的图片/视频查看器（自动收录的静默重扫不打断播放）。</summary>
         private void RefreshGrid(bool keepViewers)
         {
+            // 目录/过滤条件变化后，旧图标任务不再回写当前列表；与后台赋值同锁。
+            lock (iconQueued) { iconGen++; iconQueued.Clear(); }
             cachedVisiblePool = null;   // 列表内容即将重建，资源池缓存同步失效
             if (!keepViewers)
             {
@@ -1372,11 +1395,11 @@ namespace AppManager
 
             if (listSortColumn != null) SortShown(shown, listSortColumn, listSortAsc);
             shownApps = shown;
-            StartIconLoad();
             // 行内第二个按钮：进入集合后为「移除」（仅从集合移出），分类/全部资源/搜索下为「删除」
             grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website && kw.Length == 0
                 && currentCollection != null) ? "移除" : "删除";
             grid.SetApps(shown);
+            StartIconLoad();
             // 拖动排序仅在可排序分类的软件模式、非搜索态开放
             grid.AllowReorder = kw.Length == 0
                 && contentMode == SidebarControl.ContentMode.Software
@@ -1768,55 +1791,42 @@ namespace AppManager
             RefreshGrid(true);
         }
 
-        /// <summary>按表头列排序当前展示列表（名称/大小/时间）；大小与时间按路径缓存，一次排序每路径只读一次盘。</summary>
-        private static void SortShown(List<AppInfo> list, string column, bool asc)
+        /// <summary>当前列表元数据就绪后补应用大小/时间排序，避免排序比较器同步读盘。</summary>
+        private void OnGridMetadataReady()
         {
-            Dictionary<string, long> sizes = column == "size" ? new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase) : null;
-            Dictionary<string, DateTime> times = column == "time" ? new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase) : null;
+            if (listSortColumn != "size" && listSortColumn != "time") return;
+            RefreshGrid(true);
+        }
+
+        /// <summary>
+        /// 按表头列排序当前展示列表。名称可立即排序；大小/时间仅在全部缓存就绪后排序，
+        /// 未就绪时先保留默认顺序，后台完成后由 MetadataReady 触发一次统一重排。
+        /// </summary>
+        private void SortShown(List<AppInfo> list, string column, bool asc)
+        {
+            Dictionary<AppInfo, long> sizes = column == "size" ? new Dictionary<AppInfo, long>() : null;
+            Dictionary<AppInfo, DateTime> times = column == "time" ? new Dictionary<AppInfo, DateTime>() : null;
+            if (sizes != null || times != null)
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    long size;
+                    DateTime date;
+                    if (!grid.TryGetSortValues(list[i], out size, out date)) return;
+                    if (sizes != null) sizes[list[i]] = size;
+                    else times[list[i]] = date;
+                }
+            }
             list.Sort(delegate(AppInfo x, AppInfo y)
             {
                 int r;
                 if (column == "name") r = string.Compare(x.DisplayName(), y.DisplayName(), StringComparison.CurrentCultureIgnoreCase);
-                else if (column == "size") r = MetaSize(sizes, x).CompareTo(MetaSize(sizes, y));
-                else r = MetaTime(times, x).CompareTo(MetaTime(times, y));
+                else if (column == "size") r = sizes[x].CompareTo(sizes[y]);
+                else r = times[x].CompareTo(times[y]);
                 if (!asc) r = -r;
                 if (r == 0) r = string.Compare(x.DisplayName(), y.DisplayName(), StringComparison.CurrentCultureIgnoreCase);
                 return r;
             });
-        }
-
-        /// <summary>排序用文件大小：无路径/目录/读取失败记 -1（恒小于任何实际文件大小）。</summary>
-        private static long MetaSize(Dictionary<string, long> cache, AppInfo a)
-        {
-            string p = a == null ? null : a.TargetPath;
-            if (string.IsNullOrEmpty(p)) return -1;
-            long v;
-            if (cache.TryGetValue(p, out v)) return v;
-            v = -1;
-            try { if (File.Exists(p)) v = new FileInfo(p).Length; }
-            catch { }
-            cache[p] = v;
-            return v;
-        }
-
-        /// <summary>排序用修改时间（与列表「时间」列同口径）：读取失败记 DateTime.MinValue。</summary>
-        private static DateTime MetaTime(Dictionary<string, DateTime> cache, AppInfo a)
-        {
-            string p = a == null ? null : a.TargetPath;
-            if (string.IsNullOrEmpty(p)) return DateTime.MinValue;
-            DateTime v;
-            if (cache.TryGetValue(p, out v)) return v;
-            v = DateTime.MinValue;
-            try
-            {
-                // 媒体文件优先用拍摄时间（与列表时间列同口径），失败回退修改时间
-                DateTime taken;
-                if (MediaInfo.TryGetTakenDate(p, out taken)) v = taken;
-                else if (File.Exists(p) || Directory.Exists(p)) v = File.GetLastWriteTime(p);
-            }
-            catch { }
-            cache[p] = v;
-            return v;
         }
 
         /// <summary>统计当前可见应用总数（用于搜索态计数显示）。</summary>
@@ -2103,8 +2113,10 @@ namespace AppManager
                 for (int j = 0; j < pool.Count; j++)
                 {
                     if (!IsInExtraCategory(pool[j], it.Key)) continue;
-                    if (first == null) first = pool[j];   // 兜底：无图片成员时用首个成员版式化
-                    if (IsImageMember(pool[j])) { firstImage = pool[j]; break; }   // 取首个图片成员作自适应封面
+                    if (first == null) first = pool[j];   // 兜底：无可用图片成员时用首个成员版式化
+                    if (IsImageMember(pool[j]) && !IsCoverFailed(pool[j].TargetPath,
+                        CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize))
+                    { firstImage = pool[j]; break; }   // 跳过已损坏图片，尝试后续成员
                 }
                 it.Cover = BuildCover(c, firstImage ?? first, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize);
                 list.Add(it);
@@ -2154,19 +2166,19 @@ namespace AppManager
                 count++;
                 if (first == null) first = a;
                 if (!IsImageMember(a)) continue;
-                if (firstImage == null) firstImage = a;
+                if (firstImage == null && !IsCoverFailed(a.TargetPath,
+                    CollectionInfoCoverW, CollectionInfoCoverH)) firstImage = a;
                 if (imagePaths.Count < 60) imagePaths.Add(a.TargetPath);
             }
             return firstImage ?? first;
         }
 
-        /// <summary>条目是否可作为图片封面（有效路径 + 图片扩展名 + 文件存在）。</summary>
+        /// <summary>条目是否可作为图片封面；文件有效性由后台解码校验，UI 线程不探测磁盘。</summary>
         private static bool IsImageMember(AppInfo a)
         {
             return a != null
                 && !string.IsNullOrEmpty(a.TargetPath)
-                && MediaRules.IsImage(a.TargetPath)
-                && File.Exists(a.TargetPath);
+                && MediaRules.IsImage(a.TargetPath);
         }
 
         /// <summary>
@@ -2176,35 +2188,46 @@ namespace AppManager
         /// </summary>
         private Bitmap BuildCover(ResourceCollection c, AppInfo first, int width, int height)
         {
-            if (!string.IsNullOrEmpty(c.Cover))
+            if (!string.IsNullOrEmpty(c.Cover) && !IsCoverFailed(c.Cover, width, height))
             {
-                // 自定义封面只取缓存：未命中时登记后台解码，UI 线程不再同步解码原图
+                // UI 只取内存缓存；后台即使命中也校验时间戳，内容变化后自动更新。
                 Bitmap custom = Icons.TryGetCachedCoverThumb(c.Cover, width, height, c.CoverFocusX, c.CoverFocusY);
-                if (custom != null) return custom;
                 QueueCoverBuild(c.Cover, width, height, c.CoverFocusX, c.CoverFocusY);
+                if (custom != null) return custom;
+                return null;   // 自定义封面加载中保持优先；明确失败后才回退成员封面
             }
             if (first == null || string.IsNullOrEmpty(first.TargetPath)) return null;
-            // 图片成员：只取缓存的裁剪缩略图（与封面区等比例，无留白），未命中后台补齐
-            Bitmap photo = Icons.TryGetCachedCoverThumb(first.TargetPath, width, height, c.CoverFocusX, c.CoverFocusY);
-            if (photo != null) return photo;
-            QueueCoverBuild(first.TargetPath, width, height, c.CoverFocusX, c.CoverFocusY);
-            // 非图片成员（文档/压缩包等）：取文件图标居中版式化，避免在封面区露出方形缩略图留白
-            Bitmap icon = null;
-            try { icon = Icons.Extract(first, 64); }
-            catch { icon = null; }
-            if (icon == null) return null;
-            try { return ComposeIconCover(icon, width, height); }
-            finally { icon.Dispose(); }
+            if (MediaRules.IsImage(first.TargetPath) && !IsCoverFailed(first.TargetPath, width, height))
+            {
+                Bitmap photo = Icons.TryGetCachedCoverThumb(first.TargetPath, width, height, c.CoverFocusX, c.CoverFocusY);
+                QueueCoverBuild(first.TargetPath, width, height, c.CoverFocusX, c.CoverFocusY);
+                if (photo != null) return photo;
+                return null;
+            }
+            // 非图片成员复用图标后台加载结果；尚未到位时显示占位，绝不在此同步调用 Icons.Extract。
+            Bitmap icon = first.Icon ?? first.SmallIcon;
+            return icon == null ? null : ComposeIconCover(icon, width, height);
         }
 
         /// <summary>
         /// 后台补齐封面缩略图缓存：解码完成后触发集合 UI 重建（此时缓存命中，封面即刻显示）。
         /// 进行中/已失败（本会话内）不重复排队；失败仅进程级去重，文件修复后下次启动可再试。
         /// </summary>
+        private static string CoverRequestKey(string path, int width, int height)
+        {
+            return path + "|" + width + "x" + height;
+        }
+
+        private bool IsCoverFailed(string path, int width, int height)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            lock (coverPending) return coverFailed.Contains(CoverRequestKey(path, width, height));
+        }
+
         private void QueueCoverBuild(string path, int width, int height, float focusX, float focusY)
         {
             if (string.IsNullOrEmpty(path)) return;
-            string key = path + "|" + width + "x" + height;
+            string key = CoverRequestKey(path, width, height);
             lock (coverPending)
             {
                 if (coverPending.Contains(key) || coverFailed.Contains(key)) return;
@@ -2213,18 +2236,17 @@ namespace AppManager
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Bitmap bmp = null;
-                try { bmp = Icons.LoadCoverThumb(path, width, height, focusX, focusY); }   // 结果已写入模块缓存
+                bool cacheHit = false;
+                try { bmp = Icons.LoadCoverThumb(path, width, height, focusX, focusY, out cacheHit); }
                 catch { bmp = null; }
                 lock (coverPending)
                 {
                     coverPending.Remove(key);
                     if (bmp == null) coverFailed.Add(key);
                 }
-                if (bmp != null)
-                {
-                    bmp.Dispose();   // 缓存持有独立副本，这里只为预热解码
-                    RunOnUi((Action)delegate { UpdateCollectionUi(); });
-                }
+                if (bmp != null) bmp.Dispose();   // 缓存持有独立副本，这里只为后台校验/解码
+                // 命中未变化无需刷新；首次完成、文件变化或失败回退时重建集合 UI。
+                if (!cacheHit) RunOnUi((Action)delegate { UpdateCollectionUi(); });
             });
         }
 
@@ -2477,9 +2499,10 @@ namespace AppManager
             int count;
             List<string> images;
             AppInfo first = CollectionSummary(currentCollection, out count, out images);
-            if (images.Count > 0)
+            if (first != null && IsImageMember(first)
+                && !IsCoverFailed(first.TargetPath, CollectionInfoCoverW, CollectionInfoCoverH))
             {
-                collectionInfo.SetEditCoverPath(string.Empty, images[0]);
+                collectionInfo.SetEditCoverPath(string.Empty, first.TargetPath);
                 return;
             }
             ResourceCollection auto = new ResourceCollection();
@@ -3468,7 +3491,7 @@ namespace AppManager
 
             Label title = new Label();
             title.Text = "选择要添加的软件";
-            title.Font = Theme.FontOf(12F, FontStyle.Bold);
+            title.Font = Theme.DialogTitleFont;
             title.ForeColor = Theme.TextPrimary;
             title.Location = new Point(20, 16);
             title.AutoSize = true;
@@ -3476,7 +3499,7 @@ namespace AppManager
 
             Label hint = new Label();
             hint.Text = "已收录的应用（可多选）：";
-            hint.Font = Theme.FontOf(9F);
+            hint.Font = Theme.CaptionFont;
             hint.ForeColor = Theme.TextSecondary;
             hint.Location = new Point(20, 48);
             hint.AutoSize = true;
@@ -3486,7 +3509,7 @@ namespace AppManager
             list.BorderStyle = BorderStyle.None;
             list.BackColor = Theme.Card;
             list.ForeColor = Theme.TextPrimary;
-            list.Font = Theme.FontOf(9.5F);
+            list.Font = Theme.BodyFont;
             list.CheckOnClick = true;
             list.Location = new Point(20, 74);
             list.Size = new Size(440, 420);
@@ -4226,7 +4249,7 @@ namespace AppManager
 
                 Label title = new Label();
                 title.Text = "桌面备份清单";
-                title.Font = Theme.FontOf(13F, FontStyle.Bold);
+                title.Font = Theme.DialogTitleFont;
                 title.ForeColor = Theme.TextPrimary;
                 title.BackColor = Color.Transparent;
                 title.Location = new Point(24, 18);
@@ -4235,7 +4258,7 @@ namespace AppManager
 
                 Label desc = new Label();
                 desc.Text = "选择一项后可单独还原或移除；「还原」对搬家项移回桌面、对副本项清理备份副本。";
-                desc.Font = Theme.FontOf(9F);
+                desc.Font = Theme.CaptionFont;
                 desc.ForeColor = Theme.TextSecondary;
                 desc.BackColor = Color.Transparent;
                 desc.Location = new Point(24, 48);
@@ -4244,7 +4267,7 @@ namespace AppManager
 
                 ListBox list = new ListBox();
                 list.BorderStyle = BorderStyle.None;
-                list.Font = Theme.FontOf(9.5F);
+                list.Font = Theme.BodyFont;
                 list.BackColor = Color.White;
                 list.IntegralHeight = false;
                 list.Location = new Point(24, 78);
@@ -4522,7 +4545,7 @@ namespace AppManager
 
                 Label title = new Label();
                 title.Text = "存储位置设置";
-                title.Font = Theme.FontOf(13F, FontStyle.Bold);
+                title.Font = Theme.DialogTitleFont;
                 title.ForeColor = Theme.TextPrimary;
                 title.BackColor = Color.Transparent;
                 title.Location = new Point(24, 20);
@@ -4531,7 +4554,7 @@ namespace AppManager
 
                 Label desc = new Label();
                 desc.Text = "拖入分类的文件夹与文件，实体均移动到以下位置（原文件不再保留）。";
-                desc.Font = Theme.FontOf(9F);
+                desc.Font = Theme.CaptionFont;
                 desc.ForeColor = Theme.TextSecondary;
                 desc.BackColor = Color.Transparent;
                 desc.Location = new Point(24, 48);
@@ -4582,7 +4605,7 @@ namespace AppManager
         {
             Label lb = new Label();
             lb.Text = label;
-            lb.Font = Theme.FontOf(9.5F);
+            lb.Font = Theme.BodyFont;
             lb.ForeColor = Theme.TextSecondary;
             lb.BackColor = Color.Transparent;
             lb.Location = new Point(24, y);
@@ -4606,7 +4629,7 @@ namespace AppManager
             f.Controls.Add(fieldBg);
 
             TextBox box = new TextBox();
-            box.Font = Theme.FontOf(9.5F);
+            box.Font = Theme.BodyFont;
             box.BorderStyle = BorderStyle.None;
             box.BackColor = Color.White;
             box.Text = value;
@@ -4678,7 +4701,7 @@ namespace AppManager
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // 标题：顶栏行1（标题行）
             using (SolidBrush br = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "应用中心", Theme.FontOf(12F, FontStyle.Bold), br, new Rectangle(Theme.SidebarWidth + 16, 0, 128, Theme.TitleRowHeight));
+                Draw.DrawStringLeft(g, "应用中心", Theme.WindowTitleFont, br, new Rectangle(Theme.SidebarWidth + 16, 0, 128, Theme.TitleRowHeight));
 
             // ===== 内容区底部留白：与左右侧栏底部按钮栏同高，并显示当前集合名称与数量 =====
             Rectangle footer = ContentFooterRect();
@@ -4697,7 +4720,7 @@ namespace AppManager
                 g.DrawLine(p, footer.X + 14, footer.Y, footer.Right - 14, footer.Y);
             using (SolidBrush tb = new SolidBrush(Theme.TextSecondary))
                 Draw.DrawStringLeft(g, name + " · " + shownApps.Count + " 项",
-                    Theme.FontOf(9F), tb,
+                    Theme.CaptionFont, tb,
                     new Rectangle(footer.X + 16, footer.Y, footer.Width - 32, footer.Height));
         }
 

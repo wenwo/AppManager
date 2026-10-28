@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Threading;
 using System.Windows.Forms;
 using AppManager;
 
@@ -33,11 +34,11 @@ namespace AppManager.Controls
         private readonly SolidBrush textBrush = new SolidBrush(Theme.TextPrimary);
         private readonly SolidBrush subTextBrush = new SolidBrush(Theme.TextSecondary);
         private readonly SolidBrush favoriteBrush = new SolidBrush(Theme.Accent);
-        private readonly SolidBrush actionBlueBrush = new SolidBrush(Theme.Accent);
+        private readonly SolidBrush actionBlueBrush = new SolidBrush(Theme.AccentText);
         private readonly SolidBrush actionRedBrush = new SolidBrush(Theme.DeleteRed);
         private Font subFont;
         private Font actionFont;
-        private Font headerFont;   // 列表表头字体（略加粗，与数据行区分）
+        private Font headerFont;   // 列表表头字体（与辅助信息同级，避免过度加粗）
         private GraphicsPath gridItemPath;   // 网格卡片路径（原点，尺寸固定）
         private readonly Pen accentPen = new Pen(Theme.Accent, 2f);
         private readonly SolidBrush chipBrush = new SolidBrush(Theme.ChipBg);   // 分类分段底色
@@ -46,8 +47,10 @@ namespace AppManager.Controls
         private readonly Pen cardBorderPen = new Pen(Theme.Separator);
         private readonly StringFormat pathFormat = CreatePathFormat();   // 路径列：中间省略
         private readonly StringFormat tipFormat = CreateTipFormat();      // 悬浮信息卡：仅按 \n 换行，超宽省略
-        private readonly Dictionary<string, ListMeta> metaCache = new Dictionary<string, ListMeta>(StringComparer.OrdinalIgnoreCase);   // 大小/时间列缓存（一次读盘取两项）
-        private static readonly ListMeta EmptyMeta = new ListMeta();   // 非文件条目共用，避免每次重绘分配
+        private readonly Dictionary<string, ListMeta> metaCache = new Dictionary<string, ListMeta>(StringComparer.OrdinalIgnoreCase);   // 大小/时间列缓存（跨目录复用）
+        private readonly object metaSync = new object();
+        private volatile MetaLoadBatch metaBatch;
+        private static readonly ListMeta EmptyMeta = new ListMeta();   // 非文件条目/尚未加载共用，避免每次重绘分配
         private int locTextMaxW = -1;   // 位置列文本最大宽度（按当前 apps 缓存，重绘不再重复测量）
         private string sortColumn;      // 表头排序列（null=默认顺序）；仅绘制指示箭头，排序由主窗体执行
         private bool sortAsc = true;
@@ -91,7 +94,14 @@ namespace AppManager.Controls
         public bool GridMode
         {
             get { return grid; }
-            set { grid = value; UpdateScroll(); Invalidate(); }
+            set
+            {
+                if (grid == value) return;
+                grid = value;
+                UpdateScroll();
+                StartMetaLoad();
+                Invalidate();
+            }
         }
 
         public event Action<AppInfo> LaunchRequested;
@@ -129,6 +139,8 @@ namespace AppManager.Controls
 
         /// <summary>列表表头点击排序请求：参数为列名（name/size/time），由主窗体决定排序语义并重刷。</summary>
         public event Action<string> SortRequested;
+        /// <summary>当前列表的大小/时间元数据全部就绪，供主窗体补应用异步排序。</summary>
+        public event Action MetadataReady;
 
         /// <summary>是否接受外部文件/文件夹拖入（由外部按当前分类是否可编辑设置）。</summary>
         public bool AllowExternalDrop { get; set; }
@@ -171,13 +183,21 @@ namespace AppManager.Controls
         // 自绘悬浮信息卡（替代系统 ToolTip，风格统一）
         private string tipText = string.Empty;
         private bool tipVisible;
-        private readonly Timer tipTimer = new Timer { Interval = 450 };
+        private readonly System.Windows.Forms.Timer tipTimer = new System.Windows.Forms.Timer { Interval = 450 };
 
-        /// <summary>列表「大小/时间」列缓存项：同一文件的长度与创建时间一次读取，重绘不再重复读盘。</summary>
+        /// <summary>列表「大小/时间」列缓存项：显示文本与排序值一次读取，重绘不再读盘。</summary>
         private sealed class ListMeta
         {
             public string Size = "—";
             public string Date = "—";
+            public long SizeValue = -1;
+            public DateTime DateValue = DateTime.MinValue;
+        }
+
+        /// <summary>一批目录元数据加载任务；切换目录后以新批次替换，旧批次结果直接作废。</summary>
+        private sealed class MetaLoadBatch
+        {
+            public readonly List<AppInfo> Pending = new List<AppInfo>();
         }
 
         public AppGridControl()
@@ -192,7 +212,7 @@ namespace AppManager.Controls
             DoubleBuffered = true;
             subFont = Theme.CaptionFont;
             actionFont = Theme.ButtonFont;
-            headerFont = Theme.FontOf(8.5F, FontStyle.Bold);
+            headerFont = Theme.CaptionFont;
             tipTimer.Tick += delegate { tipVisible = true; tipTimer.Stop(); Invalidate(); };
             AllowDrop = true;   // 接受外部文件/文件夹拖入（是否放行由 AllowExternalDrop 决定）
         }
@@ -201,6 +221,7 @@ namespace AppManager.Controls
         {
             if (disposing)
             {
+                metaBatch = null;
                 cardBrush.Dispose();
                 hoverBrush.Dispose();
                 rowHoverBrush.Dispose();
@@ -267,12 +288,55 @@ namespace AppManager.Controls
                 string k = apps[i].DisplayKey();
                 if (!string.IsNullOrEmpty(k) && oldKeys.Contains(k)) { selected.Add(i); selectAnchor = i; }
             }
-            metaCache.Clear();
             locTextMaxW = -1;
             catTextMaxW = -1;
             actionReserveMax = -1;
             UpdateScroll();
+            StartMetaLoad();
             Invalidate();
+        }
+
+        /// <summary>当前条目按“可视区域优先、其余随后”排列，供图标与元数据加载共用。</summary>
+        public List<AppInfo> GetAppsVisibleFirst()
+        {
+            List<AppInfo> ordered = new List<AppInfo>(apps.Count);
+            if (apps.Count == 0) return ordered;
+            bool[] visible = new bool[apps.Count];
+            Rectangle viewport = new Rectangle(-AutoScrollPosition.X, -AutoScrollPosition.Y,
+                ClientSize.Width, ClientSize.Height);
+            for (int i = 0; i < apps.Count; i++)
+            {
+                Rectangle r = grid ? GridRect(i) : ListRowRect(i);
+                if (!r.IntersectsWith(viewport)) continue;
+                visible[i] = true;
+                ordered.Add(apps[i]);
+            }
+            for (int i = 0; i < apps.Count; i++)
+                if (!visible[i]) ordered.Add(apps[i]);
+            return ordered;
+        }
+
+        /// <summary>重扫后清空元数据缓存；普通目录切换保留缓存，避免重复读盘。</summary>
+        public void ClearMetadataCache()
+        {
+            metaBatch = null;
+            lock (metaSync) { metaCache.Clear(); }
+        }
+
+        /// <summary>只读缓存的排序值；未就绪返回 false，调用方不得回退到同步读盘。</summary>
+        public bool TryGetSortValues(AppInfo a, out long size, out DateTime date)
+        {
+            size = -1;
+            date = DateTime.MinValue;
+            if (a == null || !a.IsFile || string.IsNullOrEmpty(a.TargetPath)) return true;
+            ListMeta meta;
+            lock (metaSync)
+            {
+                if (!metaCache.TryGetValue(a.TargetPath, out meta)) return false;
+            }
+            size = meta.SizeValue;
+            date = meta.DateValue;
+            return true;
         }
 
         public void RefreshIcons()
@@ -569,7 +633,7 @@ namespace AppManager.Controls
         private void PaintEmptyState(Graphics g)
         {
             using (SolidBrush br = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringCenter(g, "暂无内容", Theme.FontOf(11F), br,
+                Draw.DrawStringCenter(g, "暂无内容", Theme.BodyFont, br,
                     new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
         }
 
@@ -848,41 +912,98 @@ namespace AppManager.Controls
             return MetaOf(a).Date;
         }
 
-        /// <summary>
-        /// 取条目「大小/时间」两项显示值：同一路径只读一次文件信息并缓存，
-        /// 列表重绘与两列共用同一份结果，避免逐行逐列重复读盘。
-        /// </summary>
+        /// <summary>绘制路径只查缓存；未就绪显示占位符，绝不因重绘同步读盘或解码媒体。</summary>
         private ListMeta MetaOf(AppInfo a)
         {
-            if (a == null || !a.IsFile) return EmptyMeta;
-            string path = a.TargetPath;
+            if (a == null || !a.IsFile || string.IsNullOrEmpty(a.TargetPath)) return EmptyMeta;
             ListMeta meta;
-            if (!string.IsNullOrEmpty(path) && metaCache.TryGetValue(path, out meta)) return meta;
-
-            meta = new ListMeta();
-            if (a.IsFolder) meta.Size = "文件夹";
-            if (!string.IsNullOrEmpty(path))
+            lock (metaSync)
             {
-                try
+                return metaCache.TryGetValue(a.TargetPath, out meta) ? meta : EmptyMeta;
+            }
+        }
+
+        /// <summary>后台补齐当前列表元数据：可视条目优先，单线程顺序读盘，旧目录批次自动失效。</summary>
+        private void StartMetaLoad()
+        {
+            MetaLoadBatch batch = new MetaLoadBatch();
+            bool needed = !grid || sortColumn == "size" || sortColumn == "time";
+            if (needed)
+            {
+                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                List<AppInfo> ordered = GetAppsVisibleFirst();
+                for (int i = 0; i < ordered.Count; i++)
                 {
-                    if (a.IsFolder)
+                    AppInfo a = ordered[i];
+                    if (a == null || !a.IsFile || string.IsNullOrEmpty(a.TargetPath) || !seen.Add(a.TargetPath)) continue;
+                    lock (metaSync) { if (metaCache.ContainsKey(a.TargetPath)) continue; }
+                    batch.Pending.Add(a);
+                }
+            }
+            metaBatch = batch.Pending.Count > 0 ? batch : null;
+            if (metaBatch == null) return;
+
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                for (int i = 0; i < batch.Pending.Count; i++)
+                {
+                    if (!ReferenceEquals(metaBatch, batch)) return;
+                    AppInfo a = batch.Pending[i];
+                    ListMeta meta = ReadMeta(a);
+                    if (!ReferenceEquals(metaBatch, batch)) return;
+                    lock (metaSync)
                     {
-                        if (Directory.Exists(path))
-                            meta.Date = Directory.GetLastWriteTime(path).ToString("yyyy-MM-dd");
+                        if (!ReferenceEquals(metaBatch, batch)) return;
+                        metaCache[a.TargetPath] = meta;
                     }
-                    else if (File.Exists(path))
+
+                    bool done = i == batch.Pending.Count - 1;
+                    // 首批逐条渐进显示，后续每 8 项合并一次重绘，避免消息队列被刷屏。
+                    if (i >= 16 && (i & 7) != 7 && !done) continue;
+                    try
                     {
-                        FileInfo fi = new FileInfo(path);
-                        meta.Size = HumanSize(fi.Length);
-                        // 媒体文件优先显示拍摄时间（照片EXIF、视频mvhd），失败回退修改时间
-                        DateTime taken;
-                        DateTime t = MediaInfo.TryGetTakenDate(path, out taken) ? taken : fi.LastWriteTime;
-                        meta.Date = t.ToString("yyyy-MM-dd");
+                        BeginInvoke((Action)delegate
+                        {
+                            if (IsDisposed || !ReferenceEquals(metaBatch, batch)) return;
+                            Invalidate();
+                            if (!done) return;
+                            metaBatch = null;
+                            Action h = MetadataReady;
+                            if (h != null) h();
+                        });
+                    }
+                    catch { return; }
+                }
+            });
+        }
+
+        /// <summary>仅在线程池调用：读取单个文件/目录的大小与时间，并生成排序缓存值。</summary>
+        private static ListMeta ReadMeta(AppInfo a)
+        {
+            ListMeta meta = new ListMeta();
+            string path = a.TargetPath;
+            try
+            {
+                if (a.IsFolder)
+                {
+                    meta.Size = "文件夹";
+                    if (Directory.Exists(path))
+                    {
+                        meta.DateValue = Directory.GetLastWriteTime(path);
+                        meta.Date = meta.DateValue.ToString("yyyy-MM-dd");
                     }
                 }
-                catch { }
-                metaCache[path] = meta;
+                else if (File.Exists(path))
+                {
+                    FileInfo fi = new FileInfo(path);
+                    meta.SizeValue = fi.Length;
+                    meta.Size = HumanSize(fi.Length);
+                    DateTime taken;
+                    meta.DateValue = MediaInfo.TryGetTakenDate(path, out taken) ? taken : fi.LastWriteTime;
+                    meta.Date = meta.DateValue.ToString("yyyy-MM-dd");
+                }
             }
+            catch { }
             return meta;
         }
 

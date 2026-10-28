@@ -491,7 +491,7 @@ namespace AppManager.Controls
                 if (image == null)
                 {
                     using (SolidBrush b = new SolidBrush(TextDim))
-                        Draw.DrawStringCenter(g, loadFailed ? "无法加载此图片" : "正在加载…", Theme.FontOf(10F), b, canvasRect);
+                        Draw.DrawStringCenter(g, loadFailed ? "无法加载此图片" : "正在加载…", Theme.BodyFont, b, canvasRect);
                     return;
                 }
                 GraphicsState st = g.Save();
@@ -520,7 +520,7 @@ namespace AppManager.Controls
                 g.DrawLine(pen, cx - 3, cy, cx + 3, cy + 5);
             }
             Rectangle textR = new Rectangle(backRect.X + 24, backRect.Y, backRect.Width - 24, backRect.Height);
-            TextRenderer.DrawText(g, "返回", Theme.FontOf(9.5F), textR, Theme.TextPrimary,
+            TextRenderer.DrawText(g, "返回", Theme.ButtonFont, textR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
         }
 
@@ -539,11 +539,11 @@ namespace AppManager.Controls
                 Math.Max(0, countR.Left - 12 - (infoBarRect.X + pad)), infoBarRect.Height);
 
             string name = paths.Count > 0 && index < paths.Count ? Path.GetFileName(paths[index]) : string.Empty;
-            TextRenderer.DrawText(g, name, Theme.FontOf(9.5F), nameR, Theme.TextPrimary,
+            TextRenderer.DrawText(g, name, Theme.BodyFont, nameR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
                 | TextFormatFlags.SingleLine);
             string count = (index + 1) + " / " + paths.Count;
-            TextRenderer.DrawText(g, count, Theme.FontOf(9F), countR, Theme.TextSecondary,
+            TextRenderer.DrawText(g, count, Theme.CaptionFont, countR, Theme.TextSecondary,
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
@@ -599,7 +599,7 @@ namespace AppManager.Controls
         {
             DrawPillButtonBg(g, 2, zoomLabelRect);
             string text = Math.Round(DisplayScale * 100F) + "%";
-            TextRenderer.DrawText(g, text, Theme.FontOf(9F), zoomLabelRect, TextWhite,
+            TextRenderer.DrawText(g, text, Theme.CaptionFont, zoomLabelRect, TextWhite,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
 

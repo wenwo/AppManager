@@ -605,7 +605,7 @@ namespace AppManager.Controls
                 Draw.FillRoundedRect(g, b, videoCardRect, VideoRadius);
             if (!loadFailed) return;
             using (SolidBrush b = new SolidBrush(TextDim))
-                Draw.DrawStringCenter(g, failText, Theme.FontOf(10F), b, videoCardRect);
+                Draw.DrawStringCenter(g, failText, Theme.BodyFont, b, videoCardRect);
         }
 
         private void DrawTopBar(Graphics g)
@@ -622,13 +622,13 @@ namespace AppManager.Controls
                 g.DrawLine(pen, cx - 3, cy, cx + 3, cy + 5);
             }
             Rectangle textR = new Rectangle(backRect.X + 24, backRect.Y, backRect.Width - 24, backRect.Height);
-            TextRenderer.DrawText(g, "返回", Theme.FontOf(9.5F), textR, Theme.TextPrimary,
+            TextRenderer.DrawText(g, "返回", Theme.ButtonFont, textR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
 
             // 音量提示：原悬浮条上方的提示条会被视频宿主窗口遮挡，改在顶栏右侧短暂显示
             if (!muted && DateTime.UtcNow >= volUntil) return;
             string hint = muted ? "已静音" : "音量 " + volume + "%";
-            TextRenderer.DrawText(g, hint, Theme.FontOf(9F), hintRect, Theme.TextSecondary,
+            TextRenderer.DrawText(g, hint, Theme.CaptionFont, hintRect, Theme.TextSecondary,
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
@@ -647,11 +647,11 @@ namespace AppManager.Controls
                 Math.Max(0, countR.Left - 12 - (infoBarRect.X + pad)), infoBarRect.Height);
 
             string name = paths.Count > 0 && index < paths.Count ? Path.GetFileName(paths[index]) : string.Empty;
-            TextRenderer.DrawText(g, name, Theme.FontOf(9.5F), nameR, Theme.TextPrimary,
+            TextRenderer.DrawText(g, name, Theme.BodyFont, nameR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
                 | TextFormatFlags.SingleLine);
             string count = (index + 1) + " / " + paths.Count;
-            TextRenderer.DrawText(g, count, Theme.FontOf(9F), countR, Theme.TextSecondary,
+            TextRenderer.DrawText(g, count, Theme.CaptionFont, countR, Theme.TextSecondary,
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
@@ -799,7 +799,7 @@ namespace AppManager.Controls
         private void DrawTime(Graphics g)
         {
             string text = FmtTime(position) + " / " + FmtTime(duration);
-            TextRenderer.DrawText(g, text, Theme.FontOf(9F), timeRect, TextWhite,
+            TextRenderer.DrawText(g, text, Theme.CaptionFont, timeRect, TextWhite,
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
         }
 

@@ -52,7 +52,7 @@ namespace AppManager.Controls
         private readonly SolidBrush hoverBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
         private readonly SolidBrush cardBrush = new SolidBrush(Theme.Card);
         private readonly SolidBrush textBrush = new SolidBrush(Theme.TextPrimary);
-        private readonly SolidBrush accentBrush = new SolidBrush(Theme.Accent);
+        private readonly SolidBrush accentBrush = new SolidBrush(Theme.AccentText);
         private readonly SolidBrush subBrush = new SolidBrush(Theme.TextSecondary);
         private readonly SolidBrush chipBrush = new SolidBrush(Theme.ChipBg);
         private readonly Pen dropPen = new Pen(Theme.Accent, 2f);
@@ -293,7 +293,7 @@ namespace AppManager.Controls
             g.Clear(Theme.SidebarBg);
 
             // 标题 + 右侧/底部分隔线：表头文字与列表表头、左侧首个分类垂直居中于同一水平线
-            Draw.DrawStringLeft(g, "集合", Theme.FontOf(9F), subBrush,
+            Draw.DrawStringLeft(g, "集合", Theme.CaptionFont, subBrush,
                 new Rectangle(PadX + 4, 0, ClientSize.Width - PadX * 2, HeaderH));
             using (Pen sep = new Pen(Theme.Separator, 1))
             {
@@ -346,7 +346,7 @@ namespace AppManager.Controls
             }
 
             Rectangle textRect = new Rectangle(cover.Right + CoverGap, r.Y, r.Right - cover.Right - CoverGap - 8, r.Height);
-            Draw.DrawStringLeft(g, item.Name, active ? Theme.SectionTitleFont : Theme.BodyFont,
+            Draw.DrawStringLeft(g, item.Name, Theme.NavigationFont,
                 active ? accentBrush : textBrush, textRect);
         }
 
@@ -425,7 +425,7 @@ namespace AppManager.Controls
             int cx = footRect.X + 16, cy = footRect.Y + footRect.Height / 2;
             g.FillRectangle(accentBrush, cx - 1, cy - 6, 2, 12);
             g.FillRectangle(accentBrush, cx - 6, cy - 1, 12, 2);
-            Draw.DrawStringLeft(g, "新建集合", Theme.FontOf(10.5F), accentBrush,
+            Draw.DrawStringLeft(g, "新建集合", Theme.ButtonFont, accentBrush,
                 new Rectangle(footRect.X + 32, footRect.Y, footRect.Width - 36, footRect.Height));
         }
 

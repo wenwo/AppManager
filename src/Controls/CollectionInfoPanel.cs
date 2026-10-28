@@ -517,7 +517,7 @@ namespace AppManager.Controls
             namePanel = MakeFieldPanel();
             nameBox = new TextBox();
             nameBox.BorderStyle = BorderStyle.None;
-            nameBox.Font = Theme.FontOf(9.5F);
+            nameBox.Font = Theme.BodyFont;
             nameBox.ForeColor = Theme.TextPrimary;
             nameBox.BackColor = Theme.SearchBg;
             nameBox.Location = new Point(10, 6);
@@ -537,7 +537,7 @@ namespace AppManager.Controls
             descBox.Multiline = true;
             descBox.BorderStyle = BorderStyle.None;
             descBox.ScrollBars = ScrollBars.Vertical;
-            descBox.Font = Theme.FontOf(9.5F);
+            descBox.Font = Theme.BodyFont;
             descBox.ForeColor = Theme.TextPrimary;
             descBox.BackColor = Theme.SearchBg;
             descBox.Location = new Point(10, 8);
@@ -848,16 +848,16 @@ namespace AppManager.Controls
 
             // 封面在左、文字在右，两侧各自在列内居中
             using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringCenter(g, name, Theme.FontOf(16F, FontStyle.Bold), nb, nameDisplayRect);
+                Draw.DrawStringCenter(g, name, Theme.PageTitleFont, nb, nameDisplayRect);
 
             string desc = description.Length == 0 ? "暂无简介" : description;
-            TextRenderer.DrawText(g, desc, Theme.FontOf(9.5F), descDisplayRect, Theme.TextSecondary,
+            TextRenderer.DrawText(g, desc, Theme.BodyFont, descDisplayRect, Theme.TextSecondary,
                 TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter | TextFormatFlags.Top
                 | TextFormatFlags.EndEllipsis);
 
             string meta = (parent.Length == 0 ? string.Empty : parent + " · ") + count + " 项资源";
             using (SolidBrush sb = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringCenter(g, meta, Theme.FontOf(9F), sb, metaDisplayRect);
+                Draw.DrawStringCenter(g, meta, Theme.CaptionFont, sb, metaDisplayRect);
 
             DrawButton(g, btnEnterRect, "进入", true, 1, true);
             DrawButton(g, btnEditRect, "编辑", false, 2, true);
@@ -899,7 +899,7 @@ namespace AppManager.Controls
             PaintPageArrow(g, btnNextPageRect, true, thumbPage < pages - 1);
             string pageText = (thumbPage + 1) + " / " + pages;
             using (SolidBrush pb = new SolidBrush(pages > 1 ? Theme.TextSecondary : Theme.Separator))
-                Draw.DrawStringCenter(g, pageText, Theme.FontOf(8.5F), pb,
+                Draw.DrawStringCenter(g, pageText, Theme.CaptionFont, pb,
                     new Rectangle(btnPrevPageRect.Right, pickerCaptionY,
                         btnNextPageRect.Left - btnPrevPageRect.Right, 20));
 
@@ -992,7 +992,7 @@ namespace AppManager.Controls
         private static void PaintCaption(Graphics g, string text, Rectangle r)
         {
             using (SolidBrush b = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringLeft(g, text, Theme.FontOf(8.5F), b, r);
+                Draw.DrawStringLeft(g, text, Theme.CaptionFont, b, r);
         }
 
         /// <summary>统一按钮绘制：主按钮强调色实底，次按钮白底描边 + 强调色文字。</summary>
@@ -1017,9 +1017,9 @@ namespace AppManager.Controls
                 using (Pen p = new Pen(Theme.Separator, 1F))
                     Draw.DrawRoundedRect(g, p, r, 10);
             }
-            Color tc = primary ? Color.White : (enabled ? Theme.Accent : Theme.TextSecondary);
+            Color tc = primary ? Color.White : (enabled ? Theme.AccentText : Theme.TextTertiary);
             using (SolidBrush tb = new SolidBrush(tc))
-                Draw.DrawStringCenter(g, text, Theme.FontOf(9.5F), tb, r);
+                Draw.DrawStringCenter(g, text, Theme.ButtonFont, tb, r);
         }
 
         /// <summary>等比裁剪填满封面（居中裁剪，类似 CSS cover）。</summary>
