@@ -790,6 +790,9 @@ namespace AppManager
             miniMusic.ExpandRequested += ExpandMiniMusicPlayer;
             miniMusic.ToggleRequested += delegate { if (musicPlayer.Visible) musicPlayer.ToggleFromMiniPlayer(); };
             miniMusic.TrackStepRequested += delegate(int step) { if (musicPlayer.Visible) musicPlayer.StepFromMiniPlayer(step); };
+            miniMusic.SeekRequested += delegate(double seconds) { if (musicPlayer.Visible) musicPlayer.SeekFromMiniPlayer(seconds); };
+            miniMusic.VolumeRequested += delegate(int volume) { if (musicPlayer.Visible) musicPlayer.SetVolumeFromMiniPlayer(volume); };
+            miniMusic.MuteRequested += delegate { if (musicPlayer.Visible) musicPlayer.ToggleMuteFromMiniPlayer(); };
             miniMusic.PlaybackStarting += delegate { HideVideoPlayer(); HideMusicPlayer(); };
             Controls.Add(miniMusic);
 
@@ -959,7 +962,6 @@ namespace AppManager
 
             // 行2（工具行）：搜索靠左；操作按钮自右缘向左排布，与行1右缘对齐
             search.Location = new Point(sb + Dpi(16), row1 + (row2 - Dpi(34)) / 2);
-            search.Size = new Size(Dpi(240), Dpi(34));
 
             // 先更新切换文案，再依其实际宽度定位，避免文案切换后宽度变化导致错位
             UpdateToggleLabel();
@@ -969,10 +971,14 @@ namespace AppManager
             toggleLabel.Location = new Point(clusterLeft - toggleLabel.PreferredWidth - Dpi(10), row1 + (row2 - toggleLabel.Height) / 2);
             viewToggle.Location = new Point(toggleLabel.Left - viewToggle.Width - Dpi(6), row1 + (row2 - viewToggle.Height) / 2);
 
+            int contentWidth = Math.Max(0, ClientSize.Width - sb);
+            int searchAvailable = Math.Max(0, viewToggle.Left - Dpi(12 + 68) - search.Left);
+            int searchWidth = Math.Max(Dpi(200), Math.Min(Dpi(420), (int)(contentWidth * 0.24)));
+            search.Size = new Size(Math.Min(searchWidth, searchAvailable), Dpi(34));
             int miniLeft = search.Right + Dpi(12);
             int countRight = viewToggle.Left - Dpi(12);
             int miniAvailable = Math.Max(0, countRight - miniLeft - Dpi(68));
-            int miniWidth = Math.Min((int)((ClientSize.Width - sb) * 0.42), miniAvailable);
+            int miniWidth = Math.Min(Dpi(640), Math.Min((int)(contentWidth * 0.40), miniAvailable));
             miniMusic.Location = new Point(miniLeft, row1 + (row2 - Dpi(34)) / 2);
             miniMusic.Size = new Size(miniWidth, Dpi(34));
             miniMusic.Visible = !settingsOpen && miniWidth >= Dpi(190);
@@ -3274,7 +3280,8 @@ namespace AppManager
 
         private void SyncMiniMusicState(string songPath, bool playing)
         {
-            if (musicPlayer.Visible) miniMusic.SyncExternalState(songPath, playing);
+            if (musicPlayer.Visible) miniMusic.SyncExternalState(songPath, playing,
+                musicPlayer.Position, musicPlayer.Duration, musicPlayer.Volume, musicPlayer.Muted);
         }
 
         private void ExpandMiniMusicPlayer(int songIndex)
@@ -5022,7 +5029,7 @@ namespace AppManager
             sidebar.Visible = show;
             grid.Visible = show;
             search.Visible = show;
-            miniMusic.Visible = show && miniMusic.Width >= 190;
+            miniMusic.Visible = show && miniMusic.Width >= Dpi(190);
             countLabel.Visible = show;
             organizeBtn.Visible = show;
             viewToggle.Visible = show;

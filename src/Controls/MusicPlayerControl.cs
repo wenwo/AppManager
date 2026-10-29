@@ -53,6 +53,21 @@ namespace AppManager.Controls
 
         public void ToggleFromMiniPlayer() { TogglePlay(); }
 
+        public double Position { get { return position; } }
+        public double Duration { get { return duration; } }
+        public int Volume { get { return volume; } }
+        public bool Muted { get { return muted; } }
+
+        public void SeekFromMiniPlayer(double seconds) { SeekTo(seconds); NotifyPlaybackState(); }
+        public void SetVolumeFromMiniPlayer(int value) { SetVolume(value); }
+        public void ToggleMuteFromMiniPlayer()
+        {
+            muted = !muted;
+            if (engine != null) engine.SetMute(muted);
+            NotifyPlaybackState();
+            Invalidate();
+        }
+
         public void StepFromMiniPlayer(int step)
         {
             if (step > 0) PlayNext(false);
@@ -303,6 +318,7 @@ namespace AppManager.Controls
             volume = Math.Max(0, Math.Min(100, value));
             if (volume > 0) muted = false;
             if (engine != null) { engine.SetVolume(volume); engine.SetMute(muted); }
+            NotifyPlaybackState();
             Invalidate();
         }
 
@@ -735,7 +751,7 @@ namespace AppManager.Controls
             else if (action == 2) TogglePlay();
             else if (action == 3) RequestClose();
             else if (action == 4) PlayNext(false);
-            else if (action == 5) { muted = !muted; if (engine != null) engine.SetMute(muted); Invalidate(); }
+            else if (action == 5) ToggleMuteFromMiniPlayer();
             else if (action == 6 || action == 7) { queueVisible = action == 7; EnsureQueueCurrentVisible(); Invalidate(); }
         }
 
