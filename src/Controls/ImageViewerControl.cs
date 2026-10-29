@@ -52,13 +52,18 @@ namespace AppManager.Controls
         private static readonly Color CanvasBg = Color.FromArgb(20, 20, 22);   // 画布内部黑底
         private static readonly Color TextWhite = Color.White;
         private static readonly Color TextDim = Color.FromArgb(160, 255, 255, 255);
-        private const int TopBarH = 44;
-        private const int PillBtnW = 44;
-        private const int PillH = 40;
-        private const int ChromePad = 16;       // 画布与内容区之间的留白
-        private const int CardGap = 12;         // 画布 / 工具条 / 信息栏之间的间距
-        private const int InfoBarH = 44;        // 底部信息栏高度（与侧边栏底栏一致）
-        private const int CanvasRadius = 14;    // 画布圆角
+        private int TopBarH { get { return Dpi(44); } }
+        private int PillBtnW { get { return Dpi(44); } }
+        private int PillH { get { return Dpi(40); } }
+        private int ChromePad { get { return Dpi(16); } }       // 画布与内容区之间的留白
+        private int CardGap { get { return Dpi(12); } }         // 画布 / 工具条 / 信息栏之间的间距
+        private int InfoBarH { get { return Dpi(44); } }        // 底部信息栏高度（与侧边栏底栏一致）
+        private int CanvasRadius { get { return Dpi(14); } }    // 画布圆角
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
 
         public ImageViewerControl()
         {
@@ -127,7 +132,7 @@ namespace AppManager.Controls
                 {
                     BeginInvoke((Action)delegate
                     {
-                        if (seq != loadSeq) { if (decoded != null) decoded.Dispose(); return; }
+                        if (IsDisposed || Disposing || seq != loadSeq) { if (decoded != null) decoded.Dispose(); return; }
                         if (decoded == null) loadFailed = true;
                         else image = decoded;
                         RecomputeFit();

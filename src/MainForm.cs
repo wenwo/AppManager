@@ -15,7 +15,7 @@ namespace AppManager
     /// 主窗体：无边框圆角 iOS 风格；侧栏 + 双行顶栏(行1 标题+窗口按钮，行2 搜索/视图/整理) + 主内容区(网格/列表)。
     /// 集成扫描、图标加载、分类过滤、自绘右键菜单、快捷中心收纳/还原、配置持久化。
     /// </summary>
-    public class MainForm : Form, IMessageFilter
+    public class MainForm : DpiAwareForm, IMessageFilter
     {
         /// <summary>「快捷中心」分类名：常驻侧栏、可添加/拖放、按规则入库。</summary>
         private const string QuickCenter = "快捷中心";
@@ -166,8 +166,9 @@ namespace AppManager
             LayoutControls();
             BuildTray();
             StartAutoScan();
+            InitializeDpiScaling();
             _ready = true;
-            MinimumSize = new Size(960, 560);
+            MinimumSize = new Size(Dpi(960), Dpi(560));
             UpdateRegion();
             RebuildSidebar();
             // 先展示上次扫描的磁盘缓存（启动即有内容可看），随后统一走后台异步扫描补最新结果；
@@ -243,7 +244,7 @@ namespace AppManager
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             base.OnFormClosing(e);
-            if (!exiting && config.CloseToTray && e.CloseReason == CloseReason.UserClosing)
+            if (!exiting && _ready && tray != null && config.CloseToTray && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
                 HideToTray();
@@ -359,9 +360,10 @@ namespace AppManager
         /// <summary>隐藏窗口到托盘（任务栏按钮随之消失），首次提示一次。</summary>
         private void HideToTray()
         {
-            HideVideoPlayer();   // 窗体隐藏不触发子控件 VisibleChanged，先收起播放器，避免托盘后台继续出声
-            HideMusicPlayer();
-            miniMusic.Stop();
+            if (!_ready) { Hide(); return; }
+            if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer();   // 窗体隐藏不触发子控件 VisibleChanged，先收起播放器，避免托盘后台继续出声
+            if (musicPlayer != null && !musicPlayer.IsDisposed) HideMusicPlayer();
+            if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.Stop();
             if (WindowState != FormWindowState.Minimized) preTrayWindowState = WindowState;   // 记录最大化等状态
             Hide();
             if (!trayTipShown && tray != null)
@@ -692,17 +694,17 @@ namespace AppManager
 
         private void LayoutControls()
         {
-            int top = Theme.TopBarHeight;
-            int row1 = Theme.TitleRowHeight;    // 行1：标题 + 窗口按钮
-            int row2 = Theme.ToolbarRowHeight;  // 行2：搜索/计数 + 视图切换 + 操作按钮
-            int sb = sidebar.CurrentWidth;
-            int statusH = 34;
+            int top = Dpi(Theme.TopBarHeight);
+            int row1 = Dpi(Theme.TitleRowHeight);    // 行1：标题 + 窗口按钮
+            int row2 = Dpi(Theme.ToolbarRowHeight);  // 行2：搜索/计数 + 视图切换 + 操作按钮
+            int sb = Dpi(sidebar.CurrentWidth);
+            int statusH = Dpi(34);
 
             sidebar.Location = new Point(0, 0);
             sidebar.Size = new Size(sb, ClientSize.Height);
 
             // 行1（标题行）：标题由 OnPaint 绘制；图标按钮贴右上角，等宽无间隔
-            int rx = ClientSize.Width - 16;
+            int rx = ClientSize.Width - Dpi(16);
             closeBtn.Location = new Point(rx - closeBtn.Width, (row1 - closeBtn.Height) / 2);
             maxBtn.Location = new Point(closeBtn.Left - maxBtn.Width, (row1 - maxBtn.Height) / 2);
             minBtn.Location = new Point(maxBtn.Left - minBtn.Width, (row1 - minBtn.Height) / 2);
@@ -711,25 +713,25 @@ namespace AppManager
             maxBtn.Kind = WindowState == FormWindowState.Maximized ? IconKind.Restore : IconKind.Maximize;
 
             // 行2（工具行）：搜索靠左；操作按钮自右缘向左排布，与行1右缘对齐
-            search.Location = new Point(sb + 16, row1 + (row2 - 34) / 2);
-            search.Size = new Size(240, 34);
+            search.Location = new Point(sb + Dpi(16), row1 + (row2 - Dpi(34)) / 2);
+            search.Size = new Size(Dpi(240), Dpi(34));
 
             // 先更新切换文案，再依其实际宽度定位，避免文案切换后宽度变化导致错位
             UpdateToggleLabel();
             organizeBtn.Location = new Point(rx - organizeBtn.Width, row1 + (row2 - organizeBtn.Height) / 2);
-            addBtn.Location = new Point(organizeBtn.Left - addBtn.Width - 10, row1 + (row2 - addBtn.Height) / 2);
+            addBtn.Location = new Point(organizeBtn.Left - addBtn.Width - Dpi(10), row1 + (row2 - addBtn.Height) / 2);
             int clusterLeft = addBtn.Visible ? addBtn.Left : organizeBtn.Left;
-            toggleLabel.Location = new Point(clusterLeft - toggleLabel.PreferredWidth - 10, row1 + (row2 - toggleLabel.Height) / 2);
-            viewToggle.Location = new Point(toggleLabel.Left - viewToggle.Width - 6, row1 + (row2 - viewToggle.Height) / 2);
+            toggleLabel.Location = new Point(clusterLeft - toggleLabel.PreferredWidth - Dpi(10), row1 + (row2 - toggleLabel.Height) / 2);
+            viewToggle.Location = new Point(toggleLabel.Left - viewToggle.Width - Dpi(6), row1 + (row2 - viewToggle.Height) / 2);
 
-            int miniLeft = search.Right + 12;
-            int countRight = viewToggle.Left - 12;
-            int miniAvailable = Math.Max(0, countRight - miniLeft - 68);
+            int miniLeft = search.Right + Dpi(12);
+            int countRight = viewToggle.Left - Dpi(12);
+            int miniAvailable = Math.Max(0, countRight - miniLeft - Dpi(68));
             int miniWidth = Math.Min((int)((ClientSize.Width - sb) * 0.42), miniAvailable);
-            miniMusic.Location = new Point(miniLeft, row1 + (row2 - 34) / 2);
-            miniMusic.Size = new Size(miniWidth, 34);
-            miniMusic.Visible = !settingsOpen && miniWidth >= 190;
-            int countLeft = miniMusic.Visible ? miniMusic.Right + 8 : miniLeft;
+            miniMusic.Location = new Point(miniLeft, row1 + (row2 - Dpi(34)) / 2);
+            miniMusic.Size = new Size(miniWidth, Dpi(34));
+            miniMusic.Visible = !settingsOpen && miniWidth >= Dpi(190);
+            int countLeft = miniMusic.Visible ? miniMusic.Right + Dpi(8) : miniLeft;
             countLabel.Location = new Point(countLeft, row1);
             countLabel.Size = new Size(Math.Max(0, countRight - countLeft), row2);
 
@@ -738,19 +740,19 @@ namespace AppManager
             int colW = 0;
             if (collectionSidebar != null)
             {
-                colW = collectionSidebar.Visible ? collectionSidebar.CurrentWidth : 0;
+                colW = collectionSidebar.Visible ? Dpi(collectionSidebar.CurrentWidth) : 0;
                 collectionSidebar.Location = new Point(sb, top);
                 collectionSidebar.Size = new Size(colW, gridHeight);
             }
             int contentX = sb + colW;
             int contentW = ClientSize.Width - contentX;
             // 列表/网格止于左右侧栏底部按钮栏之上，底部留白与两侧同高；查看器与信息页仍铺满内容区
-            int gridH = Math.Max(0, gridHeight - ContentFooterH);
+            int gridH = Math.Max(0, gridHeight - Dpi(ContentFooterH));
             grid.Location = new Point(contentX, top);
             grid.Size = new Size(contentW, gridH);
             // 表头固定条与网格同宽、贴其顶部（覆盖网格顶部表头死区，不参与滚动）
             headerStrip.Location = grid.Location;
-            headerStrip.Size = new Size(contentW, AppGridControl.ListHeaderH);
+            headerStrip.Size = new Size(contentW, Dpi(AppGridControl.ListHeaderH));
             Point contentLoc = new Point(contentX, top);
             imageViewer.Location = contentLoc;
             imageViewer.Size = new Size(contentW, gridHeight);
@@ -765,18 +767,18 @@ namespace AppManager
             loadingLabel.Size = new Size(contentW, gridHeight);
 
             // 设置页：铺满标题行以下的全部区域（含侧栏与工具行），隐藏时位置保持有效
-            settingsPage.Location = new Point(0, Theme.TitleRowHeight);
-            settingsPage.Size = new Size(ClientSize.Width, Math.Max(0, ClientSize.Height - Theme.TitleRowHeight));
+            settingsPage.Location = new Point(0, Dpi(Theme.TitleRowHeight));
+            settingsPage.Size = new Size(ClientSize.Width, Math.Max(0, ClientSize.Height - Dpi(Theme.TitleRowHeight)));
 
             // 底部状态栏
             statusBar.Location = new Point(sb, ClientSize.Height - statusH);
             statusBar.Size = new Size(ClientSize.Width - sb, statusH);
-            statusLabel.Location = new Point(12, 0);
-            statusLabel.Size = new Size(140, statusH);
-            statusProgress.Location = new Point(160, 8);
-            statusProgress.Size = new Size(180, statusH - 16);
-            statusDetail.Location = new Point(350, 0);
-            statusDetail.Size = new Size(statusBar.Width - 360, statusH);
+            statusLabel.Location = new Point(Dpi(12), 0);
+            statusLabel.Size = new Size(Dpi(140), statusH);
+            statusProgress.Location = new Point(Dpi(160), Dpi(8));
+            statusProgress.Size = new Size(Dpi(180), statusH - Dpi(16));
+            statusDetail.Location = new Point(Dpi(350), 0);
+            statusDetail.Size = new Size(statusBar.Width - Dpi(360), statusH);
 
             // 播放器全屏：视频区铺满客户区（置顶覆盖侧栏与顶栏），其余控件位置不动
             if (playerFullscreen && videoPlayer != null)
@@ -795,10 +797,29 @@ namespace AppManager
         protected override void OnSizeChanged(EventArgs e)
         {
             base.OnSizeChanged(e);
-            if (!_ready) return;
+            if (!_ready || DpiChangeInProgress) return;
             LayoutControls();
             UpdateRegion();
             grid.Invalidate();
+        }
+
+        protected override bool DeferDpiInitialization { get { return true; } }
+
+        protected override void OnDpiScaleChanged()
+        {
+            base.OnDpiScaleChanged();
+            if (!_ready) return;
+            MinimumSize = new Size(Dpi(960), Dpi(560));
+            LayoutControls();
+            lock (iconQueued)
+            {
+                iconGen++;
+                iconQueued.Clear();
+                DisposeIcons(allApps);
+            }
+            if (grid != null) StartIconLoad();
+            UpdateRegion();
+            Invalidate(true);
         }
 
         private void UpdateRegion()
@@ -833,7 +854,7 @@ namespace AppManager
                 }
             }
             catch { }
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 12)); } catch { }
+            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, DpiHelper.Scale(12, DpiHelper.ForControl(f)))); } catch { }
         }
 
         /// <summary>通过 RtlGetVersion 判断是否为 Windows 11（Build ≥ 22000）。</summary>
@@ -1195,6 +1216,7 @@ namespace AppManager
                 {
                     BeginInvoke((Action)delegate
                     {
+                        if (IsDisposed || Disposing) { scanRunning = false; return; }
                         // 换列表与释放旧图标必须在 UI 线程完成，避免与绘制/图标加载竞态
                         scanRunning = false;
                         if (result != null)
@@ -1258,6 +1280,7 @@ namespace AppManager
         {
             int gen = iconGen;
             bool loadGrid = grid.GridMode;
+            int iconSize = Dpi(loadGrid ? Theme.IconSize : Theme.ListIconSize);
             List<AppInfo> pending = new List<AppInfo>();
             List<AppInfo> ordered = grid.GetAppsVisibleFirst();
             // 集合内容/搜索视图只显示部分成员，但集合侧栏其他封面仍需异步取得成员图标。
@@ -1290,7 +1313,7 @@ namespace AppManager
                     if (loadGrid && a.Icon == null)
                     {
                         Bitmap bmp = null;
-                        try { bmp = Icons.Extract(a, Theme.IconSize); }
+                        try { bmp = Icons.Extract(a, iconSize); }
                         catch { bmp = null; }
                         lock (iconQueued)
                         {
@@ -1302,7 +1325,7 @@ namespace AppManager
                     if (!loadGrid && a.SmallIcon == null)
                     {
                         Bitmap sm = null;
-                        try { sm = Icons.ExtractSmall(a, Theme.ListIconSize); }
+                        try { sm = Icons.ExtractSmall(a, iconSize); }
                         catch { sm = null; }
                         lock (iconQueued)
                         {
@@ -1326,6 +1349,7 @@ namespace AppManager
                 BeginInvoke((Action)delegate
                 {
                     Interlocked.Exchange(ref refreshPending, 0);
+                    if (IsDisposed || Disposing || grid == null || grid.IsDisposed) return;
                     grid.RefreshIcons();
                 });
             }
@@ -1346,6 +1370,7 @@ namespace AppManager
                 BeginInvoke((Action)delegate
                 {
                     Interlocked.Exchange(ref refreshPending, 0);
+                    if (IsDisposed || Disposing || grid == null || grid.IsDisposed) return;
                     if (iconFlushTimer == null)
                     {
                         iconFlushTimer = new System.Windows.Forms.Timer { Interval = 80 };
@@ -1362,6 +1387,7 @@ namespace AppManager
         private void FlushIconRefresh()
         {
             if (iconFlushTimer != null) iconFlushTimer.Stop();
+            if (IsDisposed || Disposing || grid == null || grid.IsDisposed) return;
             List<AppInfo> batch;
             lock (iconDirty) { batch = new List<AppInfo>(iconDirty); iconDirty.Clear(); }
             for (int i = 0; i < batch.Count; i++) grid.InvalidateItem(batch[i]);
@@ -1373,7 +1399,13 @@ namespace AppManager
         private void RunOnUi(Action action)
         {
             if (IsDisposed || !IsHandleCreated) return;
-            try { BeginInvoke(action); }
+            try
+            {
+                BeginInvoke((Action)delegate
+                {
+                    if (!IsDisposed && !Disposing) action();
+                });
+            }
             catch (ObjectDisposedException) { }       // 先捕获派生类
             catch (InvalidOperationException) { }     // ObjectDisposedException 的基类
         }
@@ -3028,21 +3060,23 @@ namespace AppManager
 
         private void HideMusicPlayer()
         {
+            if (musicPlayer == null || musicPlayer.IsDisposed) return;
             if (!musicPlayer.Visible) return;
             musicPlayer.Visible = false;
-            miniMusic.ClearExternalState();
+            if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.ClearExternalState();
             SyncContentVisibility();
-            grid.Invalidate();
+            if (grid != null && !grid.IsDisposed) grid.Invalidate();
         }
 
         /// <summary>退出播放器：先恢复全屏状态，再恢复列表展示并停止播放；未打开时为空操作。</summary>
         private void HideVideoPlayer()
         {
+            if (videoPlayer == null || videoPlayer.IsDisposed) return;
             if (!videoPlayer.Visible) return;
             if (playerFullscreen) ExitVideoFullscreen();
             videoPlayer.Visible = false;   // OnVisibleChanged 内自动停止播放
             SyncContentVisibility();
-            grid.Invalidate();
+            if (grid != null && !grid.IsDisposed) grid.Invalidate();
         }
 
         // ===== 视频播放器：全屏 =====
@@ -4084,11 +4118,25 @@ namespace AppManager
 
         private void UpdateStatus(int index, int total, string currentName)
         {
+            if (statusBar == null || statusBar.IsDisposed || statusBar.Disposing
+                || !statusBar.IsHandleCreated || IsDisposed || Disposing)
+                return;
             if (statusBar.InvokeRequired)
             {
-                statusBar.BeginInvoke((Action)delegate { UpdateStatus(index, total, currentName); });
+                try
+                {
+                    statusBar.BeginInvoke((Action)delegate
+                    {
+                        if (!statusBar.IsDisposed && !statusBar.Disposing && !IsDisposed && !Disposing)
+                            UpdateStatus(index, total, currentName);
+                    });
+                }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
                 return;
             }
+            if (statusProgress == null || statusDetail == null || statusProgress.IsDisposed || statusDetail.IsDisposed)
+                return;
             statusProgress.Value = Math.Min(index + 1, statusProgress.Maximum);
             statusDetail.Text = (index + 1) + "/" + total + "  " + currentName;
         }
@@ -4109,9 +4157,13 @@ namespace AppManager
         internal static bool IsUnder(string dir, string path)
         {
             if (string.IsNullOrEmpty(dir) || string.IsNullOrEmpty(path)) return false;
-            string d = dir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            string p = path.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            return p.StartsWith(d, StringComparison.OrdinalIgnoreCase);
+            try
+            {
+                string d = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                string p = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                return p.StartsWith(d, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
         }
 
         /// <summary>文件/文件夹拖放到侧栏某分类：切到该分类并按当前模式入库（异步 + 状态栏进度）。</summary>
@@ -4900,17 +4952,17 @@ namespace AppManager
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
 
             // 侧栏使用低一层的中性灰，内容顶栏保持白色，形成稳定的三段式明暗层次
-            int sidebarWidth = sidebar.CurrentWidth;
+            int sidebarWidth = Dpi(sidebar.CurrentWidth);
             using (SolidBrush sb = new SolidBrush(Theme.SidebarBg))
                 g.FillRectangle(sb, new Rectangle(0, 0, sidebarWidth, ClientSize.Height));
             Rectangle topBar = new Rectangle(sidebarWidth, 0,
-                ClientSize.Width - sidebarWidth, Theme.TopBarHeight);
+                ClientSize.Width - sidebarWidth, Dpi(Theme.TopBarHeight));
             using (SolidBrush tb = new SolidBrush(Theme.TopBarBg))
                 g.FillRectangle(tb, topBar);
 
             // 仅以 1px 分隔线划区，避免渐变和投影造成视觉噪音
             using (Pen p1 = new Pen(Theme.Separator, 1))
-                g.DrawLine(p1, sidebarWidth, Theme.TopBarHeight - 1, ClientSize.Width, Theme.TopBarHeight - 1);
+                g.DrawLine(p1, sidebarWidth, Dpi(Theme.TopBarHeight) - 1, ClientSize.Width, Dpi(Theme.TopBarHeight) - 1);
 
             // 侧栏分隔线贯通顶栏与内容区
             using (Pen ps = new Pen(Theme.Separator, 1))
@@ -4925,7 +4977,7 @@ namespace AppManager
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // 标题：顶栏行1（标题行）
             using (SolidBrush br = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "应用中心", Theme.WindowTitleFont, br, new Rectangle(sidebar.CurrentWidth + 16, 0, 128, Theme.TitleRowHeight));
+                Draw.DrawStringLeft(g, "应用中心", Theme.WindowTitleFont, br, new Rectangle(Dpi(sidebar.CurrentWidth) + Dpi(16), 0, Dpi(128), Dpi(Theme.TitleRowHeight)));
 
             // ===== 内容区底部留白：与左右侧栏底部按钮栏同高，并显示当前集合名称与数量 =====
             Rectangle footer = ContentFooterRect();
@@ -4951,14 +5003,14 @@ namespace AppManager
         /// <summary>内容区底部留白区域：高度与左右侧栏底部按钮栏一致；窗口过矮时返回空。</summary>
         private Rectangle ContentFooterRect()
         {
-            int statusH = statusBar != null && statusBar.Visible ? 34 : 0;
-            int footerTop = ClientSize.Height - statusH - ContentFooterH;
-            int sb = sidebar.CurrentWidth;
-            int colW = collectionSidebar != null && collectionSidebar.Visible ? collectionSidebar.CurrentWidth : 0;
+            int statusH = statusBar != null && statusBar.Visible ? Dpi(34) : 0;
+            int footerTop = ClientSize.Height - statusH - Dpi(ContentFooterH);
+            int sb = Dpi(sidebar.CurrentWidth);
+            int colW = collectionSidebar != null && collectionSidebar.Visible ? Dpi(collectionSidebar.CurrentWidth) : 0;
             int contentX = sb + colW;
             int contentW = ClientSize.Width - contentX;
-            if (contentW <= 0 || footerTop <= Theme.TopBarHeight) return Rectangle.Empty;
-            return new Rectangle(contentX, footerTop, contentW, ContentFooterH);
+            if (contentW <= 0 || footerTop <= Dpi(Theme.TopBarHeight)) return Rectangle.Empty;
+            return new Rectangle(contentX, footerTop, contentW, Dpi(ContentFooterH));
         }
 
         /// <summary>刷新底部留白文案（集合名称/数量变化时只重绘该区域）。</summary>
@@ -4981,8 +5033,8 @@ namespace AppManager
         private void TryDrag(MouseButtons btn, int x, int y)
         {
             if (btn != MouseButtons.Left) return;
-            bool inTopBar = y < Theme.TopBarHeight;
-            bool inSidebar = x <= sidebar.CurrentWidth && y >= Theme.TopBarHeight;
+            bool inTopBar = y < Dpi(Theme.TopBarHeight);
+            bool inSidebar = x <= Dpi(sidebar.CurrentWidth) && y >= Dpi(Theme.TopBarHeight);
             if (!inTopBar && !inSidebar) return;
             // 顶栏内：命中搜索框、视图切换、操作按钮、窗口按钮时不拖动
             if (inTopBar && HitsTopBarControl(x, y)) return;

@@ -6,6 +6,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Text;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using AppManager.Controls;
 
@@ -15,7 +16,7 @@ namespace AppManager
     /// 自绘上下文菜单：无边框圆角，悬停高亮，点击执行回调并关闭，失焦自动关闭。
     /// 支持悬停联动的级联子菜单：父项右侧带箭头，鼠标移入即展开、移出即收起。
     /// </summary>
-    public class MenuWindow : Form
+    public class MenuWindow : DpiAwareForm
     {
         /// <summary>菜单项。</summary>
         public class MenuItem
@@ -41,6 +42,8 @@ namespace AppManager
         private const int SubWidth = 200;   // 级联子菜单宽度
         private readonly Font font;
         private readonly int width;
+
+        private int S(int value) { return Dpi(value); }
 
         /// <summary>本菜单展开的子菜单（级联）。</summary>
         private MenuWindow child;
@@ -77,7 +80,7 @@ namespace AppManager
             for (int i = 0; i < items.Count; i++)
                 h += items[i].Separator ? 9 : ItemH;
             ClientSize = new Size(width, h);
-            try { Region = new Region(Draw.RoundedPath(ClientRectangle, 12)); } catch { }
+            try { Region = new Region(Draw.RoundedPath(ClientRectangle, S(12))); } catch { }
             if (!isSubmenu)
             {
                 // 仅根菜单持有收起定时器：光标离开级联链后延时收起子菜单
@@ -85,6 +88,23 @@ namespace AppManager
                 closeTimer.Interval = 120;
                 closeTimer.Tick += delegate { OnCloseTick(); };
             }
+        }
+
+        protected override void OnDpiScaleChanged()
+        {
+            int height = S(8);
+            foreach (MenuItem item in items) height += S(item.Separator ? 9 : ItemH);
+            ClientSize = new Size(S(width), height);
+            Rectangle work = Screen.FromRectangle(Bounds).WorkingArea;
+            if (parentMenu != null)
+            {
+                int x = parentMenu.Right + S(ArrowGap);
+                if (x + Width > work.Right) x = parentMenu.Left - Width - S(ArrowGap);
+                Left = x;
+            }
+            Location = new Point(Math.Max(work.Left, Math.Min(Left, work.Right - Width)),
+                Math.Max(work.Top, Math.Min(Top, work.Bottom - Height)));
+            base.OnDpiScaleChanged();
         }
 
         /// <summary>子菜单不抢焦点：显示时不激活窗口。</summary>
@@ -122,50 +142,50 @@ namespace AppManager
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Theme.MenuBg);
             // 1px 描边：菜单悬浮于内容之上，用边界线明确「菜单层」与底层内容的分界
-            using (Pen border = new Pen(Theme.Separator, 1))
-                Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, width - 1, ClientSize.Height - 1), 12);
-            int y = 4;
+            using (Pen border = new Pen(Theme.Separator, S(1)))
+                Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, ClientSize.Width - S(1), ClientSize.Height - S(1)), S(12));
+            int y = S(4);
             for (int i = 0; i < items.Count; i++)
             {
                 MenuItem it = items[i];
                 if (it.Separator)
                 {
-                    using (Pen pen = new Pen(Theme.Separator, 1))
-                        g.DrawLine(pen, PadX, y + 4, width - PadX, y + 4);
-                    y += 9;
+                    using (Pen pen = new Pen(Theme.Separator, S(1)))
+                        g.DrawLine(pen, S(PadX), y + S(4), ClientSize.Width - S(PadX), y + S(4));
+                    y += S(9);
                     continue;
                 }
-                Rectangle r = new Rectangle(4, y, width - 8, ItemH);
+                Rectangle r = new Rectangle(S(4), y, ClientSize.Width - S(8), S(ItemH));
                 bool hov = (i == hover) && !it.Disabled;
                 if (hov)
                 {
                     using (SolidBrush b = new SolidBrush(Theme.MenuHover))
-                        Draw.FillRoundedRect(g, b, r, 6);
+                        Draw.FillRoundedRect(g, b, r, S(6));
                 }
                 bool hasSub = !it.Disabled && HasSubItems(it);
                 bool hasCheck = it.Checked;
                 // iOS 上下文菜单：悬停浅灰高亮，文字保持深色（选中态不反白）
                 Color tc = it.Disabled ? Theme.TextTertiary : Theme.TextPrimary;
                 // 勾选态在左侧预留 checkmark 占位，文字整体右移
-                int leftPad = PadX + (hasCheck ? 18 : 0);
-                int tw = r.Width - leftPad - PadX - (hasSub ? ArrowW : 0);
+                int leftPad = S(PadX + (hasCheck ? 18 : 0));
+                int tw = r.Width - leftPad - S(PadX) - (hasSub ? S(ArrowW) : 0);
                 using (SolidBrush br = new SolidBrush(tc))
                     Draw.DrawStringLeft(g, it.Text, font, br,
                         new Rectangle(r.X + leftPad, r.Y, tw, r.Height));
                 if (hasCheck)
-                    DrawCheckmark(g, r);
+                    DrawCheckmark(g, r, CurrentDpi);
                 if (hasSub)
-                    DrawChevron(g, r, Theme.TextSecondary);
-                y += ItemH;
+                    DrawChevron(g, r, Theme.TextSecondary, CurrentDpi);
+                y += S(ItemH);
             }
         }
 
         /// <summary>菜单项左侧的 iOS 风格勾选标记（用线条绘制，比「√」字形更清晰锐利）。</summary>
-        private static void DrawCheckmark(Graphics g, Rectangle r)
+        private static void DrawCheckmark(Graphics g, Rectangle r, int dpi)
         {
-            int cx = r.X + PadX + 4;
+            int cx = r.X + DpiHelper.Scale(PadX + 4, dpi);
             int cy = r.Y + r.Height / 2;
-            using (Pen p = new Pen(Theme.Accent, 1.8F))
+            using (Pen p = new Pen(Theme.Accent, 1.8F * (dpi <= 0 ? 1f : dpi / 96f)))
             {
                 p.StartCap = LineCap.Round;
                 p.EndCap = LineCap.Round;
@@ -173,27 +193,27 @@ namespace AppManager
                 g.DrawLines(p, new Point[]
                 {
                     new Point(cx, cy),
-                    new Point(cx + 3, cy + 3),
-                    new Point(cx + 8, cy - 4)
+                    new Point(cx + DpiHelper.Scale(3, dpi), cy + DpiHelper.Scale(3, dpi)),
+                    new Point(cx + DpiHelper.Scale(8, dpi), cy - DpiHelper.Scale(4, dpi))
                 });
             }
         }
 
         /// <summary>父项右侧的「›」箭头（用线条绘制，比字形更清晰）。</summary>
-        private static void DrawChevron(Graphics g, Rectangle r, Color color)
+        private static void DrawChevron(Graphics g, Rectangle r, Color color, int dpi)
         {
-            int cx = r.Right - PadX - 4;
+            int cx = r.Right - DpiHelper.Scale(PadX + 4, dpi);
             int cy = r.Y + r.Height / 2;
-            using (Pen p = new Pen(color, 1.6F))
+            using (Pen p = new Pen(color, 1.6F * (dpi <= 0 ? 1f : dpi / 96f)))
             {
                 p.StartCap = LineCap.Round;
                 p.EndCap = LineCap.Round;
                 p.LineJoin = LineJoin.Round;
                 g.DrawLines(p, new Point[]
                 {
-                    new Point(cx - 4, cy - 4),
+                    new Point(cx - DpiHelper.Scale(4, dpi), cy - DpiHelper.Scale(4, dpi)),
                     new Point(cx, cy),
-                    new Point(cx - 4, cy + 4)
+                    new Point(cx - DpiHelper.Scale(4, dpi), cy + DpiHelper.Scale(4, dpi))
                 });
             }
         }
@@ -308,10 +328,11 @@ namespace AppManager
             if (it.SubItems == null || it.SubItems.Count == 0) return;
             MenuWindow c = new MenuWindow(it.SubItems, SubWidth, true);
             c.parentMenu = this;
-            int leftX = Location.X + Width + ArrowGap;
+            int gap = S(ArrowGap);
+            int leftX = Location.X + Width + gap;
             int topY = Location.Y + ItemTop(index);
             Rectangle wa = Screen.GetWorkingArea(new Point(leftX, topY));
-            if (leftX + c.Width > wa.Right) leftX = Location.X - c.Width - ArrowGap;
+            if (leftX + c.Width > wa.Right) leftX = Location.X - c.Width - gap;
             if (leftX < wa.Left) leftX = wa.Left;
             int top = topY;
             if (top + c.Height > wa.Bottom) top = wa.Bottom - c.Height;
@@ -404,33 +425,157 @@ namespace AppManager
         /// <summary>父项在客户区内的顶部 Y 坐标（与 OnPaint / IndexAt 的累加规则一致）。</summary>
         private int ItemTop(int index)
         {
-            int y = 4;
+            int y = S(4);
             for (int i = 0; i < index && i < items.Count; i++)
-                y += items[i].Separator ? 9 : ItemH;
+                y += items[i].Separator ? S(9) : S(ItemH);
             return y;
         }
 
         private int IndexAt(int y)
         {
-            int yy = y - 4;
+            int yy = y - S(4);
+            if (yy < 0) return -1;
             for (int i = 0; i < items.Count; i++)
             {
                 if (items[i].Separator)
                 {
-                    yy -= 9;
+                    yy -= S(9);
                     if (yy < 0) return -1;
                 }
                 else
                 {
-                    if (yy < ItemH) return i;
-                    yy -= ItemH;
+                    if (yy < S(ItemH)) return i;
+                    yy -= S(ItemH);
                 }
             }
             return -1;
         }
     }
 
-    internal class BufferedDialogForm : Form
+    internal static class DpiHelper
+    {
+        internal static int ForControl(Control control)
+        {
+            DpiAwareForm form = control.FindForm() as DpiAwareForm;
+            return form == null ? control.DeviceDpi : form.LayoutDpi;
+        }
+
+        public static int Scale(int value, int dpi)
+        {
+            return (int)Math.Round(value * (dpi <= 0 ? 96 : dpi) / 96f);
+        }
+    }
+
+    public class DpiAwareForm : Form
+    {
+        private const int WM_DPICHANGED = 0x02E0;
+        private int currentDpi = 96;
+        private bool dpiInitialized;
+
+        public DpiAwareForm()
+        {
+            AutoScaleMode = AutoScaleMode.None;
+        }
+
+        internal int LayoutDpi { get { return currentDpi; } }
+        protected int CurrentDpi { get { return currentDpi; } }
+
+        [DllImport("user32.dll")]
+        private static extern uint GetDpiForWindow(IntPtr hwnd);
+        protected bool DpiChangeInProgress { get; private set; }
+        protected virtual bool DeferDpiInitialization { get { return false; } }
+
+        protected int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, currentDpi);
+        }
+
+        protected override void OnLoad(EventArgs e)
+        {
+            base.OnLoad(e);
+            if (!DeferDpiInitialization) InitializeDpiScaling();
+        }
+
+        protected void InitializeDpiScaling()
+        {
+            if (dpiInitialized || !IsHandleCreated) return;
+            dpiInitialized = true;
+            currentDpi = DeviceDpi;
+            try { int actualDpi = (int)GetDpiForWindow(Handle); if (actualDpi > 0) currentDpi = actualDpi; }
+            catch (EntryPointNotFoundException) { }
+            if (currentDpi != 96)
+            {
+                DpiChangeInProgress = true;
+                try { Scale(new SizeF(currentDpi / 96f, currentDpi / 96f)); }
+                finally { DpiChangeInProgress = false; }
+            }
+            OnDpiScaleChanged();
+        }
+
+        protected virtual void OnDpiScaleChanged()
+        {
+            if (FormBorderStyle == FormBorderStyle.None) MainForm.ApplyRoundedCorners(this);
+        }
+
+        protected override void OnDpiChanged(DpiChangedEventArgs e)
+        {
+            base.OnDpiChanged(e);
+            e.Cancel = true; // 由下方统一缩放，避免 WinForms 再缩一次。
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg != WM_DPICHANGED) { base.WndProc(ref m); return; }
+            int newDpi = (int)(m.WParam.ToInt64() & 0xFFFF);
+            if (newDpi <= 0 || m.LParam == IntPtr.Zero) return;
+            // 保留 WinForms 的通知处理；绘制统一使用消息记录的 LayoutDpi。
+            base.WndProc(ref m);
+            DpiChangeInProgress = true;
+            try
+            {
+                int oldDpi = currentDpi;
+                currentDpi = newDpi;
+                if (dpiInitialized && oldDpi != newDpi)
+                    Scale(new SizeF(newDpi / (float)oldDpi, newDpi / (float)oldDpi));
+                ApplySuggestedBounds(m.LParam);
+            }
+            finally { DpiChangeInProgress = false; }
+            OnDpiScaleChanged();
+            ApplySuggestedBounds(m.LParam);
+            Invalidate(true);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
+        }
+
+        private void ApplySuggestedBounds(IntPtr lParam)
+        {
+            if (lParam == IntPtr.Zero || IsDisposed) return;
+            try
+            {
+                NativeRect suggested = (NativeRect)Marshal.PtrToStructure(lParam, typeof(NativeRect));
+                Rectangle bounds = Rectangle.FromLTRB(suggested.Left, suggested.Top, suggested.Right, suggested.Bottom);
+                if (bounds.Width <= 0 || bounds.Height <= 0) return;
+                Rectangle work = Screen.FromRectangle(bounds).WorkingArea;
+                MinimumSize = new Size(Math.Min(MinimumSize.Width, work.Width), Math.Min(MinimumSize.Height, work.Height));
+                if (bounds.Width > work.Width) bounds.Width = work.Width;
+                if (bounds.Height > work.Height) bounds.Height = work.Height;
+                bounds.X = Math.Max(work.Left, Math.Min(bounds.Left, work.Right - bounds.Width));
+                bounds.Y = Math.Max(work.Top, Math.Min(bounds.Top, work.Bottom - bounds.Height));
+                Bounds = bounds;
+            }
+            catch (ArgumentException) { }
+            catch (ExternalException) { }
+        }
+    }
+
+    internal class BufferedDialogForm : DpiAwareForm
     {
         public BufferedDialogForm()
         {
@@ -459,14 +604,16 @@ namespace AppManager
             {
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                int dpi = DpiHelper.ForControl(f);
+                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
                 using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
-                using (Pen border = new Pen(Theme.ControlBorder, 1F))
-                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - 1, f.Height - 1), 18);
+                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
+                using (Pen border = new Pen(Theme.ControlBorder, 1F * (dpi <= 0 ? 1f : dpi / 96f)))
+                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - S(1), f.Height - S(1)), S(18));
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(24, 18, f.Width - 48, 30));
+                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(S(24), S(18), f.Width - S(48), S(30)));
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(24, 60, f.Width - 48, 60));
+                    Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(S(24), S(60), f.Width - S(48), S(60)));
             };
             RoundButton ok = MakeBtn("确定", true);
             ok.Bounds = new Rectangle(192, 142, 84, 34);
@@ -587,36 +734,38 @@ namespace AppManager
             {
                 Graphics graphics = e.Graphics;
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                int dpi = DpiHelper.ForControl(form);
+                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
                 using (SolidBrush background = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, 18);
+                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, S(18));
                 using (SolidBrush title = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(graphics, "选择分类图标", Theme.DialogTitleFont, title,
-                        new Rectangle(22, 14, 250, 28));
+                        new Rectangle(DpiHelper.Scale(22, DpiHelper.ForControl(form)), DpiHelper.Scale(14, DpiHelper.ForControl(form)), DpiHelper.Scale(250, DpiHelper.ForControl(form)), DpiHelper.Scale(28, DpiHelper.ForControl(form))));
                 for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
                 {
-                    Rectangle cell = CellBounds(index);
+                    Rectangle cell = CellBounds(index, DpiHelper.ForControl(form));
                     if (index == hover || CategoryIcons.PickerKinds[index] == selected)
                     {
                         using (SolidBrush background = new SolidBrush(CategoryIcons.PickerKinds[index] == selected
                             ? Theme.SelectionBg : Theme.RowHover))
-                            Draw.FillRoundedRect(graphics, background, cell, 9);
+                            Draw.FillRoundedRect(graphics, background, cell, S(9));
                     }
                     if (CategoryIcons.PickerKinds[index] == selected)
                     {
-                        using (Pen border = new Pen(Theme.Accent, 1.5F))
-                            Draw.DrawRoundedRect(graphics, border, cell, 9);
+                        using (Pen border = new Pen(Theme.Accent, 1.5F * (dpi <= 0 ? 1f : dpi / 96f)))
+                            Draw.DrawRoundedRect(graphics, border, cell, S(9));
                     }
                     CategoryIcons.DrawIcon(graphics, CategoryIcons.PickerKinds[index],
-                        new Rectangle(cell.X + 15, cell.Y + 12, 26, 26),
+                        new Rectangle(cell.X + DpiHelper.Scale(15, DpiHelper.ForControl(form)), cell.Y + DpiHelper.Scale(12, DpiHelper.ForControl(form)), DpiHelper.Scale(26, DpiHelper.ForControl(form)), DpiHelper.Scale(26, DpiHelper.ForControl(form))),
                         CategoryIcons.PickerKinds[index] == selected ? Theme.AccentText : Theme.TextPrimary);
                 }
                 using (SolidBrush caption = new SolidBrush(Theme.TextSecondary))
                     Draw.DrawStringLeft(graphics, CategoryIcons.DisplayName(selected), Theme.BodyFont, caption,
-                        new Rectangle(24, 216, 200, 24));
+                        new Rectangle(DpiHelper.Scale(24, DpiHelper.ForControl(form)), DpiHelper.Scale(216, DpiHelper.ForControl(form)), DpiHelper.Scale(200, DpiHelper.ForControl(form)), DpiHelper.Scale(24, DpiHelper.ForControl(form))));
             };
             form.MouseMove += delegate(object sender, MouseEventArgs e)
             {
-                int index = IconAt(e.Location);
+                int index = IconAt(e.Location, DpiHelper.ForControl(form));
                 if (index == hover) return;
                 hover = index;
                 form.Invalidate();
@@ -624,14 +773,14 @@ namespace AppManager
             form.MouseLeave += delegate { hover = -1; form.Invalidate(); };
             form.MouseClick += delegate(object sender, MouseEventArgs e)
             {
-                int index = IconAt(e.Location);
+                int index = IconAt(e.Location, DpiHelper.ForControl(form));
                 if (index < 0) return;
                 selected = CategoryIcons.PickerKinds[index];
                 form.Invalidate();
             };
             form.MouseDoubleClick += delegate(object sender, MouseEventArgs e)
             {
-                int index = IconAt(e.Location);
+                int index = IconAt(e.Location, DpiHelper.ForControl(form));
                 if (index < 0) return;
                 result = CategoryIcons.PickerKinds[index];
                 form.DialogResult = DialogResult.OK;
@@ -656,15 +805,15 @@ namespace AppManager
             return result;
         }
 
-        private static Rectangle CellBounds(int index)
+        private static Rectangle CellBounds(int index, int dpi)
         {
-            return new Rectangle(22 + (index % 6) * 59, 54 + (index / 6) * 53, 54, 48);
+            return new Rectangle(DpiHelper.Scale(22 + (index % 6) * 59, dpi), DpiHelper.Scale(54 + (index / 6) * 53, dpi), DpiHelper.Scale(54, dpi), DpiHelper.Scale(48, dpi));
         }
 
-        private static int IconAt(Point point)
+        private static int IconAt(Point point, int dpi)
         {
             for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
-                if (CellBounds(index).Contains(point)) return index;
+                if (CellBounds(index, dpi).Contains(point)) return index;
             return -1;
         }
     }
@@ -693,25 +842,27 @@ namespace AppManager
             {
                 Graphics graphics = e.Graphics;
                 graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                int dpi = DpiHelper.ForControl(form);
+                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
                 using (SolidBrush background = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, 18);
+                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, S(18));
                 using (Pen border = new Pen(Theme.ControlBorder, 1F))
                     Draw.DrawRoundedRect(graphics, border, new Rectangle(0, 0, form.Width - 1, form.Height - 1), 18);
                 using (SolidBrush titleBrush = new SolidBrush(Theme.TextPrimary))
                 {
                     Draw.DrawStringLeft(graphics, title, Theme.FontOf(13F, FontStyle.Bold), titleBrush,
-                        new Rectangle(24, 16, form.Width - 48, 30));
+                        new Rectangle(S(24), S(16), form.Width - S(48), S(30)));
                     Draw.DrawStringLeft(graphics, prompt, Theme.ButtonFont, titleBrush,
-                        new Rectangle(24, 54, form.Width - 48, 22));
+                        new Rectangle(S(24), S(54), form.Width - S(48), S(22)));
                     Draw.DrawStringLeft(graphics, "图标", Theme.ButtonFont, titleBrush,
-                        new Rectangle(24, 134, 60, 22));
+                        new Rectangle(S(24), S(134), S(60), S(22)));
                 }
                 using (SolidBrush selectedBrush = new SolidBrush(Theme.TextSecondary))
                     Draw.DrawStringLeft(graphics, CategoryIcons.DisplayName(selected), Theme.BodyFont, selectedBrush,
-                        new Rectangle(76, 134, 160, 22));
+                        new Rectangle(S(76), S(134), S(160), S(22)));
                 for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
                 {
-                    Rectangle cell = CellBounds(index);
+                    Rectangle cell = CellBounds(index, DpiHelper.ForControl(form));
                     bool active = CategoryIcons.PickerKinds[index] == selected;
                     if (active || index == hover)
                     {
@@ -724,14 +875,14 @@ namespace AppManager
                             Draw.DrawRoundedRect(graphics, border, cell, 8);
                     }
                     CategoryIcons.DrawIcon(graphics, CategoryIcons.PickerKinds[index],
-                        new Rectangle(cell.X + 9, cell.Y + 9, 20, 20),
+                        new Rectangle(cell.X + S(9), cell.Y + S(9), S(20), S(20)),
                         active ? Theme.AccentText : Theme.IconColor);
                 }
             };
             TextBox box = InputDialog.MakeField(form, new Rectangle(24, 80, 372, 40), defaultName);
             form.MouseMove += delegate(object sender, MouseEventArgs e)
             {
-                int index = IconAt(e.Location);
+                int index = IconAt(e.Location, DpiHelper.ForControl(form));
                 if (index == hover) return;
                 hover = index;
                 form.Invalidate();
@@ -739,7 +890,7 @@ namespace AppManager
             form.MouseLeave += delegate { hover = -1; form.Invalidate(); };
             form.MouseClick += delegate(object sender, MouseEventArgs e)
             {
-                int index = IconAt(e.Location);
+                int index = IconAt(e.Location, DpiHelper.ForControl(form));
                 if (index < 0) return;
                 selected = CategoryIcons.PickerKinds[index];
                 form.Invalidate();
@@ -775,15 +926,15 @@ namespace AppManager
             return result;
         }
 
-        private static Rectangle CellBounds(int index)
+        private static Rectangle CellBounds(int index, int dpi)
         {
-            return new Rectangle(24 + (index % 9) * 41, 160 + (index / 9) * 44, 38, 40);
+            return new Rectangle(DpiHelper.Scale(24 + (index % 9) * 41, dpi), DpiHelper.Scale(160 + (index / 9) * 44, dpi), DpiHelper.Scale(38, dpi), DpiHelper.Scale(40, dpi));
         }
 
-        private static int IconAt(Point point)
+        private static int IconAt(Point point, int dpi)
         {
             for (int index = 0; index < CategoryIcons.PickerKinds.Length; index++)
-                if (CellBounds(index).Contains(point)) return index;
+                if (CellBounds(index, dpi).Contains(point)) return index;
             return -1;
         }
     }
@@ -809,14 +960,16 @@ namespace AppManager
             {
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                int dpi = DpiHelper.ForControl(f);
+                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
                 using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
-                using (Pen border = new Pen(Theme.ControlBorder, 1F))
-                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - 1, f.Height - 1), 18);
+                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
+                using (Pen border = new Pen(Theme.ControlBorder, 1F * (dpi <= 0 ? 1f : dpi / 96f)))
+                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - S(1), f.Height - S(1)), S(18));
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.FontOf(13F, FontStyle.Bold), tb, new Rectangle(24, 18, f.Width - 48, 30));
+                    Draw.DrawStringLeft(g, title, Theme.FontOf(13F, FontStyle.Bold), tb, new Rectangle(S(24), S(18), f.Width - S(48), S(30)));
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, prompt, Theme.ButtonFont, mb, new Rectangle(24, 58, f.Width - 48, 22));
+                    Draw.DrawStringLeft(g, prompt, Theme.ButtonFont, mb, new Rectangle(S(24), S(58), f.Width - S(48), S(22)));
             };
             TextBox box = MakeField(f, new Rectangle(24, 86, f.ClientSize.Width - 48, 40), defaultValue);
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
@@ -903,15 +1056,16 @@ namespace AppManager
             {
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, DpiHelper.ForControl(f)); };
                 using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
+                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb,
-                        new Rectangle(22, 16, f.Width - 44, 26));
+                        new Rectangle(S(22), S(16), f.Width - S(44), S(26)));
                 using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
                 {
-                    Draw.DrawStringLeft(g, "名称", Theme.CaptionFont, lb, new Rectangle(22, 50, 120, 20));
-                    Draw.DrawStringLeft(g, "简介", Theme.CaptionFont, lb, new Rectangle(22, 114, 120, 20));
+                    Draw.DrawStringLeft(g, "名称", Theme.CaptionFont, lb, new Rectangle(S(22), S(50), S(120), S(20)));
+                    Draw.DrawStringLeft(g, "简介", Theme.CaptionFont, lb, new Rectangle(S(22), S(114), S(120), S(20)));
                 }
             };
 
@@ -1033,14 +1187,15 @@ namespace AppManager
             {
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
+                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, DpiHelper.ForControl(f)); };
                 using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, 18);
+                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
                 using (SolidBrush b = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(g, "属性", Theme.CaptionFont, b, new Rectangle(Pad, 14, DlgW - Pad * 2, 20));
+                    Draw.DrawStringLeft(g, "属性", Theme.CaptionFont, b, new Rectangle(S(Pad), S(14), S(DlgW - Pad * 2), S(20)));
 
                 // 预览：照片用缩略图铺满圆角方块，其余类型居中绘制文件图标
-                Rectangle pv = new Rectangle(Pad, 46, PreviewW, PreviewW);
-                using (GraphicsPath p = Draw.RoundedPath(pv, 12))
+                Rectangle pv = new Rectangle(S(Pad), S(46), S(PreviewW), S(PreviewW));
+                using (GraphicsPath p = Draw.RoundedPath(pv, S(12)))
                 {
                     using (SolidBrush b = new SolidBrush(Theme.ChipBg))
                         g.FillPath(b, p);
@@ -1048,19 +1203,19 @@ namespace AppManager
                     g.SetClip(p);
                     if (preview != null) DrawCover(g, preview, pv);
                     else if (icon != null)
-                        g.DrawImage(icon, new Rectangle(pv.X + (pv.Width - Theme.IconSize) / 2,
-                            pv.Y + (pv.Height - Theme.IconSize) / 2, Theme.IconSize, Theme.IconSize));
+                        g.DrawImage(icon, new Rectangle(pv.X + (pv.Width - S(Theme.IconSize)) / 2,
+                            pv.Y + (pv.Height - S(Theme.IconSize)) / 2, S(Theme.IconSize), S(Theme.IconSize)));
                     g.Restore(st);
                 }
 
                 using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(g, app.DisplayName(), Theme.DialogTitleFont, nb,
-                        new Rectangle(rightX, 46, rightW, 24));
+                        new Rectangle(S(rightX), S(46), S(rightW), S(24)));
 
                 for (int i = 0; i < rows.Count; i++)
                 {
-                    Rectangle lr = new Rectangle(rightX, 82 + i * RowH, LabelW, RowH);
-                    Rectangle vr = new Rectangle(lr.Right + 8, lr.Y, rightW - LabelW - 8, RowH);
+                    Rectangle lr = new Rectangle(S(rightX), S(82 + i * RowH), S(LabelW), S(RowH));
+                    Rectangle vr = new Rectangle(lr.Right + S(8), lr.Y, S(rightW - LabelW - 8), S(RowH));
                     using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
                         Draw.DrawStringLeft(g, rows[i][0], Theme.CaptionFont, lb, lr);
                     using (SolidBrush vb = new SolidBrush(Theme.TextPrimary))

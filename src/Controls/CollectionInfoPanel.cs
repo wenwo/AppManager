@@ -88,11 +88,16 @@ namespace AppManager.Controls
         private bool layoutDirty = true;     // 布局缓存失效标记：仅在尺寸/状态变化时重算
         private int previewGen;              // 编辑态封面原图异步加载代次
 
-        private const int BtnH = 36;
-        private const int ThumbSize = 72;
-        private const int ThumbGap = 10;
+        private int BtnH { get { return Dpi(36); } }
+        private int ThumbSize { get { return Dpi(72); } }
+        private int ThumbGap { get { return Dpi(10); } }
         private const int MaxMemberThumbs = 60;
         private const int CoverSourceMax = 1200;   // 编辑态取景原图的长边上限（足够大图预览，控制内存占用）
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
 
         /// <summary>点击「进入」：由主窗体切换到集合内容。</summary>
         public event Action EnterRequested;
@@ -276,7 +281,7 @@ namespace AppManager.Controls
                 {
                     BeginInvoke((Action)delegate
                     {
-                        if (gen != previewGen || !editing) { if (bmp != null) bmp.Dispose(); return; }
+                        if (IsDisposed || Disposing || gen != previewGen || !editing) { if (bmp != null) bmp.Dispose(); return; }
                         if (bmp == null) return;   // 解码失败：保留现有封面预览
                         DisposeEditPreview();
                         editPreview = bmp;
@@ -485,7 +490,7 @@ namespace AppManager.Controls
             {
                 BeginInvoke((Action)delegate
                 {
-                    if (gen != thumbGen) { bmp.Dispose(); return; }
+                    if (IsDisposed || Disposing || gen != thumbGen) { bmp.Dispose(); return; }
                     Bitmap old;
                     if (memberThumbs.TryGetValue(index, out old) && old != null) old.Dispose();
                     memberThumbs[index] = bmp;
@@ -503,7 +508,7 @@ namespace AppManager.Controls
             {
                 BeginInvoke((Action)delegate
                 {
-                    if (gen != thumbGen) return;
+                    if (IsDisposed || Disposing || gen != thumbGen) return;
                     thumbLoading = false;
                     Invalidate();
                 });

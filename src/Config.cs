@@ -6,6 +6,23 @@ using System.Xml;
 
 namespace AppManager
 {
+    internal static class SafeXml
+    {
+        public static XmlDocument Load(string filePath)
+        {
+            XmlReaderSettings settings = new XmlReaderSettings();
+            settings.DtdProcessing = DtdProcessing.Prohibit;
+            settings.XmlResolver = null;
+            using (XmlReader reader = XmlReader.Create(filePath, settings))
+            {
+                XmlDocument doc = new XmlDocument();
+                doc.XmlResolver = null;
+                doc.Load(reader);
+                return doc;
+            }
+        }
+    }
+
     /// <summary>统一管理运行期路径（数据目录 / 配置 / 收纳目录 / 备份目录 / 日志）。</summary>
     internal static class Paths
     {
@@ -291,8 +308,7 @@ namespace AppManager
             try
             {
                 if (!File.Exists(filePath)) return cfg;
-                XmlDocument doc = new XmlDocument();
-                doc.Load(filePath);
+                XmlDocument doc = SafeXml.Load(filePath);
                 XmlNode root = doc.DocumentElement;
                 if (root == null) return cfg;
 
@@ -625,8 +641,7 @@ namespace AppManager
             if (!File.Exists(filePath)) return null;
             try
             {
-                XmlDocument doc = new XmlDocument();
-                doc.Load(filePath);
+                XmlDocument doc = SafeXml.Load(filePath);
                 if (doc.DocumentElement == null || doc.DocumentElement.Name != "AppManagerConfig")
                     return null;
             }

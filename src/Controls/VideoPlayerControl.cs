@@ -76,15 +76,20 @@ namespace AppManager.Controls
         private static readonly Color VideoBg = Color.FromArgb(20, 20, 22);    // 视频卡片内部黑底
         private static readonly Color TextWhite = Color.White;
         private static readonly Color TextDim = Color.FromArgb(160, 255, 255, 255);
-        private const int TopBarH = 44;
-        private const int PillH = 40;
-        private const int PillBtnW = 44;
-        private const int TimeColW = 96;
-        private const int VolSliderW = 72;
-        private const int ChromePad = 16;       // 视频卡片与内容区之间的留白
-        private const int CardGap = 12;         // 视频卡片 / 操作条 / 信息栏之间的间距
-        private const int InfoBarH = 44;        // 底部信息栏高度（与侧边栏底栏一致）
-        private const int VideoRadius = 14;     // 视频卡片圆角
+        private int TopBarH { get { return Dpi(44); } }
+        private int PillH { get { return Dpi(40); } }
+        private int PillBtnW { get { return Dpi(44); } }
+        private int TimeColW { get { return Dpi(96); } }
+        private int VolSliderW { get { return Dpi(72); } }
+        private int ChromePad { get { return Dpi(16); } }       // 视频卡片与内容区之间的留白
+        private int CardGap { get { return Dpi(12); } }         // 视频卡片 / 操作条 / 信息栏之间的间距
+        private int InfoBarH { get { return Dpi(44); } }        // 底部信息栏高度（与侧边栏底栏一致）
+        private int VideoRadius { get { return Dpi(14); } }     // 视频卡片圆角
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
 
         public VideoPlayerControl()
         {

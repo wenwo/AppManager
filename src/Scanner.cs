@@ -20,6 +20,7 @@ namespace AppManager
     internal class Scanner
     {
         private readonly AppConfig config;
+        private const int ShortcutTextCapacity = 32768;
 
         // COM 快捷方式解析：IShellLinkW 接口。
         // 注意：COM 接口按 vtable 槽位顺序调用，方法声明顺序必须与 shobjidl_core.h 中
@@ -481,41 +482,43 @@ namespace AppManager
         private void ScanShortcuts(string folder, Dictionary<string, AppInfo> dict, string source, bool recursive)
         {
             if (!Directory.Exists(folder)) return;
-            string[] files;
-            try { files = Directory.GetFiles(folder, "*.*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly); }
-            catch { return; }
-            foreach (string f in files)
+            try
             {
-                string ext = Path.GetExtension(f).ToLowerInvariant();
-                if (ext != ".lnk") continue;
-                AppInfo app = ResolveShortcut(f, source);
-                if (app == null) continue;
-                // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
-                if (!IsAliveTarget(app.TargetPath, app.IsUwp)) continue;
-                if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
-                MergeByName(dict, app);
+                foreach (string f in Directory.EnumerateFiles(folder, "*.*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
+                {
+                    string ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext != ".lnk") continue;
+                    AppInfo app = ResolveShortcut(f, source);
+                    if (app == null) continue;
+                    // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
+                    if (!IsAliveTarget(app.TargetPath, app.IsUwp)) continue;
+                    if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
+                    MergeByName(dict, app);
+                }
             }
+            catch { }
         }
 
         private AppInfo ResolveShortcut(string path, string source)
         {
+            IShellLinkW link = null;
             try
             {
-                IShellLinkW link = (IShellLinkW)new CShellLink();
+                link = (IShellLinkW)new CShellLink();
                 IPersistFile pf = (IPersistFile)link;
                 pf.Load(path, 0);
 
-                StringBuilder sb = new StringBuilder(260);
-                link.GetPath(sb, 260, IntPtr.Zero, 0);
+                StringBuilder sb = new StringBuilder(ShortcutTextCapacity);
+                link.GetPath(sb, sb.Capacity, IntPtr.Zero, 0);
                 string target = sb.ToString().Trim();
 
-                StringBuilder args = new StringBuilder(260);
-                link.GetArguments(args, 260);
+                StringBuilder args = new StringBuilder(ShortcutTextCapacity);
+                link.GetArguments(args, args.Capacity);
                 string a = args.ToString();
 
-                StringBuilder iconLoc = new StringBuilder(260);
+                StringBuilder iconLoc = new StringBuilder(ShortcutTextCapacity);
                 int iconIdx;
-                link.GetIconLocation(iconLoc, 260, out iconIdx);
+                link.GetIconLocation(iconLoc, iconLoc.Capacity, out iconIdx);
                 string iconPath = iconLoc.ToString();
 
                 AppInfo app = new AppInfo();
@@ -557,6 +560,10 @@ namespace AppManager
             {
                 Debug.WriteLine("解析快捷方式失败 " + path + ": " + ex.Message);
                 return null;
+            }
+            finally
+            {
+                if (link != null) Marshal.FinalReleaseComObject(link);
             }
         }
 
@@ -792,8 +799,7 @@ namespace AppManager
             {
                 string path = CachePath;
                 if (!File.Exists(path)) return list;
-                XmlDocument doc = new XmlDocument();
-                doc.Load(path);
+                XmlDocument doc = SafeXml.Load(path);
                 XmlNodeList nodes = doc.SelectNodes("/scan/app");
                 if (nodes == null) return list;
                 foreach (XmlNode node in nodes)

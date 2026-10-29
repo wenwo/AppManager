@@ -14,13 +14,18 @@ namespace AppManager.Controls
     /// </summary>
     public class SettingsPage : Control
     {
-        private const int RowH = 48;         // 普通开关/操作行高
-        private const int InfoRowH = 56;     // 标题 + 路径两行行高
-        private const int ActionRowH = 44;   // 纯操作行高
-        private const int GapY = 20;         // 分组间距
-        private const int LabelH = 18;       // 分组标题行高
-        private const int CardPadX = 18;     // 卡片内左右留白
-        private const int CardRadius = 10;
+        private int RowH { get { return Dpi(48); } }         // 普通开关/操作行高
+        private int InfoRowH { get { return Dpi(56); } }     // 标题 + 路径两行行高
+        private int ActionRowH { get { return Dpi(44); } }   // 纯操作行高
+        private int GapY { get { return Dpi(20); } }         // 分组间距
+        private int LabelH { get { return Dpi(18); } }       // 分组标题行高
+        private int CardPadX { get { return Dpi(18); } }     // 卡片内左右留白
+        private int CardRadius { get { return Dpi(10); } }
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
 
         /// <summary>一行内容：标题（可带副标题/右侧值）+ 可选开关或点击动作。</summary>
         private sealed class Row
@@ -32,7 +37,7 @@ namespace AppManager.Controls
             public ToggleSwitch Toggle;
             public Action Action;
             public bool LastInCard;
-            public int Height = RowH;
+            public int Height;
         }
 
         /// <summary>一个分组：上方标题 + 下方白色圆角卡片。</summary>
@@ -223,6 +228,7 @@ namespace AppManager.Controls
             Row r = new Row();
             r.Title = title;
             r.Toggle = toggle;
+            r.Height = RowH;
             return r;
         }
 
@@ -230,7 +236,7 @@ namespace AppManager.Controls
         {
             Row r = MakeToggleRow(title, toggle);
             r.Subtitle = subtitle;
-            r.Height = 64;
+            r.Height = Dpi(64);
             return r;
         }
 
@@ -339,7 +345,7 @@ namespace AppManager.Controls
         }
 
         /// <summary>操作行右侧的「›」箭头（线条绘制，与上下文菜单保持一致）。</summary>
-        private static void DrawRowChevron(Graphics g, Rectangle r)
+        private void DrawRowChevron(Graphics g, Rectangle r)
         {
             int cx = r.Right - CardPadX - 7;
             int cy = r.Top + r.Height / 2;

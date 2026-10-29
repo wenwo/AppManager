@@ -212,7 +212,7 @@ namespace AppManager
             foreach (string s in subs)
             {
                 string name = Path.GetFileName(s);
-                if (IsSkippable(name, s)) continue;
+                if (IsSkippable(name, s) || IsReparsePoint(s)) continue;
                 if (config.OrganizeDir)
                     count += BackupItem(s, FolderDestDir, name, true, false);   // 整目录收纳
                 else
@@ -293,6 +293,7 @@ namespace AppManager
             try
             {
                 FileAttributes at = File.GetAttributes(fullPath);
+                if ((at & FileAttributes.ReparsePoint) != 0) return true;
                 if ((at & FileAttributes.Hidden) != 0 || (at & FileAttributes.System) != 0) return true;
             }
             catch { }
@@ -314,15 +315,20 @@ namespace AppManager
         /// <summary>递归拷贝目录（副本模式用）。</summary>
         private static void CopyDir(string src, string dst)
         {
-            Directory.CreateDirectory(dst);
-            string[] files;
-            try { files = Directory.GetFiles(src); } catch { files = new string[0]; }
-            foreach (string f in files)
-                File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), false);
-            string[] subs;
-            try { subs = Directory.GetDirectories(src); } catch { subs = new string[0]; }
-            foreach (string d in subs)
-                CopyDir(d, Path.Combine(dst, Path.GetFileName(d)));
+            if (Directory.Exists(dst) || File.Exists(dst)) throw new IOException("复制目标已存在。");
+            string staging = dst + ".copy-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                SafeDirectory.Copy(src, staging, false);
+                Directory.Move(staging, dst);
+            }
+            finally { TryDeleteDir(staging); }
+        }
+
+        private static bool IsReparsePoint(string path)
+        {
+            try { return (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0; }
+            catch { return true; }
         }
 
         /// <summary>
@@ -352,15 +358,7 @@ namespace AppManager
                 Directory.Move(source, dest);
                 return;
             }
-            try
-            {
-                CopyDir(source, dest);
-            }
-            catch
-            {
-                TryDeleteDir(dest);   // 复制中断：清理残留，源保持原样
-                throw;
-            }
+            CopyDir(source, dest); // 完整复制后才安装目标；失败只清理本次临时目录。
             try { Directory.Delete(source, true); }
             catch (Exception ex)
             {
@@ -423,6 +421,11 @@ namespace AppManager
             if (e == null) return false;
             try
             {
+                if (!IsManagedBackupPath(e.CurrentPath))
+                {
+                    Debug.WriteLine("还原失败: 当前路径不在收纳目录内 " + e.CurrentPath);
+                    return false;
+                }
                 bool backupExists = e.IsDir ? Directory.Exists(e.CurrentPath) : File.Exists(e.CurrentPath);
                 if (e.IsCopy)
                 {
@@ -434,10 +437,16 @@ namespace AppManager
                     }
                     return true;
                 }
+                if (!IsSafeRestoreTarget(e.OriginalPath))
+                {
+                    Debug.WriteLine("还原失败: 原始路径不在桌面目录内 " + e.OriginalPath);
+                    return false;
+                }
                 if (!backupExists) return false;
                 string dir = Path.GetDirectoryName(e.OriginalPath);
                 if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 string dest = UniqueRestoreTarget(e);
+                if (!IsSafeRestoreTarget(dest)) return false;
                 if (e.IsDir) MoveDirectory(e.CurrentPath, dest);
                 else MoveFile(e.CurrentPath, dest);
                 return true;
@@ -449,11 +458,51 @@ namespace AppManager
             }
         }
 
+        internal static bool IsManagedBackupPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            try
+            {
+                string fullPath = Path.GetFullPath(path);
+                return IsStrictChildOf(Paths.DesktopBackupDir, fullPath)
+                    || IsStrictChildOf(Paths.LegacyStashDir, fullPath);
+            }
+            catch { return false; }
+        }
+
+        private static bool IsStrictChildOf(string dir, string path)
+        {
+            string root = Path.GetFullPath(dir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string full = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (string.Equals(root, full, StringComparison.OrdinalIgnoreCase)) return false;
+            if (!(full + Path.DirectorySeparatorChar).StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
+            return !HasReparsePoint(root, full);
+        }
+
+        private static bool HasReparsePoint(string root, string path)
+        {
+            string current = path;
+            while (!string.IsNullOrEmpty(current))
+            {
+                try
+                {
+                    if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
+                }
+                catch (FileNotFoundException) { }
+                catch (DirectoryNotFoundException) { }
+                if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) return false;
+                string parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase)) return false;
+                current = parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            }
+            return false;
+        }
+
         /// <summary>还原落点：原位置已有同名项时追加 _restored，避免覆盖。</summary>
         private static string UniqueRestoreTarget(DesktopBackupEntry e)
         {
             string dest = e.OriginalPath;
-            bool exists = e.IsDir ? Directory.Exists(dest) : File.Exists(dest);
+            bool exists = Directory.Exists(dest) || File.Exists(dest);
             if (!exists) return dest;
             string dir = Path.GetDirectoryName(dest);
             string baseName = e.IsDir ? Path.GetFileName(dest) : Path.GetFileNameWithoutExtension(dest);
@@ -467,6 +516,22 @@ namespace AppManager
             }
             while (File.Exists(cand) || Directory.Exists(cand));
             return cand;
+        }
+
+        internal static bool IsSafeRestoreTarget(string path)
+        {
+            if (string.IsNullOrEmpty(path) || !Path.IsPathRooted(path) || path.Length < 3
+                || path[1] != ':' || (path[2] != '\\' && path[2] != '/') || path.IndexOf(':', 2) >= 0)
+                return false;
+            try
+            {
+                SafeDirectory.EnsureNoLinks(path);
+                string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string user = Path.GetFullPath(UserDesktop).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string shared = Path.GetFullPath(PublicDesktop).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                return IsStrictChildOf(user, full) || IsStrictChildOf(shared, full);
+            }
+            catch { return false; }
         }
 
         /// <summary>从清单中移除某条记录（不触碰磁盘文件）。</summary>

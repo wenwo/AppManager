@@ -4,13 +4,13 @@ Windows 桌面应用管理器：应用列表、资源分类与集合、图片查
 
 ## 构建
 
-要求：Windows 10/11 64 位（libmpv 仅提供 x64），系统自带 .NET Framework 4.x（`csc.exe`），PowerShell 5.1。
+要求：Windows 10/11 64 位（libmpv 仅提供 x64），.NET Framework 4.8（`csc.exe`），PowerShell 5.1。
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe`，随后运行内置自测（`--selftest`，当前 53 项），日志写入 `selftest.log`。
+`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe`，随后运行内置自测（`--selftest`，当前 62 项），日志写入 `selftest.log`。
 
 ## 视频播放器依赖（libmpv-2.dll）
 

@@ -181,7 +181,11 @@ namespace AppManager
             {
                 GraphicsPath p;
                 if (shadowPaths.TryGetValue(key, out p)) return p;
-                if (shadowPaths.Count > 64) shadowPaths.Clear();   // 尺寸漂移（窗口宽度变化）时防无限增长
+                if (shadowPaths.Count > 64)
+                {
+                    foreach (GraphicsPath cached in shadowPaths.Values) cached.Dispose();
+                    shadowPaths.Clear();
+                }
                 p = RoundedPath(new Rectangle(0, 0, w, h), radius);
                 shadowPaths[key] = p;
                 return p;

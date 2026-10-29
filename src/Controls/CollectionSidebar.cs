@@ -29,15 +29,20 @@ namespace AppManager.Controls
         /// <summary>集合封面缩略图边长（外部构建封面位图时按此尺寸）。</summary>
         public const int ThumbSize = 26;
 
-        private const int HeaderH = 36;   // 与列表表头/左侧分类行同高，三栏文字中心对齐
-        private const int RowH = 38;
-        private const int ItemH = 36;
-        private const int PadX = 10;
-        private const int FooterH = 44;
-        private const int CoverGap = 8;
-        private const int Radius = 8;
-        private const int ScrollBarW = 4;
-        private const int ScrollHitW = 12;
+        private int HeaderH { get { return Dpi(36); } }   // 与列表表头/左侧分类行同高，三栏文字中心对齐
+        private int RowH { get { return Dpi(38); } }
+        private int ItemH { get { return Dpi(36); } }
+        private int PadX { get { return Dpi(10); } }
+        private int FooterH { get { return Dpi(44); } }
+        private int CoverGap { get { return Dpi(8); } }
+        private int Radius { get { return Dpi(8); } }
+        private int ScrollBarW { get { return Dpi(4); } }
+        private int ScrollHitW { get { return Dpi(12); } }
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
 
         private readonly List<Item> items = new List<Item>();
         private string activeKey = string.Empty;
@@ -370,7 +375,8 @@ namespace AppManager.Controls
             if (index == externalDragIndex)
                 Draw.DrawRoundedRect(g, dropPen, r, Radius);
 
-            Rectangle cover = new Rectangle(r.X + 8, r.Y + (r.Height - ThumbSize) / 2, ThumbSize, ThumbSize);
+            int thumbSize = Dpi(ThumbSize);
+            Rectangle cover = new Rectangle(r.X + Dpi(8), r.Y + (r.Height - thumbSize) / 2, thumbSize, thumbSize);
             if (item.IsAll)
             {
                 PaintAllGlyph(g, cover, active);

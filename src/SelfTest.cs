@@ -115,6 +115,10 @@ namespace AppManager
             Case57_MusicMenuGrouping();
             Case58_CategoryIconKeys();
             Case59_LyricsReadLimit();
+            Case60_PathBoundaryNormalization();
+            Case61_RestorePathBoundary();
+            Case62_XmlDtdRejected();
+            Case63_DpiScaling();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1376,6 +1380,81 @@ namespace AppManager
                 try { if (File.Exists(path)) File.Delete(path); } catch { }
                 try { if (File.Exists(lyricPath)) File.Delete(lyricPath); } catch { }
             }
+        }
+
+        private static void Case60_PathBoundaryNormalization()
+        {
+            Begin("60 路径边界规范化相对路径与父目录片段");
+            string root = Path.Combine(Paths.DataDir, "Boundary");
+            string inside = Path.Combine(root, "child", "..", "target");
+            string outside = Path.Combine(root, "..", "outside");
+            bool ok = MainForm.IsUnder(root, inside)
+                && MainForm.IsUnder(root.ToUpperInvariant(), inside)
+                && !MainForm.IsUnder(root, outside);
+            Assert(ok, "规范化内部=True 大小写=True 越界拦截=True");
+        }
+
+        private static void Case61_RestorePathBoundary()
+        {
+            Begin("61 收纳还原拒绝删除管理目录外路径");
+            string outside = Path.Combine(Paths.DataDir, "outside-restore");
+            string managed = Path.Combine(Paths.DesktopBackupDir, "restore-copy");
+            try
+            {
+                Directory.CreateDirectory(outside);
+                Directory.CreateDirectory(managed);
+                DesktopOrganizer organizer = new DesktopOrganizer(new AppConfig());
+                DesktopBackupEntry outsideEntry = new DesktopBackupEntry();
+                outsideEntry.CurrentPath = outside;
+                outsideEntry.IsDir = true;
+                outsideEntry.IsCopy = true;
+                DesktopBackupEntry managedEntry = new DesktopBackupEntry();
+                managedEntry.CurrentPath = managed;
+                managedEntry.IsDir = true;
+                managedEntry.IsCopy = true;
+                bool ok = !organizer.RestoreOne(outsideEntry)
+                    && Directory.Exists(outside)
+                    && organizer.RestoreOne(managedEntry)
+                    && !Directory.Exists(managed)
+                    && !DesktopOrganizer.IsManagedBackupPath(Paths.DesktopBackupDir);
+                Assert(ok, "外部目录保留=True 管理副本清理=True 根目录拦截=True");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally
+            {
+                try { if (Directory.Exists(outside)) Directory.Delete(outside, true); } catch { }
+                try { if (Directory.Exists(managed)) Directory.Delete(managed, true); } catch { }
+            }
+        }
+
+        private static void Case62_XmlDtdRejected()
+        {
+            Begin("62 XML 配置禁止 DTD 且保留普通文档读取");
+            string path = TempFile(".xml");
+            try
+            {
+                File.WriteAllText(path, "<!DOCTYPE config [<!ENTITY test 'blocked'>]><config>&test;</config>", Encoding.UTF8);
+                bool rejected = false;
+                try { SafeXml.Load(path); }
+                catch (System.Xml.XmlException) { rejected = true; }
+                File.WriteAllText(path, "<config><value>ok</value></config>", Encoding.UTF8);
+                System.Xml.XmlDocument doc = SafeXml.Load(path);
+                bool ok = rejected && doc.DocumentElement != null && doc.DocumentElement.Name == "config";
+                Assert(ok, "DTD拒绝=" + rejected + " 普通XML=True");
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { try { if (File.Exists(path)) File.Delete(path); } catch { } }
+        }
+
+        private static void Case63_DpiScaling()
+        {
+            Begin("63 DPI 逻辑像素按 100/125/150/175% 缩放");
+            bool ok = DpiHelper.Scale(240, 96) == 240
+                && DpiHelper.Scale(240, 120) == 300
+                && DpiHelper.Scale(240, 144) == 360
+                && DpiHelper.Scale(240, 168) == 420
+                && DpiHelper.Scale(34, 144) == 51;
+            Assert(ok, "100%=240 125%=300 150%=360 175%=420");
         }
 
         private static void WriteBox(Stream s, string type, byte[] payload)

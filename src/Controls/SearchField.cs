@@ -63,8 +63,8 @@ namespace AppManager.Controls
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            int pad = 10;
-            int iconArea = 24;
+            int pad = DpiHelper.Scale(10, DpiHelper.ForControl(this));
+            int iconArea = DpiHelper.Scale(24, DpiHelper.ForControl(this));
             box.Location = new Point(pad + iconArea, (Height - box.PreferredHeight) / 2);
             box.Width = Math.Max(10, Width - box.Left - pad);
             placeholderLabel.SetBounds(box.Left, 0, Math.Max(0, box.Width), Height);

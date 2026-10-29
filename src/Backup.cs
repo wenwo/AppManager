@@ -31,6 +31,7 @@ namespace AppManager
 
         private static string FormatSize(long bytes)
         {
+            if (bytes < 0) return "大小未统计完成";
             if (bytes < 1024) { return bytes + " B"; }
             if (bytes < 1024 * 1024) { return (bytes / 1024) + " KB"; }
             return (bytes / 1024 / 1024) + " MB";
@@ -43,6 +44,7 @@ namespace AppManager
     /// </summary>
     internal static class LayoutBackup
     {
+        private static readonly object listLock = new object();
         public static string RootDir { get { return Paths.BackupsDir; } }
 
         /// <summary>默认名字：按时间起名，便于在列表里区分。</summary>
@@ -53,15 +55,27 @@ namespace AppManager
 
         public static List<LayoutBackupInfo> List()
         {
+            if (!Monitor.TryEnter(listLock)) return new List<LayoutBackupInfo>();
+            try { return ListCore(); }
+            finally { Monitor.Exit(listLock); }
+        }
+
+        private static List<LayoutBackupInfo> ListCore()
+        {
             List<LayoutBackupInfo> result = new List<LayoutBackupInfo>();
             try
             {
                 if (!Directory.Exists(RootDir)) { return result; }
-                foreach (string dir in Directory.GetDirectories(RootDir))
+                SafeDirectory.Budget scanBudget = new SafeDirectory.Budget();
+                foreach (string dir in Directory.EnumerateDirectories(RootDir))
                 {
+                    scanBudget.Add(0, 0);
                     string id = Path.GetFileName(dir);
                     if (id.StartsWith("_", StringComparison.Ordinal)) { continue; }   // 恢复前的临时目录
                     if (id.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) { continue; }
+                    try { SafeDirectory.EnsureNoLinks(dir); }
+                    catch (IOException) { continue; }
+                    catch (UnauthorizedAccessException) { continue; }
                     // 只认真正的布局备份：config.xml + meta.xml 缺一不可
                     // （部署时留的 deploy_before_* 快照只有 config.xml，不在列表里冒充备份）
                     if (!File.Exists(Path.Combine(dir, "config.xml"))) { continue; }
@@ -71,7 +85,7 @@ namespace AppManager
                     info.Id = id;
                     info.Name = id;
                     ReadMeta(dir, info);
-                    info.SizeBytes = DirSize(dir);
+                    info.SizeBytes = DirSize(dir, scanBudget);
                     result.Add(info);
                 }
             }
@@ -94,8 +108,7 @@ namespace AppManager
             {
                 string metaFile = Path.Combine(dir, "meta.xml");
                 if (!File.Exists(metaFile)) return;
-                XmlDocument doc = new XmlDocument();
-                doc.Load(metaFile);
+                XmlDocument doc = SafeXml.Load(metaFile);
                 XmlNode root = doc.DocumentElement;
                 if (root == null) return;
 
@@ -121,19 +134,10 @@ namespace AppManager
                 ? node.Attributes[name].Value : string.Empty;
         }
 
-        private static long DirSize(string dir)
+        private static long DirSize(string dir, SafeDirectory.Budget budget)
         {
-            long total = 0;
-            try
-            {
-                foreach (string f in Directory.GetFiles(dir, "*", SearchOption.AllDirectories))
-                {
-                    try { total += new FileInfo(f).Length; }
-                    catch { }
-                }
-            }
-            catch { }
-            return total;
+            try { return SafeDirectory.Measure(dir, budget); }
+            catch { return -1; } // 未完成的扫描不能显示成精确大小。
         }
 
         /// <summary>把当前布局另存为一份备份。</summary>
@@ -207,8 +211,7 @@ namespace AppManager
             try
             {
                 if (!File.Exists(metaFile)) return;
-                XmlDocument doc = new XmlDocument();
-                doc.Load(metaFile);
+                XmlDocument doc = SafeXml.Load(metaFile);
                 XmlNode root = doc.DocumentElement;
                 if (root == null) return;
                 string name = Attr(root, "name");
@@ -303,6 +306,7 @@ namespace AppManager
                 bool replaceDesktop = Directory.Exists(snapDesktop);
                 bool replaceStash = Directory.Exists(snapStash);
 
+                CheckRestoreCapacity();
                 transaction = Path.Combine(RootDir, "_prerestore_" + DateTime.Now.ToString("yyyyMMdd-HHmmss")
                     + "-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(transaction);
@@ -436,14 +440,23 @@ namespace AppManager
 
         private static void CopyDir(string from, string to)
         {
-            if (string.IsNullOrEmpty(from) || !Directory.Exists(from)) return;
-            if (!Directory.Exists(to)) Directory.CreateDirectory(to);
-            foreach (string f in Directory.GetFiles(from))
-                File.Copy(f, Path.Combine(to, Path.GetFileName(f)), true);
-            foreach (string d in Directory.GetDirectories(from))
+            if (!Directory.Exists(from)) return;
+            SafeDirectory.Copy(from, to, true);
+        }
+
+        // 留底可能是唯一副本；达到限额时阻止继续增长，不在列出备份时删除数据。
+        private static void CheckRestoreCapacity()
+        {
+            SafeDirectory.Budget budget = new SafeDirectory.Budget();
+            int count = 0;
+            foreach (string dir in Directory.EnumerateDirectories(RootDir, "_prerestore_*"))
             {
-                CopyDir(d, Path.Combine(to, Path.GetFileName(d)));
+                if (++count >= 3)
+                    throw new IOException("恢复留底已达 3 份，请先检查并手动归档或清理：" + RootDir);
+                SafeDirectory.Measure(dir, budget);
             }
+            if (Directory.Exists(Paths.DesktopBackupDir)) SafeDirectory.Measure(Paths.DesktopBackupDir, budget);
+            if (Directory.Exists(Paths.LegacyStashDir)) SafeDirectory.Measure(Paths.LegacyStashDir, budget);
         }
     }
 
@@ -457,6 +470,10 @@ namespace AppManager
         private readonly RoundButton btnRename;
         private readonly RoundButton btnDelete;
         private bool operationRunning;
+        private int reloadGeneration;
+        private bool reloadRunning;
+        private bool reloadPending;
+        private string pendingSelection;
 
         /// <summary>是否执行过恢复（主窗口据此重载配置与重扫）。</summary>
         public bool Restored;
@@ -517,7 +534,18 @@ namespace AppManager
             btnClose.Click += delegate { Close(); };
             Controls.Add(btnClose);
 
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
             ReloadList();
+        }
+
+        protected override void OnDpiScaleChanged()
+        {
+            base.OnDpiScaleChanged();
+            if (list != null) list.ItemHeight = Dpi(54);
         }
 
         private RoundButton MakeButton(string text, bool accent)
@@ -533,14 +561,16 @@ namespace AppManager
         {
             base.OnPaint(e);
             Graphics g = e.Graphics;
+            int dpi = CurrentDpi;
+            Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
             using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "布局备份", Theme.DialogTitleFont, tb, new Rectangle(24, 22, 260, 30));
+                Draw.DrawStringLeft(g, "布局备份", Theme.DialogTitleFont, tb, new Rectangle(S(24), S(22), S(260), S(30)));
             using (SolidBrush db = new SolidBrush(Theme.TextSecondary))
             {
                 Draw.DrawStringLeft(g, "备份会保存分类、顺序、常用、隐藏与桌面收纳的完整状态，可保存多份。", Theme.CaptionFont, db,
-                    new Rectangle(24, 56, ClientSize.Width - 48, 22));
+                    new Rectangle(S(24), S(56), ClientSize.Width - S(48), S(22)));
                 Draw.DrawStringLeft(g, "行内双击可恢复；当前收纳目录在恢复前会另存留底，不会直接删除。", Theme.CaptionFont, db,
-                    new Rectangle(24, 76, ClientSize.Width - 48, 22));
+                    new Rectangle(S(24), S(76), ClientSize.Width - S(48), S(22)));
             }
             Draw.DrawShadow(g, list.Bounds, 10, 0.35f);
         }
@@ -556,6 +586,8 @@ namespace AppManager
         private void OnDrawItem(object sender, DrawItemEventArgs e)
         {
             Graphics g = e.Graphics;
+            int dpi = CurrentDpi;
+            Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
             e.DrawBackground();
             if (e.Index < 0 || e.Index >= items.Count) return;
             LayoutBackupInfo info = items[e.Index];
@@ -567,27 +599,67 @@ namespace AppManager
             if (e.Index < items.Count - 1)
             {
                 using (Pen p = new Pen(Theme.Separator))
-                    g.DrawLine(p, r.Left + 14, r.Bottom - 1, r.Right - 14, r.Bottom - 1);
+                    g.DrawLine(p, r.Left + S(14), r.Bottom - S(1), r.Right - S(14), r.Bottom - S(1));
             }
 
             using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, info.Name, Theme.BodyFont, nb, new Rectangle(r.Left + 14, r.Top + 8, r.Width - 28, 20));
+                Draw.DrawStringLeft(g, info.Name, Theme.BodyFont, nb, new Rectangle(r.Left + S(14), r.Top + S(8), r.Width - S(28), S(20)));
             using (SolidBrush sb = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringLeft(g, info.Summary, Theme.CaptionFont, sb, new Rectangle(r.Left + 14, r.Top + 30, r.Width - 28, 18));
+                Draw.DrawStringLeft(g, info.Summary, Theme.CaptionFont, sb, new Rectangle(r.Left + S(14), r.Top + S(30), r.Width - S(28), S(18)));
         }
 
         private void ReloadList()
         {
+            ReloadList(null);
+        }
+
+        private void ReloadList(string selectId)
+        {
+            if (reloadRunning)
+            {
+                reloadPending = true;
+                pendingSelection = selectId;
+                return;
+            }
+            reloadRunning = true;
             int sel = list.SelectedIndex;
-            items.Clear();
-            items.AddRange(LayoutBackup.List());
-            list.BeginUpdate();
-            list.Items.Clear();
-            foreach (LayoutBackupInfo info in items) list.Items.Add(info.Name);
-            list.EndUpdate();
-            if (items.Count > 0) list.SelectedIndex = Math.Min(Math.Max(sel, 0), items.Count - 1);
-            UpdateButtons();
-            list.Invalidate();
+            int generation = ++reloadGeneration;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<LayoutBackupInfo> loaded = LayoutBackup.List();
+                try
+                {
+                    BeginInvoke((Action)delegate
+                    {
+                        if (IsDisposed || Disposing || generation != reloadGeneration) return;
+                        reloadRunning = false;
+                        items.Clear();
+                        items.AddRange(loaded);
+                        list.BeginUpdate();
+                        list.Items.Clear();
+                        foreach (LayoutBackupInfo info in items) list.Items.Add(info.Name);
+                        list.EndUpdate();
+                        if (!string.IsNullOrEmpty(selectId))
+                        {
+                            int requested = items.FindIndex(delegate(LayoutBackupInfo info)
+                            {
+                                return string.Equals(info.Id, selectId, StringComparison.OrdinalIgnoreCase);
+                            });
+                            if (requested >= 0) sel = requested;
+                        }
+                        if (items.Count > 0) list.SelectedIndex = Math.Min(Math.Max(sel, 0), items.Count - 1);
+                        UpdateButtons();
+                        list.Invalidate();
+                        if (reloadPending)
+                        {
+                            reloadPending = false;
+                            ReloadList(pendingSelection);
+                        }
+                    });
+                }
+                catch (ObjectDisposedException) { }
+                catch (InvalidOperationException) { }
+            });
         }
 
         private void UpdateButtons()
@@ -628,15 +700,7 @@ namespace AppManager
                 return LayoutBackup.Create(name, out id, out error) ? null : error;
             }, delegate
             {
-                ReloadList();
-                for (int i = 0; i < items.Count; i++)
-                {
-                    if (string.Equals(items[i].Id, id, StringComparison.OrdinalIgnoreCase))
-                    {
-                        list.SelectedIndex = i;
-                        break;
-                    }
-                }
+                ReloadList(id);
             });
         }
 
@@ -719,6 +783,7 @@ namespace AppManager
                 {
                     BeginInvoke((Action)delegate
                     {
+                        if (IsDisposed || Disposing) return;
                         operationRunning = false;
                         list.Enabled = true;
                         UseWaitCursor = false;

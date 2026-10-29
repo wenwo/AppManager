@@ -33,15 +33,20 @@ namespace AppManager.Controls
         private int hoverIndex = -1;
         private int dragIndex = -1;
         private int externalDragIndex = -1;   // 外部（主内容区）拖动时的高亮目标行
-        private const int ItemHeight = 36;
-        private const int SegHeight = 28;      // 顶部分段控件（软件/网站）高度
-        private static readonly int HeaderHeight = Theme.TopBarHeight;   // 顶栏总高：分类列表从其下开始
-        private const int CategoryHeaderHeight = Theme.TitleRowHeight;
-        private const int FooterHeight = 44;   // 底部「+ 新建分类」按钮高度
+        private int ItemHeight { get { return Dpi(36); } }
+        private int SegHeight { get { return Dpi(28); } }      // 顶部分段控件（软件/网站）高度
+        private int HeaderHeight { get { return Dpi(Theme.TopBarHeight); } }   // 顶栏总高：分类列表从其下开始
+        private int CategoryHeaderHeight { get { return Dpi(Theme.TitleRowHeight); } }
+        private int FooterHeight { get { return Dpi(44); } }   // 底部「+ 新建分类」按钮高度
         public const int CollapsedWidth = 44;
-        private const int ListPad = 8;         // 分类列表上下留白
-        private const int ScrollBarW = 4;      // 滚动条绘制宽度（iOS 细条）
-        private const int ScrollHitW = 12;     // 滚动条命中区宽度（比可视条宽，便于抓取）
+        private int ListPad { get { return Dpi(8); } }         // 分类列表上下留白
+        private int ScrollBarW { get { return Dpi(4); } }      // 滚动条绘制宽度（iOS 细条）
+        private int ScrollHitW { get { return Dpi(12); } }     // 滚动条命中区宽度（比可视条宽，便于抓取）
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
         private ContentMode mode = ContentMode.Software;
         private int hoverSegment = -1;         // 分段悬停：0=软件 1=网站
         private int hoverFooter = -1;          // 底部按钮悬停：0=新建分类
@@ -500,7 +505,7 @@ namespace AppManager.Controls
         {
             get
             {
-                int segY = Theme.TitleRowHeight + (Theme.ToolbarRowHeight - SegHeight) / 2;
+                int segY = Dpi(Theme.TitleRowHeight) + (Dpi(Theme.ToolbarRowHeight) - SegHeight) / 2;
                 return new Rectangle(12, segY, ClientSize.Width - 24, SegHeight);
             }
         }

@@ -68,28 +68,37 @@ namespace AppManager.Controls
         private bool suppressClick;
 
         // iOS Grouped List 尺寸（单行表格：名称靠左，分类/大小/位置 靠右且上下对齐）
-        private const int ListRowH = 30;
+        private int ListRowH { get { return Dpi(30); } }
         private const int ListTop = 0;            // 表头紧贴内容区顶部
         internal const int ListHeaderH = 36;       // 与左侧分类行同高，保证三栏文字中心对齐
-        private const int ListBottomPad = 10;     // 列表底部留白（滚动范围）
-        private const int ListMargin = 14;
-        private const int ListIcon = 20;
-        private const int ActionBtnW = 40;
-        private const int ActionBtnGap = 4;
+        private int ListBottomPad { get { return Dpi(10); } }     // 列表底部留白（滚动范围）
+        private int ListMargin { get { return Dpi(14); } }
+        private int ListIcon { get { return Dpi(20); } }
+        private int ActionBtnW { get { return Dpi(40); } }
+        private int ActionBtnGap { get { return Dpi(4); } }
         // 每条记录为独立卡片：卡片间距 + 圆角
-        private const int ListGap = 4;
-        private const int ListCardRadius = 8;
+        private int ListGap { get { return Dpi(4); } }
+        private int ListCardRadius { get { return Dpi(8); } }
         // 右侧数据列：分类列左对齐（胶囊组左边缘固定）、大小/时间固定宽、位置列按内容宽度并贴右边缘
-        private const int ColGap = 18;
-        private const int CatColMinW = 56;
-        private const int SizeColW = 76;
-        private const int TimeColW = 78;    // 资源列表「时间」列：yyyy-MM-dd
-        private const int LocColMinW = 56;
-        private const int NameColMinW = 76;   // 资源列表出现时间列时，名称列的最小可读宽度
+        private int ColGap { get { return Dpi(18); } }
+        private int CatColMinW { get { return Dpi(56); } }
+        private int SizeColW { get { return Dpi(76); } }
+        private int TimeColW { get { return Dpi(78); } }    // 资源列表「时间」列：yyyy-MM-dd
+        private int LocColMinW { get { return Dpi(56); } }
+        private int NameColMinW { get { return Dpi(76); } }   // 资源列表出现时间列时，名称列的最小可读宽度
         // 分类分段（胶囊）尺寸
-        private const int ChipH = 18;
-        private const int ChipPadX = 6;
-        private const int ChipGap = 4;
+        private int ChipH { get { return Dpi(18); } }
+        private int ChipPadX { get { return Dpi(6); } }
+        private int ChipGap { get { return Dpi(4); } }
+
+        private int GridItemGap { get { return Dpi(Theme.GridItemGap); } }
+        private int GridItemWidth { get { return Dpi(Theme.GridItemWidth); } }
+        private int GridItemHeight { get { return Dpi(Theme.GridItemHeight); } }
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
 
         public bool GridMode
         {
@@ -371,7 +380,7 @@ namespace AppManager.Controls
         internal void HandleHeaderClick(Graphics g, Point p)
         {
             if (grid) return;   // 仅列表模式有表头
-            Rectangle refRow = new Rectangle(ListMargin, 0, ClientSize.Width - ListMargin * 2, ListHeaderH);
+            Rectangle refRow = new Rectangle(ListMargin, 0, ClientSize.Width - ListMargin * 2, Dpi(ListHeaderH));
             Rectangle nameRect, catRect, sizeRect, timeRect, locRect;
             ListColumns(g, refRow, ActionReserveWidth(), out nameRect, out catRect, out sizeRect, out timeRect, out locRect);
             string col = null;
@@ -404,12 +413,12 @@ namespace AppManager.Controls
             if (grid)
             {
                 int rows = GridRows();
-                h = rows * (Theme.GridItemHeight + Theme.GridItemGap) + Theme.GridItemGap;
+                h = rows * (GridItemHeight + GridItemGap) + GridItemGap;
             }
             else
             {
                 // 列表：表头高度 + 底部留白 + 各行（含卡片间距）
-                h = ListHeaderH + ListBottomPad + apps.Count * (ListRowH + ListGap) - (apps.Count > 0 ? ListGap : 0);
+                h = Dpi(ListHeaderH) + ListBottomPad + apps.Count * (ListRowH + ListGap) - (apps.Count > 0 ? ListGap : 0);
             }
             AutoScrollMinSize = new Size(0, h);
         }
@@ -417,7 +426,7 @@ namespace AppManager.Controls
         /// <summary>列表单条记录矩形（独立卡片，卡片之间留缝；首行让出顶部吸顶表头）。</summary>
         private Rectangle ListRowRect(int index)
         {
-            return new Rectangle(ListMargin, ListTop + ListHeaderH + index * (ListRowH + ListGap),
+            return new Rectangle(ListMargin, ListTop + Dpi(ListHeaderH) + index * (ListRowH + ListGap),
                 ClientSize.Width - ListMargin * 2, ListRowH);
         }
 
@@ -512,8 +521,8 @@ namespace AppManager.Controls
 
         private int Columns()
         {
-            int w = ClientSize.Width - Theme.GridItemGap;
-            int cols = w / (Theme.GridItemWidth + Theme.GridItemGap);
+            int w = ClientSize.Width - GridItemGap;
+            int cols = w / (GridItemWidth + GridItemGap);
             return cols < 1 ? 1 : cols;
         }
 
@@ -528,22 +537,22 @@ namespace AppManager.Controls
             int cols = Columns();
             int col = index % cols;
             int row = index / cols;
-            int x = Theme.GridItemGap + col * (Theme.GridItemWidth + Theme.GridItemGap);
-            int y = Theme.GridItemGap + row * (Theme.GridItemHeight + Theme.GridItemGap);
-            return new Rectangle(x, y, Theme.GridItemWidth, Theme.GridItemHeight);
+            int x = GridItemGap + col * (GridItemWidth + GridItemGap);
+            int y = GridItemGap + row * (GridItemHeight + GridItemGap);
+            return new Rectangle(x, y, GridItemWidth, GridItemHeight);
         }
 
         private int HitIndex(Point client)
         {
             // 顶部吸顶表头区域不参与命中（否则滚动后点击表头会误命中其下方被遮挡的行）
-            if (!grid && client.Y < ListHeaderH) return -1;
+            if (!grid && client.Y < Dpi(ListHeaderH)) return -1;
             Point p = new Point(client.X - AutoScrollPosition.X, client.Y - AutoScrollPosition.Y);
             // 网格/列表布局规则均固定：按坐标直接算行列并回验矩形，不再线性扫描
             if (grid)
             {
                 int cols = Columns();
-                int col = (p.X - Theme.GridItemGap) / (Theme.GridItemWidth + Theme.GridItemGap);
-                int row = (p.Y - Theme.GridItemGap) / (Theme.GridItemHeight + Theme.GridItemGap);
+                int col = (p.X - GridItemGap) / (GridItemWidth + GridItemGap);
+                int row = (p.Y - GridItemGap) / (GridItemHeight + GridItemGap);
                 if (col >= 0 && row >= 0 && col < cols)
                 {
                     int idx = row * cols + col;
@@ -552,7 +561,7 @@ namespace AppManager.Controls
             }
             else
             {
-                int row = (p.Y - ListTop - ListHeaderH) / (ListRowH + ListGap);
+                int row = (p.Y - ListTop - Dpi(ListHeaderH)) / (ListRowH + ListGap);
                 if (row >= 0 && row < apps.Count && ListRowRect(row).Contains(p)) return row;
             }
             return -1;
@@ -616,7 +625,7 @@ namespace AppManager.Controls
 
             int y = anchor.Bottom + 6;                       // 默认置于条目下方
             if (y + h > ClientSize.Height - 4) y = anchor.Y - 6 - h;   // 下方空间不足则翻转到条目上方
-            int minY = grid ? 4 : ListHeaderH + 4;           // 列表视图需避开吸顶表头
+            int minY = grid ? 4 : Dpi(ListHeaderH) + 4;           // 列表视图需避开吸顶表头
             if (y < minY) y = minY;
 
             Rectangle tr = new Rectangle(x, y, w, h);
@@ -678,7 +687,7 @@ namespace AppManager.Controls
                 }
 
                 AppInfo a = apps[i];
-                int iconSize = Theme.IconSize;
+                int iconSize = Dpi(Theme.IconSize);
                 Rectangle ir = new Rectangle((r.Width - iconSize) / 2, 10, iconSize, iconSize);
                 if (a.Icon != null)
                 {
@@ -810,11 +819,11 @@ namespace AppManager.Controls
         internal void PaintListHeader(Graphics g, int width)
         {
             // 表头底色铺满整宽，遮住其下滚动经过的行
-            g.FillRectangle(headerBgBrush, 0, 0, width, ListHeaderH);
-            g.DrawLine(headerLinePen, 0, ListHeaderH - 1, width, ListHeaderH - 1);
+            g.FillRectangle(headerBgBrush, 0, 0, width, Dpi(ListHeaderH));
+            g.DrawLine(headerLinePen, 0, Dpi(ListHeaderH) - 1, width, Dpi(ListHeaderH) - 1);
 
             // 用与数据行同宽同列的参照矩形取列几何（仅 X 相关，Y 用表头高度以垂直居中）
-            Rectangle refRow = new Rectangle(ListMargin, 0, width - ListMargin * 2, ListHeaderH);
+            Rectangle refRow = new Rectangle(ListMargin, 0, width - ListMargin * 2, Dpi(ListHeaderH));
             int actionReserve = ActionReserveWidth();
             Rectangle nameRect, catRect, sizeRect, timeRect, locRect;
             ListColumns(g, refRow, actionReserve, out nameRect, out catRect, out sizeRect, out timeRect, out locRect);
@@ -1060,7 +1069,7 @@ namespace AppManager.Controls
         {
             if (gridItemPath == null)
                 gridItemPath = Draw.RoundedPath(
-                    new Rectangle(0, 0, Theme.GridItemWidth, Theme.GridItemHeight), Theme.CornerRadius - 4);
+                    new Rectangle(0, 0, GridItemWidth, GridItemHeight), Theme.CornerRadius - 4);
         }
 
         protected override void OnMouseMove(MouseEventArgs e)
@@ -1539,10 +1548,10 @@ namespace AppManager.Controls
             if (grid)
             {
                 int cols = Columns();
-                int cw = Theme.GridItemWidth + Theme.GridItemGap;
-                int rh = Theme.GridItemHeight + Theme.GridItemGap;
-                int gcol = (p.X - Theme.GridItemGap) / cw;
-                int grow = (p.Y - Theme.GridItemGap) / rh;
+                int cw = GridItemWidth + GridItemGap;
+                int rh = GridItemHeight + GridItemGap;
+                int gcol = (p.X - GridItemGap) / cw;
+                int grow = (p.Y - GridItemGap) / rh;
                 if (gcol < 0) gcol = 0;
                 if (gcol >= cols) gcol = cols - 1;
                 if (grow < 0) grow = 0;
@@ -1553,7 +1562,7 @@ namespace AppManager.Controls
                 return (p.X < r.X + r.Width / 2) ? gidx : gidx + 1;
             }
             int pitch = ListRowH + ListGap;
-            int idx = (p.Y - ListTop - ListHeaderH) / pitch;
+            int idx = (p.Y - ListTop - Dpi(ListHeaderH)) / pitch;
             if (idx < 0) return 0;
             if (idx >= count) return count;
             Rectangle row = ListRowRect(idx);
@@ -1603,7 +1612,7 @@ namespace AppManager.Controls
             else
             {
                 int gap = dragGap > count ? count : dragGap;
-                int y = ListTop + ListHeaderH + gap * (ListRowH + ListGap) - ListGap / 2;
+                int y = ListTop + Dpi(ListHeaderH) + gap * (ListRowH + ListGap) - ListGap / 2;
                 g.DrawLine(accentPen, ListMargin + 6, y, ClientSize.Width - ListMargin - 6, y);
             }
         }
