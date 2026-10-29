@@ -38,6 +38,7 @@ namespace AppManager
                 Run("listing preserves old rollback data; quota refuses new restore", Retention);
                 Run("DPI messages: effective DPI / suggested rectangle / repeated scaling", DpiMessages);
                 Run("maximize stays in selected monitor work area and restores", MaximizeWithinScreenWorkArea);
+                Run("window resize hit zones, minimum size, and fullscreen threshold", ResizeBounds);
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
                 Run("backup list row height at 100/125/150/175 percent", BackupDpi);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
@@ -276,6 +277,47 @@ namespace AppManager
                 Check(form.Bounds == work, "maximized window left its monitor work area");
                 typeof(MainForm).GetMethod("RestoreFromMaximized", Private).Invoke(form, null);
                 Check(form.Bounds == before, "window was not restored to its previous bounds");
+            }
+        }
+
+        private static void ResizeBounds()
+        {
+            using (MainForm form = new MainForm(new AppConfig()))
+            {
+                form.ClientSize = new Size(1000, 700);
+                form.MinimumSize = new Size(960, 560);
+                form.CreateControl();
+                MethodInfo hitTest = typeof(MainForm).GetMethod("ResizeHitTest", Private);
+                Check((int)hitTest.Invoke(form, new object[] { new Point(0, 350) }) == 10, "left resize hit missing");
+                Check((int)hitTest.Invoke(form, new object[] { new Point(999, 350) }) == 11, "right resize hit missing");
+                Check((int)hitTest.Invoke(form, new object[] { new Point(500, 0) }) == 12, "top resize hit missing");
+                Check((int)hitTest.Invoke(form, new object[] { new Point(0, 0) }) == 13, "top-left resize hit missing");
+                Check((int)hitTest.Invoke(form, new object[] { new Point(999, 699) }) == 17, "bottom-right resize hit missing");
+                Check((int)hitTest.Invoke(form, new object[] { new Point(500, 350) }) == 0, "client area became a resize zone");
+
+                MethodInfo constrain = typeof(MainForm).GetMethod("ConstrainResizeBounds", Private);
+                Rectangle work = Screen.PrimaryScreen.WorkingArea;
+                object[] minimumArgs = { new Rectangle(work.Left + 100, work.Top + 100, 500, 300), 2, work, null };
+                Rectangle minimum = (Rectangle)constrain.Invoke(form, minimumArgs);
+                Check(minimum.Width == 960 && minimum.Height == 560,
+                    "minimum resize bounds not enforced: " + minimum.Width + "x" + minimum.Height + " min=" + form.MinimumSize);
+                Check(!(bool)minimumArgs[3], "minimum resize incorrectly entered fullscreen");
+
+                object[] maximumArgs = { new Rectangle(work.Left, work.Top, work.Width + 1, work.Height), 2, work, null };
+                constrain.Invoke(form, maximumArgs);
+                Check((bool)maximumArgs[3], "maximum resize did not request fullscreen");
+
+                typeof(MainForm).GetMethod("EnterFormFullscreen", Private).Invoke(form, null);
+                Rectangle fullscreen = form.Bounds;
+                IntPtr sizing = Marshal.AllocHGlobal(16);
+                try
+                {
+                    Marshal.Copy(new int[] { work.Left, work.Top, work.Left + 100, work.Top + 100 }, 0, sizing, 4);
+                    Message message = Message.Create(form.Handle, 0x0214, IntPtr.Zero, sizing);
+                    typeof(MainForm).GetMethod("WndProc", Private).Invoke(form, new object[] { message });
+                    Check(form.Bounds == fullscreen, "fullscreen was undone by a later sizing message");
+                }
+                finally { Marshal.FreeHGlobal(sizing); }
             }
         }
 

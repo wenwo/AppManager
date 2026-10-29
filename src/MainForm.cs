@@ -111,7 +111,23 @@ namespace AppManager
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();
         private const int WM_NCLBUTTONDOWN = 0xA1;
+        private const int WM_NCHITTEST = 0x0084;
+        private const int WM_SIZING = 0x0214;
         private const int HTCAPTION = 2;
+        private const int WM_SETCURSOR = 0x0020;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int HTLEFT = 10;
+        private const int HTRIGHT = 11;
+        private const int HTTOP = 12;
+        private const int HTTOPLEFT = 13;
+        private const int HTTOPRIGHT = 14;
+        private const int HTBOTTOM = 15;
+        private const int HTBOTTOMLEFT = 16;
+        private const int HTBOTTOMRIGHT = 17;
+        private const int WMSZ_LEFT = 1;
+        private const int WMSZ_TOP = 3;
+        private const int WMSZ_TOPLEFT = 4;
+        private const int WMSZ_BOTTOMLEFT = 7;
 
         // 无边框窗体默认不含「最大化/最小化框」样式，缺少 WS_MINIMIZEBOX 时点击任务栏图标无法最小化
         private const int WS_MINIMIZEBOX = 0x00020000;
@@ -144,6 +160,15 @@ namespace AppManager
             public ushort wSuiteMask;
             public byte wProductType;
             public byte wReserved;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeRect
+        {
+            public int Left;
+            public int Top;
+            public int Right;
+            public int Bottom;
         }
 
         public MainForm(AppConfig cfg)
@@ -207,6 +232,8 @@ namespace AppManager
         /// <summary>拦截系统最小化命令，兜底保证任务栏点击等入口都能收起为最小化。</summary>
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == WM_NCHITTEST && TryHandleResizeHitTest(ref m)) return;
+            if (m.Msg == WM_SIZING && TryHandleWindowSizing(ref m)) return;
             if (m.Msg == WM_SYSCOMMAND)
             {
                 int command = m.WParam.ToInt32() & 0xFFF0;
@@ -227,6 +254,100 @@ namespace AppManager
                 }
             }
             base.WndProc(ref m);
+        }
+
+        /// <summary>无边框窗体在四边和四角提供系统缩放命中区，由 Windows 显示对应缩放光标。</summary>
+        private bool TryHandleResizeHitTest(ref Message m)
+        {
+            if (IsFormMaximized || playerFullscreen || WindowState != FormWindowState.Normal) return false;
+            long packed = m.LParam.ToInt64();
+            Point screen = new Point(unchecked((short)(packed & 0xFFFF)), unchecked((short)((packed >> 16) & 0xFFFF)));
+            int hit = ResizeHitTest(PointToClient(screen));
+            if (hit == 0) return false;
+            m.Result = (IntPtr)hit;
+            return true;
+        }
+
+        /// <summary>返回四边、四角对应的系统缩放命中码；客户区内部返回 0。</summary>
+        private int ResizeHitTest(Point point)
+        {
+            if (!ClientRectangle.Contains(point)) return 0;
+            int edge = Dpi(7);
+            int corner = Dpi(15);
+            bool left = point.X < edge;
+            bool right = point.X >= ClientSize.Width - edge;
+            bool top = point.Y < edge;
+            bool bottom = point.Y >= ClientSize.Height - edge;
+            bool nearLeft = point.X < corner;
+            bool nearRight = point.X >= ClientSize.Width - corner;
+            bool nearTop = point.Y < corner;
+            bool nearBottom = point.Y >= ClientSize.Height - corner;
+            if (nearTop && nearLeft) return HTTOPLEFT;
+            if (nearTop && nearRight) return HTTOPRIGHT;
+            if (nearBottom && nearLeft) return HTBOTTOMLEFT;
+            if (nearBottom && nearRight) return HTBOTTOMRIGHT;
+            if (left) return HTLEFT;
+            if (right) return HTRIGHT;
+            if (top) return HTTOP;
+            if (bottom) return HTBOTTOM;
+            return 0;
+        }
+
+        /// <summary>限制普通窗口的最小尺寸；请求尺寸超过当前屏幕工作区时切换为整屏。</summary>
+        private bool TryHandleWindowSizing(ref Message m)
+        {
+            if (IsFormMaximized || playerFullscreen || WindowState != FormWindowState.Normal)
+            {
+                m.Result = (IntPtr)1;
+                return true;
+            }
+            NativeRect rect = (NativeRect)Marshal.PtrToStructure(m.LParam, typeof(NativeRect));
+            Rectangle proposed = Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+            Rectangle work = Screen.FromControl(this).WorkingArea;
+            bool fullscreen;
+            Rectangle constrained = ConstrainResizeBounds(proposed, m.WParam.ToInt32(), work, out fullscreen);
+            if (fullscreen)
+            {
+                EnterFormFullscreen();
+                m.Result = (IntPtr)1;
+                return true;
+            }
+            if (constrained != proposed)
+                Marshal.StructureToPtr(new NativeRect { Left = constrained.Left, Top = constrained.Top, Right = constrained.Right, Bottom = constrained.Bottom }, m.LParam, false);
+            return false;
+        }
+
+        private Rectangle ConstrainResizeBounds(Rectangle proposed, int resizeEdge, Rectangle work, out bool fullscreen)
+        {
+            fullscreen = proposed.Width > work.Width || proposed.Height > work.Height;
+            if (fullscreen) return work;
+
+            Rectangle result = proposed;
+            int minWidth = Math.Min(MinimumSize.Width, work.Width);
+            int minHeight = Math.Min(MinimumSize.Height, work.Height);
+            bool leftEdge = resizeEdge == WMSZ_LEFT || resizeEdge == WMSZ_TOPLEFT || resizeEdge == WMSZ_BOTTOMLEFT;
+            bool topEdge = resizeEdge == WMSZ_TOP || resizeEdge == WMSZ_TOPLEFT;
+            if (result.Width < minWidth)
+            {
+                if (leftEdge) result.X = result.Right - minWidth;
+                else result.Width = minWidth;
+            }
+            if (result.Height < minHeight)
+            {
+                if (topEdge) result.Y = result.Bottom - minHeight;
+                else result.Height = minHeight;
+            }
+            return result;
+        }
+
+        /// <summary>普通窗口超过最大边界后进入覆盖任务栏的整屏，并保留拖动前的窗口位置。</summary>
+        private void EnterFormFullscreen()
+        {
+            formRestoreBounds = Bounds;
+            formMaximized = true;
+            WindowState = FormWindowState.Normal;
+            Bounds = Screen.FromControl(this).Bounds;
+            if (maxBtn != null) maxBtn.Kind = IconKind.Restore;
         }
 
         private bool IsFormMaximized
@@ -328,6 +449,12 @@ namespace AppManager
         /// </summary>
         public bool PreFilterMessage(ref Message m)
         {
+            if (m.Msg == WM_LBUTTONDOWN && StartResizeFromChild(m.HWnd)) return true;
+            if (m.Msg == WM_SETCURSOR && SetResizeCursorFromChild(m.HWnd))
+            {
+                m.Result = (IntPtr)1;
+                return true;
+            }
             if (m.Msg != WM_MOUSEWHEEL) return false;
             long lp = m.LParam.ToInt64();
             Point screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
@@ -345,6 +472,45 @@ namespace AppManager
             if (!sidebar.RectangleToScreen(sidebar.ClientRectangle).Contains(screen)) return false;
             sidebar.ScrollByWheel(delta);
             return true;
+        }
+
+        private bool StartResizeFromChild(IntPtr source)
+        {
+            if (!IsMainWindowMessage(source) || IsFormMaximized || playerFullscreen || WindowState != FormWindowState.Normal) return false;
+            Point screen = Cursor.Position;
+            int hit = ResizeHitTest(PointToClient(screen));
+            if (hit == 0) return false;
+            ReleaseCapture();
+            long packed = (long)(uint)(screen.X & 0xFFFF) | ((long)(uint)(screen.Y & 0xFFFF) << 16);
+            SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)hit, new IntPtr(packed));
+            return true;
+        }
+
+        private bool SetResizeCursorFromChild(IntPtr source)
+        {
+            if (!IsMainWindowMessage(source) || IsFormMaximized || playerFullscreen || WindowState != FormWindowState.Normal) return false;
+            int hit = ResizeHitTest(PointToClient(Cursor.Position));
+            Cursor cursor = ResizeCursor(hit);
+            if (cursor == null) return false;
+            Cursor.Current = cursor;
+            return true;
+        }
+
+        private bool IsMainWindowMessage(IntPtr source)
+        {
+            if (source == Handle) return true;
+            for (Control control = Control.FromHandle(source); control != null; control = control.Parent)
+                if (ReferenceEquals(control, this)) return true;
+            return false;
+        }
+
+        private static Cursor ResizeCursor(int hit)
+        {
+            if (hit == HTLEFT || hit == HTRIGHT) return Cursors.SizeWE;
+            if (hit == HTTOP || hit == HTBOTTOM) return Cursors.SizeNS;
+            if (hit == HTTOPLEFT || hit == HTBOTTOMRIGHT) return Cursors.SizeNWSE;
+            if (hit == HTTOPRIGHT || hit == HTBOTTOMLEFT) return Cursors.SizeNESW;
+            return null;
         }
 
         /// <summary>构建常驻系统托盘图标；右键弹出 iOS 风格菜单（打开/设置/退出），双击图标恢复窗口。</summary>
@@ -5063,6 +5229,7 @@ namespace AppManager
         private void TryDrag(MouseButtons btn, int x, int y)
         {
             if (btn != MouseButtons.Left) return;
+            if (IsFormMaximized || playerFullscreen) return;
             bool inTopBar = y < Dpi(Theme.TopBarHeight);
             bool inSidebar = x <= Dpi(sidebar.CurrentWidth) && y >= Dpi(Theme.TopBarHeight);
             if (!inTopBar && !inSidebar) return;
