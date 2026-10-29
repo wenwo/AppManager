@@ -372,7 +372,7 @@ namespace AppManager.Controls
             if (idx != hoverRow)
             {
                 hoverRow = idx;
-                Cursor = idx >= 0 ? Cursors.Hand : Cursors.Default;
+                Cursor = Cursors.Default;
                 Invalidate();
             }
         }

@@ -238,7 +238,7 @@ namespace AppManager.Controls
             int current = HitTest(e.Location);
             if (current == hover) return;
             hover = current;
-            Cursor = current >= 0 ? Cursors.Hand : Cursors.Default;
+            Cursor = Cursors.Default;
             Invalidate();
         }
 

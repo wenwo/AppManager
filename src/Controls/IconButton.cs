@@ -56,7 +56,6 @@ namespace AppManager.Controls
                 | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
                 | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
-            Cursor = Cursors.Hand;
             Size = new Size(34, 30);
         }
 

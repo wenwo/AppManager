@@ -699,7 +699,7 @@ namespace AppManager.Controls
             if (volumeDrag) { UpdateVolume(e.X); return; }
             int current = HitTest(e.Location);
             if (current != hover) { hover = current; Invalidate(); }
-            Cursor = current >= 0 && current != 8 && current != 9 ? Cursors.Hand : Cursors.Default;
+            Cursor = Cursors.Default;
         }
 
         protected override void OnMouseLeave(EventArgs e)

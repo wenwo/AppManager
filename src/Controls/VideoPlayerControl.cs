@@ -444,8 +444,7 @@ namespace AppManager.Controls
             if (seeking) { SeekTo(e.X); return; }
             int h = HitButton(e.Location);
             if (h != hover) { hover = h; Invalidate(); }
-            Cursor = (h >= 0 || HitSeek(e.Location) || HitVolumeSlider(e.Location))
-                ? Cursors.Hand : Cursors.Default;
+            Cursor = Cursors.Default;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)

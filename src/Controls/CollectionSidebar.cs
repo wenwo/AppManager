@@ -489,7 +489,7 @@ namespace AppManager.Controls
             {
                 hoverIndex = -1;
                 hoverFooter = false;
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
             if (collapsed)
@@ -509,7 +509,7 @@ namespace AppManager.Controls
                     int off = (int)((long)(e.Y - scrollGrabDy - track.Y) * MaxScroll / travel);
                     SetScroll(off);
                 }
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location))
@@ -517,7 +517,7 @@ namespace AppManager.Controls
                 if (!scrollbarHot) { scrollbarHot = true; Invalidate(); }
                 if (hoverIndex != -1) { hoverIndex = -1; Invalidate(); }
                 hoverFooter = false;
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
             if (scrollbarHot) { scrollbarHot = false; Invalidate(); }
@@ -526,7 +526,7 @@ namespace AppManager.Controls
             {
                 if (!hoverFooter) { hoverFooter = true; Invalidate(); }
                 if (hoverIndex != -1) { hoverIndex = -1; Invalidate(); }
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
             if (hoverFooter) { hoverFooter = false; Invalidate(); }
@@ -535,7 +535,7 @@ namespace AppManager.Controls
             if (idx != hoverIndex)
             {
                 hoverIndex = idx;
-                Cursor = idx >= 0 ? Cursors.Hand : Cursors.Default;
+                Cursor = Cursors.Default;
                 Invalidate();
             }
         }

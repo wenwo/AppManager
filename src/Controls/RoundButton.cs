@@ -24,7 +24,6 @@ namespace AppManager.Controls
                 | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
             Font = Theme.ButtonFont;
-            Cursor = Cursors.Hand;
             Size = new Size(90, 34);
         }
 

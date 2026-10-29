@@ -1149,7 +1149,7 @@ namespace AppManager.Controls
                     tipText = string.Empty;
                 }
                 InvalidateHover(old, idx);
-                Cursor = idx >= 0 ? Cursors.Hand : Cursors.Default;
+                Cursor = Cursors.Default;
             }
         }
 
@@ -1205,7 +1205,7 @@ namespace AppManager.Controls
             if (idx != hoverIndex)
             {
                 hoverIndex = idx;
-                Cursor = idx >= 0 ? Cursors.Hand : Cursors.Default;
+                Cursor = Cursors.Default;
                 Invalidate();
             }
         }

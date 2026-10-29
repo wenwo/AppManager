@@ -1215,7 +1215,7 @@ namespace AppManager.Controls
                 Invalidate();
             }
             if (CanPanCover && coverRect.Contains(e.Location)) Cursor = Cursors.SizeAll;
-            else Cursor = (id >= 0 || thumb >= 0) ? Cursors.Hand : Cursors.Default;
+            else Cursor = Cursors.Default;
         }
 
         protected override void OnMouseLeave(EventArgs e)

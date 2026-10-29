@@ -633,7 +633,6 @@ namespace AppManager
             RoundButton b = new RoundButton();
             b.Accent = accent;
             b.Text = text;
-            b.Cursor = Cursors.Hand;
             return b;
         }
 

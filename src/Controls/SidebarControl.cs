@@ -363,7 +363,7 @@ namespace AppManager.Controls
                 hoverIndex = -1;
                 hoverSegment = -1;
                 hoverFooter = -1;
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
             if (collapsed)
@@ -374,8 +374,7 @@ namespace AppManager.Controls
                     hoverIndex = collapsedIndex;
                     Invalidate();
                 }
-                Cursor = collapsedIndex >= 0 && !items[collapsedIndex].Separator
-                    ? Cursors.Hand : Cursors.Default;
+                Cursor = Cursors.Default;
                 return;
             }
 
@@ -408,7 +407,7 @@ namespace AppManager.Controls
                     int off = (int)((long)(e.Y - scrollGrabDy - track.Y) * MaxScroll / travel);
                     SetScroll(off);
                 }
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
             // 滚动条：悬停时加深显示并让出条目悬停
@@ -418,7 +417,7 @@ namespace AppManager.Controls
                 if (hoverIndex != -1) { hoverIndex = -1; Invalidate(); }
                 hoverSegment = -1;
                 hoverFooter = -1;
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
             if (scrollbarHot) { scrollbarHot = false; Invalidate(); }
@@ -427,7 +426,7 @@ namespace AppManager.Controls
             {
                 int seg = e.X < ClientSize.Width / 2 ? 0 : 1;
                 if (seg != hoverSegment) { hoverSegment = seg; Invalidate(); }
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 hoverIndex = -1;
                 hoverFooter = -1;
                 return;
@@ -436,7 +435,7 @@ namespace AppManager.Controls
             if (e.Y >= ClientSize.Height - FooterHeight)
             {
                 if (hoverFooter != 0) { hoverFooter = 0; Invalidate(); }
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 hoverIndex = -1;
                 return;
             }
@@ -447,7 +446,7 @@ namespace AppManager.Controls
             {
                 hoverIndex = idx;
                 Invalidate();
-                Cursor = (idx >= 0 && !items[idx].Separator) ? Cursors.Hand : Cursors.Default;
+                Cursor = Cursors.Default;
             }
         }
 
@@ -646,7 +645,7 @@ namespace AppManager.Controls
             if (idx != hoverIndex)
             {
                 hoverIndex = idx;
-                Cursor = (idx >= 0 && idx < items.Count && !items[idx].Separator) ? Cursors.Hand : Cursors.Default;
+                Cursor = Cursors.Default;
                 Invalidate();
             }
         }
@@ -717,7 +716,7 @@ namespace AppManager.Controls
                     if (travel > 0)
                         SetScroll((int)((long)(e.Y - scrollGrabDy - track.Y) * MaxScroll / travel));
                 }
-                Cursor = Cursors.Hand;
+                Cursor = Cursors.Default;
                 return;
             }
 

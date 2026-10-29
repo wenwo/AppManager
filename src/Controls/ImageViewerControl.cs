@@ -368,7 +368,7 @@ namespace AppManager.Controls
             }
             int h = HitButton(e.Location);
             if (h != hover) { hover = h; Invalidate(); }
-            Cursor = h >= 0 ? Cursors.Hand : Cursors.Default;
+            Cursor = Cursors.Default;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)

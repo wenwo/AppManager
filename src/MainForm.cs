@@ -47,6 +47,8 @@ namespace AppManager
         private IconButton maxBtn;
         private IconButton closeBtn;
         private bool formMaximized;
+        private bool resizeCursorPending;
+        private bool resizingWindow;
         private Rectangle formRestoreBounds;
         private SettingsPage settingsPage; // 设置页（独立页面，覆盖主内容区）
         private bool settingsOpen;         // 是否处于设置页
@@ -115,7 +117,9 @@ namespace AppManager
         private const int WM_SIZING = 0x0214;
         private const int HTCAPTION = 2;
         private const int WM_SETCURSOR = 0x0020;
+        private const int WM_MOUSEMOVE = 0x0200;
         private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_EXITSIZEMOVE = 0x0232;
         private const int HTLEFT = 10;
         private const int HTRIGHT = 11;
         private const int HTTOP = 12;
@@ -232,6 +236,18 @@ namespace AppManager
         /// <summary>拦截系统最小化命令，兜底保证任务栏点击等入口都能收起为最小化。</summary>
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == WM_SETCURSOR && resizingWindow)
+            {
+                Cursor resizeCursor = ResizeCursor(ResizeHitTest(PointToClient(Cursor.Position)));
+                if (resizeCursor != null)
+                {
+                    Cursor.Current = resizeCursor;
+                    m.Result = (IntPtr)1;
+                    return;
+                }
+            }
+            if (m.Msg == WM_EXITSIZEMOVE)
+                resizingWindow = false;
             if (m.Msg == WM_NCHITTEST && TryHandleResizeHitTest(ref m)) return;
             if (m.Msg == WM_SIZING && TryHandleWindowSizing(ref m)) return;
             if (m.Msg == WM_SYSCOMMAND)
@@ -450,11 +466,10 @@ namespace AppManager
         public bool PreFilterMessage(ref Message m)
         {
             if (m.Msg == WM_LBUTTONDOWN && StartResizeFromChild(m.HWnd)) return true;
-            if (m.Msg == WM_SETCURSOR && SetResizeCursorFromChild(m.HWnd))
-            {
-                m.Result = (IntPtr)1;
-                return true;
-            }
+            // WM_SETCURSOR 直接发往子控件 WndProc，不经过消息泵，过滤器收不到；
+            // 改用 WM_MOUSEMOVE（会经过泵）在边缘命中区设置缩放光标，按住按键拖动期间跳过以免覆盖拖放光标
+            if (m.Msg == WM_MOUSEMOVE && (Control.MouseButtons == MouseButtons.None || resizingWindow))
+                SetResizeCursorFromChild(m.HWnd);
             if (m.Msg != WM_MOUSEWHEEL) return false;
             long lp = m.LParam.ToInt64();
             Point screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
@@ -482,7 +497,17 @@ namespace AppManager
             if (hit == 0) return false;
             ReleaseCapture();
             long packed = (long)(uint)(screen.X & 0xFFFF) | ((long)(uint)(screen.Y & 0xFFFF) << 16);
-            SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)hit, new IntPtr(packed));
+            resizingWindow = true;
+            try
+            {
+                Cursor resizeCursor = ResizeCursor(hit);
+                if (resizeCursor != null) Cursor.Current = resizeCursor;
+                SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)hit, new IntPtr(packed));
+            }
+            finally
+            {
+                resizingWindow = false;
+            }
             return true;
         }
 
@@ -493,6 +518,17 @@ namespace AppManager
             Cursor cursor = ResizeCursor(hit);
             if (cursor == null) return false;
             Cursor.Current = cursor;
+            if (!resizeCursorPending)
+            {
+                resizeCursorPending = true;
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    resizeCursorPending = false;
+                    if (IsDisposed || Disposing || (!resizingWindow && Control.MouseButtons != MouseButtons.None)) return;
+                    Cursor deferred = ResizeCursor(ResizeHitTest(PointToClient(Cursor.Position)));
+                    if (deferred != null) Cursor.Current = deferred;
+                });
+            }
             return true;
         }
 
