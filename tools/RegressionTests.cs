@@ -42,6 +42,10 @@ namespace AppManager
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
                 Run("backup list row height at 100/125/150/175 percent", BackupDpi);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
+                Run("category removal: hidden toggle, single/batch, reload and rejoin", CategoryRemoval);
+                Run("category removal: override, extra membership and added file", CategoryRemovalSources);
+                Run("resource defaults: remove, preserve library, reload and menu rejoin", ResourceCategoryRemoval);
+                Run("category removal: failed save rolls back membership and permits retry", CategoryRemovalSaveFailure);
             }
             finally
             {
@@ -62,6 +66,208 @@ namespace AppManager
         private static void Check(bool condition, string message)
         {
             if (!condition) throw new Exception(message);
+        }
+
+        private static object Invoke(MainForm form, string method, params object[] args)
+        {
+            Type[] types = Array.ConvertAll(args, delegate(object arg) { return arg.GetType(); });
+            return typeof(MainForm).GetMethod(method, Private, null, types, null).Invoke(form, args);
+        }
+
+        private static MainForm CategoryForm(AppConfig config, params AppInfo[] apps)
+        {
+            MainForm form = new MainForm(config);
+            Invoke(form, "BuildControls");
+            typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "开发工具");
+            typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo>(apps));
+            // 本用例只验证归属与刷新；扫描结果在重新加载阶段注入，避免枚举真实系统环境。
+            typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+            return form;
+        }
+
+        private static void ClickConfirmation(Action action, bool accept)
+        {
+            bool clicked = false;
+            Stopwatch elapsed = Stopwatch.StartNew();
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    Form dialog = null;
+                    foreach (Form open in Application.OpenForms)
+                        if (open.Modal) { dialog = open; break; }
+                    if (dialog == null) return;
+                    dialog.Opacity = 0;
+                    foreach (Control button in dialog.Controls)
+                        if (button.Text == (accept ? "确定" : "取消"))
+                        {
+                            timer.Stop();
+                            typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });
+                            clicked = true;
+                            return;
+                        }
+                    if (elapsed.ElapsedMilliseconds > 3000) { timer.Stop(); dialog.Close(); }
+                };
+                timer.Start();
+                action();
+            }
+            Check(clicked, "confirmation did not execute");
+        }
+
+        private static void CategoryRemoval()
+        {
+            foreach (bool showHidden in new bool[] { false, true })
+            {
+                AppConfig config = new AppConfig { ShowHidden = showHidden };
+                AppInfo first = new AppInfo { Key = "af:regression-powershell", Name = "Windows PowerShell", Category = "开发工具", IsHidden = showHidden };
+                AppInfo second = new AppInfo { Key = "af:regression-python", Name = "Python", Category = "开发工具" };
+                if (showHidden) config.Hidden.Add(first.Key);
+                config.Favorites.Add(first.Key);
+                first.IsFavorite = true;
+                using (MainForm form = CategoryForm(config, first, second))
+                {
+                    ClickConfirmation(delegate { Invoke(form, "RemoveFromCategory", first); }, false);
+                    Check((bool)Invoke(form, "InCategory", first, "开发工具"), "cancel changed membership");
+                    ClickConfirmation(delegate { Invoke(form, "RemoveFromCategory", first); }, true);
+                    Check(!(bool)Invoke(form, "InCategory", first, "开发工具"), "single remove retained default category");
+                    Check((bool)Invoke(form, "InCategory", first, "全部软件") && (bool)Invoke(form, "InCategory", first, "常用"), "remove affected other views");
+                    Check(first.IsHidden == showHidden && config.Hidden.Contains(first.Key) == showHidden, "remove changed global hidden state");
+                    Check(((List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form)).Count == 1, "grid did not refresh immediately");
+                    ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", new List<AppInfo> { first, second }, "开发工具"); }, true);
+                    Check(!(bool)Invoke(form, "InCategory", second, "开发工具"), "batch remove retained default category");
+                }
+                AppConfig loaded = AppConfig.Load();
+                Check(!loaded.LoadFailed, "removed membership config could not reload");
+                AppInfo fresh = new AppInfo { Key = first.Key, Name = first.Name, Category = "开发工具" };
+                new Scanner(loaded).ApplyConfig(new List<AppInfo> { fresh });
+                using (MainForm form = CategoryForm(loaded, fresh))
+                {
+                    Check(!(bool)Invoke(form, "InCategory", fresh, "开发工具"), "reload restored removed membership");
+                    MenuWindow.MenuItem rejoin = (MenuWindow.MenuItem)Invoke(form, "MkAddCatMenu", fresh, "开发工具");
+                    Check(!rejoin.Disabled, "software rejoin menu was disabled");
+                    rejoin.Action();
+                    Check((bool)Invoke(form, "InCategory", fresh, "开发工具"), "rejoin failed");
+                    ClickConfirmation(delegate { Invoke(form, "RemoveFromCategory", fresh); }, true);
+                    Check(!(bool)Invoke(form, "InCategory", fresh, "开发工具"), "overlapping extra/default membership survived removal");
+                    Invoke(form, "SetHardCategory", fresh, "开发工具");
+                    Check((bool)Invoke(form, "InCategory", fresh, "开发工具"), "move back failed");
+                }
+            }
+        }
+
+        private static void CategoryRemovalSources()
+        {
+            AppConfig config = new AppConfig { ShowHidden = true };
+            AppInfo moved = new AppInfo { Key = "af:regression-edge", Name = "Microsoft Edge", Category = "开发工具" };
+            AppInfo legacy = new AppInfo { Key = "lnk:regression-chrome", Name = "Google Chrome", Category = "开发工具" };
+            AppInfo extra = new AppInfo { Key = "af:regression-extra", Name = "Extra", Category = "其他" };
+            string path = Path.Combine(root, "category-kept.txt");
+            File.WriteAllText(path, "keep");
+            AppInfo file = new AppInfo { Key = "add:" + path, TargetPath = path, Name = "category-kept", Category = "开发工具", IsFile = true };
+            config.CategoryOverride[moved.Key] = "开发工具";
+            string legacyKey = "af:" + Scanner.NormalizeEntryName(legacy.Name);
+            config.CategoryOverride[legacyKey] = "开发工具";
+            CollectionOps.AddMember(config, extra.Key, "开发工具");
+            CollectionOps.AddMember(config, extra.Key, "我的工具");
+            config.AddedItems.Add(new AddedEntry { Path = path, Category = "开发工具" });
+            config.AddedItems.Add(new AddedEntry { Path = path, Category = "开发工具" });
+            using (MainForm form = CategoryForm(config, moved, legacy, extra, file))
+            {
+                ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", new List<AppInfo> { moved, legacy, extra, file }, "开发工具"); }, true);
+                foreach (AppInfo app in new AppInfo[] { moved, legacy, extra, file })
+                    Check(!(bool)Invoke(form, "InCategory", app, "开发工具"), "source survived removal: " + app.Key);
+                Check(!config.CategoryOverride.ContainsKey(moved.Key) && !config.CategoryOverride.ContainsKey(legacyKey), "override was not revoked");
+                Check((bool)Invoke(form, "InCategory", extra, "其他") && (bool)Invoke(form, "InCategory", extra, "我的工具"), "extra removal affected other categories");
+                Check(config.AddedItems.Count == 2 && File.ReadAllText(path) == "keep", "category removal deleted library record or file");
+                Check((bool)Invoke(form, "InCategory", file, "全部文件"), "file disappeared from all files");
+            }
+        }
+
+        private static void ResourceCategoryRemoval()
+        {
+            string[] extensions = { ".png", ".mp4", ".mp3", ".txt", ".pdf", ".zip", ".bin" };
+            for (int i = 0; i < CategoryRules.ResourceBuiltIn.Length; i++)
+            foreach (bool showHidden in new bool[] { false, true })
+            {
+                string category = CategoryRules.ResourceBuiltIn[i];
+                string path = Path.Combine(root, "resource-" + i + extensions[i]);
+                File.WriteAllText(path, "keep resource");
+                AppConfig config = new AppConfig { ShowHidden = showHidden };
+                config.AddedItems.Add(new AddedEntry { Path = path, Category = category, IsResource = true });
+                AppInfo app = new AppInfo { Key = "add:" + path, TargetPath = path, Name = "resource-" + i, Category = category, IsFile = true };
+                string collection = CollectionKeys.Make(category, "保留集合");
+                config.Collections.Add(new ResourceCollection { Parent = category, Name = "保留集合" });
+                CollectionOps.AddMember(config, app.Key, collection);
+                using (MainForm form = CategoryForm(config))
+                {
+                    typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+                    typeof(MainForm).GetField("currentCategory", Private).SetValue(form, category);
+                    if (showHidden)
+                        ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", new List<AppInfo> { app }, category); }, true);
+                    else
+                        ClickConfirmation(delegate { Invoke(form, "RemoveFromCategory", app); }, true);
+                    Check(!(bool)Invoke(form, "InCategory", app, category), "resource stayed in default category: " + category);
+                    Check((bool)Invoke(form, "InCategory", app, "全部资源"), "resource left library: " + category);
+                    Check(config.ItemCategories[app.Key].Contains(collection), "category removal deleted collection membership");
+                    Check(!(bool)typeof(MainForm).GetField("scanPending", Private).GetValue(form), "category-only removal requested full scan");
+                }
+                AppConfig loaded = AppConfig.Load();
+                Scanner scanner = new Scanner(loaded);
+                Dictionary<string, AppInfo> entries = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+                typeof(Scanner).GetMethod("ScanAdded", Private).Invoke(scanner, new object[] { entries });
+                Check(entries.ContainsKey(path), "resource was lost when rescanning library: " + category);
+                AppInfo fresh = entries[path];
+                scanner.ApplyConfig(new List<AppInfo> { fresh });
+                using (MainForm form = CategoryForm(loaded))
+                {
+                    typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+                    Check(!(bool)Invoke(form, "InCategory", fresh, category) && (bool)Invoke(form, "InCategory", fresh, "全部资源"), "resource removal did not survive reload: " + category);
+                    List<MenuWindow.MenuItem> menus = (List<MenuWindow.MenuItem>)Invoke(form, "BuildResourceAddItems", fresh);
+                    MenuWindow.MenuItem rejoin = menus.Find(delegate(MenuWindow.MenuItem item) { return item.Text == category; });
+                    Check(rejoin != null && !rejoin.Disabled, "resource rejoin menu was disabled: " + category);
+                    rejoin.Action();
+                    Check((bool)Invoke(form, "InCategory", fresh, category), "resource menu rejoin failed: " + category);
+                    Check((bool)Invoke(form, "InCategory", fresh, collection), "collection membership was lost after rejoin");
+                }
+                Check(File.ReadAllText(path) == "keep resource", "resource content changed");
+            }
+        }
+
+        private static void CategoryRemovalSaveFailure()
+        {
+            AppConfig config = new AppConfig();
+            AppInfo normal = new AppInfo { Key = "af:save-normal", Name = "Python", Category = "开发工具" };
+            AppInfo extra = new AppInfo { Key = "af:save-extra", Name = "Extra", Category = "其他" };
+            AppInfo moved = new AppInfo { Key = "lnk:save-moved", Name = "Google Chrome", Category = "开发工具" };
+            CollectionOps.AddMember(config, extra.Key, "开发工具");
+            string legacy = "af:" + Scanner.NormalizeEntryName(moved.Name);
+            config.CategoryOverride[moved.Key] = config.CategoryOverride[legacy] = "开发工具";
+            config.ExcludedCategories[normal.Key] = new List<string> { "办公软件" };
+            Check(config.Save(), "save failure fixture failed");
+            string before = File.ReadAllText(Paths.ConfigFile);
+            using (MainForm form = CategoryForm(config))
+            {
+                List<AppInfo> targets = new List<AppInfo> { normal, extra, moved, normal };
+                using (FileStream locked = new FileStream(Paths.ConfigFile + ".tmp", FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                    ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", targets, "开发工具"); }, true);
+                foreach (AppInfo app in targets)
+                    Check((bool)Invoke(form, "InCategory", app, "开发工具"), "failed save changed membership: " + app.Key);
+                Check(config.ExcludedCategories[normal.Key].Count == 1 && config.ExcludedCategories[normal.Key][0] == "办公软件", "rollback damaged prior exclusions");
+                Check(config.CategoryOverride[moved.Key] == "开发工具" && config.CategoryOverride[legacy] == "开发工具", "rollback lost overrides");
+                Check(File.ReadAllText(Paths.ConfigFile) == before, "failed save changed persisted config");
+                Check(!(bool)typeof(MainForm).GetField("scanPending", Private).GetValue(form), "failed save requested scan");
+                ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", targets, "开发工具"); }, true);
+                foreach (AppInfo app in targets)
+                    Check(!(bool)Invoke(form, "InCategory", app, "开发工具"), "retry after save failure did not remove item");
+                before = File.ReadAllText(Paths.ConfigFile);
+                MenuWindow.MenuItem rejoin = (MenuWindow.MenuItem)Invoke(form, "MkAddCatMenu", normal, "开发工具");
+                using (FileStream locked = new FileStream(Paths.ConfigFile + ".tmp", FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                    rejoin.Action();
+                Check(!(bool)Invoke(form, "InCategory", normal, "开发工具"), "failed rejoin changed membership");
+                Check(File.ReadAllText(Paths.ConfigFile) == before, "failed rejoin changed persisted config");
+                rejoin.Action();
+                Check((bool)Invoke(form, "InCategory", normal, "开发工具"), "rejoin retry failed");
+            }
         }
 
         private static void Targets()

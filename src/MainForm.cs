@@ -1935,6 +1935,11 @@ namespace AppManager
                     config.ItemCategories.Remove(oldKey);
                     config.ItemCategories[newKey] = cats;
                 }
+                if (config.ExcludedCategories.TryGetValue(oldKey, out cats))
+                {
+                    config.ExcludedCategories.Remove(oldKey);
+                    config.ExcludedCategories[newKey] = cats;
+                }
             }
             InvalidateAddedIndex();   // 上文改写了 AddedEntry.Path，按旧路径建的索引必须失效
             config.Save();
@@ -2101,6 +2106,7 @@ namespace AppManager
             config.Hidden.Remove(key);
             config.CategoryOverride.Remove(key);
             config.ItemCategories.Remove(key);
+            config.ExcludedCategories.Remove(key);
             foreach (List<string> order in config.ItemOrder.Values)
                 for (int i = order.Count - 1; i >= 0; i--)
                     if (string.Equals(order[i], key, StringComparison.OrdinalIgnoreCase)) order.RemoveAt(i);
@@ -2183,6 +2189,9 @@ namespace AppManager
             if (category == "全部资源") return IsResourceEntry(a);
             if (category == "常用") return a.IsFavorite;
 
+            List<string> excluded;
+            if (config.ExcludedCategories.TryGetValue(a.Key, out excluded) && excluded.Contains(category)) return false;
+
             // 额外归属分类（拖放「加入分类」，多归属）：原分类保留，命中即视为属于该分类
             if (IsInExtraCategory(a, category)) return true;
 
@@ -2262,16 +2271,31 @@ namespace AppManager
             else if (!CanEditCategory(category)) return;
 
             bool changed = false;
+            List<Action> rollback = new List<Action>();
             for (int i = 0; i < apps.Count; i++)
             {
                 AppInfo a = apps[i];
                 if (a == null || string.IsNullOrEmpty(a.Key)) continue;
                 if (isCollection && !CanJoinResourceCategory(a, col.Parent)) continue;
                 if (InCategory(a, category)) continue;
-                if (CollectionOps.AddMember(config, a.Key, category)) changed = true;
+                if (SetCategoryExcluded(a, category, false))
+                {
+                    changed = true;
+                    rollback.Add(delegate { SetCategoryExcluded(a, category, true); });
+                }
+                if (CollectionOps.AddMember(config, a.Key, category))
+                {
+                    changed = true;
+                    rollback.Add(delegate { CollectionOps.RemoveMember(config, a.Key, category); });
+                }
             }
             if (!changed) return;
-            config.Save();
+            if (!config.Save())
+            {
+                for (int i = rollback.Count - 1; i >= 0; i--) rollback[i]();
+                ShowStatusBar("加入未保存，请检查磁盘空间和目录权限后重试。", 0, 0);
+                return;
+            }
             RefreshGrid();
         }
 
@@ -3019,6 +3043,9 @@ namespace AppManager
             foreach (List<string> extra in config.ItemCategories.Values)
                 for (int i = 0; i < extra.Count; i++)
                     if (extra[i] == oldName) extra[i] = name;
+            foreach (List<string> excluded in config.ExcludedCategories.Values)
+                for (int i = 0; i < excluded.Count; i++)
+                    if (excluded[i] == oldName) excluded[i] = name;
             // 同步排序记录中的分类名
             if (config.ItemOrder.ContainsKey(oldName))
             {
@@ -3058,6 +3085,8 @@ namespace AppManager
             // 清理指向已删分类的额外归属记录
             foreach (List<string> extra in config.ItemCategories.Values)
                 extra.Remove(category);
+            foreach (List<string> excluded in config.ExcludedCategories.Values)
+                excluded.Remove(category);
             config.ItemOrder.Remove(category);
             config.CategoryIconNames.Remove(CategoryIconKey(category));
             RemoveLegacyCategoryIconIfUnused(category);
@@ -3774,6 +3803,7 @@ namespace AppManager
         /// </summary>
         private void SetHardCategory(AppInfo app, string category)
         {
+            SetCategoryExcluded(app, category, false);
             config.CategoryOverride[app.Key] = category;
             config.ItemCategories.Remove(app.Key);
             app.Category = category;
@@ -3849,7 +3879,7 @@ namespace AppManager
         private MenuWindow.MenuItem MkAddCatMenu(AppInfo app, string category)
         {
             MenuWindow.MenuItem m = MkMenu(category, delegate { AddItemToCategory(app, category); });
-            m.Disabled = InCategory(app, category) || !CanJoinResourceCategory(app, category);
+            m.Disabled = InCategory(app, category) || !MediaRules.MatchCategoryExt(category, app.TargetPath);
             return m;
         }
 
@@ -4168,6 +4198,7 @@ namespace AppManager
                     bool configSaved = true;
                     foreach (string stored in storedList)
                     {
+                        if (SetCategoryExcluded(new AppInfo { Key = "add:" + stored }, category, false)) changed = true;
                         if (FindAddedEntry(stored, category) < 0)
                         {
                             AddedEntry e = new AddedEntry();
@@ -4418,74 +4449,27 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 从当前分类移除条目：拖放「加入」的额外归属仅移出该分类（原分类与存储位置不变）；
-        /// 用户手动添加项删除其 AddedItems 记录（不动磁盘文件）；
-        /// 其余来源条目按隐藏处理，可通过「取消隐藏」恢复。
+        /// 从当前分类移除条目；单选与多选共用相同的归属处理。
         /// </summary>
         private void RemoveFromCategory(AppInfo app)
         {
             if (app == null) return;
-            // 额外归属（拖放加入）：仅移出该分类
-            if (IsInExtraCategory(app, currentCategory)) { RemoveItemFromCategory(app, currentCategory); return; }
-            int idx = FindAddedEntry(app.TargetPath, currentCategory);
-            if (idx >= 0)
-            {
-                if (!ConfirmDialog.Show("移除条目", "确认从「" + currentCategory + "」移除该条目？\n（仅移除记录，不删除磁盘文件）")) return;
-                config.AddedItems.RemoveAt(idx);
-                InvalidateAddedIndex();
-                config.Save();
-                StartScan(false);
-                return;
-            }
-            // 硬归属（「移动到分类」写入的 CategoryOverride）：从该分类移除=撤销归属，回到原始分类，
-            // 而不是误走隐藏（撤销后可随时再「移动到分类」，无需去设置里取消隐藏）
-            string overrideCat;
-            bool hasOverride = config.CategoryOverride.TryGetValue(app.Key, out overrideCat) && overrideCat == currentCategory;
-            if (!hasOverride)
-            {
-                string legacyKey = "af:" + Scanner.NormalizeEntryName(app.Name);
-                hasOverride = config.CategoryOverride.TryGetValue(legacyKey, out overrideCat) && overrideCat == currentCategory;
-                if (hasOverride)
-                {
-                    if (!ConfirmDialog.Show("移除", "确认从「" + currentCategory + "」移除该应用？\n（将撤销分类归属，回到其原始分类）")) return;
-                    config.CategoryOverride.Remove(legacyKey);
-                    config.Save();
-                    RefreshGrid();
-                    return;
-                }
-            }
-            if (hasOverride)
-            {
-                if (!ConfirmDialog.Show("移除", "确认从「" + currentCategory + "」移除该应用？\n（将撤销分类归属，回到其原始分类）")) return;
-                config.CategoryOverride.Remove(app.Key);
-                config.Save();
-                RefreshGrid();
-                return;
-            }
-            if (!ConfirmDialog.Show("移除", "确认从「" + currentCategory + "」移除该应用？")) return;
-            SetHidden(app, true);
+            RemoveTargetsFromCategory(new List<AppInfo> { app }, currentCategory);
         }
 
         /// <summary>
-        /// 批量从指定分类移除：额外归属仅移出该分类；自建收录项移除记录（不动磁盘）；
-        /// 其余按隐藏处理。合并为一次确认、一次落盘与刷新（对齐资源管理器多选删除语义）。
+        /// 批量从指定分类移除：额外归属仅移出该分类，保留收录记录与磁盘文件；
+        /// 默认归属记录分类排除，手动覆盖撤销后重扫还原。一次确认、一次落盘与刷新。
         /// </summary>
         private void RemoveTargetsFromCategory(List<AppInfo> targets, string category)
         {
             if (targets == null || targets.Count == 0) return;
-            bool anyRecord = false;
-            for (int i = 0; i < targets.Count; i++)
-            {
-                AppInfo a = targets[i];
-                if (a != null && FindAddedEntry(a.TargetPath, category) >= 0) { anyRecord = true; break; }
-            }
-            string msg = anyRecord
-                ? "确认从「" + category + "」移除这 " + targets.Count + " 个条目？\n（仅移除记录，不删除磁盘文件）"
-                : "确认从「" + category + "」移除选中的 " + targets.Count + " 个项目？";
+            string msg = "确认从「" + category + "」移除选中的 " + targets.Count + " 个项目？\n文件与收录记录会保留，可从全部列表重新加入。";
             if (!ConfirmDialog.Show("移除条目", msg)) return;
 
             bool changed = false;
             bool recordsChanged = false;
+            List<Action> rollback = new List<Action>();
             for (int i = 0; i < targets.Count; i++)
             {
                 AppInfo a = targets[i];
@@ -4493,33 +4477,65 @@ namespace AppManager
                 // 额外归属（拖放加入）：仅移出该分类
                 if (IsInExtraCategory(a, category))
                 {
-                    if (CollectionOps.RemoveMember(config, a.Key, category)) changed = true;
-                    continue;
-                }
-                int idx = FindAddedEntry(a.TargetPath, category);
-                if (idx >= 0)
-                {
-                    while (idx >= 0)
+                    if (CollectionOps.RemoveMember(config, a.Key, category))
                     {
-                        config.AddedItems.RemoveAt(idx);
-                        idx = FindAddedEntry(a.TargetPath, category);
+                        changed = true;
+                        rollback.Add(delegate { CollectionOps.AddMember(config, a.Key, category); });
                     }
-                    InvalidateAddedIndex();   // 当前路径下的所有该分类记录已清空
-                    changed = true;
-                    recordsChanged = true;
-                    continue;
+                    if (!InCategory(a, category)) continue;
                 }
-                if (!a.IsHidden)
+                // 撤销路径键与旧版名称键的分类覆盖；重扫恢复原始归属。
+                string overrideCat;
+                if (config.CategoryOverride.TryGetValue(a.Key, out overrideCat) && overrideCat == category)
                 {
-                    a.IsHidden = true;
-                    if (!config.Hidden.Contains(a.Key)) config.Hidden.Add(a.Key);
+                    config.CategoryOverride.Remove(a.Key);
+                    rollback.Add(delegate { config.CategoryOverride[a.Key] = category; });
+                    changed = recordsChanged = true;
+                }
+                string legacyKey = "af:" + Scanner.NormalizeEntryName(a.Name);
+                if (config.CategoryOverride.TryGetValue(legacyKey, out overrideCat) && overrideCat == category)
+                {
+                    config.CategoryOverride.Remove(legacyKey);
+                    rollback.Add(delegate { config.CategoryOverride[legacyKey] = category; });
+                    changed = recordsChanged = true;
+                }
+                if (SetCategoryExcluded(a, category, true))
+                {
                     changed = true;
+                    rollback.Add(delegate { SetCategoryExcluded(a, category, false); });
                 }
             }
             if (!changed) return;
-            config.Save();
-            if (recordsChanged) StartScan(false);   // 收录记录有变动：后台重扫（内含网格刷新）
-            else RefreshGrid();
+            if (!config.Save())
+            {
+                for (int i = rollback.Count - 1; i >= 0; i--) rollback[i]();
+                ShowStatusBar("移除未保存，请检查磁盘空间和目录权限后重试。", 0, 0);
+                return;
+            }
+            RefreshGrid();   // 先移出当前列表，不等待后台扫描完成
+            if (recordsChanged) StartScan(false);   // 分类覆盖有变动：后台重扫恢复原始归属
+        }
+
+        /// <summary>记录/撤销分类排除；重新加入或移动到该分类时清除，不影响其他分类和隐藏状态。</summary>
+        private bool SetCategoryExcluded(AppInfo app, string category, bool excluded)
+        {
+            if (string.IsNullOrEmpty(app.Key)) return false;
+            List<string> cats;
+            if (!config.ExcludedCategories.TryGetValue(app.Key, out cats))
+            {
+                if (!excluded) return false;
+                cats = new List<string>();
+                config.ExcludedCategories[app.Key] = cats;
+            }
+            if (excluded)
+            {
+                if (cats.Contains(category)) return false;
+                cats.Add(category);
+                return true;
+            }
+            bool changed = cats.Remove(category);
+            if (cats.Count == 0) config.ExcludedCategories.Remove(app.Key);
+            return changed;
         }
 
         /// <summary>查找指定路径在给定分类下的 AddedItems 下标，未命中返回 -1。</summary>

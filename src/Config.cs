@@ -279,6 +279,8 @@ namespace AppManager
         public Dictionary<string, List<string>> ItemOrder = new Dictionary<string, List<string>>();
         // 额外归属分类（拖放「加入分类」）：条目 Key -> 额外加入的分类名集合；原分类与存储位置均不变
         public Dictionary<string, List<string>> ItemCategories = new Dictionary<string, List<string>>();
+        // 从分类移除的条目：独立于隐藏开关，防止扫描时又按默认规则归回原分类
+        public Dictionary<string, List<string>> ExcludedCategories = new Dictionary<string, List<string>>();
         // 侧栏中间区块分类顺序（内置分类 + 自定义分类名）；与默认顺序不一致时按此渲染并自愈回写
         public List<string> SidebarOrder = new List<string>();
         // 桌面整理模式：true=副本（保留原件），false=搬家（移动，默认）
@@ -405,6 +407,15 @@ namespace AppManager
                         if (!string.IsNullOrEmpty(c.InnerText)) cats.Add(c.InnerText);
                     if (cats.Count > 0) cfg.ItemCategories[k] = cats;
                 }
+                foreach (XmlNode n in root.SelectNodes("ExcludedCategories/Item"))
+                {
+                    string k = XmlAttr(n, "key");
+                    if (string.IsNullOrEmpty(k)) continue;
+                    List<string> cats = new List<string>();
+                    foreach (XmlNode c in n.SelectNodes("Category"))
+                        AddUnique(cats, c.InnerText);
+                    if (cats.Count > 0) cfg.ExcludedCategories[k] = cats;
+                }
                 foreach (XmlNode n in root.SelectNodes("SidebarOrder/Item"))
                     AddUnique(cfg.SidebarOrder, n.InnerText);
                 cfg.OrganizeCopy = XmlElementBool(root, "OrganizeCopy", false);
@@ -496,6 +507,15 @@ namespace AppManager
                         w.WriteStartElement("Item");
                         w.WriteAttributeString("key", kv.Key);
                         w.WriteString(kv.Value ?? string.Empty);
+                        w.WriteEndElement();
+                    }
+                    w.WriteEndElement();
+                    w.WriteStartElement("ExcludedCategories");
+                    foreach (KeyValuePair<string, List<string>> kv in ExcludedCategories)
+                    {
+                        w.WriteStartElement("Item");
+                        w.WriteAttributeString("key", kv.Key);
+                        foreach (string cat in kv.Value) w.WriteElementString("Category", cat);
                         w.WriteEndElement();
                     }
                     w.WriteEndElement();
