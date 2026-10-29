@@ -46,6 +46,8 @@ namespace AppManager
         private IconButton minBtn;
         private IconButton maxBtn;
         private IconButton closeBtn;
+        private bool formMaximized;
+        private Rectangle formRestoreBounds;
         private SettingsPage settingsPage; // 设置页（独立页面，覆盖主内容区）
         private bool settingsOpen;         // 是否处于设置页
         private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
@@ -115,6 +117,8 @@ namespace AppManager
         private const int WS_MINIMIZEBOX = 0x00020000;
         private const int WM_SYSCOMMAND = 0x0112;
         private const int SC_MINIMIZE = 0xF020;
+        private const int SC_MAXIMIZE = 0xF030;
+        private const int SC_RESTORE = 0xF120;
         private const int WM_MOUSEWHEEL = 0x020A;
 
         // Windows 11 系统圆角（边缘平滑，避免 Region 锯齿）
@@ -203,12 +207,31 @@ namespace AppManager
         /// <summary>拦截系统最小化命令，兜底保证任务栏点击等入口都能收起为最小化。</summary>
         protected override void WndProc(ref Message m)
         {
-            if (m.Msg == WM_SYSCOMMAND && (m.WParam.ToInt32() & 0xFFF0) == SC_MINIMIZE)
+            if (m.Msg == WM_SYSCOMMAND)
             {
-                WindowState = FormWindowState.Minimized;
-                return;
+                int command = m.WParam.ToInt32() & 0xFFF0;
+                if (command == SC_MINIMIZE)
+                {
+                    WindowState = FormWindowState.Minimized;
+                    return;
+                }
+                if (command == SC_MAXIMIZE)
+                {
+                    if (!IsFormMaximized) MaximizeOnCurrentScreen();
+                    return;
+                }
+                if (command == SC_RESTORE && IsFormMaximized && WindowState == FormWindowState.Normal)
+                {
+                    RestoreFromMaximized();
+                    return;
+                }
             }
             base.WndProc(ref m);
+        }
+
+        private bool IsFormMaximized
+        {
+            get { return formMaximized || WindowState == FormWindowState.Maximized; }
         }
 
         /// <summary>
@@ -216,15 +239,35 @@ namespace AppManager
         /// </summary>
         private void ToggleMaximize()
         {
-            if (WindowState == FormWindowState.Maximized)
+            if (IsFormMaximized)
             {
-                WindowState = FormWindowState.Normal;
+                RestoreFromMaximized();
             }
             else
             {
-                MaximizedBounds = Screen.FromControl(this).WorkingArea;
-                WindowState = FormWindowState.Maximized;
+                MaximizeOnCurrentScreen();
             }
+        }
+
+        /// <summary>按当前屏幕工作区设置普通最大化，避免系统最大化在多屏负坐标下移出可见区域。</summary>
+        private void MaximizeOnCurrentScreen()
+        {
+            Rectangle target = Screen.FromControl(this).WorkingArea;
+            formRestoreBounds = WindowState == FormWindowState.Maximized ? RestoreBounds : Bounds;
+            formMaximized = true;
+            WindowState = FormWindowState.Normal;
+            Bounds = target;
+            if (maxBtn != null) maxBtn.Kind = IconKind.Restore;
+        }
+
+        /// <summary>还原普通最大化前的窗口位置。</summary>
+        private void RestoreFromMaximized()
+        {
+            Rectangle target = formMaximized && !formRestoreBounds.IsEmpty ? formRestoreBounds : RestoreBounds;
+            formMaximized = false;
+            WindowState = FormWindowState.Normal;
+            if (!target.IsEmpty) Bounds = target;
+            if (maxBtn != null) maxBtn.Kind = IconKind.Maximize;
         }
 
         /// <summary>点「×」：按设置彻底退出或最小化到系统托盘。</summary>
@@ -710,7 +753,7 @@ namespace AppManager
             minBtn.Location = new Point(maxBtn.Left - minBtn.Width, (row1 - minBtn.Height) / 2);
             settingsBtn.Location = new Point(minBtn.Left - settingsBtn.Width, (row1 - settingsBtn.Height) / 2);
             // 最大化/还原图标随窗口状态切换
-            maxBtn.Kind = WindowState == FormWindowState.Maximized ? IconKind.Restore : IconKind.Maximize;
+            maxBtn.Kind = IsFormMaximized ? IconKind.Restore : IconKind.Maximize;
 
             // 行2（工具行）：搜索靠左；操作按钮自右缘向左排布，与行1右缘对齐
             search.Location = new Point(sb + Dpi(16), row1 + (row2 - Dpi(34)) / 2);
@@ -825,7 +868,7 @@ namespace AppManager
         private void UpdateRegion()
         {
             // 最大化时窗口与屏幕边缘贴合；Region 回退路径下需取消圆角，避免四角留缺口
-            if (WindowState == FormWindowState.Maximized && !IsWindows11OrGreater())
+            if ((IsFormMaximized || playerFullscreen) && !IsWindows11OrGreater())
             {
                 Region = null;
                 return;
@@ -3084,7 +3127,8 @@ namespace AppManager
         /// <summary>是否处于播放器全屏（视频区铺满客户区，覆盖侧栏与顶栏）。</summary>
         private bool playerFullscreen;
         /// <summary>进入全屏前的窗体状态（还原时回到普通/最大化）。</summary>
-        private FormWindowState prePlayerWindowState;
+        private Rectangle prePlayerBounds;
+        private bool prePlayerMaximized;
 
         /// <summary>Esc/返回：全屏时先退全屏，非全屏才退出播放器（一线播放器的两级退出）。</summary>
         private void OnVideoCloseRequested()
@@ -3104,19 +3148,12 @@ namespace AppManager
         /// <summary>进入全屏：无边框窗体按屏幕整体最大化盖住任务栏，视频区铺满客户区。</summary>
         private void EnterVideoFullscreen()
         {
+            prePlayerBounds = Bounds;
+            prePlayerMaximized = IsFormMaximized;
             playerFullscreen = true;
-            prePlayerWindowState = WindowState;
-            MaximizedBounds = Screen.FromControl(this).Bounds;
-            if (prePlayerWindowState == FormWindowState.Normal)
-            {
-                WindowState = FormWindowState.Maximized;
-            }
-            else
-            {
-                // 已最大化时 MaximizedBounds 变更不自动生效，重挂一次最大化铺满整屏
-                WindowState = FormWindowState.Normal;
-                WindowState = FormWindowState.Maximized;
-            }
+            formMaximized = false;
+            WindowState = FormWindowState.Normal;
+            Bounds = Screen.FromControl(this).Bounds;
             LayoutControls();
             videoPlayer.BringToFront();
         }
@@ -3125,16 +3162,9 @@ namespace AppManager
         private void ExitVideoFullscreen()
         {
             playerFullscreen = false;
-            MaximizedBounds = Screen.FromControl(this).WorkingArea;   // 恢复不遮任务栏的最大化边界
-            if (prePlayerWindowState == FormWindowState.Normal)
-            {
-                WindowState = FormWindowState.Normal;
-            }
-            else
-            {
-                WindowState = FormWindowState.Normal;
-                WindowState = FormWindowState.Maximized;
-            }
+            WindowState = FormWindowState.Normal;
+            formMaximized = prePlayerMaximized;
+            Bounds = prePlayerBounds;
             LayoutControls();
         }
 

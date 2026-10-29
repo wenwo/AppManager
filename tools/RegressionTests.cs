@@ -37,6 +37,7 @@ namespace AppManager
                 Run("failed restore preserves current config and files", RestoreFailure);
                 Run("listing preserves old rollback data; quota refuses new restore", Retention);
                 Run("DPI messages: effective DPI / suggested rectangle / repeated scaling", DpiMessages);
+                Run("maximize stays in selected monitor work area and restores", MaximizeWithinScreenWorkArea);
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
                 Run("backup list row height at 100/125/150/175 percent", BackupDpi);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
@@ -245,6 +246,36 @@ namespace AppManager
                 form.MinimumSize = new Size(work.Width + 500, work.Height + 500);
                 SetDpi(form, 144, new Rectangle(work.Right - 10, work.Bottom - 10, work.Width + 200, work.Height + 200));
                 Check(work.Contains(form.Bounds), "window exceeds work area");
+            }
+        }
+
+        private static void MaximizeWithinScreenWorkArea()
+        {
+            Screen target = Screen.PrimaryScreen;
+            foreach (Screen screen in Screen.AllScreens)
+            {
+                if (screen.Bounds.Left < 0)
+                {
+                    target = screen;
+                    break;
+                }
+            }
+
+            using (MainForm form = new MainForm(new AppConfig()))
+            {
+                form.FormBorderStyle = FormBorderStyle.None;
+                form.StartPosition = FormStartPosition.Manual;
+                Rectangle work = target.WorkingArea;
+                int width = Math.Min(600, work.Width);
+                int height = Math.Min(400, work.Height);
+                form.Bounds = new Rectangle(work.Left + (work.Width - width) / 2, work.Top + (work.Height - height) / 2, width, height);
+                form.CreateControl();
+                Rectangle before = form.Bounds;
+                typeof(MainForm).GetMethod("MaximizeOnCurrentScreen", Private).Invoke(form, null);
+                Check(form.WindowState == FormWindowState.Normal, "native maximize still used");
+                Check(form.Bounds == work, "maximized window left its monitor work area");
+                typeof(MainForm).GetMethod("RestoreFromMaximized", Private).Invoke(form, null);
+                Check(form.Bounds == before, "window was not restored to its previous bounds");
             }
         }
 
