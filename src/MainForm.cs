@@ -3414,10 +3414,13 @@ namespace AppManager
             List<AppInfo> targets = MenuTargets(app);
             bool multi = targets.Count > 1;
 
-            if (website && multi)
+            if (multi)
             {
-                // 资源多选：操作整批选中项（对齐资源管理器多选菜单）
-                BuildResourceMultiMenu(items, app, targets, readOnly);
+                // 多选：按当前模式生成批量菜单，避免开发工具等软件分类仍显示单项操作
+                if (website)
+                    BuildResourceMultiMenu(items, app, targets, readOnly);
+                else
+                    BuildSoftwareMultiMenu(items, app, targets, readOnly);
             }
             else if (readOnly)
             {
@@ -3558,6 +3561,49 @@ namespace AppManager
         }
 
         /// <summary>
+        /// 软件/文件模式的多选菜单：所有可执行动作都绑定整批目标，单条专属动作不再混入多选菜单。
+        /// 只读总分类保留“加入分类”，可编辑分类增加收藏、移动、隐藏和批量移除。
+        /// </summary>
+        private void BuildSoftwareMultiMenu(List<MenuWindow.MenuItem> items, AppInfo clicked,
+            List<AppInfo> targets, bool readOnly)
+        {
+            items.Add(MkDisabledMenu("已选择 " + targets.Count + " 个项目"));
+            items.Add(MkSep());
+            items.Add(MkMenu("打开", delegate { OpenItems(targets, clicked); }));
+
+            if (readOnly)
+            {
+                items.Add(MkSep());
+                items.Add(MkSubMenu("移动到分类…", BuildAddCategoryItems(targets, false)));
+                if (AnyDeletableEntry(targets))
+                    items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
+                items.Add(MkSep());
+                items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
+                items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
+                return;
+            }
+
+            bool allFavorite = AllFavorite(targets);
+            items.Add(MkMenu(allFavorite ? "从常用移除" : "添加到常用",
+                delegate { ToggleFavorite(targets, !allFavorite); }));
+            items.Add(MkSubMenu("移动到分类…", BuildMoveCategoryItems(targets)));
+            if (AnyInCustom(targets))
+                items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(targets); }));
+            items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(targets)));
+            if (CanEditCategory(currentCategory))
+                items.Add(MkMenu("从“" + currentCategory + "”移除",
+                    delegate { RemoveTargetsFromCategory(targets, currentCategory); }));
+
+            items.Add(MkSep());
+            items.Add(MkMenu(AllHidden(targets) ? "取消隐藏" : "隐藏",
+                delegate { SetHidden(targets, !AllHidden(targets)); }));
+            items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
+            items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
+            if (AnyDeletableEntry(targets))
+                items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
+        }
+
+        /// <summary>
         /// 计算自绘菜单/弹窗的落点：优先限制在窗口客户区内（避免溢出窗口边框），
         /// 若菜单比窗口还大则退化为限制在屏幕工作区内。
         /// </summary>
@@ -3636,6 +3682,38 @@ namespace AppManager
             RefreshGrid();
         }
 
+        private void ToggleFavorite(List<AppInfo> apps, bool on)
+        {
+            if (apps == null || apps.Count == 0) return;
+            bool changed = false;
+            for (int i = 0; i < apps.Count; i++)
+            {
+                AppInfo app = apps[i];
+                if (app == null || app.IsFavorite == on) continue;
+                app.IsFavorite = on;
+                if (on)
+                {
+                    if (!config.Favorites.Contains(app.Key)) config.Favorites.Add(app.Key);
+                }
+                else
+                {
+                    config.Favorites.Remove(app.Key);
+                }
+                changed = true;
+            }
+            if (!changed) return;
+            config.Save();
+            RefreshGrid();
+        }
+
+        private static bool AllFavorite(List<AppInfo> apps)
+        {
+            if (apps == null || apps.Count == 0) return false;
+            for (int i = 0; i < apps.Count; i++)
+                if (apps[i] != null && !apps[i].IsFavorite) return false;
+            return true;
+        }
+
         private void SetHidden(AppInfo app, bool on)
         {
             if (app == null) return;
@@ -3680,6 +3758,14 @@ namespace AppManager
             return false;
         }
 
+        private bool AnyInCustom(List<AppInfo> apps)
+        {
+            if (apps == null) return false;
+            for (int i = 0; i < apps.Count; i++)
+                if (apps[i] != null && InCustom(apps[i])) return true;
+            return false;
+        }
+
         /// <summary>「移动到分类」的级联子项：硬移动（覆盖原归属）。</summary>
         private List<MenuWindow.MenuItem> BuildMoveCategoryItems(AppInfo app)
         {
@@ -3697,6 +3783,25 @@ namespace AppManager
             {
                 string c = config.CustomCategories[i];
                 items.Add(MkMenu(c, MakeSetCat(app, c)));
+            }
+            return items;
+        }
+
+        private List<MenuWindow.MenuItem> BuildMoveCategoryItems(List<AppInfo> apps)
+        {
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            items.Add(MkMenu(QuickCenter, MakeSetCat(apps, QuickCenter)));
+            items.Add(MkSep());
+            for (int i = 0; i < CategoryRules.BuiltIn.Length; i++)
+            {
+                string c = CategoryRules.BuiltIn[i];
+                items.Add(MkMenu(c, MakeSetCat(apps, c)));
+            }
+            if (config.CustomCategories.Count > 0) items.Add(MkSep());
+            for (int i = 0; i < config.CustomCategories.Count; i++)
+            {
+                string c = config.CustomCategories[i];
+                items.Add(MkMenu(c, MakeSetCat(apps, c)));
             }
             return items;
         }
@@ -3852,6 +3957,17 @@ namespace AppManager
             return items;
         }
 
+        private List<MenuWindow.MenuItem> BuildAddCustomItems(List<AppInfo> apps)
+        {
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            for (int i = 0; i < config.CustomCategories.Count; i++)
+                items.Add(MkAddCatMenu(apps, config.CustomCategories[i]));
+            if (items.Count == 0) items.Add(MkDisabledMenu("（暂无自定义分类）"));
+            items.Add(MkSep());
+            items.Add(MkMenu("新建自定义分类…", delegate { AddToCustom(apps); }));
+            return items;
+        }
+
         /// <summary>
         /// 「全部*」条目右键的「加入分类」级联子项：选中即把条目「加入」该分类（多归属），
         /// 原归属与「全部」中的条目均不变。customOnly=true 时仅列出自定义分类。
@@ -3875,11 +3991,37 @@ namespace AppManager
             return items;
         }
 
+        private List<MenuWindow.MenuItem> BuildAddCategoryItems(List<AppInfo> apps, bool customOnly)
+        {
+            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            if (customOnly)
+            {
+                for (int i = 0; i < config.CustomCategories.Count; i++)
+                    items.Add(MkAddCatMenu(apps, config.CustomCategories[i]));
+                if (items.Count == 0) items.Add(MkDisabledMenu("（暂无自定义分类）"));
+            }
+            else
+            {
+                items.Add(MkAddCatMenu(apps, QuickCenter));
+                items.Add(MkSep());
+                for (int i = 0; i < CategoryRules.BuiltIn.Length; i++)
+                    items.Add(MkAddCatMenu(apps, CategoryRules.BuiltIn[i]));
+            }
+            return items;
+        }
+
         /// <summary>构造「加入分类」菜单项：条目已属于该分类时置灰，避免点击无效果。</summary>
         private MenuWindow.MenuItem MkAddCatMenu(AppInfo app, string category)
         {
             MenuWindow.MenuItem m = MkMenu(category, delegate { AddItemToCategory(app, category); });
             m.Disabled = InCategory(app, category) || !MediaRules.MatchCategoryExt(category, app.TargetPath);
+            return m;
+        }
+
+        private MenuWindow.MenuItem MkAddCatMenu(List<AppInfo> apps, string category)
+        {
+            MenuWindow.MenuItem m = MkMenu(category, delegate { AddItemsToCategory(apps, category); });
+            m.Disabled = !CanAddTargetsTo(apps, category);
             return m;
         }
 
@@ -3919,6 +4061,20 @@ namespace AppManager
             RefreshGrid();
         }
 
+        private void AddToCustom(List<AppInfo> apps)
+        {
+            if (apps == null || apps.Count == 0) return;
+            CategoryEditDialog.Result edit = CategoryEditDialog.Show(
+                "添加到自定义", "分类名称", null, CategoryIconKind.Folder);
+            if (edit == null) return;
+            string name = edit.Name;
+            if (!config.CustomCategories.Contains(name))
+                config.CustomCategories.Add(name);
+            config.CategoryIconNames[CategoryIconKey(name)] = edit.Icon.ToString();
+            RebuildSidebar();
+            AddItemsToCategory(apps, name);
+        }
+
         private void RemoveFromCustom(AppInfo app)
         {
             if (!ConfirmDialog.Show("从自定义移除", "确认将此应用从自定义分类移除？")) return;
@@ -3931,6 +4087,27 @@ namespace AppManager
                 config.Save();
                 RefreshGrid();
             }
+        }
+
+        private void RemoveFromCustom(List<AppInfo> apps)
+        {
+            if (apps == null || apps.Count == 0) return;
+            if (!ConfirmDialog.Show("从自定义移除", "确认将选中的 " + apps.Count + " 个项目从自定义分类移除？")) return;
+            bool changed = false;
+            for (int i = 0; i < apps.Count; i++)
+            {
+                AppInfo app = apps[i];
+                if (app == null) continue;
+                string ov;
+                if (!config.CategoryOverride.TryGetValue(app.Key, out ov)
+                    || !config.CustomCategories.Contains(ov)) continue;
+                config.CategoryOverride.Remove(app.Key);
+                app.Category = CategoryRules.Classify(app.Name);
+                changed = true;
+            }
+            if (!changed) return;
+            config.Save();
+            RefreshGrid();
         }
 
         private void CopyText(string text)
