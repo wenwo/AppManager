@@ -14,9 +14,12 @@ config.xml
 DesktopBackup/
 QuickCenter/
 CollectionCovers/
+Backups/
 
 # 临时探测文件
 _probe_icon.png
+.codex.patch
+.screenshots/
 
 # IDE 配置（本机私有，不入库）
 .idea/
