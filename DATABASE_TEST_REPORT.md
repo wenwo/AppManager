@@ -90,10 +90,10 @@
 
 ```powershell
 # 旧版/新版对比及真实数据只读快照性能验证；输出目录必须是新的目录
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-database-performance.ps1 -LiveDatabasePath .\appmanager.db
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-database-performance.ps1 -LiveDatabasePath "$env:LOCALAPPDATA\AppManager\appmanager.db"
 
 # 既有数据库回归 + 多链路集成；当前预期有两项失败，退出码 1
-powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-database-ingestion.ps1 -LiveDatabasePath .\appmanager.db
+powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\verify-database-ingestion.ps1 -LiveDatabasePath "$env:LOCALAPPDATA\AppManager\appmanager.db"
 ```
 
 本次原始运行产物位于 TEMP 的 `AppManagerPerformance_30c2b72ac0c04c9890029dedebdb8a81`、`AppManagerDatabaseVerification_be42e4c5a5444e1ba2f3fb46734a9bb5`；包含合成数据库和测试日志。实际入库用例的隔离数据目录为 `AppManagerIngestion_08b5537023b544a0a9c4ad9c76cb8901`。运行中的应用 PID 3236 保持不变。

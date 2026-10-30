@@ -109,8 +109,7 @@ namespace AppManager
         {
             try
             {
-                string dir = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+                string dir = Paths.DataDir;
                 if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
                 string line = error == null
                     ? DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " 整理完成，收纳 " + count + " 项"

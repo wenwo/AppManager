@@ -2839,8 +2839,7 @@ namespace AppManager
         {
             get
             {
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-                    "AppManager", "CollectionCovers");
+                return Path.Combine(Paths.DataDir, "CollectionCovers");
             }
         }
 

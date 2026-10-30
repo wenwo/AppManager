@@ -7,7 +7,7 @@ Windows 桌面应用管理器：应用列表、资源分类与集合、图片查
 - 开发目录：`D:\OWN\AppManager`，存放源码、Git 仓库、构建脚本和开发文档。
 - 运行目录：`%LOCALAPPDATA%\AppManager`，存放 `AppManager.exe`、`libmpv-2.dll`、数据库、缓存、备份和日志。
 
-`build.ps1` 默认将新构建发布到运行目录。应用运行中会拒绝覆盖，构建前请先从托盘菜单退出。
+`build.ps1` 默认将新构建发布到运行目录：先写入同目录暂存文件，自测和数据库回归通过后再原子替换。应用运行中会拒绝覆盖，构建前请先从托盘菜单退出。
 
 ## 构建
 
@@ -17,7 +17,7 @@ Windows 桌面应用管理器：应用列表、资源分类与集合、图片查
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe` 并发布到 `%LOCALAPPDATA%\AppManager\AppManager.exe`，随后运行内置自测（`--selftest`，当前 62 项），日志写入运行目录的 `selftest.log`。
+`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe` 并发布到 `%LOCALAPPDATA%\AppManager\AppManager.exe`，随后运行内置自测（`--selftest`，当前 63 项），日志写入运行目录的 `selftest.log`。
 
 分类、集合、内容关系、配置和操作记录存入本机 SQLite 数据库，首次启动自动迁移 XML 并保留原件。列表支持索引分页，设置页提供操作记录、撤销、完整备份和恢复。表结构、索引、升级和恢复说明见 [DATABASE.md](DATABASE.md)。构建还会运行隔离的数据库回归；`-ScaleDatabaseTests` 可额外验证 30 万条数据。
 
@@ -37,6 +37,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\fetch-libmpv.ps1
 2. 校验整个包的 SHA256：`99811FA17D8D14C64C5F35A230D8F77FAAB63AAA85097F67D272F781E677C252`。
 3. 解出包内 `build/x64/libmpv-2.dll`，校验 SHA256：`38ACD030006062830D792A958C5F2ADC293FA965996797980EC73D9610C309F4`。
 4. 把 DLL 放到运行目录的 `AppManager.exe` 同目录。
+5. 同步复制 `libmpv-LICENSE.txt` 到 DLL 同目录。
 
 常用参数：
 
@@ -56,5 +57,5 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\fetch-libmpv.ps1 -De
 
 ## 其他
 
-- `AppManager.exe`、`selftest.log`、`config.xml`、收纳/快捷中心数据等运行时产物位于 `%LOCALAPPDATA%\AppManager`，不进入开发仓库。
+- `AppManager.exe`、`libmpv-2.dll`、`libmpv-LICENSE.txt`、`selftest.log`、数据库、扫描缓存、旧配置留底 `config.xml.before-sqlite`、收纳/快捷中心数据和备份等运行时产物位于 `%LOCALAPPDATA%\AppManager`，不进入开发仓库。
 - 本机私有规则文件（`AGENTS.md`、`CLAUDE.md`、`.trae/rules/project_rules.md`）只在本机生效，不提交。

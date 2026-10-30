@@ -24,6 +24,10 @@ $destinationDir = Split-Path -Parent $Destination
 if ((-not [string]::IsNullOrEmpty($destinationDir)) -and (-not (Test-Path $destinationDir))) {
     New-Item -ItemType Directory -Force $destinationDir | Out-Null
 }
+$license = Join-Path (Split-Path -Parent $PSScriptRoot) "libmpv-LICENSE.txt"
+if ((Test-Path -LiteralPath $license) -and (-not [string]::IsNullOrEmpty($destinationDir))) {
+    Copy-Item -LiteralPath $license -Destination (Join-Path $destinationDir "libmpv-LICENSE.txt") -Force
+}
 
 if ((Test-Path $Destination) -and (-not $Force)) {
     Write-Host "libmpv-2.dll already exists: $Destination"
@@ -82,7 +86,7 @@ try {
     Write-Host ""
     Write-Host "Installed: $Destination"
     Write-Host "SHA256   : $dllHash"
-    Write-Host "libmpv is licensed under LGPL; see libmpv-LICENSE.txt in the repository or runtime directory."
+    Write-Host "libmpv is licensed under LGPL; libmpv-LICENSE.txt was installed next to the DLL."
     exit 0
 }
 catch {
