@@ -1102,7 +1102,7 @@ namespace AppManager
             try
             {
                 File.WriteAllText(path, brokenXml);
-                AppConfig broken = AppConfig.Load();
+                AppConfig broken = AppConfig.LoadFrom(path);
                 broken.CustomCategories.Add("不应保存");
                 bool saved = broken.Save();
                 Assert(broken.LoadFailed && !saved && File.ReadAllText(path) == brokenXml,

@@ -11,6 +11,10 @@ scan.cache.xml
 tidy.log
 error.log
 config.xml
+config.xml.*
+appmanager.db*
+AppManager.Database.exe
+DatabaseRecovery/
 DesktopBackup/
 QuickCenter/
 CollectionCovers/

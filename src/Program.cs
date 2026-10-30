@@ -69,8 +69,16 @@ namespace AppManager
                 AppConfig config = AppConfig.Load();
                 if (config.LoadFailed)
                 {
-                    MessageBox.Show("配置文件读取失败，原文件已另存为 config.xml.corrupt-时间戳 留底。\n本次运行按默认配置显示，且不会覆盖原配置文件。", "应用中心",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    if (MessageBox.Show("数据读取失败，原数据已保留。\n" + config.DatabaseError + "\n\n是否选择数据库完整备份恢复？", "应用中心",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return 1;
+                    using (OpenFileDialog recovery = new OpenFileDialog { Filter = "数据库备份 (*.db)|*.db" })
+                    {
+                        if (recovery.ShowDialog() != DialogResult.OK) return 1;
+                        try { DatabaseRecovery.Restore(ConfigDatabase.DatabasePath(Paths.ConfigFile), recovery.FileName); }
+                        catch (Exception ex) { Paths.LogError(ex); MessageBox.Show(ex.Message, "恢复失败", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1; }
+                    }
+                    config = AppConfig.Load();
+                    if (config.LoadFailed) return 1;
                 }
                 Application.Run(new MainForm(config));
             }

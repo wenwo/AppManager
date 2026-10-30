@@ -60,10 +60,14 @@ namespace AppManager
 
         // 按名称去重的索引（NormalizeEntryName → 条目）：MergeByName 由 O(n²) 遍历改为 O(1) 查找
         private Dictionary<string, AppInfo> nameIndex;
+        private Sqlite registeredItems;
 
         /// <summary>执行全量扫描，返回去重后的应用列表。</summary>
         public List<AppInfo> ScanAll()
         {
+            registeredItems = config.Database == null ? null : new Sqlite(config.Database.FilePath, true);
+            try
+            {
             nameIndex = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
             Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
             ScanDesktop(dict);          // 桌面快捷方式（快捷中心来源）
@@ -75,8 +79,11 @@ namespace AppManager
             EnrichFromRegistry(dict);   // 注册表仅补充卸载/安装/图标信息，不新增条目
 
             List<AppInfo> list = new List<AppInfo>(dict.Values);
+            if (config.Database != null) config.Database.PublishCatalog(config, list);
             ApplyConfig(list);
             return list;
+            }
+            finally { if (registeredItems != null) { registeredItems.Dispose(); registeredItems = null; } }
         }
 
         /// <summary>
@@ -126,6 +133,7 @@ namespace AppManager
 
         private void AddManaged(Dictionary<string, AppInfo> dict, string path, bool isFolder)
         {
+            if (registeredItems != null && registeredItems.Scalar("SELECT 1 FROM added_items WHERE path_key=? LIMIT 1", path.ToUpperInvariant()) != null) return;
             AppInfo a = new AppInfo();
             a.Name = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
             if (string.IsNullOrEmpty(a.Name)) a.Name = path;
@@ -179,8 +187,11 @@ namespace AppManager
         /// <summary>注入用户手动添加的软件/文件/文件夹条目（来源 AddedItems）；路径失效则跳过。</summary>
         private void ScanAdded(Dictionary<string, AppInfo> dict)
         {
-            foreach (AddedEntry e in config.AddedItems)
+            if (config.Database != null) return;
+            foreach (AddedEntry e in config.Database == null ? config.AddedItems : config.AddedItems.SoftwareEntries())
             {
+                // 资源记录已建立数据库目录；扫描系统应用时不再展开十万级资源列表。
+                if (config.Database != null && e.IsResource) continue;
                 if (string.IsNullOrEmpty(e.Path)) continue;
                 bool isFolder = e.IsFolder || Directory.Exists(e.Path);
                 if (!File.Exists(e.Path) && !Directory.Exists(e.Path)) continue;
@@ -756,12 +767,14 @@ namespace AppManager
 
         internal void ApplyConfig(List<AppInfo> list)
         {
+            HashSet<string> favorites = new HashSet<string>(config.Favorites, StringComparer.Ordinal);
+            HashSet<string> hidden = new HashSet<string>(config.Hidden, StringComparer.Ordinal);
             foreach (AppInfo a in list)
             {
                 // 旧版配置用「名称归一化 id」记录，导入时写成 af:<id>；路径键对不上时按名称回退匹配
                 string legacyKey = "af:" + NormalizeEntryName(a.Name);
-                if (config.Favorites.Contains(a.Key) || config.Favorites.Contains(legacyKey)) a.IsFavorite = true;
-                if (config.Hidden.Contains(a.Key) || config.Hidden.Contains(legacyKey)) a.IsHidden = true;
+                a.IsFavorite = favorites.Contains(a.Key) || favorites.Contains(legacyKey);
+                a.IsHidden = hidden.Contains(a.Key) || hidden.Contains(legacyKey);
                 string ov;
                 if (config.CategoryOverride.TryGetValue(a.Key, out ov) && !string.IsNullOrEmpty(ov))
                     a.Category = ov;

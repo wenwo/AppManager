@@ -1,11 +1,13 @@
 # build.ps1 - AppManager single-file build (ASCII only for PS 5.1 GBK safety)
 # Compiles all .cs under src\ into a single zero-dependency AppManager.exe
-# Usage: powershell -ExecutionPolicy Bypass -File build.ps1
+# Usage: powershell -ExecutionPolicy Bypass -File build.ps1 [-OutputPath AppManager.Database.exe]
+param([string]$OutputPath = "", [switch]$ScaleDatabaseTests)
 
 $ErrorActionPreference = "Stop"
 $base = Split-Path -Parent $MyInvocation.MyCommand.Path
 $src  = Join-Path $base "src"
 $out  = Join-Path $base "AppManager.exe"
+if ($OutputPath) { $out = [System.IO.Path]::GetFullPath($OutputPath) }
 
 $csc = @(
   "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
@@ -67,7 +69,7 @@ Write-Host "Compiler : $csc"
 Write-Host "Sources  : $($files.Count) file(s)"
 Write-Host "Output   : $out"
 
-& $csc /nologo /target:winexe /utf8output /out:$out @icoArg @manifestArg @refArgs $files
+& $csc /nologo /target:winexe /platform:x64 /utf8output /out:$out @icoArg @manifestArg @refArgs $files
 $code = $LASTEXITCODE
 if ($code -ne 0) {
   Write-Error "Build failed (exit $code)"
@@ -76,7 +78,7 @@ if ($code -ne 0) {
 
 # selftest (bounded wait so a stuck run can never hang the build)
 Write-Host "Running --selftest ..."
-$p = Start-Process -FilePath $out -ArgumentList "--selftest" -PassThru
+$p = Start-Process -FilePath $out -ArgumentList "--selftest" -WindowStyle Hidden -PassThru
 if (-not $p.WaitForExit(120000)) {
   try { $p.Kill() } catch { }
   Write-Error "Selftest timeout (120s)."
@@ -84,11 +86,22 @@ if (-not $p.WaitForExit(120000)) {
 }
 $code = $p.ExitCode
 $log = Join-Path $base "selftest.log"
-if (Test-Path $log) { Get-Content $log -Raw | Write-Host }
+if (Test-Path $log) { Get-Content $log -Raw -Encoding UTF8 | Write-Host }
 
 # Exit code convention: 0 = all cases passed, 1 = failure
 if ($code -eq 0) {
   Write-Host "Selftest PASSED (exit code 0)."
+  $dbTests = Join-Path $env:TEMP ("AppManagerDatabaseTests_" + [Guid]::NewGuid().ToString("N") + ".exe")
+  try {
+    & $csc /nologo /target:exe /platform:x64 /utf8output /main:AppManager.DatabaseTests /out:$dbTests @manifestArg @refArgs $files (Join-Path $base "tools\DatabaseTests.cs")
+    if ($LASTEXITCODE -ne 0) { throw "Database test compilation failed." }
+    $dbArgs = @()
+    if ($ScaleDatabaseTests) { $dbArgs = @("--scale") }
+    & $dbTests @dbArgs
+    if ($LASTEXITCODE -ne 0) { throw "Database tests failed." }
+  } finally {
+    if (Test-Path -LiteralPath $dbTests) { Remove-Item -LiteralPath $dbTests }
+  }
   exit 0
 } else {
   Write-Error ("Selftest FAILED (exit code " + $code + ").")

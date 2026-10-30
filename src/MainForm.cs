@@ -15,7 +15,7 @@ namespace AppManager
     /// 主窗体：无边框圆角 iOS 风格；侧栏 + 双行顶栏(行1 标题+窗口按钮，行2 搜索/视图/整理) + 主内容区(网格/列表)。
     /// 集成扫描、图标加载、分类过滤、自绘右键菜单、快捷中心收纳/还原、配置持久化。
     /// </summary>
-    public class MainForm : DpiAwareForm, IMessageFilter
+    public partial class MainForm : DpiAwareForm, IMessageFilter
     {
         /// <summary>「快捷中心」分类名：常驻侧栏、可添加/拖放、按规则入库。</summary>
         private const string QuickCenter = "快捷中心";
@@ -180,6 +180,7 @@ namespace AppManager
             config = cfg;
             scanner = new Scanner(cfg);
             organizer = new DesktopOrganizer(cfg);
+            BindDatabaseErrors();
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterScreen;
@@ -895,6 +896,15 @@ namespace AppManager
             };
             settingsPage.RescanRequested += delegate { StartScan(); };
             settingsPage.LayoutBackupRequested += delegate { ShowLayoutBackups(); };
+            settingsPage.DatabaseRequested += delegate
+            {
+                if (config.Database == null) return;
+                using (DatabaseForm dialog = new DatabaseForm(config.Database))
+                {
+                    dialog.ShowDialog(this);
+                    if (dialog.Changed) ReloadAfterRestore();
+                }
+            };
             settingsPage.SelfTestRequested += delegate { RunSelfTestFromUi(); };
             Controls.Add(settingsPage);
             settingsPage.Visible = false;   // 默认隐藏，仅点「设置」后显示
@@ -1457,7 +1467,10 @@ namespace AppManager
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
                 List<AppInfo> result = null;
-                try { result = scanner.ScanAll(); }
+                try
+                {
+                    result = scanner.ScanAll();
+                }
                 catch (Exception ex) { Paths.LogError(ex); }
                 if (result != null)
                 {
@@ -1474,6 +1487,7 @@ namespace AppManager
                         {
                             SwapApps(result);
                             RefreshGrid(keepViewers);
+                            ScheduleDatabaseMetadata();
                         }
                         else countLabel.Text = "扫描失败，已保留当前列表";
                         if (scanPending)
@@ -1684,7 +1698,11 @@ namespace AppManager
             string kw = (search.Text ?? string.Empty).Trim().ToLowerInvariant();
             List<AppInfo> shown = new List<AppInfo>();
 
-            if (kw.Length > 0)
+            if (config.Database != null)
+            {
+                shown = ReadDatabasePage(kw);
+            }
+            else if (kw.Length > 0)
             {
                 // 全局搜索：跨全部分类匹配名称，命中即显示（受内容模式过滤）
                 foreach (AppInfo a in allApps)
@@ -1730,7 +1748,7 @@ namespace AppManager
                     ApplyItemOrder(shown, currentCategory);
             }
 
-            if (listSortColumn != null) SortShown(shown, listSortColumn, listSortAsc);
+            if (listSortColumn != null && config.Database == null) SortShown(shown, listSortColumn, listSortAsc);
             shownApps = shown;
             // 行内第二个按钮：进入集合后为「移除」（仅从集合移出），分类/全部资源/搜索下为「删除」
             grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website && kw.Length == 0
@@ -1741,6 +1759,7 @@ namespace AppManager
             grid.AllowReorder = kw.Length == 0
                 && contentMode == SidebarControl.ContentMode.Software
                 && CanReorderCategory(currentCategory)
+                && (config.Database == null || categoryTotal <= DatabasePageSize)
                 && listSortColumn == null;   // 表头排序激活时禁用拖动排序，避免两套顺序语义冲突
             // 外部文件/文件夹拖入主内容区：软件/资源模式下当前分类可编辑时放行
             grid.AllowExternalDrop = CanEditCategory(currentCategory);
@@ -1912,9 +1931,9 @@ namespace AppManager
             // 同步持久化：自建条目记录路径（Key=add:路径，需一并迁移归属配置，避免分类关联失联）
             string oldKey = src.Key;
             string newKey = "add:" + dest;
-            for (int i = 0; i < config.AddedItems.Count; i++)
+            config.QueueEntryRename(oldKey, newKey);
+            foreach (AddedEntry e2 in config.AddedItems.ByPath(sp))
             {
-                AddedEntry e2 = config.AddedItems[i];
                 if (string.Equals(e2.Path, sp, StringComparison.OrdinalIgnoreCase))
                 {
                     e2.Path = dest;
@@ -2097,9 +2116,8 @@ namespace AppManager
             string p = app.TargetPath;
             string key = app.Key;
             bool removed = false;
-            for (int i = config.AddedItems.Count - 1; i >= 0; i--)
-                if (string.Equals(config.AddedItems[i].Path, p, StringComparison.OrdinalIgnoreCase))
-                { config.AddedItems.RemoveAt(i); removed = true; }
+            foreach (AddedEntry entry in config.AddedItems.ByPath(p))
+                if (config.AddedItems.Remove(entry)) removed = true;
             if (removed) InvalidateAddedIndex();
             if (string.IsNullOrEmpty(key)) return;
             config.Favorites.Remove(key);
@@ -2229,6 +2247,7 @@ namespace AppManager
         private bool IsResourceEntry(AppInfo a)
         {
             if (a == null) return false;
+            if (a.DatabaseKind >= 0) return a.DatabaseKind == 2;
             if (!a.IsFile) return false;
             // 资源文件一律来自带 IsResource 标记的 AddedItems 记录（改名/移动分类只改归属，不改变该记录）
             return IsAddedAsResource(a);
@@ -2456,7 +2475,7 @@ namespace AppManager
         private List<CollectionSidebar.Item> BuildCollectionItems()
         {
             List<CollectionSidebar.Item> list = new List<CollectionSidebar.Item>();
-            List<AppInfo> pool = VisibleResourcePool(currentCategory);   // 一次过滤供各集合复用
+            List<AppInfo> pool = config.Database == null ? VisibleResourcePool(currentCategory) : new List<AppInfo>();
             CollectionSidebar.Item all = new CollectionSidebar.Item();
             all.IsAll = true;
             all.Key = string.Empty;
@@ -2471,6 +2490,11 @@ namespace AppManager
                 it.Name = c.Name;
                 AppInfo first = null;
                 AppInfo firstImage = null;
+                if (config.Database != null)
+                {
+                    CatalogPage summary = DatabaseSummary(it.Key);
+                    pool = summary.Items;
+                }
                 for (int j = 0; j < pool.Count; j++)
                 {
                     if (!IsInExtraCategory(pool[j], it.Key)) continue;
@@ -2488,6 +2512,7 @@ namespace AppManager
         /// <summary>分类内「当前可见」的资源条目池：与网格过滤同口径（ShouldShow），保证卡片计数与网格显示一致。</summary>
         private List<AppInfo> VisibleResourcePool(string category)
         {
+            if (config.Database != null) return DatabaseSummary(category).Items;
             // RefreshGrid 资源分支已按 currentCategory 过滤并缓存；同分类时直接复用，避免重复遍历
             if (category == currentCategory
                 && contentMode == SidebarControl.ContentMode.Website
@@ -2519,6 +2544,19 @@ namespace AppManager
             AppInfo firstImage = null;
             ResourceCollection c = FindCollectionByKey(key);
             if (c == null) return null;
+            if (config.Database != null)
+            {
+                CatalogPage summary = DatabaseSummary(key);
+                count = summary.Total;
+                foreach (AppInfo a in summary.Items)
+                {
+                    if (first == null) first = a;
+                    if (!IsImageMember(a)) continue;
+                    if (firstImage == null && !IsCoverFailed(a.TargetPath, CollectionInfoCoverW, CollectionInfoCoverH)) firstImage = a;
+                    if (imagePaths.Count < 60) imagePaths.Add(a.TargetPath);
+                }
+                return firstImage ?? first;
+            }
             List<AppInfo> pool = VisibleResourcePool(c.Parent);
             for (int i = 0; i < pool.Count; i++)
             {
@@ -2778,6 +2816,7 @@ namespace AppManager
             string newKey = CollectionKeys.Make(c.Parent, c.Name);
             if (newKey != oldKey)
             {
+                config.QueueCategoryRename(oldKey, newKey);
                 CollectionOps.RenameMemberKey(config, oldKey, newKey);
                 if (currentCollection == oldKey) currentCollection = newKey;
             }
@@ -3020,6 +3059,7 @@ namespace AppManager
                 return;
             }
             int idx = cats.IndexOf(oldName);
+            config.QueueCategoryRename(oldName, name);
             if (idx >= 0) cats[idx] = name;
             string oldIconKey = CategoryIconKey(oldName);
             string newIconKey = CategoryIconKey(name);
@@ -3037,8 +3077,9 @@ namespace AppManager
             List<string> keys = new List<string>(config.CategoryOverride.Keys);
             foreach (string k in keys)
                 if (config.CategoryOverride[k] == oldName) config.CategoryOverride[k] = name;
-            foreach (AddedEntry e in config.AddedItems)
-                if (e.Category == oldName) e.Category = name;
+            if (config.Database == null)
+                foreach (AddedEntry e in config.AddedItems)
+                    if (e.Category == oldName) e.Category = name;
             // 同步额外归属记录（拖放「加入分类」结果），避免改名后条目丢失归属
             foreach (List<string> extra in config.ItemCategories.Values)
                 for (int i = 0; i < extra.Count; i++)
@@ -3253,11 +3294,27 @@ namespace AppManager
         private List<string> MiniMusicSongs(string key)
         {
             List<string> songs = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (config.Database != null)
+            {
+                for (int source = 0; source < 2; source++)
+                {
+                    bool resources = source == 0;
+                    CatalogPage page = null;
+                    do
+                    {
+                        page = config.Database.Page(key.Length == 0 ? (resources ? "全部资源" : "全部文件") : key,
+                            resources, config.ShowHidden, "", 500, page, true, false);
+                        foreach (AppInfo app in page.Items)
+                            if (!app.IsFolder && MediaRules.IsAudio(app.TargetPath) && File.Exists(app.TargetPath) && seen.Add(app.TargetPath)) songs.Add(app.TargetPath);
+                    } while (page.Items.Count > 0);
+                }
+            }
             foreach (AppInfo app in allApps)
             {
                 if (app == null || app.IsFolder || !MediaRules.IsAudio(app.TargetPath) || !File.Exists(app.TargetPath)) continue;
                 if (key.Length > 0 && !IsInExtraCategory(app, key)) continue;
-                songs.Add(app.TargetPath);
+                if (seen.Add(app.TargetPath)) songs.Add(app.TargetPath);
             }
             return songs;
         }
@@ -3677,7 +3734,7 @@ namespace AppManager
         {
             app.IsFavorite = on;
             if (on) { if (!config.Favorites.Contains(app.Key)) config.Favorites.Add(app.Key); }
-            else { config.Favorites.Remove(app.Key); }
+            else { config.Favorites.Remove(app.Key); config.Favorites.Remove("af:" + Scanner.NormalizeEntryName(app.Name)); }
             config.Save();
             RefreshGrid();
         }
@@ -3698,6 +3755,7 @@ namespace AppManager
                 else
                 {
                     config.Favorites.Remove(app.Key);
+                    config.Favorites.Remove("af:" + Scanner.NormalizeEntryName(app.Name));
                 }
                 changed = true;
             }
@@ -3733,7 +3791,7 @@ namespace AppManager
                 if (a == null || a.IsHidden == on) continue;
                 a.IsHidden = on;
                 if (on) { if (!config.Hidden.Contains(a.Key)) config.Hidden.Add(a.Key); }
-                else { config.Hidden.Remove(a.Key); }
+                else { config.Hidden.Remove(a.Key); config.Hidden.Remove("af:" + Scanner.NormalizeEntryName(a.Name)); }
                 changed = true;
             }
             if (!changed) return;
@@ -4723,7 +4781,7 @@ namespace AppManager
             if (list == null) return -1;
             for (int i = 0; i < list.Count; i++)
                 if (list[i].Category == category)
-                    return config.AddedItems.IndexOf(list[i]);
+                    return 0;
             return -1;
         }
 
@@ -4746,6 +4804,11 @@ namespace AppManager
         private List<AddedEntry> AddedIndexLookup(string path)
         {
             if (string.IsNullOrEmpty(path)) return null;
+            if (config.Database != null)
+            {
+                List<AddedEntry> entries = config.AddedItems.ByPath(path);
+                return entries.Count == 0 ? null : entries;
+            }
             EnsureAddedIndex();
             List<AddedEntry> list;
             return addedIndex.TryGetValue(path, out list) ? list : null;
@@ -4781,9 +4844,8 @@ namespace AppManager
             newName = newName.Trim();
             if (newName.Length == 0) return;
             bool changed = false;
-            for (int i = 0; i < config.AddedItems.Count; i++)
+            foreach (AddedEntry e in config.AddedItems.ByPath(app.TargetPath))
             {
-                AddedEntry e = config.AddedItems[i];
                 if (string.Equals(e.Path, app.TargetPath, StringComparison.OrdinalIgnoreCase))
                 {
                     e.Name = newName;
@@ -4821,12 +4883,11 @@ namespace AppManager
             if (app == null) return;
             if (!ConfirmDialog.Show("删除条目", "确认删除「" + app.Name + "」？\n（仅移除记录，不删除磁盘文件）")) return;
             bool removed = false;
-            for (int i = config.AddedItems.Count - 1; i >= 0; i--)
+            foreach (AddedEntry e in config.AddedItems.ByPath(app.TargetPath))
             {
-                AddedEntry e = config.AddedItems[i];
                 if (string.Equals(e.Path, app.TargetPath, StringComparison.OrdinalIgnoreCase))
                 {
-                    config.AddedItems.RemoveAt(i);
+                    config.AddedItems.Remove(e);
                     removed = true;
                 }
             }
@@ -5067,6 +5128,7 @@ namespace AppManager
         private void ReloadAfterRestore()
         {
             config = AppConfig.Load();
+            BindDatabaseErrors();
             InvalidateAddedIndex();   // config 对象已整体替换：旧索引仍指向旧配置，必须重建
             scanner = new Scanner(config);
             organizer = new DesktopOrganizer(config);
@@ -5091,7 +5153,7 @@ namespace AppManager
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 try
                 {
-                    config.ExportTo(dlg.FileName);
+                    if (!config.ExportTo(dlg.FileName)) throw new IOException("备份包未能写入，请检查目标路径和磁盘空间。");
                     MessageBox.Show("已导出备份包：\n" + dlg.FileName, "导出备份包",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
@@ -5129,8 +5191,13 @@ namespace AppManager
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
-                imported.Save();
+                if (!imported.Save())
+                {
+                    MessageBox.Show(this, "导入未保存：" + imported.DatabaseError, "导入备份包", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
                 config = imported;
+                BindDatabaseErrors();
                 InvalidateAddedIndex();   // 整库覆盖：旧索引对应旧 config，必须重建
                 scanner = new Scanner(config);
                 organizer = new DesktopOrganizer(config);
@@ -5414,6 +5481,7 @@ namespace AppManager
             // ===== 内容区底部留白：与左右侧栏底部按钮栏同高，并显示当前集合名称与数量 =====
             Rectangle footer = ContentFooterRect();
             if (footer.IsEmpty) return;
+            if (PaintDatabasePaging(g, footer)) return;
             if (collectionSidebar == null || !collectionSidebar.Visible
                 || !collectionEntered || SearchActive) return;
             string name = "全部";
@@ -5454,6 +5522,7 @@ namespace AppManager
 
         protected override void OnMouseDown(MouseEventArgs e)
         {
+            if (HandleDatabasePaging(e)) return;
             TryDrag(e.Button, e.X, e.Y);
             base.OnMouseDown(e);
         }

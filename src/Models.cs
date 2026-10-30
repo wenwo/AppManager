@@ -25,6 +25,7 @@ namespace AppManager
         public bool IsFolder;                      // 目标为文件夹
         public string Source = string.Empty;        // 来源：AppsFolder/StartMenu/Desktop/Added
         public string Key = string.Empty;           // 持久化唯一键（af:/lnk:/add:）
+        internal int DatabaseKind = -1;             // 数据库分页结果的内容类型，避免展示时逐条查询归属
 
         [NonSerialized] public Bitmap Icon;         // 运行期图标缓存（网格大图标），不参与持久化
         [NonSerialized] public Bitmap SmallIcon;    // 运行期图标缓存（列表用小图标，对齐资源管理器），不参与持久化

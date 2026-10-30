@@ -76,6 +76,8 @@ namespace AppManager
 
         private static MainForm CategoryForm(AppConfig config, params AppInfo[] apps)
         {
+            if (config.Database == null) Check(config.Save(), "database fixture save failed");
+            config.Database.PublishCatalog(config, new List<AppInfo>(apps));
             MainForm form = new MainForm(config);
             Invoke(form, "BuildControls");
             typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "开发工具");
@@ -178,7 +180,7 @@ namespace AppManager
                     Check(!(bool)Invoke(form, "InCategory", app, "开发工具"), "source survived removal: " + app.Key);
                 Check(!config.CategoryOverride.ContainsKey(moved.Key) && !config.CategoryOverride.ContainsKey(legacyKey), "override was not revoked");
                 Check((bool)Invoke(form, "InCategory", extra, "其他") && (bool)Invoke(form, "InCategory", extra, "我的工具"), "extra removal affected other categories");
-                Check(config.AddedItems.Count == 2 && File.ReadAllText(path) == "keep", "category removal deleted library record or file");
+                Check(config.AddedItems.Count == 1 && File.ReadAllText(path) == "keep", "category removal deleted library record or file");
                 Check((bool)Invoke(form, "InCategory", file, "全部文件"), "file disappeared from all files");
             }
         }
@@ -213,10 +215,9 @@ namespace AppManager
                 }
                 AppConfig loaded = AppConfig.Load();
                 Scanner scanner = new Scanner(loaded);
-                Dictionary<string, AppInfo> entries = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
-                typeof(Scanner).GetMethod("ScanAdded", Private).Invoke(scanner, new object[] { entries });
-                Check(entries.ContainsKey(path), "resource was lost when rescanning library: " + category);
-                AppInfo fresh = entries[path];
+                CatalogPage entries = loaded.Database.Page("全部资源", true, true, "", 100, null, true, false);
+                AppInfo fresh = entries.Items.Find(delegate(AppInfo a) { return a.TargetPath == path; });
+                Check(fresh != null, "resource was lost when reloading library: " + category);
                 scanner.ApplyConfig(new List<AppInfo> { fresh });
                 using (MainForm form = CategoryForm(loaded))
                 {
@@ -244,27 +245,33 @@ namespace AppManager
             config.CategoryOverride[moved.Key] = config.CategoryOverride[legacy] = "开发工具";
             config.ExcludedCategories[normal.Key] = new List<string> { "办公软件" };
             Check(config.Save(), "save failure fixture failed");
-            string before = File.ReadAllText(Paths.ConfigFile);
+            string before = AppConfig.Load().ToDocument().OuterXml;
             using (MainForm form = CategoryForm(config))
             {
                 List<AppInfo> targets = new List<AppInfo> { normal, extra, moved, normal };
-                using (FileStream locked = new FileStream(Paths.ConfigFile + ".tmp", FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                using (Sqlite locked = new Sqlite(config.Database.FilePath, false))
+                {
+                    locked.Execute("BEGIN IMMEDIATE");
                     ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", targets, "开发工具"); }, true);
+                    locked.Execute("ROLLBACK");
+                }
                 foreach (AppInfo app in targets)
                     Check((bool)Invoke(form, "InCategory", app, "开发工具"), "failed save changed membership: " + app.Key);
                 Check(config.ExcludedCategories[normal.Key].Count == 1 && config.ExcludedCategories[normal.Key][0] == "办公软件", "rollback damaged prior exclusions");
                 Check(config.CategoryOverride[moved.Key] == "开发工具" && config.CategoryOverride[legacy] == "开发工具", "rollback lost overrides");
-                Check(File.ReadAllText(Paths.ConfigFile) == before, "failed save changed persisted config");
+                Check(AppConfig.Load().ToDocument().OuterXml == before, "failed save changed persisted config");
                 Check(!(bool)typeof(MainForm).GetField("scanPending", Private).GetValue(form), "failed save requested scan");
                 ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", targets, "开发工具"); }, true);
                 foreach (AppInfo app in targets)
                     Check(!(bool)Invoke(form, "InCategory", app, "开发工具"), "retry after save failure did not remove item");
-                before = File.ReadAllText(Paths.ConfigFile);
+                before = AppConfig.Load().ToDocument().OuterXml;
                 MenuWindow.MenuItem rejoin = (MenuWindow.MenuItem)Invoke(form, "MkAddCatMenu", normal, "开发工具");
-                using (FileStream locked = new FileStream(Paths.ConfigFile + ".tmp", FileMode.Create, FileAccess.ReadWrite, FileShare.None))
-                    rejoin.Action();
+                using (Sqlite locked = new Sqlite(config.Database.FilePath, false))
+                {
+                    locked.Execute("BEGIN IMMEDIATE"); rejoin.Action(); locked.Execute("ROLLBACK");
+                }
                 Check(!(bool)Invoke(form, "InCategory", normal, "开发工具"), "failed rejoin changed membership");
-                Check(File.ReadAllText(Paths.ConfigFile) == before, "failed rejoin changed persisted config");
+                Check(AppConfig.Load().ToDocument().OuterXml == before, "failed rejoin changed persisted config");
                 rejoin.Action();
                 Check((bool)Invoke(form, "InCategory", normal, "开发工具"), "rejoin retry failed");
             }

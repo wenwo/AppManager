@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -227,11 +227,16 @@ namespace AppManager
     /// </summary>
     public class AddedEntry
     {
-        public string Path = string.Empty;
-        public string Category = string.Empty;
-        public bool IsFolder;
-        public bool IsResource; // 资源模式收纳的本地文件/文件夹（仅在资源模式展示）
-        public string Name = string.Empty;   // 用户改过的显示名，空则按路径推导
+        private string path = string.Empty, category = string.Empty, name = string.Empty;
+        private bool folder, resource;
+        internal long RecordId, ItemId;
+        internal Action<AddedEntry> Changed;
+        public string Path { get { return path; } set { if (path != value) { path = value ?? ""; Notify(); } } }
+        public string Category { get { return category; } set { if (category != value) { category = value ?? ""; Notify(); } } }
+        public string Name { get { return name; } set { if (name != value) { name = value ?? ""; Notify(); } } }
+        public bool IsFolder { get { return folder; } set { if (folder != value) { folder = value; Notify(); } } }
+        public bool IsResource { get { return resource; } set { if (resource != value) { resource = value; Notify(); } } }
+        private void Notify() { if (Changed != null) Changed(this); }
     }
 
     /// <summary>
@@ -241,6 +246,23 @@ namespace AppManager
     public class AppConfig
     {
         private readonly object saveLock = new object();
+        internal ConfigDatabase Database;
+        internal string DatabaseError;
+        internal long DatabaseRevision;
+        internal event Action<string> SaveFailed;
+
+        internal void QueueCategoryRename(string oldName, string newName)
+        {
+            if (Database != null) Database.QueueRename(oldName, newName);
+        }
+        internal void QueueEntryRename(string oldKey, string newKey)
+        {
+            if (Database != null) Database.QueueEntryRename(oldKey, newKey);
+            for (int i = 0; i < Favorites.Count; i++) if (Favorites[i] == oldKey) Favorites[i] = newKey;
+            for (int i = 0; i < Hidden.Count; i++) if (Hidden[i] == oldKey) Hidden[i] = newKey;
+            foreach (List<string> order in ItemOrder.Values)
+                for (int i = 0; i < order.Count; i++) if (order[i] == oldKey) order[i] = newKey;
+        }
 
         /// <summary>读取失败标志：配置文件损坏/被占用时为真；本次会话禁止覆盖保存，避免默认配置回写冲掉用户数据。</summary>
         internal bool LoadFailed;
@@ -261,7 +283,7 @@ namespace AppManager
         // 资源分类下的「集合」定义（成员关系在 ItemCategories，键前缀 col:）
         public List<ResourceCollection> Collections = new List<ResourceCollection>();
         public Dictionary<string, string> CategoryOverride = new Dictionary<string, string>();
-        public List<AddedEntry> AddedItems = new List<AddedEntry>();
+        public AddedEntryList AddedItems = new AddedEntryList();
         public List<DesktopBackupEntry> DesktopBackup = new List<DesktopBackupEntry>();
 
         // 每分类独立视图模式：分类名 -> true(网格)/false(列表)，缺失则用 ViewGrid 兜底
@@ -300,7 +322,7 @@ namespace AppManager
         /// <summary>加载配置；文件不存在或损坏时返回默认实例，绝不抛出。</summary>
         public static AppConfig Load()
         {
-            return LoadFrom(FilePath);
+            return ConfigDatabase.Load(FilePath);
         }
 
         /// <summary>从指定文件加载配置；文件不存在或损坏时返回默认实例，绝不抛出。</summary>
@@ -311,15 +333,35 @@ namespace AppManager
             {
                 if (!File.Exists(filePath)) return cfg;
                 XmlDocument doc = SafeXml.Load(filePath);
+                AppConfig loaded = ReadDocument(doc);
+                if (loaded.LoadedLegacy) BackupLegacyFile(filePath);
+                return loaded;
+            }
+            catch (Exception ex)
+            {
+                cfg.LoadFailed = true;
+                cfg.DatabaseError = ex.Message;
+                Paths.LogError(ex);
+                return cfg;
+            }
+        }
+
+        internal static AppConfig ReadDocument(XmlDocument doc)
+        {
+            AppConfig cfg = new AppConfig();
+            try
+            {
                 XmlNode root = doc.DocumentElement;
-                if (root == null) return cfg;
+                if (root == null) throw new InvalidDataException("配置内容为空。");
+                if (root.Name != "AppManagerConfig" && !string.Equals(root.Name, "appmanager", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidDataException("配置格式不兼容。");
 
                 // 旧版配置（<appmanager version="1">，属性式）：导入到新版模型，避免升级后分类/收藏丢失
                 if (string.Equals(root.Name, "appmanager", StringComparison.OrdinalIgnoreCase))
                 {
                     LoadLegacy(root, cfg);
                     cfg.LoadedLegacy = true;
-                    BackupLegacyFile(filePath);
+
                     return cfg;
                 }
 
@@ -329,14 +371,10 @@ namespace AppManager
                 cfg.AutoOrganizeDesktop = XmlElementBool(root, "AutoOrganizeDesktop", false);
                 cfg.CloseToTray = XmlElementBool(root, "CloseToTray", false);
 
-                foreach (XmlNode n in root.SelectNodes("Favorites/Item"))
-                    AddUnique(cfg.Favorites, n.InnerText);
-                foreach (XmlNode n in root.SelectNodes("Hidden/Item"))
-                    AddUnique(cfg.Hidden, n.InnerText);
-                foreach (XmlNode n in root.SelectNodes("CustomCategories/Item"))
-                    AddUnique(cfg.CustomCategories, n.InnerText);
-                foreach (XmlNode n in root.SelectNodes("ResourceCategories/Item"))
-                    AddUnique(cfg.ResourceCategories, n.InnerText);
+                cfg.Favorites = ReadUniqueList(root, "Favorites/Item");
+                cfg.Hidden = ReadUniqueList(root, "Hidden/Item");
+                cfg.CustomCategories = ReadUniqueList(root, "CustomCategories/Item");
+                cfg.ResourceCategories = ReadUniqueList(root, "ResourceCategories/Item");
                 foreach (XmlNode n in root.SelectNodes("Collections/Item"))
                 {
                     ResourceCollection c = new ResourceCollection();
@@ -416,8 +454,7 @@ namespace AppManager
                         AddUnique(cats, c.InnerText);
                     if (cats.Count > 0) cfg.ExcludedCategories[k] = cats;
                 }
-                foreach (XmlNode n in root.SelectNodes("SidebarOrder/Item"))
-                    AddUnique(cfg.SidebarOrder, n.InnerText);
+                cfg.SidebarOrder = ReadUniqueList(root, "SidebarOrder/Item");
                 cfg.OrganizeCopy = XmlElementBool(root, "OrganizeCopy", false);
                 cfg.OrganizeShortcut = XmlElementBool(root, "OrganizeShortcut", true);
                 cfg.OrganizeFile = XmlElementBool(root, "OrganizeFile", true);
@@ -427,19 +464,12 @@ namespace AppManager
             {
                 cfg.LoadFailed = true;
                 Paths.LogError(ex);
-                // 坏文件另存留底，便于用户找回收藏/分类/收纳记录等数据
-                try
-                {
-                    if (File.Exists(filePath))
-                        File.Copy(filePath, filePath + ".corrupt-" + DateTime.Now.ToString("yyyyMMdd-HHmmss"), true);
-                }
-                catch { }
             }
             return cfg;
         }
 
         /// <summary>保存配置；目录不存在自动创建，异常仅写日志不抛出。</summary>
-        public bool Save()
+        public bool Save([System.Runtime.CompilerServices.CallerMemberName] string action = "config.save")
         {
             if (LoadFailed)
             {
@@ -447,7 +477,9 @@ namespace AppManager
                 Paths.LogError(new InvalidOperationException("配置读取失败后拒绝覆盖保存: " + FilePath));
                 return false;
             }
-            return SaveTo(FilePath);
+            bool saved = Database != null ? Database.Save(this, action) : ConfigDatabase.SaveDetached(this, FilePath, action);
+            if (!saved && SaveFailed != null) SaveFailed(DatabaseError);
+            return saved;
         }
 
         /// <summary>
@@ -474,119 +506,7 @@ namespace AppManager
                 s.Encoding = new System.Text.UTF8Encoding(false);
                 using (XmlWriter w = XmlWriter.Create(tmp, s))
                 {
-                    w.WriteStartElement("AppManagerConfig");
-                    w.WriteElementString("ViewGrid", ViewGrid ? "true" : "false");
-                    w.WriteElementString("ShowHidden", ShowHidden ? "true" : "false");
-                    w.WriteElementString("AutoScan", AutoScan ? "true" : "false");
-                    w.WriteElementString("AutoOrganizeDesktop", AutoOrganizeDesktop ? "true" : "false");
-                    w.WriteElementString("CloseToTray", CloseToTray ? "true" : "false");
-                    w.WriteElementString("ManageRootPath", ManageRootPath ?? string.Empty);
-                    w.WriteElementString("FolderStorePath", FolderStorePath ?? string.Empty);
-                    w.WriteElementString("FileStorePath", FileStorePath ?? string.Empty);
-                    w.WriteElementString("ResourceStorePath", ResourceStorePath ?? string.Empty);
-                    WriteList(w, "Favorites", Favorites);
-                    WriteList(w, "Hidden", Hidden);
-                    WriteList(w, "CustomCategories", CustomCategories);
-                    WriteList(w, "ResourceCategories", ResourceCategories);
-                    w.WriteStartElement("Collections");
-                    foreach (ResourceCollection c in Collections)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("name", c.Name ?? string.Empty);
-                        w.WriteAttributeString("parent", c.Parent ?? string.Empty);
-                        w.WriteAttributeString("desc", c.Description ?? string.Empty);
-                        w.WriteAttributeString("cover", c.Cover ?? string.Empty);
-                        w.WriteAttributeString("fx", c.CoverFocusX.ToString("0.###", CultureInfo.InvariantCulture));
-                        w.WriteAttributeString("fy", c.CoverFocusY.ToString("0.###", CultureInfo.InvariantCulture));
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("CategoryOverrides");
-                    foreach (KeyValuePair<string, string> kv in CategoryOverride)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("key", kv.Key);
-                        w.WriteString(kv.Value ?? string.Empty);
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("ExcludedCategories");
-                    foreach (KeyValuePair<string, List<string>> kv in ExcludedCategories)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("key", kv.Key);
-                        foreach (string cat in kv.Value) w.WriteElementString("Category", cat);
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("CategoryViewModes");
-                    foreach (KeyValuePair<string, bool> kv in CategoryViewMode)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("cat", kv.Key);
-                        w.WriteString(kv.Value ? "true" : "false");
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("CategoryIconNames");
-                    foreach (KeyValuePair<string, string> kv in CategoryIconNames)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("cat", kv.Key);
-                        w.WriteString(kv.Value ?? string.Empty);
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("AddedItems");
-                    foreach (AddedEntry e in AddedItems)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("path", e.Path ?? string.Empty);
-                        w.WriteAttributeString("category", e.Category ?? string.Empty);
-                        w.WriteAttributeString("folder", e.IsFolder ? "true" : "false");
-                        w.WriteAttributeString("resource", e.IsResource ? "true" : "false");
-                        w.WriteAttributeString("name", e.Name ?? string.Empty);
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("DesktopBackup");
-                    foreach (DesktopBackupEntry e in DesktopBackup)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("path", e.OriginalPath ?? string.Empty);
-                        w.WriteAttributeString("current", e.CurrentPath ?? string.Empty);
-                        w.WriteAttributeString("shortcut", e.IsShortcut ? "true" : "false");
-                        w.WriteAttributeString("dir", e.IsDir ? "true" : "false");
-                        w.WriteAttributeString("copy", e.IsCopy ? "true" : "false");
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("ItemOrders");
-                    foreach (KeyValuePair<string, List<string>> kv in ItemOrder)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("cat", kv.Key);
-                        foreach (string key in kv.Value)
-                            w.WriteElementString("Key", key ?? string.Empty);
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    w.WriteStartElement("ItemCategories");
-                    foreach (KeyValuePair<string, List<string>> kv in ItemCategories)
-                    {
-                        w.WriteStartElement("Item");
-                        w.WriteAttributeString("key", kv.Key);
-                        foreach (string c in kv.Value)
-                            w.WriteElementString("Category", c ?? string.Empty);
-                        w.WriteEndElement();
-                    }
-                    w.WriteEndElement();
-                    WriteList(w, "SidebarOrder", SidebarOrder);
-                    w.WriteElementString("OrganizeCopy", OrganizeCopy ? "true" : "false");
-                    w.WriteElementString("OrganizeShortcut", OrganizeShortcut ? "true" : "false");
-                    w.WriteElementString("OrganizeFile", OrganizeFile ? "true" : "false");
-                    w.WriteElementString("OrganizeDir", OrganizeDir ? "true" : "false");
-                    w.WriteEndElement();
+                    WriteXml(w);
                 }
                 ReplaceAtomic(tmp, filePath);
                 return true;
@@ -598,10 +518,142 @@ namespace AppManager
             }
         }
 
-        /// <summary>
-        /// 用临时文件原子替换目标文件：同卷优先 File.Replace（保留原文件属性并支持回滚），
-        /// 目标不支持 Replace 时先把原文件移到旁路备份，再换入新文件；失败会回滚，绝不先删原文件。
-        /// </summary>
+        private static List<string> ReadUniqueList(XmlNode root, string path)
+        {
+            List<string> result = new List<string>(); HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (XmlNode node in root.SelectNodes(path)) if (!string.IsNullOrEmpty(node.InnerText) && seen.Add(node.InnerText)) result.Add(node.InnerText);
+            return result;
+        }
+
+        internal XmlDocument ToDocument(bool includeAddedItems = true)
+        {
+            XmlDocument doc = new XmlDocument();
+            using (MemoryStream stream = new MemoryStream())
+            {
+                using (XmlWriter writer = XmlWriter.Create(stream, new XmlWriterSettings { Encoding = new System.Text.UTF8Encoding(false), CloseOutput = false })) WriteXml(writer, includeAddedItems);
+                stream.Position = 0;
+                doc.Load(stream);
+            }
+            return doc;
+        }
+
+        private void WriteXml(XmlWriter w, bool includeAddedItems = true)
+        {
+            w.WriteStartElement("AppManagerConfig");
+            w.WriteElementString("ViewGrid", ViewGrid ? "true" : "false");
+            w.WriteElementString("ShowHidden", ShowHidden ? "true" : "false");
+            w.WriteElementString("AutoScan", AutoScan ? "true" : "false");
+            w.WriteElementString("AutoOrganizeDesktop", AutoOrganizeDesktop ? "true" : "false");
+            w.WriteElementString("CloseToTray", CloseToTray ? "true" : "false");
+            w.WriteElementString("ManageRootPath", ManageRootPath ?? string.Empty);
+            w.WriteElementString("FolderStorePath", FolderStorePath ?? string.Empty);
+            w.WriteElementString("FileStorePath", FileStorePath ?? string.Empty);
+            w.WriteElementString("ResourceStorePath", ResourceStorePath ?? string.Empty);
+            WriteList(w, "Favorites", Favorites);
+            WriteList(w, "Hidden", Hidden);
+            WriteList(w, "CustomCategories", CustomCategories);
+            WriteList(w, "ResourceCategories", ResourceCategories);
+            w.WriteStartElement("Collections");
+            foreach (ResourceCollection c in Collections)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("name", c.Name ?? string.Empty);
+                w.WriteAttributeString("parent", c.Parent ?? string.Empty);
+                w.WriteAttributeString("desc", c.Description ?? string.Empty);
+                w.WriteAttributeString("cover", c.Cover ?? string.Empty);
+                w.WriteAttributeString("fx", c.CoverFocusX.ToString("0.###", CultureInfo.InvariantCulture));
+                w.WriteAttributeString("fy", c.CoverFocusY.ToString("0.###", CultureInfo.InvariantCulture));
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("CategoryOverrides");
+            foreach (KeyValuePair<string, string> kv in CategoryOverride)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("key", kv.Key);
+                w.WriteString(kv.Value ?? string.Empty);
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("ExcludedCategories");
+            foreach (KeyValuePair<string, List<string>> kv in ExcludedCategories)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("key", kv.Key);
+                foreach (string cat in kv.Value) w.WriteElementString("Category", cat);
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("CategoryViewModes");
+            foreach (KeyValuePair<string, bool> kv in CategoryViewMode)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("cat", kv.Key);
+                w.WriteString(kv.Value ? "true" : "false");
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("CategoryIconNames");
+            foreach (KeyValuePair<string, string> kv in CategoryIconNames)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("cat", kv.Key);
+                w.WriteString(kv.Value ?? string.Empty);
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("AddedItems");
+            foreach (AddedEntry e in includeAddedItems ? AddedItems : new AddedEntryList())
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("path", e.Path ?? string.Empty);
+                w.WriteAttributeString("category", e.Category ?? string.Empty);
+                w.WriteAttributeString("folder", e.IsFolder ? "true" : "false");
+                w.WriteAttributeString("resource", e.IsResource ? "true" : "false");
+                w.WriteAttributeString("name", e.Name ?? string.Empty);
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("DesktopBackup");
+            foreach (DesktopBackupEntry e in DesktopBackup)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("path", e.OriginalPath ?? string.Empty);
+                w.WriteAttributeString("current", e.CurrentPath ?? string.Empty);
+                w.WriteAttributeString("shortcut", e.IsShortcut ? "true" : "false");
+                w.WriteAttributeString("dir", e.IsDir ? "true" : "false");
+                w.WriteAttributeString("copy", e.IsCopy ? "true" : "false");
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("ItemOrders");
+            foreach (KeyValuePair<string, List<string>> kv in ItemOrder)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("cat", kv.Key);
+                foreach (string key in kv.Value)
+                    w.WriteElementString("Key", key ?? string.Empty);
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            w.WriteStartElement("ItemCategories");
+            foreach (KeyValuePair<string, List<string>> kv in ItemCategories)
+            {
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("key", kv.Key);
+                foreach (string c in kv.Value)
+                    w.WriteElementString("Category", c ?? string.Empty);
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
+            WriteList(w, "SidebarOrder", SidebarOrder);
+            w.WriteElementString("OrganizeCopy", OrganizeCopy ? "true" : "false");
+            w.WriteElementString("OrganizeShortcut", OrganizeShortcut ? "true" : "false");
+            w.WriteElementString("OrganizeFile", OrganizeFile ? "true" : "false");
+            w.WriteElementString("OrganizeDir", OrganizeDir ? "true" : "false");
+            w.WriteEndElement();
+        }
+
         private static void ReplaceAtomic(string tmp, string target)
         {
             if (!File.Exists(target))
@@ -632,9 +684,9 @@ namespace AppManager
         }
 
         /// <summary>导出为备份包（.ambak，仅记录与设置，不含物理文件）。</summary>
-        public void ExportTo(string filePath)
+        public bool ExportTo(string filePath)
         {
-            SaveTo(filePath);
+            return SaveTo(filePath);
         }
 
         /// <summary>把当前配置另存为带时间戳的快照副本，返回副本路径；失败返回 null。</summary>

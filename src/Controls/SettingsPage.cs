@@ -73,6 +73,7 @@ namespace AppManager.Controls
         public event EventHandler RescanRequested;
         public event EventHandler SelfTestRequested;
         public event EventHandler LayoutBackupRequested;
+        public event EventHandler DatabaseRequested;
 
         public SettingsPage()
         {
@@ -189,6 +190,7 @@ namespace AppManager.Controls
             {
                 MakeActionRow("重新扫描", delegate { Raise(RescanRequested); }, ActionRowH),
                 MakeActionRow("布局备份与还原…", delegate { Raise(LayoutBackupRequested); }, ActionRowH),
+                MakeActionRow("数据维护与操作记录…", delegate { Raise(DatabaseRequested); }, ActionRowH),
                 MakeActionRow("运行自测（--selftest 日志）", delegate { Raise(SelfTestRequested); }, ActionRowH)
             });
         }

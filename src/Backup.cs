@@ -186,6 +186,7 @@ namespace AppManager
             if (cfg.LoadFailed) throw new InvalidDataException("当前配置读取失败，已取消备份。");
             if (!cfg.SaveTo(Path.Combine(dir, "config.xml")))
                 throw new IOException("无法写入备份配置。");
+            if (cfg.Database != null) cfg.Database.Backup(Path.Combine(dir, "appmanager.db"));
 
             CopyDir(Paths.DesktopBackupDir, Path.Combine(dir, "DesktopBackup"));
             CopyDir(Paths.LegacyStashDir, Path.Combine(dir, "DesktopStash"));
@@ -311,8 +312,9 @@ namespace AppManager
                     + "-" + Guid.NewGuid().ToString("N"));
                 Directory.CreateDirectory(transaction);
                 string oldConfig = Path.Combine(transaction, "config.xml");
-                bool hadConfig = File.Exists(Paths.ConfigFile);
-                if (hadConfig) File.Copy(Paths.ConfigFile, oldConfig, true);
+                AppConfig liveConfig = AppConfig.Load();
+                if (liveConfig.LoadFailed || !liveConfig.SaveTo(oldConfig)) throw new IOException("无法保存恢复前配置。");
+                bool hadConfig = true;
 
                 string newDesktop = Path.Combine(transaction, "newDesktopBackup");
                 string newStash = Path.Combine(transaction, "newDesktopStash");
@@ -345,9 +347,9 @@ namespace AppManager
                         Directory.Move(newStash, Paths.LegacyStashDir);
                         stashInstalled = true;
                     }
-                    File.Copy(cfgFile, Paths.ConfigFile, true);
                     if (hadConfig)
                         File.Copy(oldConfig, Path.Combine(Paths.DataDir, "config.before-restore.xml"), true);
+                    if (!restoredConfig.Save()) throw new IOException("恢复配置写入失败：" + restoredConfig.DatabaseError);
                 }
                 catch
                 {
@@ -359,8 +361,6 @@ namespace AppManager
                         Directory.Delete(Paths.LegacyStashDir, true);
                     if (stashAside && Directory.Exists(oldStash) && !Directory.Exists(Paths.LegacyStashDir))
                         Directory.Move(oldStash, Paths.LegacyStashDir);
-                    if (hadConfig && File.Exists(oldConfig)) File.Copy(oldConfig, Paths.ConfigFile, true);
-                    else if (!hadConfig && File.Exists(Paths.ConfigFile)) File.Delete(Paths.ConfigFile);
                     throw;
                 }
                 return true;
