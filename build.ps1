@@ -35,6 +35,20 @@ $refs = @(
   "Microsoft.CSharp.dll"
 )
 
+# WIC image decoding uses the framework's WPF imaging wrapper; these are inbox
+# .NET Framework assemblies and do not add a third-party runtime dependency.
+$frameworkDir = Split-Path -Parent $csc
+$wpfRefs = @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll') |
+  ForEach-Object { Join-Path $frameworkDir $_ } | Where-Object { Test-Path $_ }
+if ($wpfRefs.Count -ne 3) {
+  Write-Error "WPF imaging assemblies not found. WIC image decoding cannot be built."
+  exit 4
+}
+$refs += $wpfRefs
+$refs += @('System.Runtime.dll', 'System.Runtime.WindowsRuntime.dll') | ForEach-Object { Join-Path $frameworkDir $_ }
+$refs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+  ForEach-Object { Join-Path $env:WINDIR ('System32\WinMetadata\' + $_) }
+
 $ico = Join-Path $base "AppManager.ico"
 $icoArg = @()
 if (-not (Test-Path $ico)) {

@@ -693,8 +693,19 @@ namespace AppManager
                         Check(Math.Abs(button.Left - DpiHelper.Scale(24, dpi)) <= 2, "control scaling drift");
                     }
                 form.MinimumSize = new Size(work.Width + 500, work.Height + 500);
-                SetDpi(form, 144, new Rectangle(work.Right - 10, work.Bottom - 10, work.Width + 200, work.Height + 200));
-                Check(work.Contains(form.Bounds), "window exceeds work area");
+                Rectangle oversized = new Rectangle(work.Right - 10, work.Bottom - 10, work.Width + 200, work.Height + 200);
+                Rectangle targetWork = Screen.FromRectangle(oversized).WorkingArea;
+                SetDpi(form, 144, oversized);
+                Check(targetWork.Contains(form.Bounds), "window exceeds target monitor work area: work=" + targetWork + " bounds=" + form.Bounds);
+                foreach (Screen screen in Screen.AllScreens)
+                {
+                    work = screen.WorkingArea;
+                    form.MinimumSize = new Size(Math.Min(600, work.Width), Math.Min(300, work.Height));
+                    Rectangle small = new Rectangle(work.Right - 50, work.Bottom - 50, 40, 40);
+                    SetDpi(form, 96, small);
+                    Check(work.Contains(form.Bounds), "minimum size pushes window beyond " + screen.DeviceName + ": " + form.Bounds);
+                    Check(form.Width >= form.MinimumSize.Width && form.Height >= form.MinimumSize.Height, "minimum size ignored");
+                }
             }
         }
 

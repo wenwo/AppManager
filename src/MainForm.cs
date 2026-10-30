@@ -53,6 +53,7 @@ namespace AppManager
         private SettingsPage settingsPage; // 设置页（独立页面，覆盖主内容区）
         private bool settingsOpen;         // 是否处于设置页
         private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
+        private TextViewerControl textViewer;   // 文本查看器：双击文本资源后替换列表区域展示文本
         private VideoPlayerControl videoPlayer;  // 视频播放器：双击视频后替换列表区域播放
         private MusicPlayerControl musicPlayer;  // 音乐播放器：双击音乐后在列表区域直接播放
         private NotifyIcon tray;          // 系统托盘图标（常驻）
@@ -748,6 +749,10 @@ namespace AppManager
             imageViewer.CloseRequested += HideImageViewer;
             Controls.Add(imageViewer);
 
+            textViewer = new TextViewerControl();
+            textViewer.CloseRequested += HideTextViewer;
+            Controls.Add(textViewer);
+
             // 视频播放器：默认隐藏，双击视频时替换列表区域（尺寸/位置与 grid 一致）
             videoPlayer = new VideoPlayerControl();
             videoPlayer.CloseRequested += OnVideoCloseRequested;     // 全屏时先退全屏再退播放器
@@ -1017,6 +1022,8 @@ namespace AppManager
             Point contentLoc = new Point(contentX, top);
             imageViewer.Location = contentLoc;
             imageViewer.Size = new Size(contentW, gridHeight);
+            textViewer.Location = contentLoc;
+            textViewer.Size = new Size(contentW, gridHeight);
             videoPlayer.Location = contentLoc;
             videoPlayer.Size = new Size(contentW, gridHeight);
             musicPlayer.Location = contentLoc;
@@ -1692,6 +1699,7 @@ namespace AppManager
             {
                 // 列表内容即将变化（切分类/搜索/手动重扫），先退出图片/视频查看器，避免浏览序列过期
                 HideImageViewer();
+                HideTextViewer();
                 HideVideoPlayer();
                 HideMusicPlayer();
             }
@@ -1779,7 +1787,7 @@ namespace AppManager
         {
             if (settingsOpen) return;
             bool showGrid = !(collectionInfo != null && collectionInfo.Visible)
-                && !imageViewer.Visible && !videoPlayer.Visible && !musicPlayer.Visible;
+                && !imageViewer.Visible && !textViewer.Visible && !videoPlayer.Visible && !musicPlayer.Visible;
             if (showGrid)
             {
                 if (!grid.Visible) grid.Visible = true;
@@ -3151,11 +3159,23 @@ namespace AppManager
 
         private void OnLaunch(AppInfo app)
         {
+            bool localFile = IsLocalViewerFile(app);
+            bool resourceFile = localFile && app.IsFile
+                && contentMode == SidebarControl.ContentMode.Website;
             // 本地图片：应用内查看器直接浏览大图，不再调起系统图片查看器
-            if (app != null && !app.IsFolder
-                && MediaRules.IsImage(app.TargetPath) && File.Exists(app.TargetPath))
+            if (localFile && MediaRules.IsImage(app.TargetPath))
             {
                 ShowImageViewer(app);
+                return;
+            }
+            if (resourceFile && MediaRules.IsPdf(app.TargetPath))
+            {
+                ShowImageViewer(app);
+                return;
+            }
+            if (resourceFile && MediaRules.IsText(app.TargetPath))
+            {
+                ShowTextViewer(app);
                 return;
             }
             // 本地视频：应用内 libmpv 播放器直接播放（不调起外部播放器）
@@ -3171,6 +3191,12 @@ namespace AppManager
                 ShowMusicPlayer(app);
                 return;
             }
+            if (resourceFile)
+            {
+                if (!Launcher.OpenWith(app.TargetPath))
+                    MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "打开文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             Launcher.Launch(app);
         }
 
@@ -3183,36 +3209,47 @@ namespace AppManager
             if (apps == null || apps.Count == 0) return;
             if (apps.Count == 1) { OnLaunch(apps[0]); return; }
 
-            AppInfo embedded = IsEmbeddedMedia(clicked) ? clicked : null;
+            AppInfo embedded = IsEmbeddedViewerItem(clicked) ? clicked : null;
             if (embedded == null)
             {
                 for (int i = 0; i < apps.Count; i++)
                 {
-                    if (IsEmbeddedMedia(apps[i])) { embedded = apps[i]; break; }
+                    if (IsEmbeddedViewerItem(apps[i])) { embedded = apps[i]; break; }
                 }
             }
             if (embedded != null) OnLaunch(embedded);
             for (int i = 0; i < apps.Count; i++)
             {
                 AppInfo a = apps[i];
-                if (a == null || object.ReferenceEquals(a, embedded) || IsEmbeddedMedia(a)) continue;
+                if (a == null || object.ReferenceEquals(a, embedded) || IsEmbeddedViewerItem(a)) continue;
                 OnLaunch(a);
             }
         }
 
-        /// <summary>是否由应用内查看器/播放器打开（图片、视频）。</summary>
-        private static bool IsEmbeddedMedia(AppInfo app)
+        private static bool IsLocalViewerFile(AppInfo app)
         {
-            return app != null && !app.IsFolder && !string.IsNullOrEmpty(app.TargetPath)
-                && (MediaRules.IsImage(app.TargetPath) || MediaRules.IsVideo(app.TargetPath) || MediaRules.IsAudio(app.TargetPath));
+            if (app == null || app.IsFolder || string.IsNullOrEmpty(app.TargetPath)) return false;
+            Uri uri;
+            return !Uri.TryCreate(app.TargetPath, UriKind.Absolute, out uri) || uri.IsFile;
+        }
+
+        /// <summary>是否由应用内查看器/播放器打开。</summary>
+        private bool IsEmbeddedViewerItem(AppInfo app)
+        {
+            return IsLocalViewerFile(app)
+                && (MediaRules.IsImage(app.TargetPath)
+                    || (app.IsFile && contentMode == SidebarControl.ContentMode.Website
+                        && (MediaRules.IsPdf(app.TargetPath) || MediaRules.IsText(app.TargetPath)))
+                    || MediaRules.IsVideo(app.TargetPath) || MediaRules.IsAudio(app.TargetPath));
         }
 
         /// <summary>双击照片：在当前列表的图片序列中打开查看器。</summary>
         private void ShowImageViewer(AppInfo app)
         {
-            List<string> imgs = MediaSequence(MediaRules.IsImage);
-            if (imgs.Count == 0) { Launcher.Launch(app); return; }
+            List<string> imgs = MediaSequence(MediaRules.IsImageDocument, false);
             int idx = imgs.FindIndex(delegate(string p) { return string.Equals(p, app.TargetPath, StringComparison.OrdinalIgnoreCase); });
+            if (idx < 0) { imgs.Insert(0, app.TargetPath); idx = 0; }
+            HideOtherViewers(imageViewer);
             grid.Visible = false;
             imageViewer.BringToFront();
             imageViewer.Open(imgs, idx);
@@ -3221,10 +3258,35 @@ namespace AppManager
         /// <summary>退出查看器：恢复列表展示；未打开时为空操作，供设置页等场景直接调用。</summary>
         private void HideImageViewer()
         {
-            if (!imageViewer.Visible) return;
-            imageViewer.Visible = false;
-            SyncContentVisibility();
-            grid.Invalidate();
+            bool wasVisible = imageViewer.Visible;
+            imageViewer.ClosePreview();
+            if (wasVisible) { SyncContentVisibility(); grid.Invalidate(); }
+        }
+
+        private void ShowTextViewer(AppInfo app)
+        {
+            List<string> texts = MediaSequence(MediaRules.IsText, false);
+            int idx = texts.FindIndex(delegate(string p) { return string.Equals(p, app.TargetPath, StringComparison.OrdinalIgnoreCase); });
+            if (idx < 0) { texts.Insert(0, app.TargetPath); idx = 0; }
+            HideOtherViewers(textViewer);
+            grid.Visible = false;
+            textViewer.BringToFront();
+            textViewer.Open(texts, idx);
+        }
+
+        private void HideTextViewer()
+        {
+            bool wasVisible = textViewer.Visible;
+            textViewer.ClosePreview();
+            if (wasVisible) { SyncContentVisibility(); grid.Invalidate(); }
+        }
+
+        private void HideOtherViewers(Control keep)
+        {
+            if (!object.ReferenceEquals(keep, imageViewer)) HideImageViewer();
+            if (!object.ReferenceEquals(keep, textViewer)) HideTextViewer();
+            if (!object.ReferenceEquals(keep, videoPlayer)) HideVideoPlayer();
+            if (!object.ReferenceEquals(keep, musicPlayer)) HideMusicPlayer();
         }
 
         /// <summary>双击视频：在当前列表的视频序列中打开内置播放器。</summary>
@@ -3240,6 +3302,7 @@ namespace AppManager
                 vids.Insert(0, app.TargetPath);
                 idx = 0;
             }
+            HideOtherViewers(videoPlayer);
             grid.Visible = false;
             videoPlayer.BringToFront();
             videoPlayer.Open(vids, idx);
@@ -3248,13 +3311,13 @@ namespace AppManager
         /// <summary>
         /// 媒体浏览序列限定当前列表，避免在集合内浏览时跳到其它分类。
         /// </summary>
-        private List<string> MediaSequence(Func<string, bool> typeMatch)
+        private List<string> MediaSequence(Func<string, bool> typeMatch, bool checkExists = true)
         {
             List<string> result = new List<string>();
             foreach (AppInfo a in shownApps)
             {
                 if (a.IsFolder) continue;
-                if (typeMatch(a.TargetPath) && File.Exists(a.TargetPath))
+                if (typeMatch(a.TargetPath) && (!checkExists || File.Exists(a.TargetPath)))
                     result.Add(a.TargetPath);
             }
             return result;
@@ -3377,6 +3440,7 @@ namespace AppManager
             if (songs.Count == 0) return;
             songIndex = Math.Max(0, Math.Min(songIndex, songs.Count - 1));
             miniMusic.Stop();
+            HideOtherViewers(musicPlayer);
             grid.Visible = false;
             musicPlayer.BringToFront();
             musicPlayer.Open(songs, songIndex);
@@ -3392,6 +3456,7 @@ namespace AppManager
                 return string.Equals(path, app.TargetPath, StringComparison.OrdinalIgnoreCase);
             });
             if (songIndex < 0) { songs.Insert(0, app.TargetPath); songIndex = 0; }
+            HideOtherViewers(musicPlayer);
             grid.Visible = false;
             musicPlayer.BringToFront();
             musicPlayer.Open(songs, songIndex);
@@ -5207,6 +5272,7 @@ namespace AppManager
             if (settingsOpen) return;
             settingsOpen = true;
             HideImageViewer();   // 查看器/播放器属于列表区域，进入设置页前先退出
+            HideTextViewer();
             HideVideoPlayer();
             HideMusicPlayer();
             miniMusic.Stop();
@@ -5523,6 +5589,7 @@ namespace AppManager
                     || c is IosProgressBar || c is CheckedListBox || c is TextBox
                     || c is SidebarControl || c is AppGridControl || c is SettingsPage
                     || c is ImageViewerControl || c is VideoPlayerControl || c is MusicPlayerControl || c is MiniMusicPlayerControl
+                    || c is TextViewerControl
                     || c is CollectionInfoPanel || c is CollectionSidebar || c is ListHeaderStrip)
                     continue;
                 c.MouseDown += delegate(object s, MouseEventArgs e)

@@ -10,7 +10,13 @@ try {
     $sources = Get-ChildItem (Join-Path $project 'src') -Recurse -Filter *.cs | ForEach-Object FullName
     $references = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll',
         'System.Xml.dll', 'Microsoft.VisualBasic.dll', 'Microsoft.CSharp.dll') | ForEach-Object { '/r:' + $_ }
+    $references += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll') |
+        ForEach-Object { '/r:' + (Join-Path (Split-Path -Parent $compiler) $_) }
     $manifest = '/win32manifest:' + (Join-Path $project 'app.manifest')
+    $references += '/r:' + (Join-Path (Split-Path -Parent $compiler) 'System.Runtime.dll')
+    $references += '/r:' + (Join-Path (Split-Path -Parent $compiler) 'System.Runtime.WindowsRuntime.dll')
+    $references += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+        ForEach-Object { '/r:' + (Join-Path $env:WINDIR ('System32\WinMetadata\' + $_)) }
     & $compiler /nologo /target:winexe /utf8output "/out:$app" $manifest @references @sources
     if ($LASTEXITCODE -ne 0) { throw 'Application compilation failed.' }
     $process = Start-Process -FilePath $app -ArgumentList '--selftest' -WindowStyle Hidden -PassThru

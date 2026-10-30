@@ -564,8 +564,8 @@ namespace AppManager
                 if (bounds.Width <= 0 || bounds.Height <= 0) return;
                 Rectangle work = Screen.FromRectangle(bounds).WorkingArea;
                 MinimumSize = new Size(Math.Min(MinimumSize.Width, work.Width), Math.Min(MinimumSize.Height, work.Height));
-                if (bounds.Width > work.Width) bounds.Width = work.Width;
-                if (bounds.Height > work.Height) bounds.Height = work.Height;
+                bounds.Width = Math.Min(work.Width, Math.Max(bounds.Width, MinimumSize.Width));
+                bounds.Height = Math.Min(work.Height, Math.Max(bounds.Height, MinimumSize.Height));
                 bounds.X = Math.Max(work.Left, Math.Min(bounds.Left, work.Right - bounds.Width));
                 bounds.Y = Math.Max(work.Top, Math.Min(bounds.Top, work.Bottom - bounds.Height));
                 Bounds = bounds;

@@ -35,19 +35,30 @@ namespace AppManager
             ".rtf", ".csv", ".json", ".xml", ".html", ".htm", ".epub"
         };
 
+        /// <summary>可在内置文本查看器中直接读取的纯文本扩展名。</summary>
+        public static readonly string[] TextExt =
+        {
+            ".txt", ".md", ".log", ".ini", ".cfg", ".conf", ".csv", ".json", ".xml",
+            ".yaml", ".yml", ".toml", ".sql", ".html", ".htm", ".css", ".js", ".ts",
+            ".cs", ".java", ".py", ".sh", ".bat", ".cmd", ".ps1", ".properties"
+        };
+
+        private static readonly string[] PdfExt = { ".pdf" };
+
         /// <summary>压缩包扩展名（小写、含点）。</summary>
         public static readonly string[] ArchiveExt =
         {
             ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz"
         };
 
-        /// <summary>证件扩展名：证件照（图片）与证件文档（PDF）。</summary>
+        /// <summary>证件扩展名：证件照、证件文档与文本。</summary>
         private static readonly string[] CredentialExt = BuildCredentialExt();
 
         private static string[] BuildCredentialExt()
         {
             List<string> list = new List<string>(ImageExt);
-            list.Add(".pdf");
+            foreach (string ext in DocExt) if (!list.Contains(ext)) list.Add(ext);
+            foreach (string ext in TextExt) if (!list.Contains(ext)) list.Add(ext);
             return list.ToArray();
         }
 
@@ -55,6 +66,24 @@ namespace AppManager
         public static bool IsImage(string path)
         {
             return MatchExt(path, ImageExt);
+        }
+
+        /// <summary>是否为 PDF 文件；PDF 在资源查看器中按文档画布模式打开。</summary>
+        public static bool IsPdf(string path)
+        {
+            return MatchExt(path, PdfExt);
+        }
+
+        /// <summary>是否为可在内置文本查看器中读取的文本文件。</summary>
+        public static bool IsText(string path)
+        {
+            return MatchExt(path, TextExt);
+        }
+
+        /// <summary>图片查看器画布支持的图片类资源（图片与 PDF）。</summary>
+        public static bool IsImageDocument(string path)
+        {
+            return IsImage(path) || IsPdf(path);
         }
 
         /// <summary>是否为本地视频文件（按扩展名判定）。</summary>

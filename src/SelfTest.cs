@@ -105,6 +105,7 @@ namespace AppManager
             Case47_CollectionOpsMembers();
             Case48_CollectionParentSync();
             Case49_MediaTypeRules();
+            Case49_WicPngDecode();
             Case50_CorruptConfigProtection();
             Case51_LayoutRestoreRollback();
             Case52_SaveFailureKeepsOriginal();
@@ -1085,13 +1086,66 @@ namespace AppManager
                 && MediaRules.IsMedia(@"C:\a\x.png")
                 && MediaRules.IsMedia(@"C:\a\x.m4a")
                 && !MediaRules.IsMedia(@"C:\a\x.txt");
+            bool documentOk = MediaRules.IsPdf(@"C:\a\id.PDF")
+                && MediaRules.IsImageDocument(@"C:\a\id.pdf")
+                && MediaRules.IsImageDocument(@"C:\a\id.png")
+                && MediaRules.IsText(@"C:\a\notes.TXT")
+                && MediaRules.IsText(@"C:\a\config.json")
+                && !MediaRules.IsText(@"C:\a\archive.zip");
             bool filterOk = filter.StartsWith("视频 (*.")
                 && filter.Contains("|*.")
                 && !filter.Contains("*.jpg")
                 && !filter.Contains("*.mp3");
-            Assert(videoOk && imageOk && audioOk && mediaOk && filterOk && filterAll,
+            Assert(videoOk && imageOk && audioOk && mediaOk && documentOk && filterOk && filterAll,
                 "视频=" + videoOk + " 图片=" + imageOk + " 音频=" + audioOk
-                + " 媒体=" + mediaOk + " 过滤=" + filterOk + " 全覆盖=" + filterAll);
+                + " 媒体=" + mediaOk + " 文档=" + documentOk + " 过滤=" + filterOk + " 全覆盖=" + filterAll);
+        }
+
+        private static void Case49_WicPngDecode()
+        {
+            Begin("49B WIC 解码：透明、小图、横竖图限幅、EXIF 和句柄释放");
+            string path = TempFile(".png");
+            string jpeg = TempFile(".jpg");
+            try
+            {
+                using (Bitmap source = new Bitmap(3, 2, PixelFormat.Format32bppArgb))
+                {
+                    source.SetPixel(1, 1, Color.FromArgb(96, 12, 34, 56));
+                    source.Save(path, ImageFormat.Png);
+                }
+                bool alpha;
+                using (Bitmap decoded = WicImageDecoder.Load(path, 3200))
+                {
+                    Color pixel = decoded.GetPixel(1, 1);
+                    alpha = decoded.Width == 3 && decoded.Height == 2 && pixel.A == 96;
+                    using (FileStream exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
+                }
+                bool bounds = true;
+                foreach (Size size in new Size[] { new Size(400, 100), new Size(100, 400) })
+                {
+                    using (Bitmap source = new Bitmap(size.Width, size.Height)) source.Save(path, ImageFormat.Png);
+                    using (Bitmap decoded = WicImageDecoder.Load(path, 32))
+                        bounds = bounds && Math.Max(decoded.Width, decoded.Height) == 32
+                            && Math.Min(decoded.Width, decoded.Height) == 8;
+                }
+                using (Bitmap source = new Bitmap(4, 2))
+                {
+                    PropertyItem item = (PropertyItem)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(PropertyItem));
+                    item.Id = 0x0112; item.Type = 3; item.Value = new byte[] { 6, 0 }; item.Len = 2;
+                    source.SetPropertyItem(item);
+                    source.Save(jpeg, ImageFormat.Jpeg);
+                }
+                bool orientation;
+                using (Bitmap decoded = WicImageDecoder.Load(jpeg, 3200))
+                    orientation = decoded.Width == 2 && decoded.Height == 4;
+                Assert(alpha && bounds && orientation, "透明/小图=" + alpha + " 横竖限幅=" + bounds + " EXIF=" + orientation);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally
+            {
+                try { if (File.Exists(path)) File.Delete(path); } catch { }
+                try { if (File.Exists(jpeg)) File.Delete(jpeg); } catch { }
+            }
         }
 
         private static void Case50_CorruptConfigProtection()

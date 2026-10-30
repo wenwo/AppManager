@@ -1,6 +1,8 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
 using Microsoft.VisualBasic.FileIO;
 
 namespace AppManager
@@ -11,6 +13,16 @@ namespace AppManager
     /// </summary>
     internal static class Launcher
     {
+        private static readonly OpenWithQueue openWithQueue = new OpenWithQueue(ShowOpenWithDialog, delegate
+        {
+            MessageBox.Show("无法打开文件，请检查文件是否存在或重新选择查看器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        });
+
+        static Launcher()
+        {
+            Application.ApplicationExit += delegate { openWithQueue.Dispose(); };
+        }
+
         /// <summary>启动应用；UWP 走快捷方式 shell 解析，其余走目标/快捷方式（浏览器网址等由系统关联程序打开）。</summary>
         public static bool Launch(AppInfo app)
         {
@@ -84,6 +96,52 @@ namespace AppManager
                 Debug.WriteLine("打开文件失败: " + ex.Message);
                 return false;
             }
+        }
+
+        /// <summary>排队显示 Windows“打开方式”；同时仅一个，取消时停止后续文件。</summary>
+        public static bool OpenWith(string file)
+        {
+            if (string.IsNullOrEmpty(file)) return false;
+            try
+            {
+                return openWithQueue.Enqueue(Path.GetFullPath(file));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("打开方式选择器启动失败: " + ex.Message);
+                return false;
+            }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct OpenAsInfo
+        {
+            [MarshalAs(UnmanagedType.LPWStr)] public string File;
+            [MarshalAs(UnmanagedType.LPWStr)] public string Class;
+            public uint Flags;
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern int SHOpenWithDialog(IntPtr owner, ref OpenAsInfo info);
+        [DllImport("ole32.dll")]
+        private static extern int OleInitialize(IntPtr reserved);
+        [DllImport("ole32.dll")]
+        private static extern void OleUninitialize();
+
+        private static bool ShowOpenWithDialog(string path)
+        {
+            Marshal.ThrowExceptionForHR(OleInitialize(IntPtr.Zero));
+            try
+            {
+                OpenAsInfo info = new OpenAsInfo { File = path, Flags = 0x4 }; // OAIF_EXEC
+                // No main-window owner: the shell dialog must not disable the application's UI.
+                int result = SHOpenWithDialog(IntPtr.Zero, ref info);
+                if (result == unchecked((int)0x800704C7) || result == unchecked((int)0x80004004) || result == 1)
+                    return false;
+                Marshal.ThrowExceptionForHR(result);
+                return result == 0;
+            }
+            finally { OleUninitialize(); }
         }
 
         /// <summary>打开目标文件所在位置（资源管理器选中）。</summary>

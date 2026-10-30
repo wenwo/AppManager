@@ -15,7 +15,13 @@ $perfLog = Join-Path $perfRoot 'results.log'
 if ($LASTEXITCODE -ne 0) { throw 'Cannot export baseline revision.' }
 Expand-Archive -LiteralPath $perfArchive -DestinationPath $perfBaseline
 $perfRefs = @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Xml.dll','Microsoft.VisualBasic.dll','Microsoft.CSharp.dll') | ForEach-Object { '/r:' + $_ }
+$perfRefs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll') |
+    ForEach-Object { '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) $_) }
 $perfOld = Join-Path $perfRoot 'XML.exe'
+$perfRefs += '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) 'System.Runtime.dll')
+$perfRefs += '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) 'System.Runtime.WindowsRuntime.dll')
+$perfRefs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+    ForEach-Object { '/r:' + (Join-Path $env:WINDIR ('System32\WinMetadata\' + $_)) }
 $perfNew = Join-Path $perfRoot 'SQLite.exe'
 foreach ($perfBuild in @(@($perfBaseline, $perfOld, ''), @($perfProject, $perfNew, '/define:DATABASE'))) {
     $perfFiles = Get-ChildItem (Join-Path $perfBuild[0] 'src') -Filter *.cs -Recurse | ForEach-Object FullName

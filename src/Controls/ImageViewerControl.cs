@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
@@ -26,13 +25,17 @@ namespace AppManager.Controls
         private int index;
         private Image image;            // 当前大图；切换/退出必须 Dispose，否则文件句柄不释放
         private bool loadFailed;        // 当前图片解码失败（展示占位文案）
+        private bool pdfMode;
+        private int pdfPage, pdfPages;
+        private string failureText = "无法加载此文件，请使用外部查看器打开";
+        private readonly PreviewLoader<Image> loader;
+        private readonly RoundButton externalButton;
 
         // 缩放/平移：DisplayScale = fitScale * zoomFactor，zoomFactor=1 表示「适应窗口」
         private float fitScale = 1F;
         private float zoomFactor = 1F;
         private PointF pan;
         private bool panning;
-        private int loadSeq;           // 异步解码序号：切图后递增，过期解码结果直接丢弃
         private int wheelRemainder;    // 高精度滚轮余量累积（delta 不足一档时不丢缩放）
         private Point panStart;
         private PointF panOrigin;
@@ -73,6 +76,14 @@ namespace AppManager.Controls
             Cursor = Cursors.Default;
             TabStop = true;
             Visible = false;
+            loader = new PreviewLoader<Image>(this);
+            externalButton = new RoundButton { Text = "外部打开", Accent = false };
+            externalButton.Click += delegate
+            {
+                if (paths.Count > 0 && !Launcher.OpenWith(paths[index]))
+                    MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            };
+            Controls.Add(externalButton);
         }
 
         /// <summary>当前图片展示倍率（相对实际像素）。</summary>
@@ -92,8 +103,8 @@ namespace AppManager.Controls
         /// <summary>打开一组图片并定位到指定下标；外部负责显隐切换。</summary>
         public void Open(List<string> imagePaths, int startIndex)
         {
-            paths = imagePaths ?? new List<string>();
-            if (paths.Count == 0) { RequestClose(); return; }
+            paths = imagePaths == null ? new List<string>() : new List<string>(imagePaths);
+            if (paths.Count == 0) { ClosePreview(); RequestClose(); return; }
             index = Math.Min(Math.Max(startIndex, 0), paths.Count - 1);
             Visible = true;
             Focus();
@@ -111,102 +122,61 @@ namespace AppManager.Controls
 
         private void LoadCurrent()
         {
+            pdfPage = 0;
+            pdfPages = 0;
+            LoadPage();
+        }
+
+        private void LoadPage()
+        {
+            loader.Clear();
             ReleaseImage();
             loadFailed = false;
             string path = paths[index];
-            int seq = ++loadSeq;
+            pdfMode = MediaRules.IsPdf(path);
+            int page = pdfPage;
+            int totalPages = 0;
             // 换图后缩放/平移复位，回到「适应窗口」
             zoomFactor = 1F;
             pan = PointF.Empty;
+            panning = false;
+            press = hover = -1;
+            Capture = false;
+            wheelRemainder = 0;
+            Cursor = Cursors.Default;
             RecomputeFit();
             Invalidate();
-            if (!File.Exists(path)) { loadFailed = true; Invalidate(); return; }
-            // 大图解码放后台线程，避免同步解码卡 UI；完成后按序号校验，过期结果丢弃
-            ThreadPool.QueueUserWorkItem(delegate
+            loader.Load(delegate(CancellationToken cancellation)
             {
-                Image decoded = null;
-                try { decoded = PrepareImage(path); }
-                catch (Exception ex) { DebugWrite("图片加载失败 " + path + ": " + ex.Message); }
-                if (IsDisposed) { if (decoded != null) decoded.Dispose(); return; }
-                try
-                {
-                    BeginInvoke((Action)delegate
-                    {
-                        if (IsDisposed || Disposing || seq != loadSeq) { if (decoded != null) decoded.Dispose(); return; }
-                        if (decoded == null) loadFailed = true;
-                        else image = decoded;
-                        RecomputeFit();
-                        ClampPan();
-                        Invalidate();
-                    });
-                }
-                catch { if (decoded != null && !ReferenceEquals(decoded, image)) decoded.Dispose(); }
+                if (MediaRules.IsPdf(path)) return PdfPreview.Render(path, page, 2400, cancellation, out totalPages);
+                return WicImageDecoder.Load(path, 3200, cancellation);
+            }, delegate(Image decoded, Exception error)
+            {
+                loadFailed = decoded == null;
+                failureText = error == null ? "无法加载此文件，请使用外部查看器打开" : error.Message + "\n可使用外部查看器打开";
+                image = decoded;
+                if (pdfMode) pdfPages = totalPages;
+                RecomputeFit();
+                ClampPan();
+                Invalidate();
             });
         }
 
-        /// <summary>
-        /// 后台解码：按 EXIF Orientation 校正方向；长边超过 3200 像素时生成降采样工作位图，
-        /// 之后拖动/缩放每帧缩放的是该位图而非原图，显著降低大图操作卡顿。
-        /// 返回的位图已脱离原文件流，文件句柄随 using 释放。
-        /// </summary>
-        private static Image PrepareImage(string path)
+        public void ClosePreview()
         {
-            using (Image raw = Image.FromFile(path))
-            {
-                ApplyExifOrientation(raw);
-                int maxSide = Math.Max(raw.Width, raw.Height);
-                if (maxSide > 3200)
-                {
-                    float k = 3200F / maxSide;
-                    int w = Math.Max(1, (int)Math.Round(raw.Width * k));
-                    int h = Math.Max(1, (int)Math.Round(raw.Height * k));
-                    Bitmap small = new Bitmap(w, h, PixelFormat.Format32bppPArgb);
-                    using (Graphics g = Graphics.FromImage(small))
-                    {
-                        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                        g.DrawImage(raw, 0, 0, w, h);
-                    }
-                    return small;
-                }
-                Bitmap copy = new Bitmap(raw.Width, raw.Height, PixelFormat.Format32bppPArgb);
-                using (Graphics g2 = Graphics.FromImage(copy))
-                    g2.DrawImage(raw, 0, 0, raw.Width, raw.Height);
-                return copy;
-            }
-        }
-
-        /// <summary>按 EXIF Orientation(0x0112) 旋转/翻转，手机竖拍照片不再横躺显示。</summary>
-        private static void ApplyExifOrientation(Image img)
-        {
-            try
-            {
-                const int OrientationId = 0x0112;
-                if (Array.IndexOf(img.PropertyIdList, OrientationId) < 0) return;
-                int v = img.GetPropertyItem(OrientationId).Value[0];
-                switch (v)
-                {
-                    case 2: img.RotateFlip(RotateFlipType.RotateNoneFlipX); break;
-                    case 3: img.RotateFlip(RotateFlipType.Rotate180FlipNone); break;
-                    case 4: img.RotateFlip(RotateFlipType.Rotate180FlipX); break;
-                    case 5: img.RotateFlip(RotateFlipType.Rotate90FlipX); break;
-                    case 6: img.RotateFlip(RotateFlipType.Rotate90FlipNone); break;
-                    case 7: img.RotateFlip(RotateFlipType.Rotate270FlipX); break;
-                    case 8: img.RotateFlip(RotateFlipType.Rotate270FlipNone); break;
-                }
-                try { img.RemovePropertyItem(OrientationId); } catch { }
-            }
-            catch { }
+            loader.Clear();
+            ReleaseImage();
+            paths.Clear();
+            pdfPage = pdfPages = 0;
+            panning = false;
+            Capture = false;
+            Cursor = Cursors.Default;
+            Visible = false;
         }
 
         private void ReleaseImage()
         {
             if (image != null) { image.Dispose(); image = null; }
-        }
-
-        [System.Diagnostics.Conditional("DEBUG")]
-        private static void DebugWrite(string msg)
-        {
-            System.Diagnostics.Debug.WriteLine(msg);
         }
 
         // ===== 缩放与平移 =====
@@ -227,8 +197,10 @@ namespace AppManager.Controls
             Rectangle area = ImageArea;
             float w = image.Width * DisplayScale;
             float h = image.Height * DisplayScale;
-            pan.X = w <= area.Width ? 0F : Clamp(pan.X, area.Width - w, 0F);
-            pan.Y = h <= area.Height ? 0F : Clamp(pan.Y, area.Height - h, 0F);
+            float limitX = Math.Max(0, (w - area.Width) / 2F);
+            float limitY = Math.Max(0, (h - area.Height) / 2F);
+            pan.X = Clamp(pan.X, -limitX, limitX);
+            pan.Y = Clamp(pan.Y, -limitY, limitY);
         }
 
         private static float Clamp(float v, float min, float max)
@@ -296,6 +268,11 @@ namespace AppManager.Controls
 
         private void Prev()
         {
+            if (pdfMode && pdfPages > 1 && (pdfPage > 0 || paths.Count == 1))
+            {
+                pdfPage = (pdfPage - 1 + pdfPages) % pdfPages;
+                LoadPage(); return;
+            }
             if (paths.Count < 2) return;
             index = (index - 1 + paths.Count) % paths.Count;
             LoadCurrent();
@@ -303,6 +280,11 @@ namespace AppManager.Controls
 
         private void Next()
         {
+            if (pdfMode && pdfPages > 1 && (pdfPage + 1 < pdfPages || paths.Count == 1))
+            {
+                pdfPage = (pdfPage + 1) % pdfPages;
+                LoadPage(); return;
+            }
             if (paths.Count < 2) return;
             index = (index + 1) % paths.Count;
             LoadCurrent();
@@ -439,11 +421,17 @@ namespace AppManager.Controls
             base.OnResize(e);
             RecomputeFit();
             ClampPan();
+            if (externalButton != null)
+                externalButton.Bounds = new Rectangle(Math.Max(0, Width - Dpi(112)), Dpi(6), Dpi(96), Dpi(30));
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) ReleaseImage();
+            if (disposing)
+            {
+                ReleaseImage();
+                loader.Dispose();
+            }
             base.Dispose(disposing);
         }
 
@@ -496,7 +484,7 @@ namespace AppManager.Controls
                 if (image == null)
                 {
                     using (SolidBrush b = new SolidBrush(TextDim))
-                        Draw.DrawStringCenter(g, loadFailed ? "无法加载此图片" : "正在加载…", Theme.BodyFont, b, canvasRect);
+                        Draw.DrawStringCenter(g, loadFailed ? failureText : "正在加载…", Theme.BodyFont, b, canvasRect);
                     return;
                 }
                 GraphicsState st = g.Save();
@@ -530,7 +518,7 @@ namespace AppManager.Controls
                 g.DrawLine(p, 12, infoBarRect.Y, infoBarRect.Width - 12, infoBarRect.Y);
 
             const int pad = 16;
-            const int countW = 80;
+            int countW = pdfMode ? Dpi(180) : Dpi(80);
             Rectangle countR = new Rectangle(infoBarRect.Right - pad - countW, infoBarRect.Y,
                 countW, infoBarRect.Height);
             Rectangle nameR = new Rectangle(infoBarRect.X + pad, infoBarRect.Y,
@@ -541,6 +529,7 @@ namespace AppManager.Controls
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
                 | TextFormatFlags.SingleLine);
             string count = (index + 1) + " / " + paths.Count;
+            if (pdfMode && pdfPages > 0) count = "第 " + (pdfPage + 1) + " / " + pdfPages + " 页 · " + count;
             TextRenderer.DrawText(g, count, Theme.CaptionFont, countR, Theme.TextSecondary,
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
@@ -552,7 +541,7 @@ namespace AppManager.Controls
             using (SolidBrush b = new SolidBrush(Theme.TooltipBg))
                 Draw.FillRoundedRect(g, b, pillRect, PillH / 2);
 
-            bool single = paths.Count < 2;
+            bool single = paths.Count < 2 && pdfPages < 2;
             DrawPillBtn(g, prevRect, 0, single);
             DrawPillBtn(g, zoomOutRect, 1, false);
             DrawZoomLabel(g);
