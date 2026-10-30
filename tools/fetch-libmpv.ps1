@@ -16,9 +16,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$repoRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 if ([string]::IsNullOrWhiteSpace($Destination)) {
-    $Destination = Join-Path $repoRoot "libmpv-2.dll"
+    $runtimeRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "AppManager"
+    $Destination = Join-Path $runtimeRoot "libmpv-2.dll"
 }
 $destinationDir = Split-Path -Parent $Destination
 if ((-not [string]::IsNullOrEmpty($destinationDir)) -and (-not (Test-Path $destinationDir))) {
@@ -82,7 +82,7 @@ try {
     Write-Host ""
     Write-Host "Installed: $Destination"
     Write-Host "SHA256   : $dllHash"
-    Write-Host "libmpv is licensed under LGPL; see libmpv-LICENSE.txt in the repository."
+    Write-Host "libmpv is licensed under LGPL; see libmpv-LICENSE.txt in the repository or runtime directory."
     exit 0
 }
 catch {

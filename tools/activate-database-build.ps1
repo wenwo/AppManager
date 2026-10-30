@@ -1,6 +1,6 @@
 # Run after exiting AppManager from its tray menu. Never terminates the running app.
 $ErrorActionPreference = "Stop"
-$activateRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$activateRoot = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "AppManager"
 $activateCandidate = Join-Path $activateRoot "AppManager.Database.exe"
 $activateTarget = Join-Path $activateRoot "AppManager.exe"
 if (-not (Test-Path -LiteralPath $activateCandidate)) { throw "Build AppManager.Database.exe first." }

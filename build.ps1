@@ -1,13 +1,23 @@
 # build.ps1 - AppManager single-file build (ASCII only for PS 5.1 GBK safety)
-# Compiles all .cs under src\ into a single zero-dependency AppManager.exe
-# Usage: powershell -ExecutionPolicy Bypass -File build.ps1 [-OutputPath AppManager.Database.exe]
+# Compiles all .cs under src\ into a single zero-dependency AppManager.exe.
+# The default output is the runtime/data directory (%LOCALAPPDATA%\AppManager).
+# Usage: powershell -ExecutionPolicy Bypass -File build.ps1 [-OutputPath <candidate.exe>]
 param([string]$OutputPath = "", [switch]$ScaleDatabaseTests)
 
 $ErrorActionPreference = "Stop"
 $base = Split-Path -Parent $MyInvocation.MyCommand.Path
 $src  = Join-Path $base "src"
-$out  = Join-Path $base "AppManager.exe"
+$runtime = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "AppManager"
+New-Item -ItemType Directory -Path $runtime -Force | Out-Null
+$out  = Join-Path $runtime "AppManager.exe"
 if ($OutputPath) { $out = [System.IO.Path]::GetFullPath($OutputPath) }
+
+$running = @(Get-Process -Name AppManager -ErrorAction SilentlyContinue |
+  Where-Object { $_.Path -and [string]::Equals($_.Path, $out, [StringComparison]::OrdinalIgnoreCase) })
+if ($running.Count -gt 0) {
+  Write-Error "AppManager is running from $out. Exit it from the tray menu before building."
+  exit 5
+}
 
 $csc = @(
   "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe",
@@ -65,12 +75,12 @@ $refArgs = $refs | ForEach-Object { "/r:$_" }
 
 # Internal video player needs the mpv client library next to the exe (too large for the repo).
 # Set APPMANAGER_SKIP_LIBMPV_FETCH=1 to skip the automatic download (offline builds).
-$mpv = Join-Path $base "libmpv-2.dll"
+$mpv = Join-Path $runtime "libmpv-2.dll"
 if (-not (Test-Path $mpv)) {
   $fetch = Join-Path $base "tools\fetch-libmpv.ps1"
   if ((Test-Path $fetch) -and ($env:APPMANAGER_SKIP_LIBMPV_FETCH -ne "1")) {
     Write-Host "libmpv-2.dll missing; downloading it via tools\fetch-libmpv.ps1 ..."
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fetch
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $fetch -Destination $mpv
     if ($LASTEXITCODE -ne 0) {
       Write-Warning "libmpv-2.dll download failed. The video player will show a placeholder until the library is placed next to AppManager.exe."
     }
@@ -99,7 +109,7 @@ if (-not $p.WaitForExit(120000)) {
   exit 1
 }
 $code = $p.ExitCode
-$log = Join-Path $base "selftest.log"
+$log = Join-Path $runtime "selftest.log"
 if (Test-Path $log) { Get-Content $log -Raw -Encoding UTF8 | Write-Host }
 
 # Exit code convention: 0 = all cases passed, 1 = failure

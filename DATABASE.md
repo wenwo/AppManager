@@ -73,10 +73,10 @@ erDiagram
 
 ```powershell
 # 编译候选程序、运行核心自测及数据库回归
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -OutputPath .\AppManager.Database.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -OutputPath "$env:LOCALAPPDATA\AppManager\AppManager.Database.exe"
 
 # 另运行 30 万条数据验证（所有数据均在独立 TEMP 目录）
-powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -OutputPath .\AppManager.Database.exe -ScaleDatabaseTests
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1 -OutputPath "$env:LOCALAPPDATA\AppManager\AppManager.Database.exe" -ScaleDatabaseTests
 ```
 
 数据库测试覆盖迁移、完整字段往返、固定 ID 改名、增删改与回滚、过期写入、写锁失败、事务中途失败与重试、进程异常退出、在线备份及恢复、损坏原件留底恢复、隐藏/排除/多归属、界面分页和全分类排序。
