@@ -42,6 +42,19 @@ namespace AppManager
         private static void Run(ImportBatch batch) { FileImport.Run(batch, delegate { return true; }, null); }
         [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
         private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle handle, uint code,
+            IntPtr input, uint inputSize, IntPtr output, uint outputSize, out uint returned, IntPtr overlapped);
+        private static void MakeSparseLargerThanFreeSpace(string path)
+        {
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None))
+            {
+                uint returned;
+                if (!DeviceIoControl(stream.SafeFileHandle, 0x900c4, IntPtr.Zero, 0, IntPtr.Zero, 0, out returned, IntPtr.Zero))
+                    throw new System.ComponentModel.Win32Exception(System.Runtime.InteropServices.Marshal.GetLastWin32Error());
+                stream.SetLength(new DriveInfo(Path.GetPathRoot(path)).AvailableFreeSpace + (1L << 30));
+            }
+        }
         private static void WriteStream(string path, string text)
         {
             using (FileStream stream = new FileStream(CreateFile(path, 0x40000000, 0, IntPtr.Zero, 2, 0, IntPtr.Zero), FileAccess.Write))
@@ -71,6 +84,33 @@ namespace AppManager
                     Check(FileImport.ResolveEffect(true, Keys.Shift, DragDropEffects.Copy) == DragDropEffects.Copy, "copy-only fallback");
                     Check(FileImport.ResolveEffect(true, Keys.Control, DragDropEffects.Move) == DragDropEffects.None, "never promote copy to delete");
                     Check(FileImport.ResolveEffect(true, Keys.None, DragDropEffects.Link) == DragDropEffects.None, "unsupported allowed effects");
+                });
+                Test("disk-full errors distinguish capacity from permissions", delegate
+                {
+                    Check(FileImport.IsDiskFull(new IOException("disk full", unchecked((int)0x80070070))), "IO disk full");
+                    Check(FileImport.IsDiskFull(new System.ComponentModel.Win32Exception(39)), "Win32 disk full");
+                    Check(!FileImport.IsDiskFull(new UnauthorizedAccessException()) && !FileImport.IsDiskFull(new IOException("other")), "unrelated error misclassified");
+                });
+                Test("insufficient space stops separation without copying or deleting sources", delegate
+                {
+                    foreach (bool committed in new[] { false, true })
+                    {
+                        ImportBatch batch = Batch(ImportOperation.Move, committed ? new[] { "large.bin" } : new[] { "large.bin", "missing.txt" });
+                        ImportItem item = batch.Items[0]; MakeSparseLargerThanFreeSpace(item.Source);
+                        if (!committed) { File.Delete(batch.Items[1].Source); Run(batch); }
+                        else using (FileStream locked = new FileStream(item.Source, FileMode.Open, FileAccess.Read, FileShare.Read)) Run(batch);
+                        Check(batch.SpaceLimited && batch.Error == FileImport.SpaceMessage, "missing capacity warning");
+                        Check(File.Exists(item.Source) && File.Exists(item.Target) && item.Files[0].Linked && item.Files[0].Hash == null, "source changed or full copy attempted");
+                        Check(!File.Exists(item.Target + ".detach-" + batch.Id), "unnecessary separation copy created");
+                        Check(item.State == (committed ? FileImport.DeleteFailed : FileImport.Failed), "reported successful import");
+                        ImportBatch restored = Reload(batch);
+                        Check(restored.SpaceLimited, "capacity warning not persisted");
+                        if (committed)
+                        {
+                            FileImport.Recover(restored, true);
+                            Check(File.Exists(item.Source) && !File.Exists(item.Target + ".detach-" + batch.Id), "recovery retried separation");
+                        }
+                    }
                 });
                 Test("OLE async negotiation holds source until completion and reports optimized move", delegate
                 {

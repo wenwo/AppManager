@@ -400,7 +400,11 @@ namespace AppManager
                     { return (bool)Invoke(new Func<bool>(delegate { return CommitImport(value); })); },
                         delegate(int index, string name) { UpdateStatus(index, batch.Items.Count, name); }, cancel);
                 }
-                catch (Exception ex) { batch.Error = "导入中断：" + ex.Message; }
+                catch (Exception ex)
+                {
+                    batch.Error = "导入中断：" + ex.Message;
+                    FileImport.RecordError(batch, ex);
+                }
                 finally
                 {
                     RunOnUi(delegate
@@ -468,6 +472,13 @@ namespace AppManager
                 ShowStatusBar((!batch.Committed ? "入库未保存" : partial ? "导入部分完成" : "导入完成") + " ·「" + batch.Category + "」", batch.Items.Count, batch.Items.Count);
                 statusDetail.Text = FileImport.Summary(batch) + " · 点击查看详情";
                 MarkImportStatus(partial || !batch.Committed ? 15000 : 4000);
+                if (batch.SpaceLimited)
+                {
+                    bool shared = batch.Items.Any(i => i.Files.Any(f => f.Linked && !f.Deleted));
+                    MessageBox.Show(this, FileImport.SpaceMessage + (shared
+                        ? "\n\n部分源路径和库路径仍可能指向同一份文件，编辑一边会影响另一边，请暂勿编辑。详情见导入记录。" : ""),
+                        "磁盘空间不足", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
             }
             // 不切换用户当前视图：只做静默重扫，正在查看的图片/视频不被打断。
             if (batch.Committed) StartScan(false, true);

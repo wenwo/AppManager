@@ -50,7 +50,7 @@ namespace AppManager
     public sealed class ImportBatch
     {
         public string Id = Guid.NewGuid().ToString("N"), Category, Collection, Error;
-        public bool Resource, Committed, DeleteAuthorized, Finished;
+        public bool Resource, Committed, DeleteAuthorized, Finished, SpaceLimited;
         public ImportOperation Operation;
         public List<ImportItem> Items = new List<ImportItem>();
         [XmlIgnore] public string JournalDirectory;
@@ -64,6 +64,19 @@ namespace AppManager
     {
         internal const string Waiting = "等待", Copied = "已复制", Linked = "已收录", Skipped = "已跳过", Failed = "失败",
             Moved = "已移动", DeleteFailed = "源文件删除失败", RolledBack = "已撤回";
+        internal const string SpaceMessage = "磁盘空间不足，已停止后续操作。尚未删除的源文件已保留，请释放空间后再处理。";
+
+        internal static bool IsDiskFull(Exception error)
+        {
+            Win32Exception native = error as Win32Exception;
+            int code = native != null ? native.NativeErrorCode : error is IOException ? error.HResult & 0xffff : 0;
+            return code == 39 || code == 112;
+        }
+
+        internal static void RecordError(ImportBatch batch, Exception error)
+        {
+            if (IsDiskFull(error)) { batch.SpaceLimited = true; batch.Error = SpaceMessage; }
+        }
 
         internal static DragDropEffects ResolveEffect(bool sameVolume, Keys modifiers, DragDropEffects allowed)
         {
@@ -127,6 +140,8 @@ namespace AppManager
         private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern bool CreateHardLink(string link, string existing, IntPtr security);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool GetDiskFreeSpaceEx(string directory, out ulong available, out ulong total, out ulong free);
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, ref int info, uint size);
         [DllImport("kernel32.dll", SetLastError = true)]
@@ -427,6 +442,8 @@ namespace AppManager
                 {
                     // 同卷移动：硬链接不复制数据、不占额外空间，且保留属性、ACL 与备用数据流。
                     if (CreateHardLink(target, source, IntPtr.Zero)) { stamp.Linked = true; stamp.TargetId = Identity(target); return true; }
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == 39 || error == 112) throw new Win32Exception(error);
                     link = false; // 跨卷、FAT/exFAT、链接数上限等：本项其余文件改为复制。
                 }
                 using (FileStream output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16))
@@ -573,6 +590,7 @@ namespace AppManager
                 ImportItem item = batch.Items[i];
                 if (progress != null) progress(i, Path.GetFileName(item.Source));
                 if (item.State == Failed || item.State == Skipped) continue;
+                if (batch.SpaceLimited) { item.State = Failed; item.Error = SpaceMessage; continue; }
                 string staging = null;
                 bool stagingOwned = false;
                 try
@@ -609,7 +627,11 @@ namespace AppManager
                     staging = null; item.State = Copied;
                 }
                 catch (OperationCanceledException) { item.State = Failed; item.Error = "已取消"; }
-                catch (Exception ex) { item.State = Failed; item.Error = ex.Message; }
+                catch (Exception ex)
+                {
+                    RecordError(batch, ex);
+                    item.State = Failed; item.Error = IsDiskFull(ex) ? SpaceMessage : ex.Message;
+                }
                 finally
                 {
                     if (staging != null && stagingOwned) RemoveStaging(staging);
@@ -653,6 +675,7 @@ namespace AppManager
         internal static void DeleteSources(ImportBatch batch, CancellationToken cancel = default(CancellationToken))
         {
             if (!batch.Committed || !batch.DeleteAuthorized || batch.Operation != ImportOperation.Move) return;
+            batch.SpaceLimited = false; // 只有显式重试才会再次进入删源；恢复流程不会自动调用。
             foreach (ImportItem item in batch.Items.Where(i => !i.Reference && (i.State == Copied || i.State == DeleteFailed)))
             {
                 if (cancel.IsCancellationRequested) break; // 未处理项保持「已复制」，可在导入记录中继续。
@@ -703,9 +726,14 @@ namespace AppManager
                     }
                     item.State = Moved; item.Error = null;
                 }
-                catch (Exception ex) { item.State = DeleteFailed; item.Error = ex.Message; }
+                catch (Exception ex)
+                {
+                    RecordError(batch, ex);
+                    item.State = DeleteFailed; item.Error = IsDiskFull(ex) ? SpaceMessage : ex.Message;
+                }
                 finally { foreach (IDisposable handle in held) handle.Dispose(); }
                 SaveSoon(batch);
+                if (batch.SpaceLimited) break;
             }
             DetachRetained(batch);
             Save(batch);
@@ -724,6 +752,14 @@ namespace AppManager
                     string temporary = target + ".detach-" + batch.Id;
                     try
                     {
+                        if (batch.SpaceLimited) throw new IOException(SpaceMessage, unchecked((int)0x80070070));
+                        // 仅异常分离前检查，正常同卷移动不增加卷查询或数据读取。
+                        ulong available, total, free;
+                        if (!GetDiskFreeSpaceEx(Path.GetDirectoryName(target), out available, out total, out free))
+                            throw new Win32Exception(Marshal.GetLastWin32Error());
+                        ulong required = (ulong)new FileInfo(target).Length;
+                        foreach (ImportStreamStamp stream in Streams(target)) required = checked(required + (ulong)stream.Length);
+                        if (required > available) throw new IOException(SpaceMessage, unchecked((int)0x80070070));
                         stamp.DetachedPath = temporary;
                         SaveSoon(batch); // 分离过程也节流记账；中断时可按固定临时名找回副本。
                         ImportFileStamp independent;
@@ -743,6 +779,14 @@ namespace AppManager
                     }
                     catch (Exception ex)
                     {
+                        if (IsDiskFull(ex))
+                        {
+                            RecordError(batch, ex);
+                            item.State = batch.Committed ? DeleteFailed : Failed;
+                            item.Error = SpaceMessage + " 源路径和库路径可能仍指向同一份文件，请暂勿编辑任一边。";
+                            if (File.Exists(temporary)) item.Error += " 保留的临时副本：" + temporary;
+                            break;
+                        }
                         item.Error = (item.Error ?? "") + "；共享链接未能分离，请勿编辑源或目标文件；保留副本：" + temporary + "；" + ex.Message;
                         if (!batch.Committed)
                         {
@@ -904,7 +948,7 @@ namespace AppManager
                 Rollback(batch);
                 batch.Error = (batch.Error ?? "入库记录保存失败") + "；已撤回入库副本，全部源文件保留。";
             }
-            else if (!batch.DeleteAuthorized && batch.Operation == ImportOperation.Move)
+            else if (!batch.DeleteAuthorized && batch.Operation == ImportOperation.Move && !batch.SpaceLimited)
                 batch.Error = "部分失败，全部源文件保留；可在导入记录中确认删除已入库项的源文件。";
             Save(batch);
             DeleteSources(batch, cancel);
