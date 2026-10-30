@@ -9,7 +9,7 @@ namespace AppManager.Controls
 {
     /// <summary>
     /// 侧栏：顶部 iOS 分段控件（软件/资源），下方分类列表；"全部软件/全部资源"置底并加分隔线；
-    /// 标记为 DropTarget 的条目（可编辑分类）可接收文件/文件夹拖放，回调 FilesDropped。
+    /// 分类拖放由 ExternalDrop 统一判定，聚合页由主窗体选择导入目标。
     /// </summary>
     public class SidebarControl : ScrollableControl
     {
@@ -74,8 +74,8 @@ namespace AppManager.Controls
         private Point dragStart;
 
         public event Action<string> SelectedChanged;
-        /// <summary>文件/文件夹拖放到可投放分类时触发，参数为（目标分类 key, 被拖入的路径）。</summary>
-        public event Action<string, string[]> FilesDropped;
+        /// <summary>外部拖放统一判定；分类 key 为空时选择目标，drop=true 时接收文件。</summary>
+        public Func<string, DragEventArgs, bool, DragDropEffects> ExternalDrop;
         /// <summary>内容模式切换时触发（软件/资源）。</summary>
         public event Action<ContentMode> ModeChanged;
         /// <summary>点击底部「+ 新建分类」时触发。</summary>
@@ -837,21 +837,17 @@ namespace AppManager.Controls
             int idx = IndexAt(PointToClient(new Point(e.X, e.Y)).Y);
             dragIndex = -1;
             Invalidate();
-            if (idx < 0 || idx >= items.Count || !items[idx].DropTarget) return;
-            string[] files = e.Data == null ? null : e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files == null || files.Length == 0) return;
-            Action<string, string[]> h = FilesDropped;
-            if (h != null) h(items[idx].Key, files);
+            if (idx < 0 || idx >= items.Count || items[idx].Separator || ExternalDrop == null) return;
+            e.Effect = ExternalDrop(items[idx].DropTarget ? items[idx].Key : null, e, true);
         }
 
-        /// <summary>计算拖放目标行：仅 DropTarget 分类（可编辑分类）可接收文件/文件夹，并给出拖放光标效果。</summary>
+        /// <summary>计算拖放目标行，并由主窗体返回与实际动作一致的光标效果。</summary>
         private void UpdateDragTarget(DragEventArgs e)
         {
             int idx = IndexAt(PointToClient(new Point(e.X, e.Y)).Y);
-            bool accept = idx >= 0 && idx < items.Count && items[idx].DropTarget
-                && e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop);
+            bool accept = idx >= 0 && idx < items.Count && !items[idx].Separator && ExternalDrop != null;
             if (dragIndex != idx) { dragIndex = idx; Invalidate(); }
-            e.Effect = accept ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effect = accept ? ExternalDrop(items[idx].DropTarget ? items[idx].Key : null, e, false) : DragDropEffects.None;
         }
     }
 }

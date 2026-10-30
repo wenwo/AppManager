@@ -198,9 +198,11 @@ namespace AppManager
             base.OnLoad(e);
             Application.AddMessageFilter(this);   // 按光标位置把滚轮消息路由到侧栏
             BuildControls();
+            InitializeImportUi();
             LayoutControls();
             BuildTray();
             StartAutoScan();
+            RecoverImports();
             InitializeDpiScaling();
             _ready = true;
             MinimumSize = new Size(Dpi(960), Dpi(560));
@@ -429,13 +431,28 @@ namespace AppManager
             if (!exiting && _ready && tray != null && config.CloseToTray && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
-                HideToTray();
+                HideToTray();   // 导入在后台继续
+                return;
+            }
+            if (importRunning)
+            {
+                if (e.CloseReason == CloseReason.UserClosing)
+                {
+                    e.Cancel = true;
+                    exiting = false;
+                    RequestImportExit();
+                    return;
+                }
+                // 关机/结束任务无法等待：取消后放行，中断状态由下次启动的恢复流程处理。
+                importCancel.Cancel();
             }
         }
 
         /// <summary>窗体真正关闭时释放托盘资源，避免残留图标。</summary>
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            importTip.Dispose();
+            if (importStatusTimer != null) importStatusTimer.Dispose();
             StopAutoScan();
             Application.RemoveMessageFilter(this);
             if (searchDebounce != null)
@@ -632,6 +649,11 @@ namespace AppManager
         /// <summary>彻底退出：置标志后关闭窗体，由 OnFormClosed 释放托盘资源。</summary>
         private void ExitApp()
         {
+            if (importRunning)
+            {
+                RequestImportExit();
+                return;
+            }
             exiting = true;
             if (tray != null) tray.Visible = false;
             Close();
@@ -649,29 +671,25 @@ namespace AppManager
         protected override void OnDragEnter(DragEventArgs e)
         {
             base.OnDragEnter(e);
-            e.Effect = AcceptFormDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effect = HandleExternalImport(null, null, e, false);
         }
 
         protected override void OnDragOver(DragEventArgs e)
         {
             base.OnDragOver(e);
-            e.Effect = AcceptFormDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effect = HandleExternalImport(null, null, e, false);
         }
 
         protected override void OnDragDrop(DragEventArgs e)
         {
             base.OnDragDrop(e);
-            if (!AcceptFormDrop(e)) return;
-            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files == null || files.Length == 0) return;
-            OnGridFilesDropped(files);
+            e.Effect = HandleExternalImport(null, null, e, true);
         }
 
-        /// <summary>窗体是否放行拖入：当前分类可编辑且携带文件拖放数据；设置页打开时不接收。</summary>
-        private bool AcceptFormDrop(DragEventArgs e)
+        protected override void OnDragLeave(EventArgs e)
         {
-            return !settingsOpen && CanEditCategory(currentCategory) && e.Data != null
-                && e.Data.GetDataPresent(DataFormats.FileDrop);
+            HideImportTip();
+            base.OnDragLeave(e);
         }
 
         private void BuildControls()
@@ -679,7 +697,7 @@ namespace AppManager
             sidebar = new SidebarControl();
             sidebar.BackColor = Color.Transparent;   // 透出顶栏渐变与整体背景
             sidebar.SelectedChanged += OnSidebarSelect;
-            sidebar.FilesDropped += OnFilesDroppedToCategory;
+            sidebar.ExternalDrop = delegate(string category, DragEventArgs e, bool drop) { return HandleExternalImport(category ?? "", null, e, drop); };
             sidebar.ModeChanged += OnModeChanged;
             sidebar.CollapsedChanged += delegate { LayoutControls(); Invalidate(); };
             sidebar.AddCategoryRequested += OnAddCategory;
@@ -705,7 +723,7 @@ namespace AppManager
             grid.ReorderRequested += OnGridReorder;
             grid.DragMoved += OnGridDragMoved;
             grid.DroppedOutside += OnGridDroppedOutside;
-            grid.FilesDropped += OnGridFilesDropped;
+            grid.ExternalDrop = delegate(DragEventArgs e, bool drop) { return HandleExternalImport(null, null, e, drop); };
             grid.MoveIntoFolder += OnGridMoveIntoFolder;
             grid.BlankRightClicked += OnGridBlankRightClicked;
             grid.SortRequested += OnGridSortRequested;   // 列表表头点击排序（名称/大小/时间）
@@ -724,7 +742,11 @@ namespace AppManager
             collectionSidebar.ContextRequested += ShowCollectionMenu;
             collectionSidebar.CreateRequested += delegate { OnCreateCollection(null); };
             collectionSidebar.CollapsedChanged += delegate { LayoutControls(); Invalidate(); };
-            collectionSidebar.FilesDropped += OnCollectionFilesDropped;   // 外部文件拖到集合行 = 加入该集合
+            collectionSidebar.ExternalDrop = delegate(string key, DragEventArgs e, bool drop)
+            {
+                ResourceCollection collection = FindCollectionByKey(key);
+                return collection == null ? DragDropEffects.None : HandleExternalImport(collection.Parent, key, e, drop);
+            };
             // 集合侧边栏空白区可拖动窗体（行/底部按钮/滚动条除外）
             collectionSidebar.MouseDown += delegate(object s, MouseEventArgs e)
             {
@@ -1769,8 +1791,8 @@ namespace AppManager
                 && CanReorderCategory(currentCategory)
                 && (config.Database == null || categoryTotal <= DatabasePageSize)
                 && listSortColumn == null;   // 表头排序激活时禁用拖动排序，避免两套顺序语义冲突
-            // 外部文件/文件夹拖入主内容区：软件/资源模式下当前分类可编辑时放行
-            grid.AllowExternalDrop = CanEditCategory(currentCategory);
+            // 聚合页也接受拖入，由统一入口选择目标分类。
+            grid.AllowExternalDrop = true;
             // 拖出来源：软件模式=搜索态或只读全集/「常用」；资源模式=搜索态、「全部资源」或可编辑资源分类
             // （后两者拖出用于「加入集合侧边栏/侧栏分类」，多归属）。与网格内排序相互独立。
             grid.AllowDragOut = contentMode == SidebarControl.ContentMode.Website
@@ -1891,23 +1913,6 @@ namespace AppManager
             AddItemsToCategory(apps, cat);
         }
 
-        /// <summary>外部文件/文件夹拖入主内容区：按当前模式入库（软件/资源各自的存储位置，实体移动、原文件不保留）；集合视图内同时加入当前集合。</summary>
-        private void OnGridFilesDropped(string[] paths)
-        {
-            if (paths == null || paths.Length == 0) return;
-            if (!CanEditCategory(currentCategory)) return;
-            AddPaths(paths, currentCategory, ActiveCollectionKey);
-        }
-
-        /// <summary>外部文件拖到集合侧边栏的自定义集合行：加入该集合（同时入库到父分类）。</summary>
-        private void OnCollectionFilesDropped(string collectionKey, string[] paths)
-        {
-            if (paths == null || paths.Length == 0) return;
-            ResourceCollection c = FindCollectionByKey(collectionKey);
-            if (c == null) return;   // 集合已不存在：忽略本次投放
-            AddPaths(paths, c.Parent, collectionKey);
-        }
-
         /// <summary>
         /// 文件类型条目拖入目录类型条目：把条目目标（文件/文件夹）搬迁进该目录，
         /// 并同步自建条目的持久化记录与归属配置（Key 由路径派生，需迁移）。
@@ -1976,11 +1981,18 @@ namespace AppManager
         /// <summary>网格空白处右键：新建文件夹 / 文本文档（存入配置的存储位置，收录进当前分类）；资源分类附「新建集合…」。</summary>
         private void OnGridBlankRightClicked(Point screen)
         {
-            if (!CanEditCategory(currentCategory)) return;
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
-            items.Add(MkMenu("新建文件夹", delegate { CreateManagedEntry(true); }));
-            items.Add(MkMenu("新建文本文档", delegate { CreateManagedEntry(false); }));
-            if (contentMode == SidebarControl.ContentMode.Website)
+            MenuWindow.MenuItem paste = MkMenu("粘贴文件  Ctrl+V", delegate { grid.Focus(); PasteImportFiles(); });
+            paste.Disabled = !CanImportHere || !ClipboardHasFiles();
+            items.Add(paste);
+            items.Add(MkMenu("导入记录…", ShowImportHistory));
+            if (CanEditCategory(currentCategory))
+            {
+                items.Add(MkSep());
+                items.Add(MkMenu("新建文件夹", delegate { CreateManagedEntry(true); }));
+                items.Add(MkMenu("新建文本文档", delegate { CreateManagedEntry(false); }));
+            }
+            if (CanEditCategory(currentCategory) && contentMode == SidebarControl.ContentMode.Website)
             {
                 items.Add(MkSep());
                 items.Add(MkMenu("新建集合…", delegate { OnCreateCollection(null); }));
@@ -4216,6 +4228,11 @@ namespace AppManager
         private void OnAdd(object sender, EventArgs e)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            MenuWindow.MenuItem paste = MkMenu("粘贴文件  Ctrl+V", delegate { grid.Focus(); PasteImportFiles(); });
+            paste.Disabled = !CanImportHere || !ClipboardHasFiles();
+            items.Add(paste);
+            items.Add(MkMenu("导入记录…", ShowImportHistory));
+            items.Add(MkSep());
             if (contentMode == SidebarControl.ContentMode.Website)
             {
                 string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
@@ -4377,149 +4394,11 @@ namespace AppManager
             }
         }
 
-        /// <summary>
-        /// 把路径批量写入 AddedItems（按 路径+分类 去重），并按当前模式搬运入库：
-        /// 软件模式进入软件存储位置；资源模式进入资源存储位置（按分类建子目录），原文件移动后即不保留。
-        /// collectionKey 非空时入库后把新条目加入该集合（多归属）。
-        /// 搬运为异步执行，状态栏显示每项独立进度。
-        /// </summary>
         private void AddPaths(string[] paths, string category, string collectionKey = null)
         {
-            if (paths == null || paths.Length == 0) return;
-            if (!CanEditCategory(category)) return;   // 只读分类不接受收录
-            bool resource = contentMode == SidebarControl.ContentMode.Website;
-            if (resource)
-            {
-                // 资源内置分类按类型过滤：选文件对话框已限定类型，此处兜底拦截拖拽等其它入口
-                List<string> ok = new List<string>();
-                int skipped = 0;
-                for (int i = 0; i < paths.Length; i++)
-                {
-                    string p = paths[i];
-                    if (Directory.Exists(p) || MediaRules.MatchCategoryExt(category, p)) ok.Add(p);
-                    else skipped++;
-                }
-                if (skipped > 0 && ok.Count == 0)
-                {
-                    MessageBox.Show("所选文件与「" + category + "」的类型不符，未添加。", "添加资源",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                if (skipped > 0)
-                {
-                    MessageBox.Show("有 " + skipped + " 个文件与「" + category + "」的类型不符，已跳过。", "添加资源",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                if (ok.Count == 0) return;
-                paths = ok.ToArray();
-            }
-            MoveToCategoryAsync(paths, category, resource, collectionKey);
-        }
-
-        /// <summary>
-        /// 异步把路径搬入目标分类：逐项移动并更新状态栏进度，完成后重扫刷新。
-        /// 每项独立显示进度详情。collectionKey 非空时新登记条目同步加入该集合（多归属）。
-        /// </summary>
-        private void MoveToCategoryAsync(string[] paths, string category, bool resource, string collectionKey = null)
-        {
-            string[] valid = paths.Where(p => !string.IsNullOrEmpty(p)
-                && (File.Exists(p) || Directory.Exists(p))).ToArray();
-            if (valid.Length == 0) return;
-            int total = valid.Length;
-            ShowStatusBar("正在移入「" + category + "」…", 0, total);
-            List<string> storedList = new List<string>();
-            int failed = 0;
-            ThreadPool.QueueUserWorkItem(delegate
-            {
-                for (int i = 0; i < total; i++)
-                {
-                    string p = valid[i];
-                    string name = Path.GetFileName(p);
-                    UpdateStatus(i, total, name);
-                    string stored = StoreIntoCategory(p, category, resource);
-                    if (stored == null) failed++;
-                    else lock (storedList) storedList.Add(stored);
-                }
-                RunOnUi((Action)delegate
-                {
-                    int added = 0;
-                    bool changed = false;   // 是否产生配置变化（新增登记或补集合归属）
-                    bool configSaved = true;
-                    foreach (string stored in storedList)
-                    {
-                        if (SetCategoryExcluded(new AppInfo { Key = "add:" + stored }, category, false)) changed = true;
-                        if (FindAddedEntry(stored, category) < 0)
-                        {
-                            AddedEntry e = new AddedEntry();
-                            e.Path = stored;
-                            e.Category = category;
-                            e.IsFolder = Directory.Exists(stored);
-                            e.IsResource = resource;
-                            config.AddedItems.Add(e);
-                            added++;
-                        }
-                        // 已登记过的条目重复添加时仍要补集合归属（否则表现为「加入集合无效果」）；
-                        // 与右键/拖拽入口同口径：类型不符父分类约束的（如文件夹进照片集）不成为成员
-                        if (!string.IsNullOrEmpty(collectionKey)
-                            && MediaRules.MatchCategoryExt(category, stored)
-                            && CollectionOps.AddMember(config, "add:" + stored, collectionKey))
-                            changed = true;
-                    }
-                    if (added > 0)
-                    {
-                        InvalidateAddedIndex();
-                        configSaved = config.Save();
-                        if (configSaved) StartScan(false);
-                    }
-                    else if (changed)
-                    {
-                        // 全部条目已登记、仅补集合归属：无需重扫，落盘并刷新集合侧边栏/网格即可
-                        configSaved = config.Save();
-                        if (configSaved) RefreshGrid();
-                    }
-                    // 完成态短暂停留再收起：避免进度一闪而过用户看不到结果
-                    statusLabel.Text = "已入库 " + added + " 项到「" + category + "」";
-                    statusDetail.Text = failed > 0 ? failed + " 项搬运失败，未登记" : string.Empty;
-                    if (!configSaved)
-                    {
-                        HideStatusBar();
-                        MessageBox.Show("文件已搬运，但收录配置保存失败。请检查磁盘空间和目录权限。",
-                            "添加入库", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        return;
-                    }
-                    System.Windows.Forms.Timer doneTimer = new System.Windows.Forms.Timer { Interval = 900 };
-                    doneTimer.Tick += delegate { doneTimer.Stop(); doneTimer.Dispose(); HideStatusBar(); };
-                    doneTimer.Start();
-                });
-            });
-        }
-
-        /// <summary>
-        /// 入库规则：软件模式下文件夹/文件收进配置的统一存储位置（.exe 只登记不搬）；
-        /// 资源模式收进「资源存储位置」下按分类建立的子目录，所有文件（含 .exe）均实体移动。
-        /// 未配置时回退 ManageRoot（H:\Manage）。已在目标目录内返回原路径，搬运失败返回 null。
-        /// </summary>
-        private string StoreIntoCategory(string path, string category, bool resource)
-        {
-            try
-            {
-                bool isFolder = Directory.Exists(path);
-                if (!resource && !isFolder && IsSoftwareFile(path)) return path; // 软件分类下的 .exe 只登记不搬
-                string destDir = resource
-                    ? ResourceStoreOf(category)
-                    : (isFolder ? FolderStoreOf() : FileStoreOf());
-                if (IsUnder(destDir, path)) return path;                 // 已在目标目录内，避免二次搬运
-                if (!Directory.Exists(destDir)) Directory.CreateDirectory(destDir);
-                string name = Path.GetFileName(path);
-                string dest = UniqueDest(destDir, name);
-                if (isFolder) DesktopOrganizer.MoveDirectory(path, dest); else DesktopOrganizer.MoveFile(path, dest);
-                return dest;
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("分类入库失败 " + category + " " + path + ": " + ex.Message);
-                return null;
-            }
+            if (paths == null || paths.Length == 0 || !CanEditCategory(category)) return;
+            QueueImport(paths, ImportOperation.Move, category, collectionKey,
+                contentMode == SidebarControl.ContentMode.Website, 0);
         }
 
         /// <summary>目录 dir 下不重名的落点路径：重名时追加 _1、_2…（与入库规则一致）。internal 供自测验证。</summary>
@@ -4627,6 +4506,7 @@ namespace AppManager
 
         private void ShowStatusBar(string text, int value, int total)
         {
+            ResetImportStatus();
             statusBar.Visible = true;
             statusLabel.Text = text;
             statusProgress.Maximum = Math.Max(1, total);
@@ -4662,6 +4542,7 @@ namespace AppManager
 
         private void HideStatusBar()
         {
+            ResetImportStatus();
             statusBar.Visible = false;
             LayoutControls();
         }
@@ -4683,18 +4564,6 @@ namespace AppManager
                 return p.StartsWith(d, StringComparison.OrdinalIgnoreCase);
             }
             catch { return false; }
-        }
-
-        /// <summary>文件/文件夹拖放到侧栏某分类：切到该分类并按当前模式入库（异步 + 状态栏进度）。</summary>
-        private void OnFilesDroppedToCategory(string category, string[] paths)
-        {
-            if (paths == null || paths.Length == 0) return;
-            if (!CanEditCategory(category)) return;
-            currentCategory = category;
-            sidebar.SetActive(currentCategory);
-            addBtn.Visible = CanEditCategory(currentCategory);
-            LayoutControls();
-            AddPaths(paths, category);
         }
 
         /// <summary>
@@ -5627,6 +5496,7 @@ namespace AppManager
                 collectionInfo.PasteCover();
                 return true;
             }
+            if (keyData == (Keys.Control | Keys.V) && PasteImportFiles()) return true;
             // Esc：设置页优先返回主内容区；页内编辑先取消编辑；再清空搜索；最后按集合层级回退
             if (keyData == Keys.Escape && settingsOpen)
             {

@@ -74,8 +74,8 @@ namespace AppManager.Controls
         public event Action<string, Point> ContextRequested;
         /// <summary>点击底部「+ 新建集合」。</summary>
         public event Action CreateRequested;
-        /// <summary>外部文件拖放到集合行：集合键 + 路径数组。</summary>
-        public event Action<string, string[]> FilesDropped;
+        /// <summary>集合行的外部拖放：统一计算效果，drop=true 时接收文件。</summary>
+        public Func<string, DragEventArgs, bool, DragDropEffects> ExternalDrop;
         /// <summary>集合栏收起或展开后触发，供主窗体重新布局。</summary>
         public event Action CollapsedChanged;
 
@@ -223,19 +223,15 @@ namespace AppManager.Controls
             base.OnDragDrop(e);
             string key = DropCollectionAtScreen(new Point(e.X, e.Y));
             SetExternalDropHighlight(null);
-            if (key == null || e.Data == null) return;
-            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files == null || files.Length == 0) return;
-            Action<string, string[]> h = FilesDropped;
-            if (h != null) h(key, files);
+            if (key == null || ExternalDrop == null) return;
+            e.Effect = ExternalDrop(key, e, true);
         }
 
         /// <summary>外部拖入反馈：仅自定义集合行接受文件拖放。</summary>
         private void UpdateExternalDropFeedback(DragEventArgs e)
         {
-            bool fileDrop = e.Data != null && e.Data.GetDataPresent(DataFormats.FileDrop);
-            string key = fileDrop ? DropCollectionAtScreen(new Point(e.X, e.Y)) : null;
-            e.Effect = key != null ? DragDropEffects.Copy : DragDropEffects.None;
+            string key = DropCollectionAtScreen(new Point(e.X, e.Y));
+            e.Effect = key != null && ExternalDrop != null ? ExternalDrop(key, e, false) : DragDropEffects.None;
             SetExternalDropHighlight(key);
         }
 

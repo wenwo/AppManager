@@ -34,6 +34,7 @@ namespace AppManager
             Application.EnableVisualStyles();
             Run("XML migration: all fields and relationships survive restart", Migration);
             Run("manual batch, grid drop and collection drop preserve bytes and memberships", UiIngestion);
+            Run("external effects, queued copies and fixed destinations", ExternalCopyQueue);
             Run("failed physical move keeps source bytes and does not register a phantom item", FailedMove);
             Run("software registration, new file/folder and scanner publish preserve manual rows", SoftwareAndScan);
             Run("same content in multiple categories has complete listing projections", MultipleCategories);
@@ -145,9 +146,9 @@ namespace AppManager
                 texts.AddRange(new string[] { Hash(File.ReadAllBytes(a)), Hash(File.ReadAllBytes(b)) });
                 Invoke(form, "AddPaths", new string[] { a, b }, "资料", Collection); PumpUntil(() => c.AddedItems.Count == 2);
                 string grid = Source("grid.txt", "grid"); Set(form, "currentCollection", Collection); Set(form, "collectionEntered", true); Invoke(form, "UpdateCollectionUi");
-                texts.Add(Hash(File.ReadAllBytes(grid))); Invoke(form, "OnGridFilesDropped", (object)new string[] { grid }); PumpUntil(() => c.AddedItems.Count == 3);
+                texts.Add(Hash(File.ReadAllBytes(grid))); Invoke(form, "QueueImport", new string[] { grid }, ImportOperation.Move, "资料", Collection, true, (uint)0, null); PumpUntil(() => c.AddedItems.Count == 3);
                 string collection = Source("collection.txt", "collection");
-                texts.Add(Hash(File.ReadAllBytes(collection))); Invoke(form, "OnCollectionFilesDropped", Collection, new string[] { collection }); PumpUntil(() => c.AddedItems.Count == 4);
+                texts.Add(Hash(File.ReadAllBytes(collection))); Invoke(form, "QueueImport", new string[] { collection }, ImportOperation.Move, "资料", Collection, true, (uint)0, null); PumpUntil(() => c.AddedItems.Count == 4);
                 string existing = c.AddedItems.First().Path;
                 Invoke(form, "AddPaths", new string[] { existing }, "资料", Collection); PumpUntil(() => c.AddedItems.Count == 4);
                 Check(!File.Exists(a) && !File.Exists(b) && !File.Exists(grid) && !File.Exists(collection), "source not moved");
@@ -172,17 +173,55 @@ namespace AppManager
             AppConfig read = Reload(); Check(read.AddedItems.Count == 3 && Fingerprint(read) == before, "scanner removed manual content");
             Check(read.Database.Page("全部文件", false, true, "", 10, null, true, false).Total == 3, "manual catalog lost to scanner"); Integrity(read.Database);
         }
+        private static void ExternalCopyQueue()
+        {
+            AppConfig c = Fixture();
+            string a = Source("copy1\\same.txt", "first"), b = Source("copy2\\same.txt", "second");
+            using (MainForm form = Form(c, true))
+            {
+                Invoke(form, "InitializeImportUi");
+                Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                Controls.SidebarControl sidebar = (Controls.SidebarControl)typeof(MainForm).GetField("sidebar", Private).GetValue(form);
+                Controls.CollectionSidebar collections = (Controls.CollectionSidebar)typeof(MainForm).GetField("collectionSidebar", Private).GetValue(form);
+                Check(grid.ExternalDrop != null && sidebar.ExternalDrop != null && collections.ExternalDrop != null, "drop handlers not connected");
+                Controls.CollectionInfoPanel info = (Controls.CollectionInfoPanel)typeof(MainForm).GetField("collectionInfo", Private).GetValue(form);
+                Set(form, "currentCollection", Collection); Set(form, "collectionEntered", false); info.Visible = true;
+                Check((string)typeof(MainForm).GetProperty("ImportCollectionKey", Private).GetValue(form, null) == Collection, "collection info drop lost membership");
+                info.Visible = false;
+                DataObject data = new DataObject(DataFormats.FileDrop, new string[] { a });
+                DragEventArgs copy = new DragEventArgs(data, 8, 0, 0, DragDropEffects.Copy | DragDropEffects.Move, DragDropEffects.None);
+                Check(grid.ExternalDrop(copy, false) == DragDropEffects.Copy, "Ctrl drop effect");
+                DragEventArgs restricted = new DragEventArgs(data, 4, 0, 0, DragDropEffects.Copy, DragDropEffects.None);
+                Check(sidebar.ExternalDrop("资料", restricted, false) == DragDropEffects.Copy, "copy-only source effect");
+                Check(collections.ExternalDrop(Collection, copy, false) == DragDropEffects.Copy, "collection effect");
+                Invoke(form, "HideImportTip");
+                Invoke(form, "QueueImport", new string[] { a }, ImportOperation.Copy, "资料", Collection, true, (uint)0, null);
+                Invoke(form, "QueueImport", new string[] { b }, ImportOperation.Copy, "资料", Collection, true, (uint)0, null);
+                Set(form, "currentCategory", "另一分类");
+                PumpUntil(() => !(bool)typeof(MainForm).GetField("importRunning", Private).GetValue(form));
+                Check(File.Exists(a) && File.Exists(b), "copy removed sources");
+                Check(c.AddedItems.Count == 2 && c.AddedItems.All(i => i.Category == "资料"), "destination changed while queued");
+                Check(c.AddedItems.Select(i => i.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 2, "queued filename conflict");
+                string existing = c.AddedItems.First().Path;
+                Invoke(form, "QueueImport", new string[] { existing.ToUpperInvariant() }, ImportOperation.Copy, "另一分类", null, true, (uint)0, null);
+                PumpUntil(() => !(bool)typeof(MainForm).GetField("importRunning", Private).GetValue(form));
+                Check(c.AddedItems.Count == 2 && File.Exists(existing), "reference was copied or duplicated by casing");
+                Check(Reload().Database.Page("另一分类", true, true, "", 10, null, true, false).Total == 1, "extra category not indexed");
+            }
+            Check(Reload().Database.Page(Collection, true, true, "", 10, null, true, false).Total == 2, "copy collection lost on restart");
+        }
         private static void FailedMove()
         {
             AppConfig c = Fixture(); string good = Source("good.txt", "good bytes"), locked = Source("locked.txt", "locked bytes");
             using (MainForm form = Form(c, true))
-            using (FileStream input = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.Read))
+            using (FileStream input = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.None))
             {
                 Invoke(form, "AddPaths", new string[] { good, locked }, "资料", Collection); PumpUntil(() => c.AddedItems.Count == 1);
-                Check(File.Exists(locked) && File.ReadAllText(locked) == "locked bytes", "failed move changed original");
+                Check(File.Exists(locked) && File.Exists(good), "batch failure must preserve every source");
                 Check(c.AddedItems.All(a => Path.GetFileName(a.Path) != "locked.txt"), "failed file was registered");
                 Check(File.ReadAllText(c.AddedItems.First().Path) == "good bytes", "successful move lost bytes");
             }
+            Check(File.ReadAllText(locked) == "locked bytes", "failed copy changed original");
             AppConfig read = Reload(); Check(read.AddedItems.Count == 1 && read.Database.Page(Collection, true, true, "", 10, null, true, false).Total == 1, "failure persisted a partial relation"); Integrity(read.Database);
         }
         private static void MultipleCategories()

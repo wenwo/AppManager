@@ -159,8 +159,8 @@ namespace AppManager.Controls
         /// </summary>
         public bool AllowDragOut { get; set; }
 
-        /// <summary>外部文件/文件夹拖入主内容区：携带路径数组，由外部按当前分类入库。</summary>
-        public event Action<string[]> FilesDropped;
+        /// <summary>外部拖放：主窗体统一计算光标效果，drop=true 时接收文件。</summary>
+        public Func<DragEventArgs, bool, DragDropEffects> ExternalDrop;
 
         /// <summary>是否在列表行右侧显示操作按钮（改名/改地址/删除）。</summary>
         public bool ShowRowActions { get; set; }
@@ -1133,30 +1133,19 @@ namespace AppManager.Controls
         protected override void OnDragEnter(DragEventArgs e)
         {
             base.OnDragEnter(e);
-            e.Effect = AcceptFileDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effect = ExternalDrop != null && AllowExternalDrop ? ExternalDrop(e, false) : DragDropEffects.None;
         }
 
         protected override void OnDragOver(DragEventArgs e)
         {
             base.OnDragOver(e);
-            e.Effect = AcceptFileDrop(e) ? DragDropEffects.Copy : DragDropEffects.None;
+            e.Effect = ExternalDrop != null && AllowExternalDrop ? ExternalDrop(e, false) : DragDropEffects.None;
         }
 
         protected override void OnDragDrop(DragEventArgs e)
         {
             base.OnDragDrop(e);
-            if (!AcceptFileDrop(e)) return;
-            string[] files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files == null || files.Length == 0) return;
-            Action<string[]> h = FilesDropped;
-            if (h != null) h(files);
-        }
-
-        /// <summary>是否放行拖入：当前分类可编辑且携带文件拖放数据。</summary>
-        private bool AcceptFileDrop(DragEventArgs e)
-        {
-            return AllowExternalDrop && e.Data != null
-                && e.Data.GetDataPresent(DataFormats.FileDrop);
+            e.Effect = ExternalDrop != null && AllowExternalDrop ? ExternalDrop(e, true) : DragDropEffects.None;
         }
 
         protected override void OnMouseClick(MouseEventArgs e)
