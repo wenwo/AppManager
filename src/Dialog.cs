@@ -1139,8 +1139,7 @@ namespace AppManager
     }
 
     /// <summary>
-    /// 资源属性对话框：左侧缩略图（照片显示真实预览，其余类型显示文件图标），右侧名称与元数据
-    /// （类型/大小/拍摄时间/尺寸/地点/位置/创建与修改时间）。
+    /// 软件与资源属性对话框：左侧缩略图，右侧名称与元数据，下方显示完整所属分类与路径。
     /// 信息组织参考 Windows「属性」、macOS「显示简介」与相册详情面板；照片的拍摄时间与 GPS 地点取自 EXIF。
     /// </summary>
     public static class PropertiesDialog
@@ -1151,112 +1150,271 @@ namespace AppManager
         private const int RowH = 26;
         private const int LabelW = 84;
 
-        public static void Show(AppInfo app)
+        private static readonly System.Threading.SemaphoreSlim PreviewGate = new System.Threading.SemaphoreSlim(1, 1);
+
+        public static void Show(AppInfo app, string categories = null)
         {
             if (app == null) return;
-            string path = app.TargetPath;
-            bool folder = !string.IsNullOrEmpty(path) && Directory.Exists(path);
-            bool file = !string.IsNullOrEmpty(path) && File.Exists(path);
-            if (!folder && !file) return;
+            using (PropertiesForm form = new PropertiesForm(app, categories)) ConfirmDialog.ShowModal(form);
+        }
 
-            Bitmap preview;
-            List<string[]> rows = BuildRows(app, path, folder, out preview);
-            int rowsBottom = 82 + rows.Count * RowH;
-            int clientH = rowsBottom + 12 + 32 + 22;
-
-            Form f = new BufferedDialogForm();
-            f.FormBorderStyle = FormBorderStyle.None;
-            f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(DlgW, clientH);
-            f.BackColor = Theme.Background;
-            f.ShowInTaskbar = false;
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
-
-            // 克隆图标：模态期间后台静默重扫可能释放原图标，直接引用会画到已释放位图；
-            // 图标尚未加载时按需提取一次，避免属性页预览区空白
-            Bitmap icon = null;
-            try
-            {
-                icon = app.Icon != null ? new Bitmap(app.Icon) : Icons.Extract(app, Theme.IconSize);
-            }
-            catch { }
-            int rightX = Pad + PreviewW + 16;
-            int rightW = DlgW - rightX - Pad;
-            f.Paint += delegate(object s, PaintEventArgs e)
-            {
-                Graphics g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, DpiHelper.ForControl(f)); };
-                using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
-                using (SolidBrush b = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(g, "属性", Theme.CaptionFont, b, new Rectangle(S(Pad), S(14), S(DlgW - Pad * 2), S(20)));
-
-                // 预览：照片用缩略图铺满圆角方块，其余类型居中绘制文件图标
-                Rectangle pv = new Rectangle(S(Pad), S(46), S(PreviewW), S(PreviewW));
-                using (GraphicsPath p = Draw.RoundedPath(pv, S(12)))
-                {
-                    using (SolidBrush b = new SolidBrush(Theme.ChipBg))
-                        g.FillPath(b, p);
-                    GraphicsState st = g.Save();
-                    g.SetClip(p);
-                    if (preview != null) DrawCover(g, preview, pv);
-                    else if (icon != null)
-                        g.DrawImage(icon, new Rectangle(pv.X + (pv.Width - S(Theme.IconSize)) / 2,
-                            pv.Y + (pv.Height - S(Theme.IconSize)) / 2, S(Theme.IconSize), S(Theme.IconSize)));
-                    g.Restore(st);
-                }
-
-                using (SolidBrush nb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, app.DisplayName(), Theme.DialogTitleFont, nb,
-                        new Rectangle(S(rightX), S(46), S(rightW), S(24)));
-
-                for (int i = 0; i < rows.Count; i++)
-                {
-                    Rectangle lr = new Rectangle(S(rightX), S(82 + i * RowH), S(LabelW), S(RowH));
-                    Rectangle vr = new Rectangle(lr.Right + S(8), lr.Y, S(rightW - LabelW - 8), S(RowH));
-                    using (SolidBrush lb = new SolidBrush(Theme.TextSecondary))
-                        Draw.DrawStringLeft(g, rows[i][0], Theme.CaptionFont, lb, lr);
-                    using (SolidBrush vb = new SolidBrush(Theme.TextPrimary))
-                        Draw.DrawStringLeft(g, rows[i][1], Theme.BodyFont, vb, vr);
-                }
+        private static List<string[]> BasicRows(AppInfo app, string categories)
+        {
+            string membership = categories ?? app.Category;
+            return new List<string[]> {
+                new string[] { "所属", string.IsNullOrEmpty(membership) ? "—" : membership },
+                new string[] { "路径", string.IsNullOrEmpty(app.TargetPath) ? "—" : app.TargetPath }
             };
+        }
 
-            RoundButton done = ConfirmDialog.MakeBtn("完成", true);
-            done.Bounds = new Rectangle(DlgW - Pad - 96, clientH - 22 - 32, 96, 32);
-            done.Click += delegate { f.DialogResult = DialogResult.OK; f.Close(); };
-            f.Controls.Add(done);
-            f.KeyPreview = true;
-            f.KeyDown += delegate(object s, KeyEventArgs e)
+        private sealed class PropertyData : IDisposable
+        {
+            internal List<string[]> Rows;
+            internal Bitmap Preview, Icon;
+            public void Dispose()
             {
-                if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Enter)
-                {
-                    f.DialogResult = DialogResult.OK;
-                    f.Close();
-                }
-            };
-
-            // 模态结束后统一释放位图（无论对话框如何关闭）
-            try { ConfirmDialog.ShowModal(f); }
-            finally
-            {
-                if (icon != null) icon.Dispose();
-                if (preview != null) preview.Dispose();
-                f.Dispose();
+                if (Preview != null) Preview.Dispose();
+                if (Icon != null) Icon.Dispose();
             }
         }
 
-        /// <summary>构建属性行：类型/大小 +（照片）拍摄时间/尺寸/地点 + 位置/创建与修改时间。</summary>
-        private static List<string[]> BuildRows(AppInfo app, string path, bool folder, out Bitmap preview)
+        // 结果经锁交给界面定时器；关闭后由后台释放结果，不向已销毁窗口投递回调。
+        private sealed class PropertyLoad : IDisposable
+        {
+            private readonly object gate = new object();
+            private readonly System.Threading.CancellationTokenSource cancel = new System.Threading.CancellationTokenSource();
+            private bool closed, finished;
+            private PropertyData result;
+
+            internal PropertyLoad(AppInfo app, string categories, bool loadIcon)
+            {
+                System.Threading.CancellationToken token = cancel.Token;
+                System.Threading.ThreadPool.QueueUserWorkItem(delegate
+                {
+                    PropertyData data = new PropertyData();
+                    try
+                    {
+                        data.Rows = BuildRows(app, categories, out data.Preview, token);
+                        token.ThrowIfCancellationRequested();
+                        if (loadIcon) data.Icon = Icons.Extract(app, Theme.IconSize);
+                    }
+                    catch (OperationCanceledException) { data.Dispose(); data = null; }
+                    catch (Exception ex)
+                    {
+                        Paths.LogError(ex);
+                        data.Rows = BasicRows(app, categories);
+                        data.Rows.Insert(0, new string[] { "信息", "暂时无法读取" });
+                    }
+                    finally
+                    {
+                        lock (gate)
+                        {
+                            finished = true;
+                            if (closed && data != null) data.Dispose();
+                            else result = data;
+                            cancel.Dispose();
+                        }
+                    }
+                });
+            }
+
+            internal PropertyData Take()
+            {
+                lock (gate) { PropertyData data = result; result = null; return data; }
+            }
+
+            public void Dispose()
+            {
+                lock (gate)
+                {
+                    if (closed) return;
+                    closed = true;
+                    if (!finished) cancel.Cancel();
+                    if (result != null) { result.Dispose(); result = null; }
+                }
+            }
+        }
+
+        private sealed class PropertiesForm : BufferedDialogForm
+        {
+            private readonly Panel body = new Panel { AutoScroll = true, BackColor = Theme.Card, Name = "PropertyContent" };
+            private readonly TextBox categoryValue = DetailBox("CategoryValue");
+            private readonly TextBox pathValue = DetailBox("TargetPathValue");
+            private readonly RoundButton done = ConfirmDialog.MakeBtn("完成", true);
+            private readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 40 };
+            private readonly string title;
+            private List<string[]> rows;
+            private int[] rowTops;
+            private Bitmap icon, preview;
+            private PropertyLoad load;
+            private bool layingOut, loading = true;
+
+            internal PropertiesForm(AppInfo app, string categories)
+            {
+                // 后台只读取快照，避免重扫或改名时读到变化中的条目及已释放的图标。
+                AppInfo snapshot = new AppInfo { Name = app.Name, TargetPath = app.TargetPath,
+                    ShortcutPath = app.ShortcutPath, DisplayIcon = app.DisplayIcon, InstallLocation = app.InstallLocation,
+                    IsFile = app.IsFile, IsFolder = app.IsFolder, IsUwp = app.IsUwp, Category = app.Category };
+                title = app.DisplayName();
+                rows = BasicRows(snapshot, categories);
+                try { if (app.Icon != null) icon = new Bitmap(app.Icon); } catch { }
+                FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.CenterParent;
+                ClientSize = new Size(DlgW, 440);
+                BackColor = Theme.Card;
+                ShowInTaskbar = false;
+                body.Controls.Add(categoryValue);
+                body.Controls.Add(pathValue);
+                Controls.Add(body);
+                done.Name = "PropertiesDone";
+                done.Click += delegate { DialogResult = DialogResult.OK; Close(); };
+                Controls.Add(done);
+                ActiveControl = done;
+                KeyPreview = true;
+                KeyDown += delegate(object sender, KeyEventArgs e)
+                {
+                    if (e.KeyCode == Keys.Escape || e.KeyCode == Keys.Enter) { DialogResult = DialogResult.OK; Close(); }
+                };
+                body.Paint += PaintContent;
+                poll.Tick += delegate
+                {
+                    PropertyData data = load.Take();
+                    if (data == null) return;
+                    poll.Stop();
+                    loading = false;
+                    rows = data.Rows;
+                    preview = data.Preview; data.Preview = null;
+                    if (icon == null) { icon = data.Icon; data.Icon = null; }
+                    data.Dispose();
+                    LayoutContent();
+                    body.Invalidate();
+                };
+                Shown += delegate { load = new PropertyLoad(snapshot, categories, icon == null); poll.Start(); };
+                LayoutContent();
+            }
+
+            private static TextBox DetailBox(string name)
+            {
+                return new TextBox { Name = name, ReadOnly = true, Multiline = true, BorderStyle = BorderStyle.None,
+                    ScrollBars = ScrollBars.Vertical, Font = Theme.BodyFont, ForeColor = Theme.TextPrimary, BackColor = Theme.Card };
+            }
+
+            protected override void OnDpiScaleChanged()
+            {
+                base.OnDpiScaleChanged();
+                Rectangle work = Screen.FromControl(this).WorkingArea;
+                Size = new Size(Math.Min(Width, work.Width), Math.Min(Height, work.Height));
+                LayoutContent();
+            }
+
+            protected override void OnResize(EventArgs e)
+            {
+                base.OnResize(e);
+                if (!DpiChangeInProgress) LayoutContent();
+            }
+
+            private void LayoutContent()
+            {
+                if (rows == null || layingOut) return;
+                layingOut = true;
+                try
+                {
+                    body.Bounds = new Rectangle(0, Dpi(42), ClientSize.Width, Math.Max(1, ClientSize.Height - Dpi(108)));
+                    done.Bounds = new Rectangle(ClientSize.Width - Dpi(Pad + 96), ClientSize.Height - Dpi(54), Dpi(96), Dpi(32));
+                    rowTops = new int[rows.Count];
+                    int bottom = 40;
+                    for (int i = 0; i < rows.Count; i++)
+                    {
+                        bool detail = rows[i][0] == "所属" || rows[i][0] == "路径";
+                        if (detail) bottom = Math.Max(bottom, PreviewW + 16);
+                        rowTops[i] = bottom;
+                        bottom += detail ? RowH * 2 : RowH;
+                    }
+                    body.AutoScrollMinSize = new Size(Dpi(DlgW - Pad), Dpi(bottom + 8));
+                    Point scroll = body.AutoScrollPosition;
+                    for (int i = 0; i < rows.Count; i++)
+                    {
+                        TextBox box = rows[i][0] == "所属" ? categoryValue : rows[i][0] == "路径" ? pathValue : null;
+                        if (box == null) continue;
+                        if (box.Text != rows[i][1]) box.Text = rows[i][1];
+                        box.Bounds = new Rectangle(Dpi(Pad + LabelW + 8) + scroll.X, Dpi(rowTops[i] + 3) + scroll.Y,
+                            Dpi(DlgW - Pad * 2 - LabelW - 8), Dpi(RowH * 2 - 6));
+                    }
+                }
+                finally { layingOut = false; }
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                using (SolidBrush brush = new SolidBrush(Theme.TextSecondary))
+                    Draw.DrawStringLeft(e.Graphics, "属性", Theme.CaptionFont, brush, new Rectangle(Dpi(Pad), Dpi(14), Dpi(DlgW - Pad * 2), Dpi(20)));
+            }
+
+            private void PaintContent(object sender, PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.TranslateTransform(body.AutoScrollPosition.X, body.AutoScrollPosition.Y);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle pv = new Rectangle(Dpi(Pad), Dpi(4), Dpi(PreviewW), Dpi(PreviewW));
+                using (GraphicsPath path = Draw.RoundedPath(pv, Dpi(12)))
+                {
+                    using (SolidBrush brush = new SolidBrush(Theme.ChipBg)) g.FillPath(brush, path);
+                    GraphicsState state = g.Save();
+                    g.SetClip(path);
+                    if (preview != null) DrawCover(g, preview, pv);
+                    else if (icon != null) g.DrawImage(icon, new Rectangle(pv.X + (pv.Width - Dpi(Theme.IconSize)) / 2,
+                        pv.Y + (pv.Height - Dpi(Theme.IconSize)) / 2, Dpi(Theme.IconSize), Dpi(Theme.IconSize)));
+                    g.Restore(state);
+                }
+                int rightX = Pad + PreviewW + 16, rightW = DlgW - rightX - Pad;
+                using (SolidBrush brush = new SolidBrush(Theme.TextPrimary))
+                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, brush, new Rectangle(Dpi(rightX), Dpi(4), Dpi(rightW), Dpi(24)));
+                if (loading) using (SolidBrush brush = new SolidBrush(Theme.TextSecondary))
+                    Draw.DrawStringLeft(g, "正在读取文件信息…", Theme.CaptionFont, brush, new Rectangle(Dpi(rightX), Dpi(40), Dpi(rightW), Dpi(RowH)));
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    bool detail = rows[i][0] == "所属" || rows[i][0] == "路径";
+                    Rectangle label = new Rectangle(Dpi(detail ? Pad : rightX), Dpi(rowTops[i]), Dpi(LabelW), Dpi(RowH));
+                    using (SolidBrush brush = new SolidBrush(Theme.TextSecondary)) Draw.DrawStringLeft(g, rows[i][0], Theme.CaptionFont, brush, label);
+                    if (detail) continue;
+                    using (SolidBrush brush = new SolidBrush(Theme.TextPrimary))
+                        Draw.DrawStringLeft(g, rows[i][1], Theme.BodyFont, brush, new Rectangle(label.Right + Dpi(8), label.Y, Dpi(rightW - LabelW - 8), Dpi(RowH)));
+                }
+            }
+
+            protected override void Dispose(bool disposing)
+            {
+                if (disposing)
+                {
+                    poll.Dispose();
+                    if (load != null) load.Dispose();
+                    if (icon != null) { icon.Dispose(); icon = null; }
+                    if (preview != null) { preview.Dispose(); preview = null; }
+                }
+                base.Dispose(disposing);
+            }
+        }
+
+        /// <summary>构建软件与资源属性；仅为存在的磁盘目标读取文件元数据。</summary>
+        private static List<string[]> BuildRows(AppInfo app, string categories, out Bitmap preview, System.Threading.CancellationToken cancellation)
         {
             preview = null;
+            cancellation.ThrowIfCancellationRequested();
             List<string[]> rows = new List<string[]>();
+            string path = app.TargetPath;
+            bool folder = Directory.Exists(path);
+            cancellation.ThrowIfCancellationRequested();
+            bool file = File.Exists(path);
 
             string typeText;
-            if (folder) typeText = "文件夹";
+            if (folder || app.IsFolder) typeText = "文件夹";
+            else if (!app.IsFile) typeText = app.IsUwp ? "打包应用" : "软件";
+            else if (Scanner.IsUrl(path)) typeText = "网址";
             else
             {
-                string ext = Path.GetExtension(path);
+                string ext = string.Empty;
+                try { ext = Path.GetExtension(path); } catch { }
                 string typeName = MediaRules.IsImage(path) ? "照片"
                     : MediaRules.IsVideo(path) ? "视频"
                     : MediaRules.IsAudio(path) ? "音乐" : "文件";
@@ -1267,16 +1425,25 @@ namespace AppManager
             rows.Add(new string[] { "类型", typeText });
 
             string size = "—";
-            if (!folder)
+            if (file)
             {
                 try { size = HumanSize(new FileInfo(path).Length); } catch { }
             }
-            rows.Add(new string[] { "大小", size });
+            if (file || folder) rows.Add(new string[] { "大小", size });
 
             int width = 0, height = 0;
             string taken = null, geo = null;
-            if (!folder && MediaRules.IsImage(path))
-                ReadImageInfo(path, out width, out height, out taken, out geo, out preview);
+            if (file && MediaRules.IsImage(path))
+            {
+                PreviewGate.Wait(cancellation);
+                try
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    ReadImageInfo(path, out width, out height, out taken, out geo, out preview);
+                }
+                finally { PreviewGate.Release(); }
+            }
+            cancellation.ThrowIfCancellationRequested();
 
             if (!string.IsNullOrEmpty(taken)) rows.Add(new string[] { "拍摄时间", taken });
             if (width > 0) rows.Add(new string[] { "尺寸", width + " × " + height });
@@ -1289,16 +1456,20 @@ namespace AppManager
                 dir = Path.GetDirectoryName(p) ?? string.Empty;
             }
             catch { }
-            rows.Add(new string[] { "位置", dir.Length == 0 ? path : dir });
+            if (file || folder) rows.Add(new string[] { "位置", dir.Length == 0 ? path : dir });
 
-            try
+            if (file || folder)
             {
-                DateTime created = folder ? Directory.GetCreationTime(path) : File.GetCreationTime(path);
-                DateTime modified = folder ? Directory.GetLastWriteTime(path) : File.GetLastWriteTime(path);
-                rows.Add(new string[] { "创建时间", created.ToString("yyyy-MM-dd HH:mm:ss") });
-                rows.Add(new string[] { "修改时间", modified.ToString("yyyy-MM-dd HH:mm:ss") });
+                try
+                {
+                    DateTime created = folder ? Directory.GetCreationTime(path) : File.GetCreationTime(path);
+                    DateTime modified = folder ? Directory.GetLastWriteTime(path) : File.GetLastWriteTime(path);
+                    rows.Add(new string[] { "创建时间", created.ToString("yyyy-MM-dd HH:mm:ss") });
+                    rows.Add(new string[] { "修改时间", modified.ToString("yyyy-MM-dd HH:mm:ss") });
+                }
+                catch { }
             }
-            catch { }
+            rows.AddRange(BasicRows(app, categories));
             return rows;
         }
 

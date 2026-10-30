@@ -2966,7 +2966,7 @@ namespace AppManager
             return items;
         }
 
-        /// <summary>返回条目所属的全部分类名（逗号分隔），供列表「所属」字段与悬浮提示使用。</summary>
+        /// <summary>返回条目所属的全部分类名（逗号分隔），供列表「所属」字段与属性对话框使用。</summary>
         private string GetCategoryText(AppInfo a)
         {
             if (a == null) return string.Empty;
@@ -2984,6 +2984,7 @@ namespace AppManager
                         cats.Add(extra[i]);
             }
             // 自定义分类通过 override 已体现在 a.Category
+            cats.RemoveAll(delegate(string category) { return !InCategory(a, category); });
             return string.Join(", ", cats.ToArray());
         }
 
@@ -3465,6 +3466,13 @@ namespace AppManager
 
         private void OnContextMenu(AppInfo app, Point screen)
         {
+            MenuWindow mw = new MenuWindow(BuildContextMenu(app), 230);
+            mw.Location = FixLocation(screen, mw.Size);
+            mw.Show(this);
+        }
+
+        private List<MenuWindow.MenuItem> BuildContextMenu(AppInfo app)
+        {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             bool website = contentMode == SidebarControl.ContentMode.Website;
             bool readOnly = IsReadOnlyCategory(currentCategory);
@@ -3487,8 +3495,6 @@ namespace AppManager
                 items.Add(MkSep());
                 items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
-                if (website && app.IsFile && IsLocalPath(app.TargetPath))
-                    items.Add(MkMenu("属性…", delegate { PropertiesDialog.Show(app); }));
                 items.Add(MkSep());
                 // 只读全集分类：以「加入」方式把条目多归属到其它分类（原归属与「全部」中的条目均不变）
                 items.Add(MkSubMenu(website ? "移动到分类…" : "添加到默认分类…", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
@@ -3552,8 +3558,6 @@ namespace AppManager
                     items.Add(MkMenu("隐藏", delegate { SetHidden(app, true); }));
                 items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
-                if (website && app.IsFile && IsLocalPath(app.TargetPath))
-                    items.Add(MkMenu("属性…", delegate { PropertiesDialog.Show(app); }));
                 if (!website && !string.IsNullOrEmpty(app.UninstallString))
                 {
                     items.Add(MkSep());
@@ -3561,9 +3565,12 @@ namespace AppManager
                 }
             }
 
-            MenuWindow mw = new MenuWindow(items, 230);
-            mw.Location = FixLocation(screen, mw.Size);
-            mw.Show(this);
+            if (!multi)
+            {
+                items.Add(MkSep());
+                items.Add(MkMenu("属性…", delegate { PropertiesDialog.Show(app, GetCategoryText(app)); }));
+            }
+            return items;
         }
 
         /// <summary>
@@ -3698,12 +3705,6 @@ namespace AppManager
             List<AppInfo> one = new List<AppInfo>();
             one.Add(clicked);
             return one;
-        }
-
-        /// <summary>资源「属性」仅对磁盘上仍存在的文件/文件夹可用。</summary>
-        private static bool IsLocalPath(string path)
-        {
-            return !string.IsNullOrEmpty(path) && (File.Exists(path) || Directory.Exists(path));
         }
 
         private static MenuWindow.MenuItem MkMenu(string text, Action action)

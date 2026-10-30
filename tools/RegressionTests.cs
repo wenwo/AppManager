@@ -47,6 +47,9 @@ namespace AppManager
                 Run("resource defaults: remove, preserve library, reload and menu rejoin", ResourceCategoryRemoval);
                 Run("category removal: failed save rolls back membership and permits retry", CategoryRemovalSaveFailure);
                 Run("default category addition: single/batch, multiple memberships, removal and reload", DefaultCategoryAddition);
+                Run("properties: software/resource menus, grid/list and complete memberships", PropertiesMenus);
+                Run("properties: file metadata, folders, missing targets and packaged apps", PropertiesMetadata);
+                Run("properties: DPI scrolling, responsive open and cancelled background load", PropertiesResponsiveAndDpi);
             }
             finally
             {
@@ -115,6 +118,166 @@ namespace AppManager
                 action();
             }
             Check(clicked, "confirmation did not execute");
+        }
+
+        private static void InspectProperties(Action open, string categories, string path, Action<Form> inspect = null, bool waitForMetadata = false)
+        {
+            bool inspected = false;
+            Exception failure = null;
+            Stopwatch elapsed = Stopwatch.StartNew();
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    Form dialog = null;
+                    foreach (Form form in Application.OpenForms) if (form.Modal) { dialog = form; break; }
+                    if (dialog == null) return;
+                    if (waitForMetadata && (bool)dialog.GetType().GetField("loading", Private).GetValue(dialog) && elapsed.ElapsedMilliseconds < 5000) return;
+                    timer.Stop();
+                    dialog.Opacity = 0;
+                    try
+                    {
+                        TextBox category = dialog.Controls.Find("CategoryValue", true)[0] as TextBox;
+                        TextBox target = dialog.Controls.Find("TargetPathValue", true)[0] as TextBox;
+                        Check(category != null && target != null, "property fields missing");
+                        Check(category.Text == categories && target.Text == path, "property content truncated or stale");
+                        foreach (TextBox box in new TextBox[] { category, target })
+                        {
+                            Check(box.ReadOnly && box.Multiline && box.ScrollBars == ScrollBars.Vertical, "long values cannot be read safely");
+                            box.SelectAll();
+                            Check(box.SelectedText == box.Text, "property content cannot be selected for copy");
+                            Check(dialog.ClientRectangle.Contains(dialog.RectangleToClient(box.RectangleToScreen(box.ClientRectangle))), "property field exceeds dialog");
+                        }
+                        Check(!category.Bounds.IntersectsWith(target.Bounds), "property fields overlap");
+                        if (waitForMetadata) Check(!(bool)dialog.GetType().GetField("loading", Private).GetValue(dialog), "metadata did not finish");
+                        if (inspect != null) inspect(dialog);
+                        inspected = true;
+                    }
+                    catch (Exception ex) { failure = ex; }
+                    finally { dialog.DialogResult = DialogResult.OK; dialog.Close(); }
+                };
+                timer.Start();
+                open();
+            }
+            if (failure != null) throw failure;
+            Check(inspected, "properties did not open");
+        }
+
+        private static void PropertiesMenus()
+        {
+            foreach (bool resource in new bool[] { false, true })
+            {
+                AppConfig config = new AppConfig();
+                string category = resource ? "照片" : "开发工具";
+                string path = Path.Combine(root, resource ? "property.png" : "property.exe");
+                File.WriteAllText(path, "keep");
+                AppInfo app = new AppInfo { Key = "property:" + resource, Name = "Property", TargetPath = path,
+                    Category = category, IsFile = resource, IsFavorite = true, Icon = new Bitmap(16, 16) };
+                config.Favorites.Add(app.Key);
+                string extra = "我的分类" + new string('长', 100);
+                CollectionOps.AddMember(config, app.Key, extra);
+                CollectionOps.AddMember(config, app.Key, "办公软件");
+                CollectionOps.AddMember(config, app.Key, "col:" + category + "/fixture");
+                config.ExcludedCategories[app.Key] = new List<string> { "办公软件" };
+                if (resource) config.AddedItems.Add(new AddedEntry { Path = path, Category = category, IsResource = true });
+                using (MainForm form = CategoryForm(config, app))
+                {
+                    typeof(MainForm).GetField("contentMode", Private).SetValue(form,
+                        resource ? Controls.SidebarControl.ContentMode.Website : Controls.SidebarControl.ContentMode.Software);
+                    Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                    foreach (bool gridMode in new bool[] { true, false })
+                        foreach (bool all in new bool[] { false, true })
+                        {
+                            grid.GridMode = gridMode;
+                            typeof(MainForm).GetField("currentCategory", Private).SetValue(form, all ? (resource ? "全部资源" : "全部软件") : category);
+                            List<MenuWindow.MenuItem> menu = (List<MenuWindow.MenuItem>)Invoke(form, "BuildContextMenu", app);
+                            Check(menu.FindAll(delegate(MenuWindow.MenuItem m) { return m.Text == "属性…"; }).Count == 1, "missing or duplicate properties menu");
+                            MenuWindow.MenuItem properties = FindMenu(menu, "属性…");
+                            Check(!properties.Disabled, "properties unexpectedly disabled");
+                            InspectProperties(properties.Action, category + ", 常用, " + extra, path);
+                        }
+                }
+                app.Icon.Dispose();
+                Check(File.ReadAllText(path) == "keep", "properties changed original file");
+            }
+        }
+
+        private static void PropertiesMetadata()
+        {
+            string photo = Path.Combine(root, "property-metadata.png");
+            using (Bitmap bitmap = new Bitmap(3, 2)) bitmap.Save(photo, System.Drawing.Imaging.ImageFormat.Png);
+            AppInfo[] apps = {
+                new AppInfo { TargetPath = photo, IsFile = true },
+                new AppInfo { TargetPath = root, IsFile = true, IsFolder = true },
+                new AppInfo { TargetPath = Path.Combine(root, "missing.txt"), IsFile = true },
+                new AppInfo { TargetPath = "shell:AppsFolder\\Fixture.App_123!App", IsUwp = true }
+            };
+            foreach (AppInfo app in apps)
+            {
+                object[] args = { app, "分类一, 分类二", null, CancellationToken.None };
+                List<string[]> rows = (List<string[]>)typeof(PropertiesDialog).GetMethod("BuildRows", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, args);
+                using (Bitmap preview = (Bitmap)args[2])
+                {
+                    Check(rows.Exists(delegate(string[] row) { return row[0] == "所属" && row[1] == "分类一, 分类二"; }), "metadata lost categories");
+                    Check(rows.Exists(delegate(string[] row) { return row[0] == "路径" && row[1] == app.TargetPath; }), "metadata lost full path");
+                    if (app.TargetPath == photo)
+                        Check(preview != null && rows.Exists(delegate(string[] row) { return row[0] == "尺寸" && row[1] == "3 × 2"; }), "photo metadata was lost");
+                    if (!File.Exists(app.TargetPath) && !Directory.Exists(app.TargetPath))
+                        Check(!rows.Exists(delegate(string[] row) { return row[0] == "创建时间" || row[0] == "修改时间"; }), "non-file target has fake timestamps");
+                }
+                if (app.IsUwp || app.TargetPath.EndsWith("missing.txt"))
+                    InspectProperties(delegate { PropertiesDialog.Show(app, "分类一, 分类二"); }, "分类一, 分类二", app.TargetPath);
+            }
+        }
+
+        private static void PropertiesResponsiveAndDpi()
+        {
+            string photo = Path.Combine(root, "property-async.png");
+            using (Bitmap bitmap = new Bitmap(3, 2)) bitmap.Save(photo, System.Drawing.Imaging.ImageFormat.Png);
+            AppInfo app = new AppInfo { TargetPath = photo, Name = "Photo", IsFile = true, Icon = new Bitmap(16, 16) };
+            SemaphoreSlim gate = (SemaphoreSlim)typeof(PropertiesDialog).GetField("PreviewGate", BindingFlags.Static | BindingFlags.NonPublic).GetValue(null);
+            object load = null;
+            int held = 1;
+            gate.Wait();
+            Stopwatch elapsed = Stopwatch.StartNew();
+            using (System.Threading.Timer release = new System.Threading.Timer(delegate
+            {
+                if (Interlocked.Exchange(ref held, 0) == 1) gate.Release();
+            }, null, 2000, Timeout.Infinite))
+            try
+            {
+                InspectProperties(delegate { PropertiesDialog.Show(app, "照片"); }, "照片", photo, delegate(Form dialog)
+                {
+                    Check(elapsed.ElapsedMilliseconds < 1000, "opening waited for image decoding");
+                    load = dialog.GetType().GetField("load", Private).GetValue(dialog);
+                    foreach (int dpi in new int[] { 96, 144, 168, 192, 240, 288 })
+                    {
+                        Rectangle work = Screen.PrimaryScreen.WorkingArea;
+                        SetDpi(dialog, dpi, new Rectangle(work.Location, new Size(520 * dpi / 96, 440 * dpi / 96)));
+                        Control done = dialog.Controls["PropertiesDone"];
+                        Panel content = (Panel)dialog.Controls["PropertyContent"];
+                        Check(work.Contains(dialog.Bounds), "properties exceed work area");
+                        Check(dialog.ClientRectangle.Contains(done.Bounds), "Done button is clipped at DPI " + dpi);
+                        Check(content.Bottom <= done.Top, "scrolling content overlaps Done button");
+                        TextBox target = (TextBox)content.Controls["TargetPathValue"];
+                        content.ScrollControlIntoView(target);
+                        Check(content.ClientRectangle.Contains(target.Bounds), "path cannot be scrolled into view at DPI " + dpi);
+                    }
+                });
+            }
+            finally { if (Interlocked.Exchange(ref held, 0) == 1) gate.Release(); }
+            Check(load != null && (bool)load.GetType().GetField("closed", Private).GetValue(load), "closing did not cancel metadata");
+            Stopwatch cancellation = Stopwatch.StartNew();
+            while (!(bool)load.GetType().GetField("finished", Private).GetValue(load) && cancellation.ElapsedMilliseconds < 3000) Thread.Sleep(10);
+            Check((bool)load.GetType().GetField("finished", Private).GetValue(load), "cancelled load did not finish");
+            Check(load.GetType().GetField("result", Private).GetValue(load) == null, "closed dialog retained background result");
+            InspectProperties(delegate { PropertiesDialog.Show(app, "照片"); }, "照片", photo, delegate(Form dialog)
+            {
+                Check(dialog.GetType().GetField("preview", Private).GetValue(dialog) != null, "background preview was not delivered");
+                List<string[]> rows = (List<string[]>)dialog.GetType().GetField("rows", Private).GetValue(dialog);
+                Check(rows.Exists(delegate(string[] row) { return row[0] == "尺寸" && row[1] == "3 × 2"; }), "background metadata was not delivered");
+            }, true);
+            app.Icon.Dispose();
         }
 
         private static MenuWindow.MenuItem FindMenu(List<MenuWindow.MenuItem> items, string text)

@@ -46,7 +46,6 @@ namespace AppManager.Controls
         private readonly Pen headerLinePen = new Pen(Theme.Separator);   // 列表表头底部分隔线
         private readonly Pen cardBorderPen = new Pen(Theme.Separator);
         private readonly StringFormat pathFormat = CreatePathFormat();   // 路径列：中间省略
-        private readonly StringFormat tipFormat = CreateTipFormat();      // 悬浮信息卡：仅按 \n 换行，超宽省略
         private readonly Dictionary<string, ListMeta> metaCache = new Dictionary<string, ListMeta>(StringComparer.OrdinalIgnoreCase);   // 大小/时间列缓存（跨目录复用）
         private readonly object metaSync = new object();
         private volatile MetaLoadBatch metaBatch;
@@ -189,11 +188,6 @@ namespace AppManager.Controls
         /// <summary>由外部提供：返回条目「所属」分类的显示文本（多个用逗号分隔）。</summary>
         public Func<AppInfo, string> CategoryTextProvider { get; set; }
 
-        // 自绘悬浮信息卡（替代系统 ToolTip，风格统一）
-        private string tipText = string.Empty;
-        private bool tipVisible;
-        private readonly System.Windows.Forms.Timer tipTimer = new System.Windows.Forms.Timer { Interval = 450 };
-
         /// <summary>列表「大小/时间」列缓存项：显示文本与排序值一次读取，重绘不再读盘。</summary>
         private sealed class ListMeta
         {
@@ -222,7 +216,6 @@ namespace AppManager.Controls
             subFont = Theme.CaptionFont;
             actionFont = Theme.ButtonFont;
             headerFont = Theme.SectionTitleFont;
-            tipTimer.Tick += delegate { tipVisible = true; tipTimer.Stop(); Invalidate(); };
             AllowDrop = true;   // 接受外部文件/文件夹拖入（是否放行由 AllowExternalDrop 决定）
         }
 
@@ -250,8 +243,6 @@ namespace AppManager.Controls
                 selectRowBrush.Dispose();
                 selectPen.Dispose();
                 pathFormat.Dispose();
-                tipFormat.Dispose();
-                tipTimer.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -264,15 +255,6 @@ namespace AppManager.Controls
             sf.LineAlignment = StringAlignment.Center;
             sf.Trimming = StringTrimming.EllipsisPath;
             sf.FormatFlags = StringFormatFlags.NoWrap;
-            return sf;
-        }
-
-        /// <summary>悬浮信息卡 StringFormat：仅在文本自带的 \n 处换行（不按宽度折行），超宽以省略号截断。</summary>
-        private static StringFormat CreateTipFormat()
-        {
-            StringFormat sf = new StringFormat();
-            sf.FormatFlags = StringFormatFlags.NoWrap;
-            sf.Trimming = StringTrimming.EllipsisCharacter;
             return sf;
         }
 
@@ -590,52 +572,6 @@ namespace AppManager.Controls
 
             if (dragging && dragGap >= 0) PaintDropIndicator(g);
             if (dragging && dropTarget >= 0) PaintFolderDropHighlight(g);
-
-            // 自绘悬浮信息卡（iOS 深色圆角，替代系统 ToolTip）：锚定在悬停条目下方，避免遮挡条目本身
-            if (tipVisible && !string.IsNullOrEmpty(tipText))
-            {
-                GraphicsState ts = g.Save();
-                g.ResetTransform();   // 以客户区坐标绘制，便于按可视区域夹紧
-                PaintTooltip(g);
-                g.Restore(ts);
-            }
-        }
-
-        /// <summary>
-        /// 绘制悬浮信息卡：以悬停条目为锚点置于其下方（不遮挡条目图标与名称），
-        /// 右/下越界时自动翻转并夹紧到可视区域内；文本过长以省略号截断。
-        /// </summary>
-        private void PaintTooltip(Graphics g)
-        {
-            if (hoverIndex < 0 || hoverIndex >= apps.Count) return;
-
-            // 内容坐标 → 客户区坐标（与滚动位置一致）
-            Rectangle anchor = grid ? GridRect(hoverIndex) : ListRowRect(hoverIndex);
-            anchor.Offset(AutoScrollPosition.X, AutoScrollPosition.Y);
-
-            SizeF sz = g.MeasureString(tipText, subFont, new SizeF(10000f, 10000f), tipFormat);
-            int w = (int)Math.Ceiling(sz.Width) + 24;
-            int h = (int)Math.Ceiling(sz.Height) + 14;
-            int maxW = ClientSize.Width - 8;
-            if (w > maxW) w = maxW;
-
-            int x = anchor.X;
-            if (x + w > ClientSize.Width - 4) x = ClientSize.Width - 4 - w;
-            if (x < 4) x = 4;
-
-            int y = anchor.Bottom + 6;                       // 默认置于条目下方
-            if (y + h > ClientSize.Height - 4) y = anchor.Y - 6 - h;   // 下方空间不足则翻转到条目上方
-            int minY = grid ? 4 : Dpi(ListHeaderH) + 4;           // 列表视图需避开吸顶表头
-            if (y < minY) y = minY;
-
-            Rectangle tr = new Rectangle(x, y, w, h);
-            Draw.DrawShadow(g, tr, 8, 0.8f);
-            using (SolidBrush b = new SolidBrush(Theme.TooltipBg))
-            using (GraphicsPath p = Draw.RoundedPath(tr, 8))
-                g.FillPath(b, p);
-            using (SolidBrush tb = new SolidBrush(Color.White))
-                g.DrawString(tipText, subFont, tb,
-                    new RectangleF(tr.X + 12, tr.Y + 7, tr.Width - 24, tr.Height - 14), tipFormat);
         }
 
         /// <summary>空态提示：主内容区居中显示浅灰文案（网格/列表通用）。</summary>
@@ -1085,8 +1021,6 @@ namespace AppManager.Controls
                     if (Math.Abs(e.X - dragStart.X) > d.Width || Math.Abs(e.Y - dragStart.Y) > d.Height)
                     {
                         dragging = true;
-                        tipVisible = false;
-                        tipTimer.Stop();
                     }
                 }
                 if (dragging)
@@ -1134,20 +1068,6 @@ namespace AppManager.Controls
             {
                 int old = hoverIndex;
                 hoverIndex = idx;
-                tipVisible = false;
-                tipTimer.Stop();
-                if (idx >= 0 && idx < apps.Count)
-                {
-                    AppInfo a = apps[idx];
-                    string cat = (CategoryTextProvider != null) ? CategoryTextProvider(a) : a.Category;
-                    tipText = "所属：" + cat;
-                    if (!string.IsNullOrEmpty(a.TargetPath)) tipText += "\n" + a.TargetPath;
-                    tipTimer.Start();
-                }
-                else
-                {
-                    tipText = string.Empty;
-                }
                 InvalidateHover(old, idx);
                 Cursor = Cursors.Default;
             }
@@ -1173,8 +1093,6 @@ namespace AppManager.Controls
         protected override void OnMouseLeave(EventArgs e)
         {
             hoverIndex = -1;
-            tipVisible = false;
-            tipTimer.Stop();
             if (dropTarget != -1) dropTarget = -1;   // 拖出网格时清除搬迁落点高亮
             Invalidate();
             base.OnMouseLeave(e);
