@@ -3491,9 +3491,9 @@ namespace AppManager
                     items.Add(MkMenu("属性…", delegate { PropertiesDialog.Show(app); }));
                 items.Add(MkSep());
                 // 只读全集分类：以「加入」方式把条目多归属到其它分类（原归属与「全部」中的条目均不变）
-                items.Add(MkSubMenu("移动到分类…", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
+                items.Add(MkSubMenu(website ? "移动到分类…" : "添加到默认分类…", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
                 if (!website)
-                    items.Add(MkSubMenu("移动到自定义…", BuildAddCategoryItems(app, true)));
+                    items.Add(MkSubMenu("添加到自定义…", BuildAddCategoryItems(app, true)));
                 AddDeleteMenu(items, app);
             }
             else
@@ -3532,7 +3532,7 @@ namespace AppManager
                         items.Add(MkMenu("从常用移除", delegate { ToggleFavorite(app, false); }));
                     else
                         items.Add(MkMenu("添加到常用", delegate { ToggleFavorite(app, true); }));
-                    items.Add(MkSubMenu("移动到分类…", BuildMoveCategoryItems(app)));
+                    items.Add(MkSubMenu("添加到默认分类…", BuildAddCategoryItems(app, false)));
                     if (InCustom(app))
                         items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(app); }));
                     items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(app)));
@@ -3619,7 +3619,7 @@ namespace AppManager
 
         /// <summary>
         /// 软件/文件模式的多选菜单：所有可执行动作都绑定整批目标，单条专属动作不再混入多选菜单。
-        /// 只读总分类保留“加入分类”，可编辑分类增加收藏、移动、隐藏和批量移除。
+        /// 只读总分类保留“加入分类”，可编辑分类增加收藏、隐藏和批量移除。
         /// </summary>
         private void BuildSoftwareMultiMenu(List<MenuWindow.MenuItem> items, AppInfo clicked,
             List<AppInfo> targets, bool readOnly)
@@ -3631,7 +3631,7 @@ namespace AppManager
             if (readOnly)
             {
                 items.Add(MkSep());
-                items.Add(MkSubMenu("移动到分类…", BuildAddCategoryItems(targets, false)));
+                items.Add(MkSubMenu("添加到默认分类…", BuildAddCategoryItems(targets, false)));
                 if (AnyDeletableEntry(targets))
                     items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
                 items.Add(MkSep());
@@ -3643,7 +3643,7 @@ namespace AppManager
             bool allFavorite = AllFavorite(targets);
             items.Add(MkMenu(allFavorite ? "从常用移除" : "添加到常用",
                 delegate { ToggleFavorite(targets, !allFavorite); }));
-            items.Add(MkSubMenu("移动到分类…", BuildMoveCategoryItems(targets)));
+            items.Add(MkSubMenu("添加到默认分类…", BuildAddCategoryItems(targets, false)));
             if (AnyInCustom(targets))
                 items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(targets); }));
             items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(targets)));
@@ -3824,46 +3824,6 @@ namespace AppManager
             return false;
         }
 
-        /// <summary>「移动到分类」的级联子项：硬移动（覆盖原归属）。</summary>
-        private List<MenuWindow.MenuItem> BuildMoveCategoryItems(AppInfo app)
-        {
-            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
-            // 「移动到分类 ▸ 快捷中心」：把别处的条目收进快捷中心
-            items.Add(MkMenu(QuickCenter, MakeSetCat(app, QuickCenter)));
-            items.Add(MkSep());
-            for (int i = 0; i < CategoryRules.BuiltIn.Length; i++)
-            {
-                string c = CategoryRules.BuiltIn[i];
-                items.Add(MkMenu(c, MakeSetCat(app, c)));
-            }
-            if (config.CustomCategories.Count > 0) items.Add(MkSep());
-            for (int i = 0; i < config.CustomCategories.Count; i++)
-            {
-                string c = config.CustomCategories[i];
-                items.Add(MkMenu(c, MakeSetCat(app, c)));
-            }
-            return items;
-        }
-
-        private List<MenuWindow.MenuItem> BuildMoveCategoryItems(List<AppInfo> apps)
-        {
-            List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
-            items.Add(MkMenu(QuickCenter, MakeSetCat(apps, QuickCenter)));
-            items.Add(MkSep());
-            for (int i = 0; i < CategoryRules.BuiltIn.Length; i++)
-            {
-                string c = CategoryRules.BuiltIn[i];
-                items.Add(MkMenu(c, MakeSetCat(apps, c)));
-            }
-            if (config.CustomCategories.Count > 0) items.Add(MkSep());
-            for (int i = 0; i < config.CustomCategories.Count; i++)
-            {
-                string c = config.CustomCategories[i];
-                items.Add(MkMenu(c, MakeSetCat(apps, c)));
-            }
-            return items;
-        }
-
         /// <summary>资源条目「移动到分类」的级联子项（单条）。</summary>
         private List<MenuWindow.MenuItem> BuildMoveResourceItems(AppInfo app)
         {
@@ -3972,17 +3932,6 @@ namespace AppManager
             app.Category = category;
         }
 
-        /// <summary>「移动到分类」的级联子项：硬归属（覆盖原归属）。</summary>
-        private Action MakeSetCat(AppInfo app, string cat)
-        {
-            return delegate
-            {
-                SetHardCategory(app, cat);
-                config.Save();
-                RefreshGrid();
-            };
-        }
-
         /// <summary>批量硬归属：逐项写入分类覆盖后统一落盘刷新。</summary>
         private void SetHardCategory(List<AppInfo> apps, string cat)
         {
@@ -4027,8 +3976,8 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 「全部*」条目右键的「加入分类」级联子项：选中即把条目「加入」该分类（多归属），
-        /// 原归属与「全部」中的条目均不变。customOnly=true 时仅列出自定义分类。
+        /// 「添加到默认分类」级联子项：保留原归属，可加入多个分类；已加入的分类置灰。
+        /// customOnly=true 时仅列出自定义分类。
         /// </summary>
         private List<MenuWindow.MenuItem> BuildAddCategoryItems(AppInfo app, bool customOnly)
         {

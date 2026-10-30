@@ -46,6 +46,7 @@ namespace AppManager
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
                 Run("resource defaults: remove, preserve library, reload and menu rejoin", ResourceCategoryRemoval);
                 Run("category removal: failed save rolls back membership and permits retry", CategoryRemovalSaveFailure);
+                Run("default category addition: single/batch, multiple memberships, removal and reload", DefaultCategoryAddition);
             }
             finally
             {
@@ -114,6 +115,77 @@ namespace AppManager
                 action();
             }
             Check(clicked, "confirmation did not execute");
+        }
+
+        private static MenuWindow.MenuItem FindMenu(List<MenuWindow.MenuItem> items, string text)
+        {
+            MenuWindow.MenuItem item = items.Find(delegate(MenuWindow.MenuItem m) { return m.Text == text; });
+            Check(item != null, "menu missing: " + text);
+            return item;
+        }
+
+        private static void DefaultCategoryAddition()
+        {
+            AppConfig config = new AppConfig();
+            AppInfo first = new AppInfo { Key = "af:category-add-first", Name = "First", Category = "开发工具", TargetPath = Path.Combine(root, "kept.exe") };
+            AppInfo second = new AppInfo { Key = "af:category-add-second", Name = "Second", Category = "浏览器" };
+            File.WriteAllText(first.TargetPath, "keep");
+            config.CustomCategories.Add("我的工具");
+            CollectionOps.AddMember(config, first.Key, "我的工具");
+            config.CategoryOverride[second.Key] = "浏览器";
+            config.Favorites.Add(first.Key);
+            first.IsFavorite = true;
+            List<AppInfo> targets = new List<AppInfo> { first, second };
+            using (MainForm form = CategoryForm(config, first, second))
+            {
+                List<MenuWindow.MenuItem> single = (List<MenuWindow.MenuItem>)Invoke(form, "BuildAddCategoryItems", first, false);
+                Check(FindMenu(single, "开发工具").Disabled, "original category should be disabled");
+                Check(!single.Exists(delegate(MenuWindow.MenuItem m) { return m.Text == "我的工具"; }), "default menu included custom category");
+                FindMenu(single, "办公软件").Action();
+                FindMenu(single, "系统工具").Action();
+                Check(first.Category == "开发工具" && !config.CategoryOverride.ContainsKey(first.Key), "addition replaced primary category");
+                foreach (string category in new string[] { "开发工具", "办公软件", "系统工具", "我的工具", "常用" })
+                    Check((bool)Invoke(form, "InCategory", first, category), "addition lost membership: " + category);
+                single = (List<MenuWindow.MenuItem>)Invoke(form, "BuildAddCategoryItems", first, false);
+                Check(FindMenu(single, "办公软件").Disabled, "existing membership was not disabled");
+                int count = config.ItemCategories[first.Key].Count;
+                FindMenu(single, "办公软件").Action();
+                Check(config.ItemCategories[first.Key].Count == count, "duplicate membership added");
+
+                foreach (bool readOnly in new bool[] { false, true })
+                {
+                    List<MenuWindow.MenuItem> batch = new List<MenuWindow.MenuItem>();
+                    Invoke(form, "BuildSoftwareMultiMenu", batch, first, targets, readOnly);
+                    List<MenuWindow.MenuItem> defaults = FindMenu(batch, "添加到默认分类…").SubItems;
+                    MenuWindow.MenuItem office = FindMenu(defaults, "办公软件");
+                    Check(office.Disabled == readOnly, "batch availability did not reflect partial/all membership");
+                    if (!office.Disabled) office.Action();
+                    if (readOnly) FindMenu(defaults, "快捷中心").Action();
+                }
+                Check(config.CategoryOverride[second.Key] == "浏览器" && second.Category == "浏览器", "batch addition changed existing override");
+                Check((bool)Invoke(form, "InCategory", second, "浏览器"), "batch addition lost original membership");
+                Check(config.Database.Page("办公软件", false, true, "", 20, null, false, false).Total == 2, "database list lost batch membership");
+                Check(File.ReadAllText(first.TargetPath) == "keep", "addition moved or changed the file");
+            }
+
+            AppConfig loaded = AppConfig.Load();
+            Check(!loaded.LoadFailed, "addition could not reload");
+            new Scanner(loaded).ApplyConfig(targets);
+            using (MainForm form = CategoryForm(loaded, first, second))
+            {
+                foreach (AppInfo app in targets)
+                    foreach (string category in new string[] { "办公软件", "快捷中心" })
+                        Check((bool)Invoke(form, "InCategory", app, category), "reload lost membership: " + category);
+                Check((bool)Invoke(form, "InCategory", first, "我的工具") && (bool)Invoke(form, "InCategory", first, "系统工具"), "reload lost other memberships");
+                ClickConfirmation(delegate { Invoke(form, "RemoveTargetsFromCategory", new List<AppInfo> { first }, "办公软件"); }, true);
+                Check(!(bool)Invoke(form, "InCategory", first, "办公软件"), "removal kept target membership");
+                foreach (string category in new string[] { "开发工具", "系统工具", "我的工具", "快捷中心" })
+                    Check((bool)Invoke(form, "InCategory", first, category), "removal affected another category: " + category);
+            }
+            AppConfig afterRemoval = AppConfig.Load();
+            Check(!afterRemoval.LoadFailed, "removal could not reload");
+            Check(afterRemoval.Database.Page("办公软件", false, true, "", 20, null, false, false).Total == 1, "removal affected other batch member");
+            Check(afterRemoval.Database.Page("开发工具", false, true, "", 20, null, false, false).Total == 1, "original category lost after reload");
         }
 
         private static void CategoryRemoval()
