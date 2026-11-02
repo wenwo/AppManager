@@ -435,6 +435,12 @@ namespace AppManager
                 HideToTray();   // 导入在后台继续
                 return;
             }
+            // 任务栏「关闭窗口」等未经 ExitApp 的关闭：文本查看器有未保存修改时先询问
+            if (!exiting && e.CloseReason == CloseReason.UserClosing && textViewer != null && !textViewer.ConfirmLeave())
+            {
+                e.Cancel = true;
+                return;
+            }
             if (importRunning)
             {
                 if (e.CloseReason == CloseReason.UserClosing)
@@ -655,6 +661,7 @@ namespace AppManager
                 RequestImportExit();
                 return;
             }
+            if (textViewer != null && !textViewer.ConfirmLeave()) return;
             exiting = true;
             if (tray != null) tray.Visible = false;
             Close();

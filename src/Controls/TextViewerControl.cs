@@ -2,29 +2,50 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Drawing;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
 
 namespace AppManager.Controls
 {
-    /// <summary>应用内纯文本查看器：用于 txt、配置、代码和常见标记文本资源。</summary>
+    /// <summary>
+    /// 应用内文本查看器：用于 txt、配置、代码和常见标记文本资源（文档与证件共用）。
+    /// 文本视图可直接编辑并按原编码保存；Markdown 文件额外提供渲染预览，可与文本视图切换。
+    /// </summary>
     public class TextViewerControl : Control
     {
         public event Action CloseRequested;
 
         private readonly RichTextBox textBox;
+        private readonly RichTextBox markdownBox;
         private readonly PreviewLoader<TextPreview> loader;
         private readonly RoundButton externalButton;
+        private readonly RoundButton saveButton;
         private readonly Font textFont;
+        private readonly Timer renderTimer;
         private readonly List<string> paths = new List<string>();
         private int index;
         private Rectangle backRect;
         private Rectangle prevRect;
         private Rectangle nextRect;
         private Rectangle infoBarRect;
+        private Rectangle markdownTabRect;
+        private Rectangle plainTabRect;
         private bool loadFailed;
         private bool loading;
         private string failureText = "无法读取此文本";
         private bool truncated;
+        private TextPreview current;       // 当前文件的读取结果：编码与修改时间用于保存
+        private string savedText;          // 最近一次读取/保存的内容（换行统一为 \n）
+        private string newline = "\r\n";   // 文件原有换行风格，保存时还原
+        private bool markdownFile;
+        private bool showMarkdown = true;  // Markdown 默认渲染预览；切换结果在本次运行内沿用
+        private bool dirty;
+        private bool syncing;              // 程序写入文本框时不视为用户编辑
+        private bool editorLoaded;         // 文本框按需填充：Markdown 预览期间不加载，切到文本视图时再填入
+        private int editVersion;
+        private int renderedVersion = -1;
+        private int renderedWidth;
 
         private int Dpi(int value)
         {
@@ -37,6 +58,7 @@ namespace AppManager.Controls
         private int CardGap { get { return Dpi(12); } }
         private int PillH { get { return Dpi(40); } }
         private int PillBtnW { get { return Dpi(44); } }
+        private bool MarkdownVisible { get { return markdownFile && showMarkdown; } }
 
         private Rectangle TextArea
         {
@@ -59,10 +81,14 @@ namespace AppManager.Controls
             externalButton = new RoundButton { Text = "外部打开", Accent = false };
             externalButton.Click += delegate
             {
-                if (paths.Count > 0 && !Launcher.OpenWith(paths[index]))
+                if (paths.Count == 0 || !ConfirmLeave("打开外部程序前，是否保存对“{0}”的修改？")) return;
+                if (!Launcher.OpenWith(paths[index]))
                     MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
             Controls.Add(externalButton);
+            saveButton = new RoundButton { Text = "保存", Accent = true, Visible = false };
+            saveButton.Click += delegate { Save(); };
+            Controls.Add(saveButton);
 
             textBox = new RichTextBox();
             textBox.ReadOnly = true;
@@ -70,17 +96,35 @@ namespace AppManager.Controls
             textBox.BorderStyle = BorderStyle.None;
             textBox.DetectUrls = false;
             textBox.WordWrap = false;
+            textBox.AcceptsTab = true;
             textBox.ScrollBars = RichTextBoxScrollBars.Both;
             textBox.BackColor = Color.White;
             textBox.ForeColor = Color.FromArgb(35, 35, 38);
             textFont = new Font(FontFamily.GenericMonospace, 10F, FontStyle.Regular);
             textBox.Font = textFont;
             textBox.Visible = false;
+            textBox.TextChanged += delegate { OnTextEdited(); };
             Controls.Add(textBox);
+
+            markdownBox = new MarkdownRichTextBox();
+            markdownBox.ReadOnly = true;
+            markdownBox.Multiline = true;
+            markdownBox.BorderStyle = BorderStyle.None;
+            markdownBox.DetectUrls = false;
+            markdownBox.WordWrap = true;
+            markdownBox.ScrollBars = RichTextBoxScrollBars.Vertical;
+            markdownBox.BackColor = Color.White;
+            markdownBox.Visible = false;
+            Controls.Add(markdownBox);
+
+            // 窗口拖拽缩放时合并重排：表格/代码块列宽随可用宽度重新渲染
+            renderTimer = new Timer { Interval = 200 };
+            renderTimer.Tick += delegate { renderTimer.Stop(); RenderMarkdown(true); };
         }
 
         public void Open(List<string> textPaths, int startIndex)
         {
+            ResolvePendingEdits();
             paths.Clear();
             if (textPaths != null) paths.AddRange(textPaths);
             if (paths.Count == 0) { ClosePreview(); RequestClose(); return; }
@@ -99,16 +143,34 @@ namespace AppManager.Controls
         private void LoadCurrent()
         {
             loader.Clear();
+            renderTimer.Stop();
             loadFailed = false;
             loading = true;
             truncated = false;
+            current = null;
             failureText = "无法读取此文本";
             textBox.Visible = false;
-            textBox.Clear();
+            markdownBox.Visible = false;
+            SetEditorText(string.Empty);
+            editorLoaded = false;
+            markdownBox.Clear();
+            editVersion++;
+            renderedVersion = -1;
             string path = paths[index];
+            markdownFile = MediaRules.IsMarkdown(path);
+            LayoutTextBox();
+            // Markdown 预览在后台线程一并生成 RTF，界面线程只负责装入
+            bool render = MarkdownVisible;
+            int width = MarkdownWidth(), twips = MarkdownTwips(width);
             loader.Load(delegate(System.Threading.CancellationToken cancellation)
             {
-                return TextPreview.Read(path, cancellation);
+                TextPreview preview = TextPreview.Read(path, cancellation);
+                if (render)
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    preview.RenderedRtf = MarkdownRtf.Render(preview.Content, twips);
+                }
+                return preview;
             }, delegate(TextPreview preview, Exception error)
             {
                 loading = false;
@@ -119,39 +181,254 @@ namespace AppManager.Controls
                 }
                 else
                 {
-                    textBox.Text = preview.Content;
+                    current = preview;
                     truncated = preview.Truncated;
-                    textBox.Visible = true;
+                    newline = DetectNewline(preview.Content);
+                    savedText = NormalizeNewlines(preview.Content);
+                    if (preview.RenderedRtf != null && MarkdownVisible)
+                    {
+                        markdownBox.Rtf = preview.RenderedRtf;
+                        renderedVersion = editVersion;
+                        renderedWidth = width;
+                    }
+                    preview.RenderedRtf = null;
+                    ShowCurrentView();
                 }
                 Invalidate();
             });
-            LayoutTextBox();
             Invalidate();
         }
 
         public void ClosePreview()
         {
+            ResolvePendingEdits();
             loader.Clear();
-            textBox.Clear();
+            renderTimer.Stop();
+            SetEditorText(string.Empty);
+            editorLoaded = false;
             textBox.Visible = false;
+            markdownBox.Clear();
+            markdownBox.Visible = false;
             loading = false;
+            current = null;
             paths.Clear();
             Visible = false;
         }
 
+        // ===== 视图切换 =====
+
+        private void SetMarkdownView(bool markdown)
+        {
+            if (!markdownFile || showMarkdown == markdown || current == null) return;
+            showMarkdown = markdown;
+            ShowCurrentView();
+            Invalidate();
+        }
+
+        private void ShowCurrentView()
+        {
+            if (current == null) return;
+            LayoutTextBox();
+            if (MarkdownVisible) RenderMarkdown(false);
+            else if (!editorLoaded)
+            {
+                SetEditorText(savedText);
+                // 截断内容保存会丢失后半部分，仅允许只读查看
+                textBox.ReadOnly = truncated;
+                editorLoaded = true;
+            }
+            textBox.Visible = !MarkdownVisible;
+            markdownBox.Visible = MarkdownVisible;
+            if (MarkdownVisible) markdownBox.Focus();
+            else textBox.Focus();
+        }
+
+        /// <summary>按文本框中的最新内容渲染；未编辑且宽度未变时复用上次结果。</summary>
+        private void RenderMarkdown(bool keepScroll)
+        {
+            if (!MarkdownVisible || current == null) return;
+            int width = MarkdownWidth();
+            if (renderedVersion == editVersion && Math.Abs(width - renderedWidth) < Dpi(24)) return;
+            int firstChar = keepScroll && markdownBox.TextLength > 0 ? markdownBox.GetCharIndexFromPosition(new Point(1, 1)) : 0;
+            markdownBox.Rtf = MarkdownRtf.Render(EditorText(), MarkdownTwips(width));
+            renderedVersion = editVersion;
+            renderedWidth = width;
+            markdownBox.Select(0, 0);
+            if (firstChar > 0)
+            {
+                int line = markdownBox.GetLineFromCharIndex(Math.Min(firstChar, markdownBox.TextLength));
+                SendMessage(markdownBox.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)line);
+            }
+        }
+
+        private int MarkdownWidth()
+        {
+            return Math.Max(Dpi(160), markdownBox.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - Dpi(8));
+        }
+
+        private int MarkdownTwips(int width)
+        {
+            return width * 1440 / Math.Max(96, DpiHelper.ForControl(this));
+        }
+
+        // ===== 编辑与保存 =====
+
+        private void SetEditorText(string text)
+        {
+            syncing = true;
+            try
+            {
+                textBox.Text = text;
+                textBox.ClearUndo();
+            }
+            finally { syncing = false; }
+            dirty = false;
+            saveButton.Visible = false;
+        }
+
+        /// <summary>编辑器当前内容，换行统一为 LF；文本框尚未填充时即为已保存内容。</summary>
+        private string EditorText()
+        {
+            return editorLoaded ? NormalizeNewlines(textBox.Text) : savedText;
+        }
+
+        private void OnTextEdited()
+        {
+            if (syncing || !editorLoaded) return;
+            editVersion++;
+            // 句柄重建等也会触发 TextChanged：仅内容确实不同才标记为已修改
+            if (!dirty && current != null && EditorText() != savedText)
+            {
+                dirty = true;
+                saveButton.Visible = true;
+                LayoutTextBox();
+                Invalidate();
+            }
+        }
+
+        private bool HasUnsavedChanges()
+        {
+            return dirty && current != null && paths.Count > 0 && EditorText() != savedText;
+        }
+
+        /// <summary>Ctrl+S / 保存按钮：按读取时的编码与换行写回原文件。</summary>
+        private bool Save()
+        {
+            if (!HasUnsavedChanges())
+            {
+                MarkClean();
+                return true;
+            }
+            string path = paths[index];
+            string text = EditorText();
+            try
+            {
+                if (File.Exists(path) && File.GetLastWriteTimeUtc(path) != current.LastWriteUtc
+                    && MessageBox.Show(this, "“" + Path.GetFileName(path) + "”已在外部被修改，保存将覆盖这些修改。是否继续？",
+                        "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                    return false;
+                Encoding encoding = current.Encoding ?? new UTF8Encoding(false);
+                string content = text.Replace("\n", newline);
+                try { TextPreview.Write(path, content, encoding); }
+                catch (EncoderFallbackException)
+                {
+                    if (MessageBox.Show(this, "部分字符无法用原编码（" + encoding.EncodingName + "）保存，是否改用 UTF-8 保存？",
+                            "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                        return false;
+                    encoding = new UTF8Encoding(false);
+                    TextPreview.Write(path, content, encoding);
+                }
+                current.Encoding = encoding;
+                current.LastWriteUtc = File.GetLastWriteTimeUtc(path);
+                savedText = text;
+                MarkClean();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (!(ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException
+                    || ex is NotSupportedException || ex is System.Security.SecurityException)) throw;
+                MessageBox.Show(this, "保存失败：" + ex.Message, "保存", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return false;
+            }
+        }
+
+        private void MarkClean()
+        {
+            dirty = false;
+            saveButton.Visible = false;
+            LayoutTextBox();
+            Invalidate();
+        }
+
+        /// <summary>离开当前文件前处理未保存的修改；返回 false 表示用户选择取消。</summary>
+        public bool ConfirmLeave()
+        {
+            return ConfirmLeave("是否保存对“{0}”的修改？");
+        }
+
+        private bool ConfirmLeave(string format)
+        {
+            if (!HasUnsavedChanges()) return true;
+            DialogResult result = MessageBox.Show(this, string.Format(format, Path.GetFileName(paths[index])), "文本",
+                MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (result == DialogResult.Yes) return Save();
+            return result == DialogResult.No;
+        }
+
+        /// <summary>外部强制关闭（切换分类、进入设置等）无法取消，只询问是否保存，避免修改被静默丢弃。</summary>
+        private void ResolvePendingEdits()
+        {
+            if (!HasUnsavedChanges()) return;
+            if (MessageBox.Show(this, "是否保存对“" + Path.GetFileName(paths[index]) + "”的修改？", "文本",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
+                Save();
+            dirty = false;
+        }
+
+        private static string NormalizeNewlines(string text)
+        {
+            return (text ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n');
+        }
+
+        private static string DetectNewline(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return "\r\n";
+            int lf = text.IndexOf('\n');
+            int cr = text.IndexOf('\r');
+            if (cr >= 0 && (lf < 0 || cr < lf)) return cr + 1 < text.Length && text[cr + 1] == '\n' ? "\r\n" : "\r";
+            return lf >= 0 ? "\n" : "\r\n";
+        }
+
+        // ===== 布局与绘制 =====
+
         private void LayoutTextBox()
         {
             if (textBox == null) return;
-            externalButton.Bounds = new Rectangle(Math.Max(0, Width - Dpi(112)), Dpi(6), Dpi(96), Dpi(30));
+            int buttonY = Dpi(6), buttonH = Dpi(30);
+            externalButton.Bounds = new Rectangle(Math.Max(0, Width - Dpi(112)), buttonY, Dpi(96), buttonH);
+            int right = externalButton.Left - Dpi(8);
+            if (markdownFile && current != null)
+            {
+                plainTabRect = new Rectangle(right - Dpi(60), buttonY, Dpi(60), buttonH);
+                markdownTabRect = new Rectangle(plainTabRect.X - Dpi(92), buttonY, Dpi(92), buttonH);
+                right = markdownTabRect.Left - Dpi(8);
+            }
+            else markdownTabRect = plainTabRect = Rectangle.Empty;
+            saveButton.Bounds = new Rectangle(Math.Max(0, right - Dpi(72)), buttonY, Dpi(72), buttonH);
             Rectangle area = TextArea;
             textBox.Bounds = new Rectangle(area.X + Dpi(1), area.Y + Dpi(1),
                 Math.Max(0, area.Width - Dpi(2)), Math.Max(0, area.Height - Dpi(2)));
+            // Markdown 预览留出阅读边距，背景由 DrawCanvas 补白
+            markdownBox.Bounds = new Rectangle(area.X + Dpi(20), area.Y + Dpi(12),
+                Math.Max(0, area.Width - Dpi(24)), Math.Max(0, area.Height - Dpi(16)));
         }
 
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
             LayoutTextBox();
+            if (MarkdownVisible && current != null) { renderTimer.Stop(); renderTimer.Start(); }
             Invalidate();
         }
 
@@ -182,6 +459,8 @@ namespace AppManager.Controls
         {
             Rectangle area = TextArea;
             if (area.Width <= 0 || area.Height <= 0) return;
+            if (markdownBox.Visible)
+                using (SolidBrush b = new SolidBrush(markdownBox.BackColor)) g.FillRectangle(b, area);
             using (Pen p = new Pen(Theme.Separator, 1)) g.DrawRectangle(p, area);
             if (loadFailed)
             {
@@ -203,6 +482,27 @@ namespace AppManager.Controls
             TextRenderer.DrawText(g, "返回", Theme.ButtonFont,
                 new Rectangle(backRect.X + Dpi(24), backRect.Y, backRect.Width - Dpi(24), backRect.Height),
                 Theme.TextPrimary, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            DrawViewSwitch(g);
+        }
+
+        /// <summary>Markdown / 文本 分段切换：样式与侧栏「软件 | 资源」一致。</summary>
+        private void DrawViewSwitch(Graphics g)
+        {
+            if (markdownTabRect.IsEmpty) return;
+            System.Drawing.Drawing2D.SmoothingMode mode = g.SmoothingMode;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            Rectangle seg = Rectangle.Union(markdownTabRect, plainTabRect);
+            using (SolidBrush bg = new SolidBrush(Theme.SegmentBg)) Draw.FillRoundedRect(g, bg, seg, Dpi(7));
+            Rectangle active = showMarkdown ? markdownTabRect : plainTabRect;
+            active.Inflate(-Dpi(2), -Dpi(2));
+            using (SolidBrush b = new SolidBrush(Color.White)) Draw.FillRoundedRect(g, b, active, Dpi(6));
+            g.SmoothingMode = mode;
+            TextRenderer.DrawText(g, "Markdown", Theme.ButtonFont, markdownTabRect,
+                showMarkdown ? Theme.AccentText : Theme.TextSecondary,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
+            TextRenderer.DrawText(g, "文本", Theme.ButtonFont, plainTabRect,
+                showMarkdown ? Theme.TextSecondary : Theme.AccentText,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
         private void DrawPill(Graphics g)
@@ -253,6 +553,7 @@ namespace AppManager.Controls
             Rectangle nameR = new Rectangle(infoBarRect.X + pad, infoBarRect.Y,
                 Math.Max(0, countR.Left - Dpi(12) - (infoBarRect.X + pad)), infoBarRect.Height);
             string name = paths.Count > 0 && index < paths.Count ? Path.GetFileName(paths[index]) : string.Empty;
+            if (dirty) name += " · 已修改（Ctrl+S 保存）";
             if (truncated) name += " · 仅预览前 256K 字符，完整内容请外部打开";
             TextRenderer.DrawText(g, name, Theme.BodyFont, nameR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
@@ -260,27 +561,48 @@ namespace AppManager.Controls
                 TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine);
         }
 
+        // ===== 交互 =====
+
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
-            if (backRect.Contains(e.Location)) { RequestClose(); return; }
+            if (backRect.Contains(e.Location)) { if (ConfirmLeave()) RequestClose(); return; }
             if (prevRect.Contains(e.Location)) { Step(-1); return; }
             if (nextRect.Contains(e.Location)) { Step(1); return; }
+            if (markdownTabRect.Contains(e.Location)) { SetMarkdownView(true); return; }
+            if (plainTabRect.Contains(e.Location)) { SetMarkdownView(false); return; }
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            Cursor = markdownTabRect.Contains(e.Location) || plainTabRect.Contains(e.Location) ? Cursors.Hand : Cursors.Default;
         }
 
         private void Step(int delta)
         {
-            if (paths.Count < 2) return;
+            if (paths.Count < 2 || !ConfirmLeave()) return;
             index = (index + delta + paths.Count) % paths.Count;
             LoadCurrent();
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            if (keyData == Keys.Escape) { RequestClose(); return true; }
+            if (keyData == Keys.Escape) { if (ConfirmLeave()) RequestClose(); return true; }
             if (keyData == (Keys.Alt | Keys.Left)) { Step(-1); return true; }
             if (keyData == (Keys.Alt | Keys.Right)) { Step(1); return true; }
+            if (keyData == (Keys.Control | Keys.S)) { if (current != null) Save(); return true; }
+            // 编辑时只粘贴纯文本：RichEdit 默认会粘入图片/格式，保存时会变成占位字符
+            if ((keyData == (Keys.Control | Keys.V) || keyData == (Keys.Shift | Keys.Insert)) && textBox.Focused)
+            {
+                try
+                {
+                    if (!textBox.ReadOnly && Clipboard.ContainsText()) textBox.SelectedText = Clipboard.GetText();
+                }
+                catch (ExternalException) { }
+                return true;
+            }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
@@ -289,10 +611,55 @@ namespace AppManager.Controls
             if (disposing)
             {
                 loader.Dispose();
+                renderTimer.Dispose();
                 if (textBox != null) textBox.Dispose();
+                if (markdownBox != null) markdownBox.Dispose();
                 textFont.Dispose();
             }
             base.Dispose(disposing);
+        }
+
+        private const int EM_LINESCROLL = 0x00B6;
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        /// <summary>
+        /// Markdown 预览框：优先使用 RichEdit 4.1+（msftedit.dll）以正确显示表格与单元格底色，缺失时退回默认 RichEdit；
+        /// 只读预览不显示插入光标。
+        /// </summary>
+        private sealed class MarkdownRichTextBox : RichTextBox
+        {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            private static extern IntPtr LoadLibraryW(string path);
+
+            [DllImport("user32.dll")]
+            private static extern bool HideCaret(IntPtr hWnd);
+
+            private static readonly bool modern =
+                LoadLibraryW(Path.Combine(Environment.SystemDirectory, "msftedit.dll")) != IntPtr.Zero;
+
+            protected override CreateParams CreateParams
+            {
+                get
+                {
+                    CreateParams cp = base.CreateParams;
+                    if (modern) cp.ClassName = "RICHEDIT50W";
+                    return cp;
+                }
+            }
+
+            protected override void OnGotFocus(EventArgs e)
+            {
+                base.OnGotFocus(e);
+                HideCaret(Handle);
+            }
+
+            protected override void OnSelectionChanged(EventArgs e)
+            {
+                base.OnSelectionChanged(e);
+                if (Focused) HideCaret(Handle);
+            }
         }
     }
 }

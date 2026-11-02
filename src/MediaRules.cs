@@ -31,19 +31,21 @@ namespace AppManager
         /// <summary>文档扩展名（小写、含点）。</summary>
         public static readonly string[] DocExt =
         {
-            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md",
+            ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".txt", ".md", ".markdown",
             ".rtf", ".csv", ".json", ".xml", ".html", ".htm", ".epub"
         };
 
         /// <summary>可在内置文本查看器中直接读取的纯文本扩展名。</summary>
         public static readonly string[] TextExt =
         {
-            ".txt", ".md", ".log", ".ini", ".cfg", ".conf", ".csv", ".json", ".xml",
+            ".txt", ".md", ".markdown", ".log", ".ini", ".cfg", ".conf", ".csv", ".json", ".xml",
             ".yaml", ".yml", ".toml", ".sql", ".html", ".htm", ".css", ".js", ".ts",
             ".cs", ".java", ".py", ".sh", ".bat", ".cmd", ".ps1", ".properties"
         };
 
         private static readonly string[] PdfExt = { ".pdf" };
+
+        private static readonly string[] MarkdownExt = { ".md", ".markdown" };
 
         /// <summary>压缩包扩展名（小写、含点）。</summary>
         public static readonly string[] ArchiveExt =
@@ -78,6 +80,12 @@ namespace AppManager
         public static bool IsText(string path)
         {
             return MatchExt(path, TextExt);
+        }
+
+        /// <summary>是否为 Markdown 文本；文本查看器为其提供渲染预览与纯文本两种视图。</summary>
+        public static bool IsMarkdown(string path)
+        {
+            return MatchExt(path, MarkdownExt);
         }
 
         /// <summary>图片查看器画布支持的图片类资源（图片与 PDF）。</summary>

@@ -48,6 +48,9 @@ namespace AppManager
                 Run("PDF corrupt/missing/oversize/cancelled inputs recover", PdfFailures);
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
+                Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
+                Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
+                Run("text edits save with original encoding, BOM and newlines", TextSaving);
                 Run("PDF page navigation and image pan in both directions", ViewerNavigation);
                 Run("resource routing preserves software scripts; credentials accept text", Routing);
                 Run("external pickers serialize on STA, deduplicate and keep UI responsive", PickerSerial);
@@ -334,6 +337,122 @@ namespace AppManager
                 image.ClosePreview();
             }
             Application.DoEvents();
+        }
+        // 窗体未显示时 Control.Visible 恒为 false，读取控件自身的可见标志
+        private static bool Shown(Control control)
+        { return (bool)typeof(Control).GetMethod("GetState", BindingFlags.NonPublic | BindingFlags.Instance).Invoke(control, new object[] { 2 }); }
+        private static string RenderedText(string markdown)
+        {
+            using (RichTextBox box = new RichTextBox())
+            {
+                box.Rtf = MarkdownRtf.Render(markdown, 9000);
+                return box.Text;
+            }
+        }
+        private static void MarkdownRendering()
+        {
+            string text = RenderedText("# 标题 #\n\n**粗体** *斜体* ~~删除~~ `a{b}\\c` [链接](http://x) ![图](a.png)\n"
+                + "- 项目\n  - [x] 完成\n1. 第一\n2. 第二\n\n> 引用\n\n| 列A | 列B |\n|:--|--:|\n| 1 | `x|y` |\n\n"
+                + "```\ncode {block}\n```\n\n---\nsnake_case_name \\*星号\\* <!-- 注释 -->\n");
+            foreach (string expected in new string[] { "标题", "粗体", "斜体", "删除", "a{b}\\c", "链接", "[图片：图]", "项目", "\u2611",
+                "1.", "2.", "第二", "引用", "列A", "列B", "x|y", "code {block}", "snake_case_name", "*星号*" })
+                Check(text.Contains(expected), "missing rendered text: " + expected);
+            foreach (string syntax in new string[] { "# ", "**", "~~", "`", "](", "```", "<!--", "|:--" })
+                Check(!text.Contains(syntax), "markdown syntax leaked: " + syntax);
+            Check(RenderedText("plain <b>html</b> 1 < 2 * 3").Contains("plain <b>html</b> 1 < 2 * 3"), "unsupported text altered");
+            Check(RenderedText(string.Empty) != null && RenderedText("\uD83D\uDE00 emoji").Contains("\uD83D\uDE00"), "surrogates");
+            Stopwatch elapsed = Stopwatch.StartNew();
+            StringBuilder large = new StringBuilder();
+            while (large.Length < TextPreview.MaxCharacters)
+                large.Append("## 小节\n\n段落 **加粗** `代码` [链接](u) <https://a.b> 文本 *强调* _下划线_\n- 列表项\n\n");
+            string rtf = MarkdownRtf.Render(large.ToString(), 9000);
+            Console.WriteLine("  256K markdown -> RTF: " + elapsed.ElapsedMilliseconds + " ms, " + rtf.Length / 1024 + " KiB");
+            Check(elapsed.ElapsedMilliseconds < 3000, "markdown render too slow");
+        }
+        private static void MarkdownViewSwitch()
+        {
+            using (Form form = new Form())
+            using (TextViewerControl viewer = new TextViewerControl())
+            {
+                form.Controls.Add(viewer); viewer.Size = new Size(800, 600);
+                IntPtr handle = form.Handle; handle = viewer.Handle;
+                RichTextBox text = (RichTextBox)Field(viewer, "textBox"), markdown = (RichTextBox)Field(viewer, "markdownBox");
+                string md = WriteText("note.md", "# 标题\n\n正文", new UTF8Encoding(false));
+                viewer.Open(new List<string> { md }, 0);
+                Pump(delegate { return !((bool)Field(viewer, "loading")); });
+                Check(Shown(markdown) && !Shown(text) && markdown.Text.Contains("标题") && !markdown.Text.Contains("#"), "markdown preview default");
+                Call(viewer, "SetMarkdownView", false);
+                Check(Shown(text) && !Shown(markdown) && !text.ReadOnly && text.Text.StartsWith("# 标题"), "plain text view");
+                text.Select(text.TextLength, 0); text.SelectedText = "\n\n**新增**";
+                Check((bool)Field(viewer, "dirty") && Shown((Control)Field(viewer, "saveButton")), "edit not tracked");
+                Call(viewer, "SetMarkdownView", true);
+                Check(markdown.Text.Contains("新增") && !markdown.Text.Contains("**"), "preview missed live edit");
+                Call(viewer, "SetMarkdownView", false);
+                Check(text.Text.EndsWith("**新增**") && (bool)Field(viewer, "dirty"), "edit lost across view switch");
+                Check((bool)Call(viewer, "Save"), "save failed");
+                Check(File.ReadAllText(md) == "# 标题\n\n正文\n\n**新增**", "markdown saved content");
+                string txt = WriteText("plain.txt", "abc", Encoding.UTF8);
+                viewer.Open(new List<string> { txt }, 0);
+                Pump(delegate { return !((bool)Field(viewer, "loading")); });
+                Check(Shown(text) && !Shown(markdown) && !text.ReadOnly && ((Rectangle)Field(viewer, "markdownTabRect")).IsEmpty, "plain text has md switch");
+                // 程序加载与重新打开不应产生未保存状态（否则关闭时会弹窗阻塞）
+                Check(!(bool)Field(viewer, "dirty") && viewer.ConfirmLeave(), "load marked dirty");
+                StringBuilder large = new StringBuilder();
+                while (large.Length < TextPreview.MaxCharacters)
+                    large.Append("## 小节\n\n段落 **加粗** `代码`\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\ncode\n```\n\n");
+                string big = WriteText("big.md", large.ToString(), new UTF8Encoding(false));
+                Call(viewer, "SetMarkdownView", true);
+                Check(!(bool)Field(viewer, "showMarkdown"), "view switch applied without markdown file");
+                Set(viewer, "showMarkdown", true);
+                Stopwatch elapsed = Stopwatch.StartNew();
+                viewer.Open(new List<string> { big }, 0);
+                Pump(delegate { return !((bool)Field(viewer, "loading")); });
+                Console.WriteLine("  256K markdown preview load/display: " + elapsed.ElapsedMilliseconds + " ms");
+                Check(markdown.TextLength > 0, "large markdown preview empty");
+                viewer.ClosePreview();
+            }
+        }
+        private static void TextSaving()
+        {
+            using (Form form = new Form())
+            using (TextViewerControl viewer = new TextViewerControl())
+            {
+                form.Controls.Add(viewer); viewer.Size = new Size(800, 600);
+                IntPtr handle = form.Handle; handle = viewer.Handle;
+                RichTextBox text = (RichTextBox)Field(viewer, "textBox");
+                Encoding[] encodings = { new UTF8Encoding(false), new UTF8Encoding(true), Encoding.Unicode, Encoding.BigEndianUnicode, Encoding.Default };
+                foreach (Encoding encoding in encodings)
+                    foreach (string newline in new string[] { "\r\n", "\n" })
+                    {
+                        string path = WriteText("save.txt", "第一行" + newline + "second", encoding);
+                        viewer.Open(new List<string> { path }, 0);
+                        Pump(delegate { return !((bool)Field(viewer, "loading")); });
+                        text.Select(text.TextLength, 0); text.SelectedText = "\nthird";
+                        Check((bool)Call(viewer, "Save"), "save failed: " + encoding.WebName);
+                        byte[] expected = Concat(encoding.GetPreamble(), encoding.GetBytes("第一行" + newline + "second" + newline + "third"));
+                        Check(Convert.ToBase64String(File.ReadAllBytes(path)) == Convert.ToBase64String(expected),
+                            "bytes differ: " + encoding.WebName + " " + (newline == "\n" ? "LF" : "CRLF"));
+                        Check(!(bool)Field(viewer, "dirty") && !Shown((Control)Field(viewer, "saveButton")), "saved state");
+                    }
+                Check(Directory.GetFiles(root, ".save.txt.*").Length == 0, "temporary file left behind");
+                string truncatedPath = WriteText("huge.txt", new string('x', TextPreview.MaxCharacters + 1), new UTF8Encoding(false));
+                viewer.Open(new List<string> { truncatedPath }, 0);
+                Pump(delegate { return !((bool)Field(viewer, "loading")); });
+                Check(text.ReadOnly, "truncated text editable");
+                viewer.ClosePreview();
+            }
+            if (Encoding.Default.IsSingleByte || Encoding.Default.CodePage == 936)
+            {
+                string legacy = WriteText("legacy.txt", "abc", Encoding.Default);
+                Expect<EncoderFallbackException>(delegate { TextPreview.Write(legacy, "\uD83D\uDE00", Encoding.Default); });
+                Check(File.ReadAllText(legacy, Encoding.Default) == "abc", "failed write changed file");
+            }
+        }
+        private static byte[] Concat(byte[] a, byte[] b)
+        {
+            byte[] result = new byte[a.Length + b.Length];
+            Buffer.BlockCopy(a, 0, result, 0, a.Length); Buffer.BlockCopy(b, 0, result, a.Length, b.Length);
+            return result;
         }
         private static void ViewerNavigation()
         {
