@@ -51,6 +51,10 @@ namespace AppManager
                 Run("properties: file metadata, folders, missing targets and packaged apps", PropertiesMetadata);
                 Run("properties: DPI scrolling, responsive open and cancelled background load", PropertiesResponsiveAndDpi);
                 Run("cross-volume move: no foreign overwrite, read-only source, locked file kept", CrossVolumeMoves);
+                Run("rename: managed resource file renames on disk and migrates every keyed record", RenameManagedFile);
+                Run("rename: invalid names, conflicts, extension rule/confirm, case-only, locked file, save-failure rollback", RenameValidation);
+                Run("rename: folders rebase covers and refuse nested entries; software/referenced items keep display-name rename", RenameFoldersAndSoftware);
+                Run("move into folder keeps favorite, hidden, order, membership and cover", MoveIntoFolderKeepsRecords);
             }
             finally
             {
@@ -162,6 +166,268 @@ namespace AppManager
             }
             if (failure != null) throw failure;
             Check(inspected, "properties did not open");
+        }
+
+        // ===== 改名 =====
+
+        private static AppConfig RenameConfig(string scope)
+        {
+            string dir = Path.Combine(root, scope);
+            return new AppConfig
+            {
+                ManageRootPath = Path.Combine(dir, "manage"),
+                ResourceStorePath = Path.Combine(dir, "res"),
+                FileStorePath = Path.Combine(dir, "files"),
+                FolderStorePath = Path.Combine(dir, "folders")
+            };
+        }
+
+        private static AppInfo AddEntry(AppConfig config, string category, string path, bool folder, bool resource, string name)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            if (folder) Directory.CreateDirectory(path); else File.WriteAllText(path, "data");
+            config.AddedItems.Add(new AddedEntry { Path = path, Category = category, IsResource = resource, IsFolder = folder, Name = name });
+            return new AppInfo { Key = "add:" + path, TargetPath = path, Name = name, Category = category, IsFile = true, IsFolder = folder, Source = "Added" };
+        }
+
+        private static MainForm ResourceForm(AppConfig config, string category, params AppInfo[] apps)
+        {
+            MainForm form = CategoryForm(config, apps);
+            typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+            typeof(MainForm).GetField("currentCategory", Private).SetValue(form, category);
+            return form;
+        }
+
+        private static List<AddedEntry> EntriesOf(MainForm form, AppInfo app)
+        {
+            return (List<AddedEntry>)Invoke(form, "EntriesOf", app);
+        }
+
+        private static string TryRename(MainForm form, AppInfo app, bool folder, string name)
+        {
+            return (string)Invoke(form, "TryRenameOnDisk", app, EntriesOf(form, app), app.TargetPath, folder, name);
+        }
+
+        private static TextBox FindTextBox(Control parent)
+        {
+            foreach (Control child in parent.Controls)
+            {
+                TextBox box = child as TextBox ?? FindTextBox(child);
+                if (box != null) return box;
+            }
+            return null;
+        }
+
+        /// <summary>在改名对话框中输入 text 并点「确定」；返回对话框是否因校验失败仍保持打开（随后由本方法关闭）。</summary>
+        private static bool AnswerInput(Action action, string text, out string initial, out int start, out int length)
+        {
+            string seen = null;
+            int selectionStart = -1, selectionLength = -1;
+            bool answered = false, stayedOpen = false;
+            Stopwatch elapsed = Stopwatch.StartNew();
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    Form dialog = null;
+                    foreach (Form open in Application.OpenForms)
+                        if (open.Modal) { dialog = open; break; }
+                    if (dialog == null) return;
+                    dialog.Opacity = 0;
+                    if (answered || elapsed.ElapsedMilliseconds > 5000) { stayedOpen = answered; timer.Stop(); dialog.Close(); return; }
+                    TextBox box = FindTextBox(dialog);
+                    if (box == null) return;
+                    seen = box.Text; selectionStart = box.SelectionStart; selectionLength = box.SelectionLength;
+                    box.Text = text;
+                    answered = true;
+                    foreach (Control button in dialog.Controls)
+                        if (button.Text == "确定") { typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty }); break; }
+                };
+                timer.Start();
+                action();
+            }
+            Check(answered, "input dialog did not appear");
+            initial = seen; start = selectionStart; length = selectionLength;
+            return stayedOpen;
+        }
+
+        private static void RenameManagedFile()
+        {
+            AppConfig config = RenameConfig("rename-managed");
+            string dir = Path.Combine(config.ResourceStorePath, "压缩包");
+            string path = Path.Combine(dir, "base-generate-code (7).zip");
+            AppInfo app = AddEntry(config, "压缩包", path, false, true, "test");   // 旧版改名只改了显示名
+            string key = app.Key, collection = CollectionKeys.Make("压缩包", "资料");
+            config.Collections.Add(new ResourceCollection { Parent = "压缩包", Name = "资料" });
+            CollectionOps.AddMember(config, key, collection);
+            config.Favorites.Add(key);
+            config.Hidden.Add(key);
+            config.ItemOrder["压缩包"] = new List<string> { key };
+            config.ExcludedCategories[key] = new List<string> { "文档" };
+            string renamed = Path.Combine(dir, "改名后.zip"), newKey = "add:" + renamed;
+            using (MainForm form = ResourceForm(config, "压缩包", app))
+            {
+                Check((bool)Invoke(form, "RenamesOnDisk", app, EntriesOf(form, app)), "managed resource treated as display-name rename");
+                string seen; int start, length;
+                bool stayedOpen = AnswerInput(delegate { Invoke(form, "RenameAddedEntry", app); }, "改名后.zip", out seen, out start, out length);
+                Check(seen == "test.zip" && start == 0 && length == 4, "prefill/selection: " + seen + " " + start + "+" + length);
+                Check(!stayedOpen, "valid rename kept the dialog open");
+                Check(File.Exists(renamed) && !File.Exists(path) && File.ReadAllText(renamed) == "data", "file was not renamed on disk");
+                Check(app.Key == newKey && app.TargetPath == renamed && app.Name == "改名后" && app.DisplayName() == "改名后.zip", "app not updated: " + app.DisplayName());
+                Check(config.Favorites.Contains(newKey) && !config.Favorites.Contains(key), "favorite not migrated");
+                Check(config.Hidden.Contains(newKey) && !config.Hidden.Contains(key), "hidden not migrated");
+                Check(config.ItemOrder["压缩包"].Contains(newKey) && !config.ItemOrder["压缩包"].Contains(key), "order not migrated");
+            }
+            AppConfig loaded = AppConfig.Load();
+            List<AddedEntry> records = loaded.AddedItems.ByPath(renamed);
+            Check(records.Count == 1 && records[0].Name == "改名后" && records[0].IsResource && loaded.AddedItems.ByPath(path).Count == 0, "persisted record");
+            Check(loaded.Favorites.Contains(newKey) && !loaded.Favorites.Contains(key), "persisted favorite");
+            Check(loaded.Hidden.Contains(newKey) && !loaded.Hidden.Contains(key), "persisted hidden");
+            Check(loaded.ItemOrder.ContainsKey("压缩包") && loaded.ItemOrder["压缩包"].Contains(newKey), "persisted order");
+            Check(loaded.ItemCategories.ContainsKey(newKey) && loaded.ItemCategories[newKey].Contains(collection) && !loaded.ItemCategories.ContainsKey(key), "persisted collection membership");
+            Check(loaded.ExcludedCategories.ContainsKey(newKey) && loaded.ExcludedCategories[newKey].Contains("文档"), "persisted exclusion");
+        }
+
+        private static void RenameValidation()
+        {
+            Check(MainForm.ValidateEntryName("ok name.txt") == null && MainForm.ValidateEntryName(".gitignore") == null, "valid names rejected");
+            foreach (string bad in new string[] { "", "a|b", "a/b", "a:b", "CON", "nul.txt", "com1 .zip", "end.", "end ", ".", "..", new string('x', 256) })
+                Check(MainForm.ValidateEntryName(bad) != null, "invalid name accepted: [" + bad + "]");
+            Check(MainForm.StemLength("报告.final.docx") == "报告.final".Length && MainForm.StemLength(".gitignore") == -1, "stem selection");
+
+            AppConfig config = RenameConfig("rename-validation");
+            string dir = Path.Combine(config.ResourceStorePath, "压缩包");
+            AppInfo app = AddEntry(config, "压缩包", Path.Combine(dir, "pack.zip"), false, true, "pack");
+            File.WriteAllText(Path.Combine(dir, "other.zip"), "x");                            // 磁盘已有同名文件
+            config.AddedItems.Add(new AddedEntry { Path = Path.Combine(dir, "taken.zip"), Category = "压缩包", IsResource = true });   // 已登记的路径
+            using (MainForm form = ResourceForm(config, "压缩包", app))
+            {
+                string original = app.TargetPath;
+                Check(TryRename(form, app, false, "a|b.zip").Contains("不能包含"), "invalid character");
+                Check(TryRename(form, app, false, "CON.zip").Contains("保留名称"), "reserved name");
+                Check(TryRename(form, app, false, "   ") == "名称不能为空", "blank name");
+                Check(TryRename(form, app, false, "other.zip").Contains("已有名为"), "disk conflict");
+                Check(TryRename(form, app, false, "taken.zip").Contains("其它条目"), "registered conflict");
+                string typeError = TryRename(form, app, false, "pack.png");
+                Check(typeError == MediaRules.CategoryTypeHint("压缩包") + "，不能改为「.png」", "category type rule: " + typeError);
+                Check(File.Exists(original) && app.TargetPath == original, "rejected rename changed the file");
+
+                string result = null;
+                ClickConfirmation(delegate { result = TryRename(form, app, false, "pack.7z"); }, false);
+                Check(result == string.Empty && File.Exists(original) && app.TargetPath == original, "cancelled extension change renamed the file");
+                ClickConfirmation(delegate { result = TryRename(form, app, false, "pack.7z"); }, true);
+                string sevenZip = Path.Combine(dir, "pack.7z");
+                Check(result == null && File.Exists(sevenZip) && !File.Exists(original) && app.TargetPath == sevenZip, "confirmed extension change");
+
+                // 只改大小写：同一路径，Windows 上必须仍能改名
+                Check(TryRename(form, app, false, "PACK.7z") == null, "case-only rename failed");
+                Check(Path.GetFileName(Directory.GetFiles(dir, "*.7z")[0]) == "PACK.7z" && app.Key == "add:" + Path.Combine(dir, "PACK.7z"), "case-only rename not applied");
+
+                string beforeLock = app.TargetPath;
+                using (new FileStream(app.TargetPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    string locked = TryRename(form, app, false, "locked.7z");
+                    Check(locked != null && locked.StartsWith("无法改名："), "locked file: " + locked);
+                }
+                Check(File.Exists(beforeLock) && app.TargetPath == beforeLock && EntriesOf(form, app)[0].Path == beforeLock, "locked rename changed records");
+
+                string persisted = AppConfig.Load().ToDocument().OuterXml;
+                string keyBefore = app.Key;
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                {
+                    db.Execute("BEGIN IMMEDIATE");
+                    string failed = TryRename(form, app, false, "saved.7z");
+                    db.Execute("ROLLBACK");
+                    Check(failed != null && failed.StartsWith("资源库未能保存"), "save failure not reported: " + failed);
+                }
+                Check(File.Exists(beforeLock) && !File.Exists(Path.Combine(dir, "saved.7z")), "save failure did not restore the file name");
+                Check(app.Key == keyBefore && app.TargetPath == beforeLock && app.Name == "PACK" && EntriesOf(form, app)[0].Path == beforeLock, "save failure did not restore records");
+                Check(AppConfig.Load().ToDocument().OuterXml == persisted, "failed save changed persisted config");
+                Check(TryRename(form, app, false, "saved.7z") == null && File.Exists(Path.Combine(dir, "saved.7z")), "retry after save failure");
+            }
+            AppConfig loaded = AppConfig.Load();
+            Check(loaded.AddedItems.ByPath(Path.Combine(dir, "saved.7z")).Count == 1 && loaded.AddedItems.ByPath(Path.Combine(dir, "pack.zip")).Count == 0,
+                "persisted path after retries");
+        }
+
+        private static void RenameFoldersAndSoftware()
+        {
+            AppConfig config = RenameConfig("rename-folders");
+            string photos = Path.Combine(config.ResourceStorePath, "照片");
+            AppInfo album = AddEntry(config, "照片", Path.Combine(photos, "Trip"), true, true, "Trip");
+            string cover = Path.Combine(album.TargetPath, "封面.png");
+            File.WriteAllText(cover, "png");
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "精选", Cover = cover });
+            AppInfo nested = AddEntry(config, "照片", Path.Combine(photos, "嵌套"), true, true, "嵌套");
+            AddEntry(config, "照片", Path.Combine(nested.TargetPath, "inner.jpg"), false, true, "inner");
+
+            string scope = Path.Combine(root, "rename-folders");
+            AppInfo exe = AddEntry(config, "开发工具", Path.Combine(scope, "apps", "tool.exe"), false, false, "tool");
+            AppInfo shortcut = AddEntry(config, "开发工具", Path.Combine(config.FileStorePath, "快捷.lnk"), false, false, "快捷");
+            AppInfo storedDoc = AddEntry(config, "办公软件", Path.Combine(config.FileStorePath, "笔记.txt"), false, false, "笔记");
+            AppInfo outside = AddEntry(config, "办公软件", Path.Combine(scope, "elsewhere", "外部.txt"), false, false, "外部");
+            using (MainForm form = ResourceForm(config, "照片", album, nested, exe, shortcut, storedDoc, outside))
+            {
+                Check(!(bool)Invoke(form, "RenamesOnDisk", exe, EntriesOf(form, exe)), "exe would be renamed on disk");
+                Check(!(bool)Invoke(form, "RenamesOnDisk", shortcut, EntriesOf(form, shortcut)), "shortcut in store would be renamed on disk");
+                Check(!(bool)Invoke(form, "RenamesOnDisk", outside, EntriesOf(form, outside)), "referenced file would be renamed on disk");
+                Check((bool)Invoke(form, "RenamesOnDisk", storedDoc, EntriesOf(form, storedDoc)), "stored document not renamed on disk");
+                Check((bool)Invoke(form, "RenamesOnDisk", album, EntriesOf(form, album)), "resource folder not renamed on disk");
+
+                Check(Invoke(form, "RenameBlocker", nested.TargetPath, true) != null, "folder with nested entries not blocked");
+                Check(Invoke(form, "RenameBlocker", album.TargetPath, true) == null, "plain folder blocked");
+
+                string renamed = Path.Combine(photos, "Trip 2024");
+                Check(TryRename(form, album, true, "Trip 2024") == null && Directory.Exists(renamed) && File.Exists(Path.Combine(renamed, "封面.png")), "folder rename");
+                Check(config.Collections[0].Cover == Path.Combine(renamed, "封面.png"), "cover not rebased: " + config.Collections[0].Cover);
+                Check(album.Name == "Trip 2024" && album.DisplayName() == "Trip 2024", "folder display name");
+                Check(TryRename(form, album, true, "TRIP 2024") == null
+                    && new DirectoryInfo(photos).GetDirectories("trip 2024")[0].Name == "TRIP 2024", "case-only folder rename");
+
+                // 软件与引用条目：只改显示名，磁盘文件保持不变
+                foreach (AppInfo app in new AppInfo[] { exe, outside })
+                {
+                    string before = app.TargetPath, seen; int start, length;
+                    AnswerInput(delegate { Invoke(form, "RenameAddedEntry", app); }, "新的显示名", out seen, out start, out length);
+                    Check(File.Exists(before) && app.TargetPath == before && app.Name == "新的显示名"
+                        && EntriesOf(form, app)[0].Name == "新的显示名", "display-name rename touched disk: " + before);
+                }
+            }
+            AppConfig loaded = AppConfig.Load();
+            Check(loaded.Collections.Find(delegate(ResourceCollection c) { return c.Name == "精选"; }).Cover
+                == Path.Combine(photos, "TRIP 2024", "封面.png"), "persisted cover");
+            Check(loaded.AddedItems.ByPath(Path.Combine(photos, "TRIP 2024")).Count == 1, "persisted folder path");
+        }
+
+        private static void MoveIntoFolderKeepsRecords()
+        {
+            AppConfig config = RenameConfig("move-into");
+            string photos = Path.Combine(config.ResourceStorePath, "照片");
+            AppInfo image = AddEntry(config, "照片", Path.Combine(photos, "a.png"), false, true, "a");
+            AppInfo target = AddEntry(config, "照片", Path.Combine(photos, "收纳"), true, true, "收纳");
+            string key = image.Key, collection = CollectionKeys.Make("照片", "精选");
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "精选", Cover = image.TargetPath });
+            CollectionOps.AddMember(config, key, collection);
+            config.Favorites.Add(key);
+            config.Hidden.Add(key);
+            config.ItemOrder["照片"] = new List<string> { key, target.Key };
+            string dest = Path.Combine(target.TargetPath, "a.png"), newKey = "add:" + dest;
+            using (MainForm form = ResourceForm(config, "照片", image, target))
+            {
+                Invoke(form, "OnGridMoveIntoFolder", image, target);
+                Check(File.Exists(dest) && !File.Exists(Path.Combine(photos, "a.png")), "file not moved");
+                // 本次运行内的状态（重启前常用星标、隐藏与排序都以内存为准）
+                Check(config.Favorites.Contains(newKey) && !config.Favorites.Contains(key), "favorite stale in session");
+                Check(config.Hidden.Contains(newKey) && !config.Hidden.Contains(key), "hidden stale in session");
+                Check(config.ItemOrder["照片"].Contains(newKey) && !config.ItemOrder["照片"].Contains(key), "order stale in session");
+                Check(config.Collections[0].Cover == dest, "cover stale in session");
+            }
+            AppConfig loaded = AppConfig.Load();
+            Check(loaded.Favorites.Contains(newKey) && !loaded.Favorites.Contains(key), "favorite lost by move");
+            Check(loaded.Hidden.Contains(newKey) && !loaded.Hidden.Contains(key), "hidden lost by move");
+            Check(loaded.ItemOrder["照片"].Contains(newKey) && !loaded.ItemOrder["照片"].Contains(key), "order lost by move");
+            Check(loaded.ItemCategories.ContainsKey(newKey) && loaded.ItemCategories[newKey].Contains(collection), "membership lost by move");
+            Check(loaded.Collections.Find(delegate(ResourceCollection c) { return c.Name == "精选"; }).Cover == dest, "cover lost by move");
         }
 
         private static void CrossVolumeMoves()

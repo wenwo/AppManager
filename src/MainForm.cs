@@ -2001,39 +2001,8 @@ namespace AppManager
                 return;
             }
 
-            // 同步持久化：自建条目记录路径（Key=add:路径，需一并迁移归属配置，避免分类关联失联）
-            string oldKey = src.Key;
-            string newKey = "add:" + dest;
-            config.QueueEntryRename(oldKey, newKey);
-            foreach (AddedEntry e2 in config.AddedItems.ByPath(sp))
-            {
-                if (string.Equals(e2.Path, sp, StringComparison.OrdinalIgnoreCase))
-                {
-                    e2.Path = dest;
-                    e2.IsFolder = srcIsDir;
-                }
-            }
-            if (!string.IsNullOrEmpty(oldKey))
-            {
-                string ov;
-                if (config.CategoryOverride.TryGetValue(oldKey, out ov))
-                {
-                    config.CategoryOverride.Remove(oldKey);
-                    config.CategoryOverride[newKey] = ov;
-                }
-                List<string> cats;
-                if (config.ItemCategories.TryGetValue(oldKey, out cats))
-                {
-                    config.ItemCategories.Remove(oldKey);
-                    config.ItemCategories[newKey] = cats;
-                }
-                if (config.ExcludedCategories.TryGetValue(oldKey, out cats))
-                {
-                    config.ExcludedCategories.Remove(oldKey);
-                    config.ExcludedCategories[newKey] = cats;
-                }
-            }
-            InvalidateAddedIndex();   // 上文改写了 AddedEntry.Path，按旧路径建的索引必须失效
+            // 同步持久化：Key=add:路径 派生的全部记录随路径迁移（归属、常用、隐藏、排序、集合封面）
+            RekeyEntry(src.Key, "add:" + dest, sp, dest, srcIsDir);
             bool saved = config.Save();
             StartScan(false);   // 后台重扫（完成后自行刷新网格与图标），UI 线程不再同步全量扫描
             if (!saved)
@@ -4893,29 +4862,6 @@ namespace AppManager
             }
             addedIndex = map;
             addedIndexDirty = false;
-        }
-
-        /// <summary>改名：修改用户添加条目的显示名。</summary>
-        private void RenameAddedEntry(AppInfo app)
-        {
-            if (app == null) return;
-            string newName = InputDialog.Show("改名", "请输入新名称：", app.Name);
-            if (newName == null) return;
-            newName = newName.Trim();
-            if (newName.Length == 0) return;
-            bool changed = false;
-            foreach (AddedEntry e in config.AddedItems.ByPath(app.TargetPath))
-            {
-                if (string.Equals(e.Path, app.TargetPath, StringComparison.OrdinalIgnoreCase))
-                {
-                    e.Name = newName;
-                    changed = true;
-                }
-            }
-            if (!changed) return;
-            app.Name = newName;
-            config.Save();
-            StartScan(false);
         }
 
         /// <summary>

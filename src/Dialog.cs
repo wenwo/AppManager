@@ -947,7 +947,18 @@ namespace AppManager
 
         public static string Show(string title, string prompt, string defaultValue)
         {
+            return Show(title, prompt, defaultValue, -1, null);
+        }
+
+        /// <summary>
+        /// selectLength：初始只选中前 N 个字符（改名时只选主名，-1 为全选）。
+        /// validate：点确定/回车时调用；返回错误信息时对话框保持打开并在输入框下方显示，
+        /// 返回空串仅保持打开（如用户在二次确认中取消），返回 null 表示接受并关闭。
+        /// </summary>
+        public static string Show(string title, string prompt, string defaultValue, int selectLength, Func<string, string> validate)
+        {
             string result = null;
+            string error = null;
             Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
@@ -969,11 +980,33 @@ namespace AppManager
                     Draw.DrawStringLeft(g, title, Theme.FontOf(13F, FontStyle.Bold), tb, new Rectangle(S(24), S(18), f.Width - S(48), S(30)));
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(g, prompt, Theme.ButtonFont, mb, new Rectangle(S(24), S(58), f.Width - S(48), S(22)));
+                if (!string.IsNullOrEmpty(error))
+                    using (SolidBrush eb = new SolidBrush(Theme.DeleteRed))
+                        Draw.DrawStringLeft(g, error, Theme.CaptionFont, eb, new Rectangle(S(24), S(129), f.Width - S(48), S(24)));
             };
             TextBox box = MakeField(f, new Rectangle(24, 86, f.ClientSize.Width - 48, 40), defaultValue);
+            box.TextChanged += delegate { if (error != null) { error = null; f.Invalidate(); } };
+            Action accept = delegate
+            {
+                string value = box.Text;
+                if (validate != null)
+                {
+                    string problem = validate(value);
+                    if (problem != null)
+                    {
+                        error = problem.Length > 0 ? problem : null;
+                        f.Invalidate();
+                        box.Focus();
+                        return;
+                    }
+                }
+                result = value;
+                f.DialogResult = DialogResult.OK;
+                f.Close();
+            };
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
             ok.Bounds = new Rectangle(192, 158, 84, 34);
-            ok.Click += delegate { result = box.Text; f.DialogResult = DialogResult.OK; f.Close(); };
+            ok.Click += delegate { accept(); };
             RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
             cancel.Bounds = new Rectangle(292, 158, 84, 34);
             cancel.Click += delegate { result = null; f.DialogResult = DialogResult.Cancel; f.Close(); };
@@ -981,10 +1014,11 @@ namespace AppManager
             f.Controls.Add(cancel);
             box.KeyDown += delegate(object s, KeyEventArgs e)
             {
-                if (e.KeyCode == Keys.Enter) { result = box.Text; f.DialogResult = DialogResult.OK; f.Close(); }
+                if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; accept(); }
                 if (e.KeyCode == Keys.Escape) { result = null; f.DialogResult = DialogResult.Cancel; f.Close(); }
             };
-            box.SelectAll();
+            if (selectLength >= 0) box.Select(0, Math.Min(selectLength, box.TextLength));
+            else box.SelectAll();
             f.ActiveControl = box;
             ConfirmDialog.ShowModal(f);
             f.Dispose();
