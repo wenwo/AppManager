@@ -202,6 +202,14 @@ namespace AppManager
             return "「" + category + "」只接收" + ResourceCategoryTypeName(category) + "类型的文件";
         }
 
+        /// <summary>分类支持的文件扩展名列表，用于格式不符时明确提示。</summary>
+        public static string CategorySupportedFormats(string category)
+        {
+            string[] exts = ResourceCategoryExt(category);
+            if (exts == null) return "所有文件";
+            return string.Join("、", exts);
+        }
+
         /// <summary>只含内置解码器能打开的图片（集合封面等需要应用自己绘制的场景），不含 HEIC/SVG 等分类可收但无法解码的格式。</summary>
         public static string DecodableImageFilter()
         {

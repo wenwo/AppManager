@@ -915,12 +915,17 @@ namespace AppManager
             bool filterOk = photoFilter.StartsWith("照片 (*.")
                 && photoFilter.Contains("*.jpg") && photoFilter.Contains("|*.jpg")
                 && MediaRules.ResourceCategoryFilter("文件") == "所有文件 (*.*)|*.*";
+            string docFormats = MediaRules.CategorySupportedFormats("文档");
+            bool formatHintOk = docFormats.Contains(".pdf") && docFormats.Contains(".docx")
+                && docFormats.Contains(".ofd") && !docFormats.Contains(".mp4")
+                && MediaRules.CategorySupportedFormats("文件") == "所有文件";
             bool nameOk = MediaRules.ResourceCategoryTypeName("视频") == "视频"
                 && MediaRules.ResourceCategoryTypeName("文件") == "文件"
                 && MediaRules.ResourceCategoryTypeName("我的照片") == "文件";
-            Assert(photoOk && videoOk && musicOk && docOk && zipOk && idOk && freeOk && filterOk && nameOk,
+            Assert(photoOk && videoOk && musicOk && docOk && zipOk && idOk && freeOk && filterOk && formatHintOk && nameOk,
                 "照片=" + photoOk + " 视频=" + videoOk + " 音乐=" + musicOk + " 文档=" + docOk
-                + " 压缩包=" + zipOk + " 证件=" + idOk + " 不限=" + freeOk + " 过滤=" + filterOk + " 名称=" + nameOk);
+                + " 压缩包=" + zipOk + " 证件=" + idOk + " 不限=" + freeOk + " 过滤=" + filterOk
+                + " 格式提示=" + formatHintOk + " 名称=" + nameOk);
         }
 
         /// <summary>集合键规则与集合定义的配置往返（XML 保存/重读一致）。</summary>

@@ -962,7 +962,7 @@ namespace AppManager
             loadingLabel.Visible = false;
             Controls.Add(loadingLabel);
 
-            // 底部状态栏（默认隐藏，搬运/处理时显示）
+            // 底部状态条（默认隐藏，搬运/处理时覆盖在内容区底部留白上）
             statusBar = new Panel();
             statusBar.BackColor = Theme.StatusBarBg;
             statusBar.Visible = false;
@@ -999,7 +999,7 @@ namespace AppManager
             int row1 = Dpi(Theme.TitleRowHeight);    // 行1：标题 + 窗口按钮
             int row2 = Dpi(Theme.ToolbarRowHeight);  // 行2：搜索/计数 + 视图切换 + 操作按钮
             int sb = Dpi(sidebar.CurrentWidth);
-            int statusH = Dpi(34);
+            int footerH = Dpi(ContentFooterH);
 
             sidebar.Location = new Point(0, 0);
             sidebar.Size = new Size(sb, ClientSize.Height);
@@ -1039,7 +1039,7 @@ namespace AppManager
             countLabel.Location = new Point(countLeft, row1);
             countLabel.Size = new Size(Math.Max(0, countRight - countLeft), row2);
 
-            int gridHeight = ClientSize.Height - top - (statusBar.Visible ? statusH : 0);
+            int gridHeight = ClientSize.Height - top;
             // 集合侧边栏可见时占据主侧栏与内容区之间，网格与各查看器按该宽度让位
             int colW = 0;
             if (collectionSidebar != null)
@@ -1078,15 +1078,22 @@ namespace AppManager
             settingsPage.Location = new Point(0, Dpi(Theme.TitleRowHeight));
             settingsPage.Size = new Size(ClientSize.Width, Math.Max(0, ClientSize.Height - Dpi(Theme.TitleRowHeight)));
 
-            // 底部状态栏
-            statusBar.Location = new Point(sb, ClientSize.Height - statusH);
-            statusBar.Size = new Size(ClientSize.Width - sb, statusH);
+            // 底部状态条覆盖内容区留白，不压缩列表高度，也不推动原有底栏
+            statusBar.Location = new Point(contentX, ClientSize.Height - footerH);
+            statusBar.Size = new Size(contentW, footerH);
             statusLabel.Location = new Point(Dpi(12), 0);
-            statusLabel.Size = new Size(Dpi(140), statusH);
-            statusProgress.Location = new Point(Dpi(160), Dpi(8));
-            statusProgress.Size = new Size(Dpi(180), statusH - Dpi(16));
-            statusDetail.Location = new Point(Dpi(350), 0);
-            statusDetail.Size = new Size(statusBar.Width - Dpi(360), statusH);
+            if (statusProgress.Visible)
+            {
+                statusLabel.Size = new Size(Dpi(160), footerH);
+                statusProgress.Location = new Point(Dpi(176), (footerH - Dpi(18)) / 2);
+                statusProgress.Size = new Size(Dpi(180), Dpi(18));
+                statusDetail.Location = new Point(Dpi(366), 0);
+                statusDetail.Size = new Size(Math.Max(0, statusBar.Width - Dpi(378)), footerH);
+            }
+            else
+            {
+                statusLabel.Size = new Size(Math.Max(0, statusBar.Width - Dpi(24)), footerH);
+            }
 
             // 播放器全屏：视频区铺满客户区（置顶覆盖侧栏与顶栏），其余控件位置不动
             if (playerFullscreen && videoPlayer != null)
@@ -4655,9 +4662,12 @@ namespace AppManager
             ResetImportStatus();
             statusBar.Visible = true;
             statusLabel.Text = text;
+            statusProgress.Visible = total > 0;
+            statusDetail.Visible = total > 0;
             statusProgress.Maximum = Math.Max(1, total);
             statusProgress.Value = Math.Min(value, statusProgress.Maximum);
             statusDetail.Text = string.Empty;
+            statusBar.BringToFront();
             LayoutControls();
         }
 
@@ -5511,8 +5521,7 @@ namespace AppManager
         /// <summary>内容区底部留白区域：高度与左右侧栏底部按钮栏一致；窗口过矮时返回空。</summary>
         private Rectangle ContentFooterRect()
         {
-            int statusH = statusBar != null && statusBar.Visible ? Dpi(34) : 0;
-            int footerTop = ClientSize.Height - statusH - Dpi(ContentFooterH);
+            int footerTop = ClientSize.Height - Dpi(ContentFooterH);
             int sb = Dpi(sidebar.CurrentWidth);
             int colW = collectionSidebar != null && collectionSidebar.Visible ? Dpi(collectionSidebar.CurrentWidth) : 0;
             int contentX = sb + colW;

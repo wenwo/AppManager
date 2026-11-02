@@ -343,7 +343,7 @@ namespace AppManager
                 // 与拖放一致：全部类型不符时直接提示，不排队一个注定全部跳过的导入批次
                 if (resource && Enumerable.Range(0, paths.Length).All(i => !MediaRules.FitsCategory(category, paths[i], folders[i])))
                 {
-                    ShowNotice("未导入：" + MediaRules.CategoryTypeHint(category));
+                    ShowUnsupportedFormats(category, paths);
                     return true;
                 }
                 QueueImport(paths, operation, category, choose ? null : ImportCollectionKey, resource, sequence);
@@ -354,6 +354,19 @@ namespace AppManager
                 MessageBox.Show(this, "无法读取剪贴板，请重试。\n" + ex.Message, "粘贴文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return true;
             }
+        }
+
+        private void ShowUnsupportedFormats(string category, string[] paths)
+        {
+            string formats = string.Join("、", paths
+                .Select(Path.GetExtension)
+                .Select(ext => string.IsNullOrEmpty(ext) ? "无扩展名" : ext.ToLowerInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+            string lead = paths.Length == 1 ? "未导入：该文件" : "未导入：" + paths.Length + " 个文件";
+            string message = lead + "的格式不符合「" + category + "」分类。\n\n"
+                + "不支持：" + formats + "\n\n"
+                + "支持格式（不区分大小写）：\n" + MediaRules.CategorySupportedFormats(category);
+            MessageBox.Show(this, message, "格式不支持", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         private void EnqueueImport(Action action)

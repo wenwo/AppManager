@@ -35,6 +35,7 @@ namespace AppManager
             Run("XML migration: all fields and relationships survive restart", Migration);
             Run("manual batch, grid drop and collection drop preserve bytes and memberships", UiIngestion);
             Run("external effects, queued copies and fixed destinations", ExternalCopyQueue);
+            Run("cross-mode copy keeps the original software category", CrossModeCopy);
             Run("failed physical move keeps source bytes and does not register a phantom item", FailedMove);
             Run("software registration, new file/folder and scanner publish preserve manual rows", SoftwareAndScan);
             Run("same content in multiple categories has complete listing projections", MultipleCategories);
@@ -209,10 +210,29 @@ namespace AppManager
                 Invoke(form, "QueueImport", new string[] { existing.ToUpperInvariant() }, ImportOperation.Copy, "另一分类", null, true, (uint)0, null);
                 PumpUntil(() => !(bool)typeof(MainForm).GetField("importRunning", Private).GetValue(form));
                 Check(c.AddedItems.Count == 2 && File.Exists(existing), "reference was copied or duplicated by casing");
+                Check(Reload().Database.Page("资料", true, true, "", 10, null, true, false).Total == 2, "original category lost after copy");
                 Check(Reload().Database.Page("另一分类", true, true, "", 10, null, true, false).Total == 1, "extra category not indexed");
             }
             Check(Reload().Database.Page(Collection, true, true, "", 10, null, true, false).Total == 2, "copy collection lost on restart");
         }
+        private static void CrossModeCopy()
+        {
+            AppConfig c = Fixture();
+            string path = Source("cross-mode.txt", "same content");
+            c.AddedItems.Add(new AddedEntry { Path = path, Category = "软件测试", IsResource = false }); Save(c);
+            using (MainForm form = Form(c, true))
+            {
+                Set(form, "currentCategory", "资料");
+                Invoke(form, "QueueImport", new string[] { path }, ImportOperation.Copy, "资料", null, true, (uint)0, null);
+                PumpUntil(() => !(bool)typeof(MainForm).GetField("importRunning", Private).GetValue(form));
+            }
+            AppConfig read = Reload();
+            Check(read.AddedItems.Count == 2, "cross-mode copy did not keep both memberships");
+            Check(read.Database.Page("软件测试", false, true, "", 10, null, true, false).Total == 1, "original software category lost");
+            Check(read.Database.Page("资料", true, true, "", 10, null, true, false).Total == 1, "resource category missing");
+            Integrity(read.Database);
+        }
+
         private static void FailedMove()
         {
             AppConfig c = Fixture(); string good = Source("good.txt", "good bytes"), locked = Source("locked.txt", "locked bytes");
@@ -342,6 +362,8 @@ namespace AppManager
             Check(read.AddedItems.ByPath(cut).Count == 0 && !read.Favorites.Contains(cutKey) && !read.ItemCategories.ContainsKey(cutKey), "moved-out entry not purged");
             Check(read.AddedItems.ByPath(offline).Count == 1, "entry purged although its folder is unavailable");
             string category; Check(read.CategoryOverride.TryGetValue(pasteKey, out category) && category == "另一分类" && File.Exists(paste), "in-app paste did not move the category");
+            Check(read.Database.Page("资料", true, true, "", 10, null, true, false).Total == 1, "moved item still listed in the original category");
+            Check(read.Database.Page("另一分类", true, true, "", 10, null, true, false).Total == 1, "moved item missing from the target category");
             Integrity(read.Database);
         }
         private static void ResourceTypes()

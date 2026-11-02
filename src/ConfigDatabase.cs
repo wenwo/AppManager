@@ -93,6 +93,7 @@ namespace AppManager
                 AppConfig result = store.Read();
                 result.Database = store;
                 store.EnsureCatalog(result);
+                store.RepairMembershipProjections();
                 result.DatabaseRevision = store.revision;
                 return result;
             }

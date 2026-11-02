@@ -117,6 +117,7 @@ namespace AppManager
         {
             using (Sqlite.Statement read = db.Prepare("SELECT c.metadata,c.kind,c.active,g.key,c.size,c.modified FROM catalog c LEFT JOIN groups g ON g.id=c.base_group WHERE c.item_id=?"))
             using (Sqlite.Statement relations = db.Prepare("SELECT r.section,g.key,r.ordinal,r.item_id FROM records r LEFT JOIN groups g ON g.id=r.group_id WHERE r.item_id=? OR r.item_id=(SELECT id FROM entries WHERE key=?) ORDER BY CASE WHEN r.item_id=? THEN 0 ELSE 1 END"))
+            using (Sqlite.Statement memberships = db.Prepare("SELECT g.key,a.resource FROM added_items a LEFT JOIN groups g ON g.id=a.group_id WHERE a.item_id=?"))
             using (Sqlite.Statement remove = db.Prepare("DELETE FROM listing WHERE item_id=?"))
             using (Sqlite.Statement insert = db.Prepare("INSERT OR IGNORE INTO listing(group_id,item_id,kind,hidden,rank,name,size,modified) VALUES(?,?,?,?,?,?,?,?)"))
             using (Sqlite.Statement setHidden = db.Prepare("UPDATE catalog SET hidden=? WHERE item_id=?"))
@@ -130,7 +131,8 @@ namespace AppManager
                     string legacy = "af:" + Scanner.NormalizeEntryName(a.Name);
                     bool isHidden = false, favorite = false, overridden = false;
                     string primary = a.Category;
-                    HashSet<string> categories = new HashSet<string>(StringComparer.Ordinal);
+                    bool resourceMember = kind == 2, softwareMember = kind != 2;
+                    Dictionary<string, int> categories = new Dictionary<string, int>(StringComparer.Ordinal);
                     HashSet<string> excluded = new HashSet<string>(StringComparer.Ordinal);
                     Dictionary<string, long> ranks = new Dictionary<string, long>(StringComparer.Ordinal);
                     relations.Bind(id, legacy, id);
@@ -142,34 +144,87 @@ namespace AppManager
                             case "Favorites": favorite = true; break;
                             case "Hidden": isHidden = true; break;
                             case "CategoryOverrides": if (!overridden && !string.IsNullOrEmpty(relation[1])) { primary = relation[1]; overridden = true; } break;
-                            case "ItemCategories": if (exact) categories.Add(relation[1]); break;
+                            case "ItemCategories": if (exact) AddCategory(categories, relation[1], kind == 2 ? 2 : 0); break;
                             case "ExcludedCategories": if (exact) excluded.Add(relation[1]); break;
                             case "ItemOrders": if (!ranks.ContainsKey(relation[1])) ranks[relation[1]] = Number(relation[2]); break;
                         }
                     }
                     setHidden.Bind(isHidden, id); setHidden.Read();
-                    categories.Add(primary);
-                    if (!overridden && a.IsDesktop) categories.Add("快捷中心");
+                    AddCategory(categories, primary, kind == 2 ? 2 : 0);
+                    if (!overridden)
+                    {
+                        // 同一路径可同时登记在软件分类和资源分类（跨模式复制）：每条归属都要投影，不能只保留主分类。
+                        // 显式分类覆盖表示「移动到分类」，原分类不再展示，只保留覆盖后的主分类与额外归属。
+                        memberships.Bind(id);
+                        while (memberships.Read())
+                        {
+                            string[] membership = memberships.Row();
+                            bool resource = membership[1] == "1";
+                            if (resource) resourceMember = true; else softwareMember = true;
+                            AddCategory(categories, membership[0], resource ? 2 : 0);
+                        }
+                        if (a.IsDesktop) AddCategory(categories, "快捷中心", kind == 2 ? 2 : 0);
+                    }
                     foreach (string cat in excluded) categories.Remove(cat);
                     // 集合成员必须仍属于父分类，集合关系自身保留，移回父分类后可恢复。
                     List<string> invalid = new List<string>();
-                    foreach (string cat in categories) if (CollectionKeys.IsCollectionKey(cat))
+                    foreach (string cat in new List<string>(categories.Keys)) if (CollectionKeys.IsCollectionKey(cat))
                     {
                         int slash = cat.IndexOf('/', 4);
-                        if (slash < 0 || !categories.Contains(cat.Substring(4, slash - 4))) invalid.Add(cat);
+                        if (slash < 0 || !categories.ContainsKey(cat.Substring(4, slash - 4))) invalid.Add(cat);
                     }
                     foreach (string cat in invalid) categories.Remove(cat);
-                    categories.Add(kind == 2 ? "全部资源" : (kind == 0 ? "全部软件" : "全部文件"));
-                    if (favorite) categories.Add("常用");
-                    foreach (string category in categories)
+                    if (resourceMember) AddCategory(categories, "全部资源", 2);
+                    if (softwareMember) AddCategory(categories, kind == 0 ? "全部软件" : "全部文件", 0);
+                    if (favorite) AddCategory(categories, "常用", kind == 2 ? 2 : 0);
+                    foreach (KeyValuePair<string, int> entry in categories)
                     {
+                        string category = entry.Key;
                         if (string.IsNullOrEmpty(category)) continue;
                         long rank = long.MaxValue;
                         if (!ranks.TryGetValue(category, out rank)) rank = long.MaxValue;
-                        insert.Bind(Group(db, category), id, kind == 2 ? 2 : 0, isHidden, rank, SearchName(a.Name), Number(row[4]), Number(row[5])); insert.Read();
+                        insert.Bind(Group(db, category), id, entry.Value, isHidden, rank, SearchName(a.Name), Number(row[4]), Number(row[5])); insert.Read();
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// 修复历史数据：同一路径在软件分类与资源分类各有归属时，旧投影只保留了优先的一条。
+        /// 按 added_items 的实际归属补齐缺失的列表行，启动时只处理确实缺失的条目。
+        /// </summary>
+        internal void RepairMembershipProjections()
+        {
+            try
+            {
+                lock (gate)
+                using (Sqlite db = Open())
+                {
+                    HashSet<long> affected = new HashSet<long>();
+                    foreach (string[] row in db.Query("SELECT DISTINCT a.item_id FROM added_items a WHERE a.group_id IS NOT NULL"
+                        + " AND NOT EXISTS (SELECT 1 FROM listing l WHERE l.item_id=a.item_id AND l.group_id=a.group_id)"
+                        + " AND NOT EXISTS (SELECT 1 FROM records r WHERE r.section='CategoryOverrides' AND r.item_id=a.item_id)"
+                        + " AND NOT EXISTS (SELECT 1 FROM records r WHERE r.section='ExcludedCategories' AND r.item_id=a.item_id AND r.group_id=a.group_id)"))
+                        affected.Add(Number(row[0]));
+                    if (affected.Count == 0) return;
+                    db.Execute("BEGIN IMMEDIATE");
+                    try
+                    {
+                        UpdateAddedCatalog(db, affected);
+                        RebuildListings(db, null, affected);
+                        db.Execute("COMMIT");
+                    }
+                    catch { db.Execute("ROLLBACK"); throw; }
+                }
+            }
+            catch (Exception ex) { Paths.LogError(new IOException("归属投影修复失败，后续保存时会重建。", ex)); }
+        }
+
+        private static void AddCategory(Dictionary<string, int> categories, string category, int kind)
+        {
+            if (string.IsNullOrEmpty(category)) return;
+            int existing;
+            if (!categories.TryGetValue(category, out existing) || existing < kind) categories[category] = kind;
         }
 
         private static string SearchName(string value)
@@ -231,7 +286,9 @@ namespace AppManager
                 if (metadataSort) order = rank + (descending ? " DESC," + name + " DESC," + itemId + " DESC" : "," + name + "," + itemId);
                 else order = (search || byName ? name : "l.rank,l.name") + (descending && (search || byName) ? " DESC," + itemId + " DESC" : "," + itemId);
                 args.Add(limit);
-                foreach (string[] row in db.Query("SELECT c.metadata,c.hidden,c.item_id," + rank + "," + name + ",g.key,c.kind FROM " + from + " LEFT JOIN groups g ON g.id=c.base_group WHERE " + where + " ORDER BY " + order + " LIMIT ?", args.ToArray()))
+                // 分类视图按该分类自己的归属类型取内容类型：同一路径可能同时属于软件分类和资源分类。
+                string kindColumn = search ? "c.kind" : "l.kind";
+                foreach (string[] row in db.Query("SELECT c.metadata,c.hidden,c.item_id," + rank + "," + name + ",g.key," + kindColumn + " FROM " + from + " LEFT JOIN groups g ON g.id=c.base_group WHERE " + where + " ORDER BY " + order + " LIMIT ?", args.ToArray()))
                 {
                     AppInfo a = Unpack(row[0]); a.IsHidden = row[1] == "1"; result.Items.Add(a);
                     if (row[5] != null) a.Category = row[5];
