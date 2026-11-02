@@ -76,7 +76,8 @@ namespace AppManager
             Copy(source, target, overwrite, new Budget());
         }
 
-        internal static void Copy(string source, string target, bool overwrite, Budget budget)
+        /// <summary>按预检快照复制，返回已复制的源条目（文件与目录的完整路径，父目录在前）。</summary>
+        internal static List<string> Copy(string source, string target, bool overwrite, Budget budget)
         {
             source = DesktopOrganizer.NormalizeRoot(Path.GetFullPath(source));
             target = DesktopOrganizer.NormalizeRoot(Path.GetFullPath(target));
@@ -98,6 +99,7 @@ namespace AppManager
                 if (directory) Directory.CreateDirectory(dest);
                 else File.Copy(path, dest, overwrite);
             }
+            return entries;
         }
     }
 }

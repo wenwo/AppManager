@@ -98,6 +98,30 @@ namespace AppManager
             if (pathCache.Count >= 512) pathCache.Clear(); pathCache[path ?? ""] = result;
             return result;
         }
+        /// <summary>位于指定文件夹之内（不含文件夹自身）的收录项，包括尚未保存的改动。</summary>
+        internal List<AddedEntry> EntriesUnder(string folder)
+        {
+            List<AddedEntry> result = new List<AddedEntry>();
+            if (string.IsNullOrEmpty(folder)) return result;
+            string prefix = folder.TrimEnd('\\', '/') + "\\";
+            Predicate<AddedEntry> under = delegate(AddedEntry e)
+            { return e.Path != null && e.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && !result.Contains(e); };
+            if (Store != null)
+            {
+                string key = prefix.ToUpperInvariant();
+                using (Sqlite db = new Sqlite(Store.FilePath, true))
+                    foreach (string[] row in db.Query(Columns + " WHERE substr(a.path_key,1,?)=? ORDER BY a.id", key.Length, key))
+                    {
+                        if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
+                        AddedEntry entry = Hydrate(row);   // 未保存的改名以内存对象为准，下面按当前路径复核
+                        if (under(entry)) result.Add(entry);
+                    }
+                foreach (AddedEntry entry in Dirty.Values)
+                    if (!Removed.Contains(entry.RecordId) && under(entry)) result.Add(entry);
+            }
+            foreach (AddedEntry entry in New) if (under(entry)) result.Add(entry);
+            return result;
+        }
         public bool Remove(AddedEntry entry)
         {
             pathCache.Clear();

@@ -41,6 +41,8 @@ namespace AppManager
             Run("case variants of the same Windows path resolve to one content identity", CaseVariants);
             Run("XML import replaces intended state and preserves prior audit chain", Import);
             Run("path move preserves stable identity, favorites, hidden, ordering and collection", Move);
+            Run("move guards: shortcut targets stay, reused path key saves, folder contents are found", MoveGuards);
+            Run("cut and move-out: vanished sources purge entries, unavailable folders do not, in-app paste moves", MoveOut);
             Run("backup, restore, undo and redo match complete state fingerprints", Restore);
             Run("four writers and scanner publishing: no lost commits or orphan relationships", ConcurrentWriters);
             Run("live backup during ingestion is an internally consistent committed snapshot", ConcurrentBackup);
@@ -271,6 +273,75 @@ namespace AppManager
             Check(Id(read.Database, newKey) == id && read.AddedItems.ByPath(moved).Count == 1, "identity changed on move");
             Check(read.Favorites.Contains(newKey) && read.Hidden.Contains(newKey) && read.ItemOrder["资料"][0] == newKey && read.ItemCategories[newKey].Contains(Collection), "relationship not moved");
             Check(read.Database.Page(Collection, true, true, "", 10, null, true, false).Total == 1, "moved projection missing"); Integrity(read.Database);
+        }
+        private static void MoveGuards()
+        {
+            AppConfig c = Fixture(); string folder = Path.Combine(scope, "target"); Directory.CreateDirectory(folder);
+            // 快捷方式条目（lnk:）的目标是用户自己的文件：拖入目录条目不得搬动它
+            string user = Source("user.txt", "user file");
+            using (MainForm form = Form(c, true)) Invoke(form, "OnGridMoveIntoFolder",
+                new AppInfo { Key = "lnk:" + user, TargetPath = user, Name = "user", IsFile = true }, new AppInfo { TargetPath = folder, IsFolder = true });
+            Check(File.ReadAllText(user) == "user file" && !File.Exists(Path.Combine(folder, "user.txt")), "shortcut target was moved");
+
+            // entries 行不回收：路径改到曾登记过的位置时，保存不能失败，后续保存也不能被卡住
+            string stale = Path.Combine(folder, "reuse.txt");
+            c.AddedItems.Add(new AddedEntry { Path = stale, Category = "资料", IsResource = true }); Save(c);
+            foreach (AddedEntry e in c.AddedItems.ByPath(stale)) c.AddedItems.Remove(e);
+            Save(c); Check(Id(c.Database, "add:" + stale) != 0, "fixture: stale entry row missing");
+            string reuse = Source("reuse.txt", "reuse"); string oldKey = "add:" + reuse, newKey = "add:" + stale;
+            c.AddedItems.Add(new AddedEntry { Path = reuse, Category = "资料", IsResource = true }); Save(c);
+            c.QueueEntryRename(oldKey, newKey);
+            foreach (AddedEntry e in c.AddedItems.ByPath(reuse)) e.Path = stale;
+            Check(c.Save(), "rename onto a previously registered key failed: " + c.DatabaseError);
+            c.Favorites.Add(newKey); Check(c.Save(), "later save blocked by the failed rename: " + c.DatabaseError);
+            AppConfig read = Reload();
+            Check(read.AddedItems.ByPath(stale).Count == 1 && read.AddedItems.ByPath(reuse).Count == 0 && read.Favorites.Contains(newKey), "renamed entry lost");
+            Integrity(read.Database);
+
+            // 文件夹内的收录项：数据库中、未保存的新增与改名都能找到，已删除的不算
+            string box = Path.Combine(scope, "box"), inner = Path.Combine(box, "inner.txt"), boxed = Path.Combine(box + "ed", "x.txt");
+            read.AddedItems.Add(new AddedEntry { Path = inner, Category = "资料", IsResource = true });
+            read.AddedItems.Add(new AddedEntry { Path = boxed, Category = "资料", IsResource = true }); Save(read);
+            Check(read.AddedItems.EntriesUnder(box).Count == 1, "folder contents not found or sibling prefix matched");
+            foreach (AddedEntry e in read.AddedItems.ByPath(inner)) e.Path = Path.Combine(scope, "out.txt");
+            Check(read.AddedItems.EntriesUnder(box).Count == 0, "unsaved move out of the folder ignored");
+            read.AddedItems.Add(new AddedEntry { Path = Path.Combine(box, "new.txt"), Category = "资料", IsResource = true });
+            Check(read.AddedItems.EntriesUnder(box + "\\").Count == 1, "unsaved addition inside the folder ignored");
+        }
+        private static void MoveOut()
+        {
+            AppConfig c = Fixture();
+            string cut = Source("cut.txt", "cut"), cutKey = "add:" + cut;
+            string offline = Source("offline\\keep.txt", "keep"), offlineKey = "add:" + offline;
+            string paste = Source("paste.txt", "paste"), pasteKey = "add:" + paste;
+            foreach (string path in new[] { cut, offline, paste }) c.AddedItems.Add(new AddedEntry { Path = path, Category = "资料", IsResource = true });
+            c.Favorites.Add(cutKey); c.ItemCategories[cutKey] = new List<string> { Collection }; Save(c);
+            using (MainForm form = Form(c, true))
+            {
+                AppInfo a = new AppInfo { Key = cutKey, TargetPath = cut, Name = "cut", IsFile = true, Category = "资料" };
+                AppInfo b = new AppInfo { Key = offlineKey, TargetPath = offline, Name = "keep", IsFile = true, Category = "资料" };
+                Invoke(form, "WatchMoveOut", new List<AppInfo> { a, b }, DateTime.MaxValue);
+                Invoke(form, "CheckMoveOuts");
+                Check(c.AddedItems.ByPath(cut).Count == 1, "purged while the source is still in place");
+                File.Move(cut, Path.Combine(scope, "elsewhere.txt"));                                  // 被资源管理器移走
+                Directory.Move(Path.GetDirectoryName(offline), Path.Combine(scope, "offline-gone"));   // 所在目录也不可用：视为卷离线
+                Invoke(form, "CheckMoveOuts");
+
+                // 本应用剪切后粘贴回应用：按「移动到分类」改归属，剪切随之结束
+                Type stateType = typeof(MainForm).GetNestedType("CutState", BindingFlags.NonPublic);
+                object state = Activator.CreateInstance(stateType);
+                AppInfo p = new AppInfo { Key = pasteKey, TargetPath = paste, Name = "paste", IsFile = true, Category = "资料" };
+                stateType.GetField("Apps").SetValue(state, new List<AppInfo> { p });
+                stateType.GetField("Resource").SetValue(state, true);
+                Set(form, "cutState", state); Set(form, "currentCategory", "另一分类");
+                Invoke(form, "PasteCutItems");
+                Check(typeof(MainForm).GetField("cutState", Private).GetValue(form) == null, "cut not finished after paste");
+            }
+            AppConfig read = Reload();
+            Check(read.AddedItems.ByPath(cut).Count == 0 && !read.Favorites.Contains(cutKey) && !read.ItemCategories.ContainsKey(cutKey), "moved-out entry not purged");
+            Check(read.AddedItems.ByPath(offline).Count == 1, "entry purged although its folder is unavailable");
+            string category; Check(read.CategoryOverride.TryGetValue(pasteKey, out category) && category == "另一分类" && File.Exists(paste), "in-app paste did not move the category");
+            Integrity(read.Database);
         }
         private static void Restore()
         {

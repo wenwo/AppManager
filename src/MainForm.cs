@@ -732,7 +732,9 @@ namespace AppManager
             grid.DragMoved += OnGridDragMoved;
             grid.DroppedOutside += OnGridDroppedOutside;
             grid.ExternalDrop = delegate(DragEventArgs e, bool drop) { return HandleExternalImport(null, null, e, drop); };
+            grid.DragOutData = ExportDragData;   // 拖出窗口：把条目实体文件交给资源管理器/其它程序
             grid.MoveIntoFolder += OnGridMoveIntoFolder;
+            grid.CanMoveIntoFolder = CanMoveIntoFolder;
             grid.BlankRightClicked += OnGridBlankRightClicked;
             grid.SortRequested += OnGridSortRequested;   // 列表表头点击排序（名称/大小/时间）
             grid.MetadataReady += OnGridMetadataReady;
@@ -1940,30 +1942,54 @@ namespace AppManager
         }
 
         /// <summary>
+        /// 可拖入目录条目的来源：本应用管理的文件/文件夹（收录与收纳库条目，Key 为 add:路径）。
+        /// 桌面/开始菜单快捷方式条目（lnk:/af:）的目标是用户自己的文件，不能被搬走。
+        /// </summary>
+        private static bool CanMoveIntoFolder(AppInfo app)
+        {
+            return app != null && app.IsFile && !string.IsNullOrEmpty(app.Key)
+                && app.Key.StartsWith("add:", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
         /// 文件类型条目拖入目录类型条目：把条目目标（文件/文件夹）搬迁进该目录，
         /// 并同步自建条目的持久化记录与归属配置（Key 由路径派生，需迁移）。
-        /// 已在目标内 / 拖入自身子目录 / 搬运失败时不做任何变更。
+        /// 已直接位于目标内 / 拖入自身子目录 / 搬运失败时不做任何变更（同资源管理器）。
         /// </summary>
         private void OnGridMoveIntoFolder(AppInfo src, AppInfo folder)
         {
-            if (src == null || folder == null || !src.IsFile || !folder.IsFolder) return;
+            if (src == null || folder == null || !CanMoveIntoFolder(src) || !folder.IsFolder) return;
             string sp = src.TargetPath;
             string dp = folder.TargetPath;
             if (string.IsNullOrEmpty(sp) || string.IsNullOrEmpty(dp)) return;
             if (!Directory.Exists(dp)) return;               // 目录条目失效
             bool srcIsDir = Directory.Exists(sp);
             if (!srcIsDir && !File.Exists(sp)) return;       // 文件条目失效
-            if (IsUnder(sp, dp) || IsUnder(dp, sp)) return;  // 拖入自身子目录 / 已在目标内
+            if (IsUnder(sp, dp)) return;                     // 拖入自身或自身子目录
+            string parent = Path.GetDirectoryName(Path.GetFullPath(sp).TrimEnd('\\', '/'));
+            if (parent != null && string.Equals(parent.TrimEnd('\\', '/'), Path.GetFullPath(dp).TrimEnd('\\', '/'),
+                StringComparison.OrdinalIgnoreCase)) return;   // 已直接位于目标目录
+            // 文件夹内还有其它收录项时，移动会让它们全部指向旧路径而失效
+            if (srcIsDir && config.AddedItems.EntriesUnder(sp).Count > 0)
+            {
+                MessageBox.Show(this, "「" + src.DisplayName() + "」内包含其它已收录的项目，移动后这些项目会失效。\n请先移除这些项目后再移动。",
+                    "移动", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
 
-            string dest = UniqueDest(dp, Path.GetFileName(sp));
+            string dest = UniqueEntryDest(dp, Path.GetFileName(sp.TrimEnd('\\', '/')));
+            bool sourceRemoved;
             try
             {
-                if (srcIsDir) DesktopOrganizer.MoveDirectory(sp, dest);   // 同卷 Move / 跨卷 复制+删除
-                else DesktopOrganizer.MoveFile(sp, dest);
+                sourceRemoved = srcIsDir
+                    ? DesktopOrganizer.MoveDirectory(sp, dest)   // 同卷 Move / 跨卷 复制+校验删源
+                    : DesktopOrganizer.MoveFile(sp, dest);
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Debug.WriteLine("拖入目录搬迁失败 " + sp + " -> " + dest + ": " + ex.Message);
+                Paths.LogError(ex);
+                MessageBox.Show(this, "无法移动「" + src.DisplayName() + "」，原文件保持不变。\n" + ex.Message, "移动",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -2000,8 +2026,24 @@ namespace AppManager
                 }
             }
             InvalidateAddedIndex();   // 上文改写了 AddedEntry.Path，按旧路径建的索引必须失效
-            config.Save();
+            bool saved = config.Save();
             StartScan(false);   // 后台重扫（完成后自行刷新网格与图标），UI 线程不再同步全量扫描
+            if (!saved)
+                MessageBox.Show(this, "文件已移动到「" + dp + "」，但资源库未能保存，请检查磁盘空间和目录权限。", "移动",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            else if (!sourceRemoved)
+                MessageBox.Show(this, "已移动到「" + dp + "」，但原位置有内容未能删除（可能正被使用，或在移动期间被修改），已保留在：\n" + sp,
+                    "移动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        /// <summary>目标目录下的可用名称：避开磁盘上已有的文件，也避开曾收录过的路径（避免继承旧条目的隐藏/分类等设置）。</summary>
+        private string UniqueEntryDest(string dir, string name)
+        {
+            string dest = Path.Combine(dir, name);
+            int i = 1;
+            while (File.Exists(dest) || Directory.Exists(dest) || config.AddedItems.ByPath(dest).Count > 0)
+                dest = Path.Combine(dir, Path.GetFileNameWithoutExtension(name) + "_" + i++ + Path.GetExtension(name));
+            return dest;
         }
 
         /// <summary>网格空白处右键：新建文件夹 / 文本文档（存入配置的存储位置，收录进当前分类）；资源分类附「新建集合…」。</summary>
@@ -3615,6 +3657,7 @@ namespace AppManager
                 items.Add(MkMenu("打开", delegate { OnLaunch(app); }));
                 items.Add(MkMenu("打开所在位置", delegate { Launcher.OpenFileLocation(app); }));
                 items.Add(MkSep());
+                AddCopyFilesMenu(items, targets);
                 items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
                 items.Add(MkSep());
@@ -3678,6 +3721,7 @@ namespace AppManager
                     items.Add(MkMenu("取消隐藏", delegate { SetHidden(app, false); }));
                 else
                     items.Add(MkMenu("隐藏", delegate { SetHidden(app, true); }));
+                AddCopyFilesMenu(items, targets);
                 items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
                 if (!website && !string.IsNullOrEmpty(app.UninstallString))
@@ -3710,6 +3754,7 @@ namespace AppManager
             if (readOnly)
             {
                 items.Add(MkSep());
+                AddCopyFilesMenu(items, targets);
                 items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
                 items.Add(MkSep());
@@ -3742,6 +3787,7 @@ namespace AppManager
                 items.Add(MkMenu("取消隐藏", delegate { SetHidden(targets, false); }));
             else
                 items.Add(MkMenu("隐藏", delegate { SetHidden(targets, true); }));
+            AddCopyFilesMenu(items, targets);
             items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
             items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
         }
@@ -3764,6 +3810,7 @@ namespace AppManager
                 if (AnyDeletableEntry(targets))
                     items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
                 items.Add(MkSep());
+                AddCopyFilesMenu(items, targets);
                 items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
                 return;
@@ -3783,6 +3830,7 @@ namespace AppManager
             items.Add(MkSep());
             items.Add(MkMenu(AllHidden(targets) ? "取消隐藏" : "隐藏",
                 delegate { SetHidden(targets, !AllHidden(targets)); }));
+            AddCopyFilesMenu(items, targets);
             items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
             items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
             if (AnyDeletableEntry(targets))
@@ -5543,6 +5591,13 @@ namespace AppManager
                 return true;
             }
             if (keyData == (Keys.Control | Keys.V) && PasteImportFiles()) return true;
+            // Ctrl+C / Ctrl+X：网格内复制/剪切选中条目的实体文件（可在资源管理器/桌面/聊天窗口粘贴）
+            if ((keyData == (Keys.Control | Keys.C) || keyData == (Keys.Control | Keys.X))
+                && grid.Focused && grid.SelectedApps.Count > 0)
+            {
+                PutItemsOnClipboard(grid.SelectedApps, keyData == (Keys.Control | Keys.X));
+                return true;
+            }
             // Esc：设置页优先返回主内容区；页内编辑先取消编辑；再清空搜索；最后按集合层级回退
             if (keyData == Keys.Escape && settingsOpen)
             {

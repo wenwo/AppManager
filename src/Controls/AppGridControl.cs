@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
@@ -65,6 +66,8 @@ namespace AppManager.Controls
         private int dropTarget = -1;   // 拖动悬停命中的目录条目（文件搬迁目标），-1 表示无
         private Point dragStart;
         private bool suppressClick;
+        private bool dragInternal;        // 本次拖动是否参与网格内排序/拖出加入分类（否则只能拖到窗口外）
+        private bool externalDragTried;   // 本次拖动已尝试转为系统拖放（无可导出文件时不再重复读盘）
 
         // iOS Grouped List 尺寸（单行表格：名称靠左，分类/大小/位置 靠右且上下对齐）
         private int ListRowH { get { return Dpi(30); } }
@@ -142,6 +145,8 @@ namespace AppManager.Controls
 
         /// <summary>文件类型条目拖入目录类型条目：请求把条目目标（文件/文件夹）搬迁进该目录。</summary>
         public event Action<AppInfo, AppInfo> MoveIntoFolder;
+        /// <summary>条目能否作为「拖入目录」的来源（由主窗体按收录来源判定）；未设置时任何文件条目都可以。</summary>
+        public Func<AppInfo, bool> CanMoveIntoFolder;
         /// <summary>空白区右键：请求弹出新建菜单（文件夹/文本文档），携带屏幕坐标。</summary>
         public event Action<Point> BlankRightClicked;
 
@@ -161,6 +166,42 @@ namespace AppManager.Controls
 
         /// <summary>外部拖放：主窗体统一计算光标效果，drop=true 时接收文件。</summary>
         public Func<DragEventArgs, bool, DragDropEffects> ExternalDrop;
+
+        /// <summary>拖动越出主窗口时提供系统拖放请求（文件列表 + 允许的效果），返回 null 表示这些条目没有可导出的实体文件。</summary>
+        public Func<List<AppInfo>, ExternalDragRequest> DragOutData;
+
+        // 已剪切（等待粘贴）的条目：图标半透明显示，对齐资源管理器的剪切效果。
+        private HashSet<string> cutKeys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly ImageAttributes CutIconAttributes = CreateCutIconAttributes();
+
+        /// <summary>设置已剪切条目的 Key；传 null 清除剪切显示。</summary>
+        public void SetCutKeys(IEnumerable<string> keys)
+        {
+            cutKeys = keys == null ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(keys, StringComparer.OrdinalIgnoreCase);
+            Invalidate();
+        }
+
+        private bool IsCut(AppInfo a)
+        {
+            return cutKeys.Count > 0 && a != null && !string.IsNullOrEmpty(a.Key) && cutKeys.Contains(a.Key);
+        }
+
+        private static ImageAttributes CreateCutIconAttributes()
+        {
+            ColorMatrix matrix = new ColorMatrix();
+            matrix.Matrix33 = 0.45f;
+            ImageAttributes attributes = new ImageAttributes();
+            attributes.SetColorMatrix(matrix);
+            return attributes;
+        }
+
+        /// <summary>绘制条目图标：已剪切的条目按半透明绘制。</summary>
+        private static void DrawItemIcon(Graphics g, Image icon, Rectangle r, bool cut)
+        {
+            if (cut) g.DrawImage(icon, r, 0, 0, icon.Width, icon.Height, GraphicsUnit.Pixel, CutIconAttributes);
+            else g.DrawImage(icon, r);
+        }
 
         /// <summary>是否在列表行右侧显示操作按钮（改名/改地址/删除）。</summary>
         public bool ShowRowActions { get; set; }
@@ -627,7 +668,7 @@ namespace AppManager.Controls
                 Rectangle ir = new Rectangle((r.Width - iconSize) / 2, 10, iconSize, iconSize);
                 if (a.Icon != null)
                 {
-                    try { g.DrawImage(a.Icon, ir); } catch { }
+                    try { DrawItemIcon(g, a.Icon, ir, IsCut(a)); } catch { }
                 }
                 else
                 {
@@ -782,7 +823,8 @@ namespace AppManager.Controls
             if (ico == null) return;
             try
             {
-                if (ico.Width <= slot.Width && ico.Height <= slot.Height)
+                bool cut = IsCut(a);
+                if (ico.Width <= slot.Width && ico.Height <= slot.Height && !cut)
                 {
                     g.DrawImageUnscaled(ico,
                         slot.X + (slot.Width - ico.Width) / 2,
@@ -792,8 +834,8 @@ namespace AppManager.Controls
                 {
                     int iw = Math.Min(ico.Width, slot.Width);
                     int ih = Math.Min(ico.Height, slot.Height);
-                    g.DrawImage(ico, new Rectangle(
-                        slot.X + (slot.Width - iw) / 2, slot.Y + (slot.Height - ih) / 2, iw, ih));
+                    DrawItemIcon(g, ico, new Rectangle(
+                        slot.X + (slot.Width - iw) / 2, slot.Y + (slot.Height - ih) / 2, iw, ih), cut);
                 }
             }
             catch { }
@@ -1025,9 +1067,13 @@ namespace AppManager.Controls
                 }
                 if (dragging)
                 {
+                    Point screen = PointToScreen(e.Location);
                     // 持续通知外部：便于侧栏分类联动高亮（指针在网格外时同样触发）
-                    Action<Point> moved = DragMoved;
-                    if (moved != null) moved(PointToScreen(e.Location));
+                    Action<Point> moved = dragInternal ? DragMoved : null;
+                    if (moved != null) moved(screen);
+                    // 指针离开主窗口：转为系统拖放，把实体文件交给资源管理器/桌面/其它程序
+                    if (StartExternalDrag(screen)) return;
+                    if (!dragInternal) { Cursor = Cursors.Default; return; }
 
                     // 多选整批拖动：不做网格内排序/目录搬迁，落点只在网格外（集合/分类）
                     if (MultiDrag)
@@ -1319,7 +1365,9 @@ namespace AppManager.Controls
                 }
             }
 
-            if (allowReorder || AllowDragOut)
+            dragInternal = allowReorder || AllowDragOut;
+            externalDragTried = false;
+            if (dragInternal || DragOutData != null)
             {
                 if (idx >= 0)
                 {
@@ -1385,6 +1433,7 @@ namespace AppManager.Controls
             if (dragFrom < 0 || dragFrom >= apps.Count) return -1;
             AppInfo src = apps[dragFrom];
             if (!src.IsFile) return -1;                       // 仅文件类型条目可拖入目录
+            if (CanMoveIntoFolder != null && !CanMoveIntoFolder(src)) return -1;
             int idx = HitIndex(client);
             if (idx < 0 || idx >= apps.Count || idx == dragFrom) return -1;
             AppInfo t = apps[idx];
@@ -1408,7 +1457,7 @@ namespace AppManager.Controls
                 return;
             }
             bool wasDrag = dragging;
-            bool droppedOutside = wasDrag && !ClientRectangle.Contains(e.Location)
+            bool droppedOutside = wasDrag && dragInternal && !ClientRectangle.Contains(e.Location)
                 && dragFrom >= 0 && dragFrom < apps.Count;
             if (droppedOutside)
             {
@@ -1435,6 +1484,28 @@ namespace AppManager.Controls
             ResetDrag();
             Cursor = Cursors.Default;
             if (wasDrag) Invalidate();
+        }
+
+        /// <summary>
+        /// 拖动越出主窗口：以系统 OLE 拖放接管，允许的效果由请求决定（默认复制，可移动的条目按 Shift 移动）。
+        /// DoDragDrop 期间由系统消费松手消息，因此先结束网格内拖动状态。返回 true 表示已接管。
+        /// </summary>
+        private bool StartExternalDrag(Point screen)
+        {
+            Func<List<AppInfo>, ExternalDragRequest> source = DragOutData;
+            Form form = FindForm();
+            if (source == null || externalDragTried || form == null || form.Bounds.Contains(screen)) return false;
+            externalDragTried = true;
+            ExternalDragRequest request = source(DragApps());
+            if (request == null || request.Data == null) return false;
+            ResetDrag();
+            collapseOnUp = false;
+            suppressClick = true;
+            Cursor = Cursors.Default;
+            Invalidate();
+            DragDropEffects effect = DoDragDrop(request.Data, request.Allowed);
+            if (request.Completed != null) request.Completed(effect);
+            return true;
         }
 
         private void ResetDrag()
@@ -1562,5 +1633,13 @@ namespace AppManager.Controls
             using (Graphics g = CreateGraphics())
                 grid.HandleHeaderClick(g, e.Location);
         }
+    }
+
+    /// <summary>拖出到其它程序的请求：数据对象、允许的效果，以及拖放结束后的回调（参数为目标返回的效果）。</summary>
+    public sealed class ExternalDragRequest
+    {
+        public DataObject Data;
+        public DragDropEffects Allowed;
+        public Action<DragDropEffects> Completed;
     }
 }

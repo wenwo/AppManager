@@ -135,6 +135,12 @@ namespace AppManager
             try
             {
                 if (!CanImportHere || e.Data == null) { HideImportTip(); return DragDropEffects.None; }
+                // 本应用拖出的条目又拖回窗口：OLE 拖放仍在网格的鼠标事件内，不在此重入导入流程。
+                if (e.Data.GetDataPresent(DragOutFormat))
+                {
+                    if (drop) HideImportTip(); else ShowImportTip("已在库中，请在窗口内直接拖到分类", e);
+                    return DragDropEffects.None;
+                }
                 if (!e.Data.GetDataPresent(DataFormats.FileDrop))
                 {
                     if (e.Data.GetDataPresent("FileGroupDescriptorW") || e.Data.GetDataPresent("FileGroupDescriptor"))
@@ -279,6 +285,8 @@ namespace AppManager
             try
             {
                 uint sequence = GetClipboardSequenceNumber();
+                // 本应用剪切的条目粘贴回应用：按「移动到分类」处理，不再当作外部文件导入。
+                if (cutState != null && sequence == cutState.Sequence) { PasteCutItems(); return true; }
                 IDataObject data = Clipboard.GetDataObject();
                 if (data == null || !data.GetDataPresent(DataFormats.FileDrop)) return false;
                 string[] paths = data.GetData(DataFormats.FileDrop) as string[];
@@ -363,6 +371,9 @@ namespace AppManager
                     bool reference = (!resource && !folder && IsSoftwareFile(source)) || known != null || FileImport.Within(dir, source);
                     ImportItem item = new ImportItem { Source = source, Target = dir, Folder = folder, Reference = reference };
                     if (folder && FileImport.Within(source, dir)) { item.State = FileImport.Failed; item.Error = "不能将文件夹导入自身内部。"; }
+                    // 移动会让文件夹内已收录的项目全部指向旧路径而失效；复制不影响它们。
+                    else if (folder && !reference && operation == ImportOperation.Move && config.AddedItems.EntriesUnder(source).Count > 0)
+                    { item.State = FileImport.Failed; item.Error = "文件夹内包含已收录的项目，不能移动；请改用复制（拖放时按住 Ctrl）。"; }
                     else if (resource && !folder && !MediaRules.MatchCategoryExt(category, source))
                     { item.State = FileImport.Skipped; item.Error = "文件类型不符合目标分类。"; }
                     batch.Items.Add(item);

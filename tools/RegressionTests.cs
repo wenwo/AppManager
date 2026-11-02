@@ -50,6 +50,7 @@ namespace AppManager
                 Run("properties: software/resource menus, grid/list and complete memberships", PropertiesMenus);
                 Run("properties: file metadata, folders, missing targets and packaged apps", PropertiesMetadata);
                 Run("properties: DPI scrolling, responsive open and cancelled background load", PropertiesResponsiveAndDpi);
+                Run("cross-volume move: no foreign overwrite, read-only source, locked file kept", CrossVolumeMoves);
             }
             finally
             {
@@ -161,6 +162,67 @@ namespace AppManager
             }
             if (failure != null) throw failure;
             Check(inspected, "properties did not open");
+        }
+
+        private static void CrossVolumeMoves()
+        {
+            string tempRoot = Path.GetPathRoot(Path.GetTempPath());
+            string other = null;
+            foreach (DriveInfo drive in DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (drive.DriveType == DriveType.Fixed && drive.IsReady
+                        && !string.Equals(drive.RootDirectory.FullName, tempRoot, StringComparison.OrdinalIgnoreCase)
+                        && !FileImport.SameVolume(drive.RootDirectory.FullName, tempRoot)) { other = drive.RootDirectory.FullName; break; }
+                }
+                catch (IOException) { }
+            }
+            if (other == null) { Console.WriteLine("  (skipped: no second fixed volume)"); return; }
+            string far = Path.Combine(other, "AppManagerRegression_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(far);
+            try
+            {
+                // 目标在选名之后被他人占用：移动失败，不得删除或覆盖对方文件，源保持不变，不留临时文件
+                string source = Path.Combine(root, "xv-file.txt");
+                File.WriteAllText(source, "mine");
+                string foreign = Path.Combine(far, "taken.txt");
+                File.WriteAllText(foreign, "theirs");
+                bool threw = false;
+                try { DesktopOrganizer.MoveFile(source, foreign); }
+                catch (IOException) { threw = true; }
+                Check(threw && File.ReadAllText(foreign) == "theirs" && File.ReadAllText(source) == "mine", "existing target overwritten or deleted");
+                Check(Directory.GetFiles(far).Length == 1, "staging copy left behind");
+
+                // 只读源文件跨卷移动后源消失（资源管理器同样会移走只读文件）
+                File.SetAttributes(source, FileAttributes.ReadOnly);
+                Check(DesktopOrganizer.MoveFile(source, Path.Combine(far, "moved.txt")) && !File.Exists(source), "read-only source not moved");
+                Check(File.ReadAllText(Path.Combine(far, "moved.txt")) == "mine", "moved file content changed");
+
+                // 目录中被占用的文件保留在源位置，其余移走；目标是完整副本，返回 false 提示源未清空
+                string dir = Path.Combine(root, "xv-dir");
+                Directory.CreateDirectory(Path.Combine(dir, "sub"));
+                File.WriteAllText(Path.Combine(dir, "a.txt"), "a");
+                string locked = Path.Combine(dir, "sub", "locked.txt");
+                File.WriteAllText(locked, "l");
+                bool removed;
+                using (new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    removed = DesktopOrganizer.MoveDirectory(dir, Path.Combine(far, "dir"));
+                Check(!removed && File.ReadAllText(locked) == "l" && !File.Exists(Path.Combine(dir, "a.txt")), "locked file handling wrong");
+                Check(File.ReadAllText(Path.Combine(far, "dir", "a.txt")) == "a"
+                    && File.ReadAllText(Path.Combine(far, "dir", "sub", "locked.txt")) == "l", "target copy incomplete");
+
+                // 正常目录：源完全移除
+                string clean = Path.Combine(root, "xv-clean");
+                Directory.CreateDirectory(Path.Combine(clean, "deep"));
+                File.WriteAllText(Path.Combine(clean, "deep", "b.txt"), "b");
+                Check(DesktopOrganizer.MoveDirectory(clean, Path.Combine(far, "clean")) && !Directory.Exists(clean), "clean directory not fully moved");
+            }
+            finally
+            {
+                foreach (string file in Directory.GetFiles(far, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+                Directory.Delete(far, true);
+            }
         }
 
         private static void PropertiesMenus()

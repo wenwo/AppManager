@@ -260,6 +260,9 @@ namespace AppManager
             {
                 string id = db.Scalar("SELECT id FROM entries WHERE key=?", rename[0]);
                 if (id == null) continue;
+                // entries 行不回收：新路径曾登记过时直接改名会违反唯一约束，使本次及之后的保存全部失败。
+                // 跳过改名即可，记录与收录项按新键差量写入（复用已有行），结果与未排队改名一致。
+                if (db.Scalar("SELECT id FROM entries WHERE key=?", rename[1]) != null) continue;
                 db.Execute("UPDATE entries SET key=? WHERE id=?", rename[1], Number(id));
                 entries.Remove(rename[0]); entries[rename[1]] = Number(id);
             }

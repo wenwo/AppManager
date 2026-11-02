@@ -313,14 +313,15 @@ namespace AppManager
         }
 
         /// <summary>递归拷贝目录（副本模式用）。</summary>
-        private static void CopyDir(string src, string dst)
+        private static List<string> CopyDir(string src, string dst)
         {
             if (Directory.Exists(dst) || File.Exists(dst)) throw new IOException("复制目标已存在。");
             string staging = dst + ".copy-" + Guid.NewGuid().ToString("N");
             try
             {
-                SafeDirectory.Copy(src, staging, false);
+                List<string> copied = SafeDirectory.Copy(src, staging, false, new SafeDirectory.Budget());
                 Directory.Move(staging, dst);
+                return copied;
             }
             finally { TryDeleteDir(staging); }
         }
@@ -349,43 +350,95 @@ namespace AppManager
         /// 会抛「源路径和目标路径必须具有相同的根」，改为「递归复制 + 删除源」实现。复制中断时
         /// 清理残留目标并抛出，源目录保持原样，避免数据丢失。
         /// </summary>
-        internal static void MoveDirectory(string source, string dest)
+        /// <returns>
+        /// 源目录是否已完全移除。跨卷时复制期间新增/修改的文件、被占用的文件会保留在源位置（不丢数据），
+        /// 此时返回 false，目标已是完整副本。同卷移动恒为 true。
+        /// </returns>
+        internal static bool MoveDirectory(string source, string dest)
         {
-            string srcRoot = Path.GetPathRoot(Path.GetFullPath(source));
-            string dstRoot = Path.GetPathRoot(Path.GetFullPath(dest));
-            if (string.Equals(srcRoot, dstRoot, StringComparison.OrdinalIgnoreCase))
+            if (SameVolumeAs(source, dest))
             {
                 Directory.Move(source, dest);
-                return;
+                return true;
             }
-            CopyDir(source, dest); // 完整复制后才安装目标；失败只清理本次临时目录。
-            try { Directory.Delete(source, true); }
-            catch (Exception ex)
+            List<string> copied = CopyDir(source, dest); // 完整复制后才安装目标；失败只清理本次临时目录。
+            DeleteCopiedSource(NormalizeRoot(Path.GetFullPath(source)), Path.GetFullPath(dest), copied);
+            return !Directory.Exists(source);
+        }
+
+        /// <summary>
+        /// 跨卷移动的删源阶段：只删除复制快照里、且与目标副本大小和修改时间一致的文件；
+        /// 目录自深向浅非递归删除，保留下来的文件或复制期间新出现的内容使目录非空而保留。
+        /// </summary>
+        private static void DeleteCopiedSource(string source, string dest, List<string> copied)
+        {
+            for (int i = copied.Count - 1; i >= 0; i--)
             {
-                Debug.WriteLine("跨卷移动：复制已完成但删除源目录失败 " + source + ": " + ex.Message);
+                string path = copied[i];
+                string copy = Path.Combine(dest, path.Substring(source.Length).TrimStart('\\', '/'));
+                if (Directory.Exists(path))
+                {
+                    try { Directory.Delete(path, false); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                    continue;
+                }
+                try
+                {
+                    FileInfo original = new FileInfo(path), target = new FileInfo(copy);
+                    if (!original.Exists) continue;
+                    if (!target.Exists || original.Length != target.Length || original.LastWriteTimeUtc != target.LastWriteTimeUtc)
+                        continue;   // 复制后被修改：保留源文件，由用户决定取舍
+                    if ((original.Attributes & FileAttributes.ReadOnly) != 0)
+                        original.Attributes &= ~FileAttributes.ReadOnly;
+                    original.Delete();
+                }
+                catch (Exception ex)
+                {
+                    Paths.LogError(new IOException("跨卷移动已复制但源文件未删除: " + path, ex));
+                }
             }
         }
 
-        internal static void MoveFile(string source, string dest)
+        /// <summary>
+        /// 移动文件：同卷直接 Move；跨卷先复制到目标目录内的临时名再改名到位（不覆盖他人文件），
+        /// 最后删除源文件。返回 false 表示副本已就位但源文件未能删除（被占用/无权限）。
+        /// </summary>
+        internal static bool MoveFile(string source, string dest)
         {
-            string srcRoot = Path.GetPathRoot(Path.GetFullPath(source));
-            string dstRoot = Path.GetPathRoot(Path.GetFullPath(dest));
-            if (string.Equals(srcRoot, dstRoot, StringComparison.OrdinalIgnoreCase))
+            if (SameVolumeAs(source, dest))
             {
                 File.Move(source, dest);
-                return;
+                return true;
+            }
+            string staging = dest + ".copy-" + Guid.NewGuid().ToString("N");
+            try
+            {
+                File.Copy(source, staging, false);
+                File.Move(staging, dest);   // 目标若在此期间出现则失败，不覆盖
+            }
+            finally
+            {
+                try { if (File.Exists(staging)) File.Delete(staging); } catch { }
             }
             try
             {
-                File.Copy(source, dest, false);
+                FileInfo original = new FileInfo(source);
+                if ((original.Attributes & FileAttributes.ReadOnly) != 0)
+                    original.Attributes &= ~FileAttributes.ReadOnly;
+                original.Delete();
+                return true;
             }
-            catch
+            catch (Exception ex)
             {
-                try { if (File.Exists(dest)) File.Delete(dest); } catch { }
-                throw;
+                Paths.LogError(new IOException("跨卷移动已复制但源文件删除失败: " + source, ex));
+                return false;
             }
-            try { File.Delete(source); }
-            catch (Exception ex) { Paths.LogError(new IOException("跨卷移动已复制但源文件删除失败: " + source, ex)); }
+        }
+
+        /// <summary>源与目标（尚不存在，按其所在目录判断）是否同一卷；挂载点按实际卷区分，无法确认时按跨卷处理。</summary>
+        private static bool SameVolumeAs(string source, string dest)
+        {
+            string parent = Path.GetDirectoryName(Path.GetFullPath(dest).TrimEnd('\\', '/'));
+            return !string.IsNullOrEmpty(parent) && FileImport.SameVolume(Path.GetFullPath(source), parent);
         }
 
         /// <summary>尽力删除目录，失败静默（用于清理搬迁残留）。</summary>
