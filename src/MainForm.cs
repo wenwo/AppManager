@@ -1117,6 +1117,7 @@ namespace AppManager
                 iconQueued.Clear();
                 DisposeIcons(allApps);
                 DisposeIcons(new List<AppInfo>(databaseRetained.Values));   // 数据库分页条目同样按新 DPI 尺寸重取图标
+                ClearDatabaseSummaries(true);
             }
             if (grid != null) StartIconLoad();
             UpdateRegion();
@@ -1696,9 +1697,14 @@ namespace AppManager
             if (IsDisposed || Disposing || grid == null || grid.IsDisposed) return;
             List<AppInfo> batch;
             lock (iconDirty) { batch = new List<AppInfo>(iconDirty); iconDirty.Clear(); }
-            for (int i = 0; i < batch.Count; i++) grid.InvalidateItem(batch[i]);
-            // 非图片集合封面复用已异步加载的文件图标，图标到位后只重建当前集合 UI。
-            if (collectionSidebar != null && collectionSidebar.Visible) UpdateCollectionUi();
+            bool coverIconReady = false;
+            for (int i = 0; i < batch.Count; i++)
+            {
+                grid.InvalidateItem(batch[i]);
+                if (coverIconWaiters.Contains(batch[i])) coverIconReady = true;
+            }
+            // 非图片集合封面复用已异步加载的文件图标：仅当到位的图标正是某个封面在等的，才重建当前集合 UI。
+            if (coverIconReady && collectionSidebar != null && collectionSidebar.Visible) UpdateCollectionUi();
         }
 
         /// <summary>后台线程回 UI 的安全入口：窗口已销毁/句柄未创建时静默丢弃，避免关闭路径抛异常。</summary>
@@ -1792,6 +1798,7 @@ namespace AppManager
 
             if (listSortColumn != null && config.Database == null) SortShown(shown, listSortColumn, listSortAsc);
             shownApps = shown;
+            addedPrefetchPending = config.Database != null;   // 列表「所属」列等首次按路径查询时整页一次预读
             // 行内第二个按钮：进入集合后为「移除」（仅从集合移出），分类/全部资源/搜索下为「删除」
             grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website && kw.Length == 0
                 && currentCollection != null) ? "移除" : "删除";
@@ -2402,6 +2409,7 @@ namespace AppManager
         /// <summary>刷新集合侧边栏与信息页：可见性、集合列表与封面、选中态、信息页数据。</summary>
         private void UpdateCollectionUi()
         {
+            coverIconWaiters.Clear();   // 本次重建中仍缺图标的封面成员会由 BuildCover 重新登记
             if (!CanShowCollectionSidebar)
             {
                 currentCollection = null;   // 离开可编辑资源分类/进入设置页：集合上下文失效
@@ -2564,6 +2572,9 @@ namespace AppManager
         // 避免每次刷新都重复遍历 allApps（N 条目 × M 集合）。SwapApps/RefreshGrid 入口失效。
         private List<AppInfo> cachedVisiblePool;
 
+        // 集合封面正在等待图标的成员：图标刷新只在命中这些条目时重建集合 UI，避免每批图标都整体重建。
+        private readonly HashSet<AppInfo> coverIconWaiters = new HashSet<AppInfo>();
+
         /// <summary>
         /// 集合概览（与集合视图过滤同口径，一次遍历取全）：返回封面用首个图片成员
         /// （无图片时返回首个成员，供图标版式化）；同时输出可见成员数与图片成员路径（最多 60 张）。
@@ -2637,7 +2648,8 @@ namespace AppManager
             }
             // 非图片成员复用图标后台加载结果；尚未到位时显示占位，绝不在此同步调用 Icons.Extract。
             Bitmap icon = first.Icon ?? first.SmallIcon;
-            return icon == null ? null : ComposeIconCover(icon, width, height);
+            if (icon == null) { coverIconWaiters.Add(first); return null; }   // 图标到位后由 FlushIconRefresh 重建封面
+            return ComposeIconCover(icon, width, height);
         }
 
         /// <summary>
@@ -3001,6 +3013,7 @@ namespace AppManager
         private string GetCategoryText(AppInfo a)
         {
             if (a == null) return string.Empty;
+            PrefetchAddedForShown();
             List<string> cats = new List<string>();
             if (!string.IsNullOrEmpty(a.Category)) cats.Add(a.Category);
             if (a.IsFavorite) cats.Add("常用");
@@ -3017,6 +3030,20 @@ namespace AppManager
             // 自定义分类通过 override 已体现在 a.Category
             cats.RemoveAll(delegate(string category) { return !InCategory(a, category); });
             return string.Join(", ", cats.ToArray());
+        }
+
+        private bool addedPrefetchPending;   // RefreshGrid 后置位：列表「所属」列首次取文本时整页预读路径记录
+
+        /// <summary>列表逐行计算「所属」会按路径查询 AddedItems：首次时用一个连接预读当前页全部路径。</summary>
+        private void PrefetchAddedForShown()
+        {
+            if (!addedPrefetchPending) return;
+            addedPrefetchPending = false;
+            if (config.Database == null) return;
+            List<string> paths = new List<string>(shownApps.Count);
+            foreach (AppInfo app in shownApps) paths.Add(app.TargetPath);
+            try { config.AddedItems.Prefetch(paths); }
+            catch (Exception ex) { Paths.LogError(ex); }   // 预读失败不影响逐条查询
         }
 
         private bool IsCustomCategory(string name)

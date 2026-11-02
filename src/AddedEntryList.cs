@@ -66,8 +66,27 @@ namespace AppManager
         {
             List<AddedEntry> cached;
             if (pathCache.TryGetValue(path ?? "", out cached)) return cached;
+            if (Store == null) return LoadPath(null, path);
+            using (Sqlite db = new Sqlite(Store.FilePath, true)) return LoadPath(db, path);
+        }
+        /// <summary>批量预读未缓存的路径：共用一个只读连接，避免列表逐行查询时每条都新开数据库连接。</summary>
+        internal void Prefetch(IEnumerable<string> paths)
+        {
+            if (Store == null) return;
+            List<string> distinct = new List<string>(); HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths)
+                if (!string.IsNullOrEmpty(path) && seen.Add(path) && distinct.Count < 256) distinct.Add(path);
+            List<string> missing = distinct.FindAll(delegate(string path) { return !pathCache.ContainsKey(path); });
+            if (missing.Count == 0) return;
+            // 缓存满 512 会整体清空：放不下时先腾空并整批重读，避免预读中途把自己刚读到的结果清掉
+            if (pathCache.Count + missing.Count >= 512) { pathCache.Clear(); missing = distinct; }
+            using (Sqlite db = new Sqlite(Store.FilePath, true))
+                foreach (string path in missing) LoadPath(db, path);
+        }
+        private List<AddedEntry> LoadPath(Sqlite db, string path)
+        {
             List<AddedEntry> result = new List<AddedEntry>(); HashSet<long> ids = new HashSet<long>();
-            if (Store != null) using (Sqlite db = new Sqlite(Store.FilePath, true))
+            if (db != null)
                 foreach (string[] row in db.Query(Columns + " WHERE a.path_key=? ORDER BY a.id", (path ?? "").ToUpperInvariant()))
                 {
                     AddedEntry entry = Hydrate(row);
