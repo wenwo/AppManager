@@ -281,7 +281,7 @@ namespace AppManager
             try
             {
                 if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
-                using (Bitmap src = new Bitmap(path))
+                using (Bitmap src = DecodeThumbnailSource(path, delegate(int w, int h) { return displaySize * 2; }))
                 {
                     if (src.Width <= 0 || src.Height <= 0) return null;
                     Bitmap dst = new Bitmap(displaySize, displaySize, PixelFormat.Format32bppArgb);
@@ -302,6 +302,17 @@ namespace AppManager
                 }
             }
             catch { return null; }   // 损坏文件/非图片内容：回退到常规图标流程
+        }
+
+        /// <summary>
+        /// 缩略图取源：WIC 解码时直接缩到所需长边（按原图宽高计算），千万像素照片无需整图解码，
+        /// 也不占用跨线程串行的 GDI+，避免后台批量生成缩略图时拖慢 UI 线程绘制；
+        /// WIC 不支持或超出其限制时回退 GDI+ 整图解码，保持原有兼容范围。
+        /// </summary>
+        private static Bitmap DecodeThumbnailSource(string path, Func<int, int, int> longSideFor)
+        {
+            try { return WicImageDecoder.Load(path, longSideFor); }
+            catch { return new Bitmap(path); }
         }
 
         /// <summary>
@@ -402,7 +413,11 @@ namespace AppManager
             try
             {
                 if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
-                using (Bitmap src = new Bitmap(path))
+                using (Bitmap src = DecodeThumbnailSource(path, delegate(int w, int h)
+                {
+                    double fill = Math.Max((double)width / w, (double)height / h);
+                    return (int)Math.Min(int.MaxValue / 2, Math.Ceiling(Math.Max(w, h) * fill)) * 2;
+                }))
                 {
                     if (src.Width <= 0 || src.Height <= 0) return null;
                     double scale = Math.Max((double)width / src.Width, (double)height / src.Height);
@@ -445,7 +460,7 @@ namespace AppManager
             try
             {
                 if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
-                using (Bitmap src = new Bitmap(path))
+                using (Bitmap src = DecodeThumbnailSource(path, delegate(int w, int h) { return maxLongEdge; }))
                 {
                     if (src.Width <= 0 || src.Height <= 0) return null;
                     double scale = Math.Min(1.0, (double)maxLongEdge / Math.Max(src.Width, src.Height));

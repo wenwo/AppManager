@@ -15,6 +15,9 @@ namespace AppManager
         private CatalogPage databasePage;
         private readonly List<CatalogPage> databaseCursors = new List<CatalogPage>();
         private readonly Dictionary<string, CatalogPage> databaseSummaries = new Dictionary<string, CatalogPage>();
+        // 跨分类/分页保留的条目对象（持有已加载图标），按 Key 复用；超过上限时只留当前页。
+        private readonly Dictionary<string, AppInfo> databaseRetained = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+        private const int DatabaseRetainedLimit = 1000;
         private Rectangle databasePrevious, databaseNext;
         private bool databaseMetadataRunning;
 
@@ -63,19 +66,54 @@ namespace AppManager
             if (databasePageNumber < databaseCursors.Count) databaseCursors[databasePageNumber] = databasePage;
             else databaseCursors.Add(databasePage);
             scanner.ApplyConfig(databasePage.Items);
-            // 保留同页对象及图标/元数据缓存，避免异步元数据完成后反复重载同一页。
-            Dictionary<string, AppInfo> previous = new Dictionary<string, AppInfo>();
-            foreach (AppInfo a in shownApps) if (!string.IsNullOrEmpty(a.Key)) previous[a.Key] = a;
-            for (int i = 0; i < databasePage.Items.Count; i++)
-            {
-                AppInfo a = databasePage.Items[i], old;
-                if (!previous.TryGetValue(a.Key, out old) || old.TargetPath != a.TargetPath || old.Name != a.Name) continue;
-                old.IsFavorite = a.IsFavorite; old.IsHidden = a.IsHidden; old.Category = a.Category; old.DatabaseKind = a.DatabaseKind;
-                databasePage.Items[i] = old; previous.Remove(a.Key);
-            }
-            DisposeIcons(new List<AppInfo>(previous.Values));
+            // 复用看过的条目对象及其图标/元数据缓存：切回分类时图标立即可用，不再先空白再逐个出现。
+            for (int i = 0; i < databasePage.Items.Count; i++) databasePage.Items[i] = RetainDatabaseItem(databasePage.Items[i]);
+            TrimDatabaseRetained(databasePage.Items);
             categoryTotal = databasePage.Total;
             return databasePage.Items;
+        }
+
+        /// <summary>同键且图标来源未变时复用保留对象并刷新其字段；否则以新对象替换并释放旧图标。</summary>
+        private AppInfo RetainDatabaseItem(AppInfo fresh)
+        {
+            if (string.IsNullOrEmpty(fresh.Key)) return fresh;
+            AppInfo old;
+            if (databaseRetained.TryGetValue(fresh.Key, out old))
+            {
+                if (old.TargetPath == fresh.TargetPath && old.Name == fresh.Name && old.ShortcutPath == fresh.ShortcutPath
+                    && old.DisplayIcon == fresh.DisplayIcon && old.IsUwp == fresh.IsUwp && old.IsFolder == fresh.IsFolder)
+                {
+                    old.InstallLocation = fresh.InstallLocation; old.UninstallString = fresh.UninstallString;
+                    old.Category = fresh.Category; old.IsFavorite = fresh.IsFavorite; old.IsHidden = fresh.IsHidden;
+                    old.IsDesktop = fresh.IsDesktop; old.IsFile = fresh.IsFile; old.Source = fresh.Source; old.DatabaseKind = fresh.DatabaseKind;
+                    return old;
+                }
+                DisposeIcons(new List<AppInfo> { old });   // 旧对象只可能在即将被替换的上一页中，随后 SetApps 即换掉
+            }
+            databaseRetained[fresh.Key] = fresh;
+            return fresh;
+        }
+
+        /// <summary>保留池超限时释放当前页以外的条目图标（页内对象继续保留）。</summary>
+        private void TrimDatabaseRetained(List<AppInfo> keep)
+        {
+            if (databaseRetained.Count <= DatabaseRetainedLimit) return;
+            ReleaseDatabaseRetained(keep);
+        }
+
+        /// <summary>从保留池移除 keep 以外的条目并释放其图标。</summary>
+        private void ReleaseDatabaseRetained(List<AppInfo> keep)
+        {
+            HashSet<AppInfo> current = new HashSet<AppInfo>(keep);
+            List<string> keys = new List<string>();
+            List<AppInfo> drop = new List<AppInfo>();
+            foreach (KeyValuePair<string, AppInfo> kv in databaseRetained)
+            {
+                if (current.Contains(kv.Value)) continue;
+                keys.Add(kv.Key); drop.Add(kv.Value);
+            }
+            foreach (string key in keys) databaseRetained.Remove(key);
+            DisposeIcons(drop);
         }
 
         private CatalogPage DatabaseSummary(string key)

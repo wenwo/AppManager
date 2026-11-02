@@ -80,6 +80,7 @@ namespace AppManager
         // 软件模式下上次选中的分类：切到资源模式再切回时恢复，避免丢失浏览位置
         private string lastSoftwareCategory = "常用";
         private bool _ready = false;
+        private bool restoringViewToggle;   // 程序恢复分类视图偏好：开关只更新外观，不落盘也不重复取图标
         private int categoryTotal = 0;
         private volatile int iconGen = 0;   // 图标加载代号：换列表即自增，使旧加载任务自动失效
         private int refreshPending = 0; // 图标重绘合并标志，0=无待处理请求
@@ -836,6 +837,7 @@ namespace AppManager
             viewToggle.Checked = GetCategoryGridMode(currentCategory);
             viewToggle.CheckedChanged += delegate
             {
+                if (restoringViewToggle) { UpdateToggleLabel(); return; }
                 SetCategoryGridMode(currentCategory, viewToggle.Checked);
                 config.Save();
                 grid.GridMode = viewToggle.Checked;
@@ -1084,6 +1086,14 @@ namespace AppManager
             toggleLabel.Text = viewToggle.Checked ? "网格" : "列表";
         }
 
+        /// <summary>按分类偏好同步开关外观；网格模式与图标加载由调用方随后统一应用。</summary>
+        private void RestoreViewToggle(bool gridMode)
+        {
+            restoringViewToggle = true;
+            try { viewToggle.Checked = gridMode; }
+            finally { restoringViewToggle = false; }
+        }
+
         protected override void OnSizeChanged(EventArgs e)
         {
             base.OnSizeChanged(e);
@@ -1106,6 +1116,7 @@ namespace AppManager
                 iconGen++;
                 iconQueued.Clear();
                 DisposeIcons(allApps);
+                DisposeIcons(new List<AppInfo>(databaseRetained.Values));   // 数据库分页条目同样按新 DPI 尺寸重取图标
             }
             if (grid != null) StartIconLoad();
             UpdateRegion();
@@ -1338,7 +1349,7 @@ namespace AppManager
             sidebar.SetActive(key);
             // 每分类独立视图模式：切换分类时恢复该分类上次选择的网格/列表
             bool gm = GetCategoryGridMode(key);
-            viewToggle.Checked = gm;   // 触发 CheckedChanged 自动落盘与应用
+            RestoreViewToggle(gm);   // 只恢复已记忆的偏好：不触发落盘（每次切换整库保存会清空条目路径缓存）
             grid.GridMode = gm;
             SyncHeaderStrip();
             addBtn.Visible = CanEditCategory(key);
@@ -1545,6 +1556,7 @@ namespace AppManager
                 iconGen++;
                 iconQueued.Clear();
                 DisposeIcons(allApps);   // 与后台图标赋值同锁，避免销毁后回写及位图泄漏
+                ReleaseDatabaseRetained(shownApps);   // 重扫后图标来源可能变化：其余分类的保留图标下次按需重取
             }
             grid.ClearMetadataCache();
             allApps = newList ?? new List<AppInfo>();
@@ -5087,7 +5099,7 @@ namespace AppManager
                 currentCategory = "全部软件";
                 RebuildSidebar();
                 sidebar.SetActive(currentCategory);
-                viewToggle.Checked = GetCategoryGridMode(currentCategory);
+                RestoreViewToggle(GetCategoryGridMode(currentCategory));
                 grid.GridMode = GetCategoryGridMode(currentCategory);
                 SyncHeaderStrip();
                 addBtn.Visible = CanEditCategory(currentCategory);

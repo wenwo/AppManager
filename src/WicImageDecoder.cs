@@ -20,6 +20,20 @@ namespace AppManager
 
         public static Bitmap Load(string path, int maxSide, CancellationToken cancellation)
         {
+            return Decode(path, delegate(int w, int h) { return maxSide; }, cancellation);
+        }
+
+        /// <summary>
+        /// 按原图尺寸（已计入 EXIF 旋转）决定长边上限后解码：缩略图在解码阶段即缩小，
+        /// 大照片无需整图解码，也不经 GDI+（GDI+ 跨线程串行，整图解码会拖住 UI 线程绘制）。
+        /// </summary>
+        public static Bitmap Load(string path, Func<int, int, int> maxSideFor)
+        {
+            return Decode(path, maxSideFor, CancellationToken.None);
+        }
+
+        private static Bitmap Decode(string path, Func<int, int, int> maxSideFor, CancellationToken cancellation)
+        {
             cancellation.ThrowIfCancellationRequested();
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
@@ -33,6 +47,8 @@ namespace AppManager
                 int height = frame.PixelHeight;
                 if (width <= 0 || height <= 0 || (long)width * height > 64L * 1024 * 1024)
                     throw new InvalidDataException("图片超过内置查看器的 64M 像素限制。");
+                bool rotated = orientation >= 5 && orientation <= 8;
+                int maxSide = maxSideFor(rotated ? height : width, rotated ? width : height);
                 cancellation.ThrowIfCancellationRequested();
                 stream.Position = 0;
                 BitmapImage source = new BitmapImage();
