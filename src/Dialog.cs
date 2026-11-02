@@ -962,7 +962,9 @@ namespace AppManager
             Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(400, 218);
+            // 有校验时多留一行，错误提示可折成两行显示（长文件名、系统错误信息不被截断）
+            int extra = validate != null ? 18 : 0;
+            f.ClientSize = new Size(400, 218 + extra);
             f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
             try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
@@ -982,7 +984,11 @@ namespace AppManager
                     Draw.DrawStringLeft(g, prompt, Theme.ButtonFont, mb, new Rectangle(S(24), S(58), f.Width - S(48), S(22)));
                 if (!string.IsNullOrEmpty(error))
                     using (SolidBrush eb = new SolidBrush(Theme.DeleteRed))
-                        Draw.DrawStringLeft(g, error, Theme.CaptionFont, eb, new Rectangle(S(24), S(129), f.Width - S(48), S(24)));
+                    using (StringFormat wrap = new StringFormat { Trimming = StringTrimming.EllipsisCharacter })
+                    {
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                        g.DrawString(error, Theme.CaptionFont, eb, new RectangleF(S(24), S(130), f.Width - S(48), S(20 + extra)), wrap);
+                    }
             };
             TextBox box = MakeField(f, new Rectangle(24, 86, f.ClientSize.Width - 48, 40), defaultValue);
             box.TextChanged += delegate { if (error != null) { error = null; f.Invalidate(); } };
@@ -1005,16 +1011,18 @@ namespace AppManager
                 f.Close();
             };
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
-            ok.Bounds = new Rectangle(192, 158, 84, 34);
+            ok.Bounds = new Rectangle(192, 158 + extra, 84, 34);
             ok.Click += delegate { accept(); };
             RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
-            cancel.Bounds = new Rectangle(292, 158, 84, 34);
+            cancel.Bounds = new Rectangle(292, 158 + extra, 84, 34);
             cancel.Click += delegate { result = null; f.DialogResult = DialogResult.Cancel; f.Close(); };
             f.Controls.Add(ok);
             f.Controls.Add(cancel);
             box.KeyDown += delegate(object s, KeyEventArgs e)
             {
-                if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; accept(); }
+                // 延后执行：KeyDown 返回后回车字符才会从消息队列移除；若立即执行，
+                // 校验中弹出的二次确认框会先收到这个回车字符（响铃或误触按钮）
+                if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; f.BeginInvoke(accept); }
                 if (e.KeyCode == Keys.Escape) { result = null; f.DialogResult = DialogResult.Cancel; f.Close(); }
             };
             if (selectLength >= 0) box.Select(0, Math.Min(selectLength, box.TextLength));

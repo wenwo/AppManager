@@ -61,6 +61,12 @@ namespace AppManager.Controls
             Invalidate();
         }
 
+        /// <summary>文件改名或移动后更新播放列表里的路径（含文件夹内的曲目）；不打断正在播放的曲目。</summary>
+        public void RebasePath(string oldPath, string newPath)
+        {
+            for (int i = 0; i < paths.Count; i++) paths[i] = EntryPaths.Rebase(paths[i], oldPath, newPath);
+        }
+
         public void Stop()
         {
             pollTimer.Stop();

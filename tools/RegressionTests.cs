@@ -205,7 +205,7 @@ namespace AppManager
 
         private static string TryRename(MainForm form, AppInfo app, bool folder, string name)
         {
-            return (string)Invoke(form, "TryRenameOnDisk", app, EntriesOf(form, app), app.TargetPath, folder, name);
+            return (string)Invoke(form, "TryRenameOnDisk", app, app.TargetPath, folder, name);
         }
 
         private static TextBox FindTextBox(Control parent)
@@ -220,6 +220,12 @@ namespace AppManager
 
         /// <summary>在改名对话框中输入 text 并点「确定」；返回对话框是否因校验失败仍保持打开（随后由本方法关闭）。</summary>
         private static bool AnswerInput(Action action, string text, out string initial, out int start, out int length)
+        {
+            return AnswerInput(action, text, null, out initial, out start, out length);
+        }
+
+        /// <summary>beforeAccept：点「确定」前在对话框打开期间执行（模拟后台导入等触发的保存）。</summary>
+        private static bool AnswerInput(Action action, string text, Action beforeAccept, out string initial, out int start, out int length)
         {
             string seen = null;
             int selectionStart = -1, selectionLength = -1;
@@ -238,6 +244,7 @@ namespace AppManager
                     TextBox box = FindTextBox(dialog);
                     if (box == null) return;
                     seen = box.Text; selectionStart = box.SelectionStart; selectionLength = box.SelectionLength;
+                    if (beforeAccept != null) beforeAccept();
                     box.Text = text;
                     answered = true;
                     foreach (Control button in dialog.Controls)
@@ -267,9 +274,15 @@ namespace AppManager
             string renamed = Path.Combine(dir, "改名后.zip"), newKey = "add:" + renamed;
             using (MainForm form = ResourceForm(config, "压缩包", app))
             {
-                Check((bool)Invoke(form, "RenamesOnDisk", app, EntriesOf(form, app)), "managed resource treated as display-name rename");
+                Check((bool)Invoke(form, "RenamesOnDisk", app, app.TargetPath), "managed resource treated as display-name rename");
+                object mini = typeof(MainForm).GetField("miniMusic", Private).GetValue(form);
+                FieldInfo playlist = mini.GetType().GetField("paths", Private);
+                playlist.SetValue(mini, new List<string> { path, Path.Combine(dir, "other.mp3") });
                 string seen; int start, length;
-                bool stayedOpen = AnswerInput(delegate { Invoke(form, "RenameAddedEntry", app); }, "改名后.zip", out seen, out start, out length);
+                // 对话框打开期间发生一次无关的保存（后台导入完成等）：会清空记录缓存，改名不能再改到旧对象上
+                bool stayedOpen = AnswerInput(delegate { Invoke(form, "RenameAddedEntry", app); }, "改名后.zip",
+                    delegate { config.Favorites.Add("af:unrelated"); Check(config.Save(), "unrelated save failed"); },
+                    out seen, out start, out length);
                 Check(seen == "test.zip" && start == 0 && length == 4, "prefill/selection: " + seen + " " + start + "+" + length);
                 Check(!stayedOpen, "valid rename kept the dialog open");
                 Check(File.Exists(renamed) && !File.Exists(path) && File.ReadAllText(renamed) == "data", "file was not renamed on disk");
@@ -277,10 +290,13 @@ namespace AppManager
                 Check(config.Favorites.Contains(newKey) && !config.Favorites.Contains(key), "favorite not migrated");
                 Check(config.Hidden.Contains(newKey) && !config.Hidden.Contains(key), "hidden not migrated");
                 Check(config.ItemOrder["压缩包"].Contains(newKey) && !config.ItemOrder["压缩包"].Contains(key), "order not migrated");
+                List<string> songs = (List<string>)playlist.GetValue(mini);
+                Check(songs[0] == renamed && songs[1] == Path.Combine(dir, "other.mp3"), "mini player playlist kept the old path");
             }
             AppConfig loaded = AppConfig.Load();
             List<AddedEntry> records = loaded.AddedItems.ByPath(renamed);
-            Check(records.Count == 1 && records[0].Name == "改名后" && records[0].IsResource && loaded.AddedItems.ByPath(path).Count == 0, "persisted record");
+            Check(records.Count == 1 && records[0].Name == "改名后" && records[0].IsResource && loaded.AddedItems.ByPath(path).Count == 0,
+                "persisted record (stale entry written back?): " + records.Count + " / old=" + loaded.AddedItems.ByPath(path).Count);
             Check(loaded.Favorites.Contains(newKey) && !loaded.Favorites.Contains(key), "persisted favorite");
             Check(loaded.Hidden.Contains(newKey) && !loaded.Hidden.Contains(key), "persisted hidden");
             Check(loaded.ItemOrder.ContainsKey("压缩包") && loaded.ItemOrder["压缩包"].Contains(newKey), "persisted order");
@@ -366,13 +382,21 @@ namespace AppManager
             AppInfo shortcut = AddEntry(config, "开发工具", Path.Combine(config.FileStorePath, "快捷.lnk"), false, false, "快捷");
             AppInfo storedDoc = AddEntry(config, "办公软件", Path.Combine(config.FileStorePath, "笔记.txt"), false, false, "笔记");
             AppInfo outside = AddEntry(config, "办公软件", Path.Combine(scope, "elsewhere", "外部.txt"), false, false, "外部");
-            using (MainForm form = ResourceForm(config, "照片", album, nested, exe, shortcut, storedDoc, outside))
+            AppInfo userPhoto = AddEntry(config, "照片", Path.Combine(scope, "Pictures", "IMG_1.jpg"), false, true, "IMG_1");
+            AppInfo categoryDir = AddEntry(config, "文件", photos, true, true, "照片");
+            AppInfo storeRoot = AddEntry(config, "文件", config.FileStorePath, true, false, "files");
+            using (MainForm form = ResourceForm(config, "照片", album, nested, exe, shortcut, storedDoc, outside, userPhoto, categoryDir, storeRoot))
             {
-                Check(!(bool)Invoke(form, "RenamesOnDisk", exe, EntriesOf(form, exe)), "exe would be renamed on disk");
-                Check(!(bool)Invoke(form, "RenamesOnDisk", shortcut, EntriesOf(form, shortcut)), "shortcut in store would be renamed on disk");
-                Check(!(bool)Invoke(form, "RenamesOnDisk", outside, EntriesOf(form, outside)), "referenced file would be renamed on disk");
-                Check((bool)Invoke(form, "RenamesOnDisk", storedDoc, EntriesOf(form, storedDoc)), "stored document not renamed on disk");
-                Check((bool)Invoke(form, "RenamesOnDisk", album, EntriesOf(form, album)), "resource folder not renamed on disk");
+                Check(!(bool)Invoke(form, "RenamesOnDisk", exe, exe.TargetPath), "exe would be renamed on disk");
+                Check(!(bool)Invoke(form, "RenamesOnDisk", shortcut, shortcut.TargetPath), "shortcut in store would be renamed on disk");
+                Check(!(bool)Invoke(form, "RenamesOnDisk", outside, outside.TargetPath), "referenced file would be renamed on disk");
+                Check((bool)Invoke(form, "RenamesOnDisk", storedDoc, storedDoc.TargetPath), "stored document not renamed on disk");
+                Check((bool)Invoke(form, "RenamesOnDisk", album, album.TargetPath), "resource folder not renamed on disk");
+                // 资源记录但文件在存储目录之外（已收录的原位置路径再导入资源分类）：是用户自己的文件
+                Check(!(bool)Invoke(form, "RenamesOnDisk", userPhoto, userPhoto.TargetPath), "user's own file outside the store would be renamed on disk");
+                // 存储结构本身：资源分类目录、文件存储根
+                Check(!(bool)Invoke(form, "RenamesOnDisk", categoryDir, categoryDir.TargetPath), "resource category directory would be renamed");
+                Check(!(bool)Invoke(form, "RenamesOnDisk", storeRoot, storeRoot.TargetPath), "file store root would be renamed");
 
                 Check(Invoke(form, "RenameBlocker", nested.TargetPath, true) != null, "folder with nested entries not blocked");
                 Check(Invoke(form, "RenameBlocker", album.TargetPath, true) == null, "plain folder blocked");
