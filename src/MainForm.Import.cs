@@ -40,7 +40,7 @@ namespace AppManager
 
         private bool CanImportHere
         {
-            get { return !importExitPending && !settingsOpen && !imageViewer.Visible && !textViewer.Visible && !videoPlayer.Visible
+            get { return !importExitPending && !settingsOpen && !imageViewer.Visible && !textViewer.Visible && !archiveViewer.Visible && !videoPlayer.Visible
                 && !musicPlayer.Visible && !collectionInfo.IsEditing; }
         }
 

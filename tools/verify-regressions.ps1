@@ -9,7 +9,7 @@ $process = $null
 try {
     $sources = Get-ChildItem (Join-Path $project 'src') -Recurse -Filter *.cs | ForEach-Object FullName
     $references = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll',
-        'System.Xml.dll', 'Microsoft.VisualBasic.dll', 'Microsoft.CSharp.dll') | ForEach-Object { '/r:' + $_ }
+        'System.Xml.dll', 'Microsoft.VisualBasic.dll', 'Microsoft.CSharp.dll', 'System.IO.Compression.dll') | ForEach-Object { '/r:' + $_ }
     $references += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll') |
         ForEach-Object { '/r:' + (Join-Path (Split-Path -Parent $compiler) $_) }
     $manifest = '/win32manifest:' + (Join-Path $project 'app.manifest')

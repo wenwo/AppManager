@@ -54,7 +54,8 @@ $refs = @(
   "System.Windows.Forms.dll",
   "System.Xml.dll",
   "Microsoft.VisualBasic.dll",
-  "Microsoft.CSharp.dll"
+  "Microsoft.CSharp.dll",
+  "System.IO.Compression.dll"
 )
 
 # WIC image decoding uses the framework's WPF imaging wrapper; these are inbox

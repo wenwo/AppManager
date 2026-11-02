@@ -14,7 +14,7 @@ $perfLog = Join-Path $perfRoot 'results.log'
 & git -C $perfProject archive --format=zip "--output=$perfArchive" $BaselineRevision
 if ($LASTEXITCODE -ne 0) { throw 'Cannot export baseline revision.' }
 Expand-Archive -LiteralPath $perfArchive -DestinationPath $perfBaseline
-$perfRefs = @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Xml.dll','Microsoft.VisualBasic.dll','Microsoft.CSharp.dll') | ForEach-Object { '/r:' + $_ }
+$perfRefs = @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Xml.dll','Microsoft.VisualBasic.dll','Microsoft.CSharp.dll', 'System.IO.Compression.dll') | ForEach-Object { '/r:' + $_ }
 $perfRefs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll') |
     ForEach-Object { '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) $_) }
 $perfOld = Join-Path $perfRoot 'XML.exe'

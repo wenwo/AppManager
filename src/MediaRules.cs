@@ -122,6 +122,12 @@ namespace AppManager
             return MatchExt(path, AudioExt);
         }
 
+        /// <summary>是否为压缩包；资源中的压缩包由内置查看器列出内容。</summary>
+        public static bool IsArchive(string path)
+        {
+            return MatchExt(path, ArchiveExt);
+        }
+
         /// <summary>是否为任一类型的本地媒体文件（图片/视频/音频）。</summary>
         public static bool IsMedia(string path)
         {

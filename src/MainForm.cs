@@ -54,6 +54,7 @@ namespace AppManager
         private bool settingsOpen;         // 是否处于设置页
         private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
         private TextViewerControl textViewer;   // 文本查看器：双击文本资源后替换列表区域展示文本
+        private ArchiveViewerControl archiveViewer;   // 压缩包查看器：双击压缩包资源后替换列表区域列出内容
         private VideoPlayerControl videoPlayer;  // 视频播放器：双击视频后替换列表区域播放
         private MusicPlayerControl musicPlayer;  // 音乐播放器：双击音乐后在列表区域直接播放
         private NotifyIcon tray;          // 系统托盘图标（常驻）
@@ -785,6 +786,10 @@ namespace AppManager
             textViewer.CloseRequested += HideTextViewer;
             Controls.Add(textViewer);
 
+            archiveViewer = new ArchiveViewerControl();
+            archiveViewer.CloseRequested += HideArchiveViewer;
+            Controls.Add(archiveViewer);
+
             // 视频播放器：默认隐藏，双击视频时替换列表区域（尺寸/位置与 grid 一致）
             videoPlayer = new VideoPlayerControl();
             videoPlayer.CloseRequested += OnVideoCloseRequested;     // 全屏时先退全屏再退播放器
@@ -1057,6 +1062,8 @@ namespace AppManager
             imageViewer.Size = new Size(contentW, gridHeight);
             textViewer.Location = contentLoc;
             textViewer.Size = new Size(contentW, gridHeight);
+            archiveViewer.Location = contentLoc;
+            archiveViewer.Size = new Size(contentW, gridHeight);
             videoPlayer.Location = contentLoc;
             videoPlayer.Size = new Size(contentW, gridHeight);
             musicPlayer.Location = contentLoc;
@@ -1749,6 +1756,7 @@ namespace AppManager
                 // 列表内容即将变化（切分类/搜索/手动重扫），先退出图片/视频查看器，避免浏览序列过期
                 HideImageViewer();
                 HideTextViewer();
+                HideArchiveViewer();
                 HideVideoPlayer();
                 HideMusicPlayer();
             }
@@ -1837,7 +1845,7 @@ namespace AppManager
         {
             if (settingsOpen) return;
             bool showGrid = !(collectionInfo != null && collectionInfo.Visible)
-                && !imageViewer.Visible && !textViewer.Visible && !videoPlayer.Visible && !musicPlayer.Visible;
+                && !imageViewer.Visible && !textViewer.Visible && !archiveViewer.Visible && !videoPlayer.Visible && !musicPlayer.Visible;
             if (showGrid)
             {
                 if (!grid.Visible) grid.Visible = true;
@@ -3287,6 +3295,11 @@ namespace AppManager
                 ShowTextViewer(app);
                 return;
             }
+            if (resourceFile && MediaRules.IsArchive(app.TargetPath))
+            {
+                ShowArchiveViewer(app);
+                return;
+            }
             // 本地视频：应用内 libmpv 播放器直接播放（不调起外部播放器）
             if (app != null && !app.IsFolder
                 && MediaRules.IsVideo(app.TargetPath) && File.Exists(app.TargetPath))
@@ -3348,7 +3361,7 @@ namespace AppManager
             return IsLocalViewerFile(app)
                 && (MediaRules.IsImage(app.TargetPath)
                     || (app.IsFile && contentMode == SidebarControl.ContentMode.Website
-                        && (MediaRules.IsPdf(app.TargetPath) || MediaRules.IsText(app.TargetPath)))
+                        && (MediaRules.IsPdf(app.TargetPath) || MediaRules.IsText(app.TargetPath) || MediaRules.IsArchive(app.TargetPath)))
                     || MediaRules.IsVideo(app.TargetPath) || MediaRules.IsAudio(app.TargetPath));
         }
 
@@ -3390,10 +3403,30 @@ namespace AppManager
             if (wasVisible) { SyncContentVisibility(); grid.Invalidate(); }
         }
 
+        /// <summary>双击压缩包：在当前列表的压缩包序列中打开查看器，列出包内文件。</summary>
+        private void ShowArchiveViewer(AppInfo app)
+        {
+            List<string> archives = MediaSequence(MediaRules.IsArchive, false);
+            int idx = archives.FindIndex(delegate(string p) { return string.Equals(p, app.TargetPath, StringComparison.OrdinalIgnoreCase); });
+            if (idx < 0) { archives.Insert(0, app.TargetPath); idx = 0; }
+            HideOtherViewers(archiveViewer);
+            grid.Visible = false;
+            archiveViewer.BringToFront();
+            archiveViewer.Open(archives, idx);
+        }
+
+        private void HideArchiveViewer()
+        {
+            bool wasVisible = archiveViewer.Visible;
+            archiveViewer.ClosePreview();
+            if (wasVisible) { SyncContentVisibility(); grid.Invalidate(); }
+        }
+
         private void HideOtherViewers(Control keep)
         {
             if (!object.ReferenceEquals(keep, imageViewer)) HideImageViewer();
             if (!object.ReferenceEquals(keep, textViewer)) HideTextViewer();
+            if (!object.ReferenceEquals(keep, archiveViewer)) HideArchiveViewer();
             if (!object.ReferenceEquals(keep, videoPlayer)) HideVideoPlayer();
             if (!object.ReferenceEquals(keep, musicPlayer)) HideMusicPlayer();
         }
@@ -5285,6 +5318,7 @@ namespace AppManager
             settingsOpen = true;
             HideImageViewer();   // 查看器/播放器属于列表区域，进入设置页前先退出
             HideTextViewer();
+            HideArchiveViewer();
             HideVideoPlayer();
             HideMusicPlayer();
             miniMusic.Stop();
@@ -5601,7 +5635,7 @@ namespace AppManager
                     || c is IosProgressBar || c is CheckedListBox || c is TextBox
                     || c is SidebarControl || c is AppGridControl || c is SettingsPage
                     || c is ImageViewerControl || c is VideoPlayerControl || c is MusicPlayerControl || c is MiniMusicPlayerControl
-                    || c is TextViewerControl
+                    || c is TextViewerControl || c is ArchiveViewerControl
                     || c is CollectionInfoPanel || c is CollectionSidebar || c is ListHeaderStrip)
                     continue;
                 c.MouseDown += delegate(object s, MouseEventArgs e)

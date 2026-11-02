@@ -9,7 +9,7 @@ $stderr = $output + '.err'
 try {
     $sources = Get-ChildItem (Join-Path $project 'src') -Recurse -Filter *.cs | ForEach-Object FullName
     $refs = @('System.dll', 'System.Core.dll', 'System.Drawing.dll', 'System.Windows.Forms.dll',
-        'System.Xml.dll', 'Microsoft.VisualBasic.dll', 'Microsoft.CSharp.dll')
+        'System.Xml.dll', 'Microsoft.VisualBasic.dll', 'Microsoft.CSharp.dll', 'System.IO.Compression.dll')
     $refs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll',
         'System.Runtime.dll', 'System.Runtime.WindowsRuntime.dll') | ForEach-Object { Join-Path $framework $_ }
     $refs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |

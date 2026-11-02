@@ -5,7 +5,7 @@ $ingestCompiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\cs
 $ingestRoot = Join-Path ([IO.Path]::GetTempPath()) ('AppManagerDatabaseVerification_' + [Guid]::NewGuid().ToString('N'))
 [IO.Directory]::CreateDirectory($ingestRoot) | Out-Null
 $ingestFiles = Get-ChildItem (Join-Path $ingestProject 'src') -Recurse -Filter *.cs | ForEach-Object FullName
-$ingestRefs = @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Xml.dll','Microsoft.VisualBasic.dll','Microsoft.CSharp.dll') | ForEach-Object { '/r:' + $_ }
+$ingestRefs = @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Xml.dll','Microsoft.VisualBasic.dll','Microsoft.CSharp.dll', 'System.IO.Compression.dll') | ForEach-Object { '/r:' + $_ }
 $ingestRefs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll') |
     ForEach-Object { '/r:' + (Join-Path (Split-Path -Parent $ingestCompiler) $_) }
 $ingestLog = Join-Path $ingestRoot 'results.log'

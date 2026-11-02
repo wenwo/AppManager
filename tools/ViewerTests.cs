@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.IO.Compression;
 using System.Reflection;
 using System.Runtime.Serialization;
 using System.Text;
@@ -53,6 +54,10 @@ namespace AppManager
                 Run("text edits save with original encoding, BOM and newlines", TextSaving);
                 Run("PDF page navigation and image pan in both directions", ViewerNavigation);
                 Run("resource routing preserves software scripts; credentials accept text", Routing);
+                Run("archive zip names (UTF-8 flag, unflagged UTF-8, GBK), tree, sizes and path normalization", ArchiveZip);
+                Run("archive tar.gz/xz/bz2/zst/7z and raw gz through system libarchive; corrupt and truncated input", ArchiveLibArchive);
+                Run("archive reading shares the file, honours cancellation and releases handles", ArchiveSharing);
+                Run("archive viewer browse, natural/size sort, breadcrumbs, hint and switching", ArchiveViewer);
                 Run("external pickers serialize on STA, deduplicate and keep UI responsive", PickerSerial);
                 Run("external picker cancellation clears pending files and permits retry", PickerCancellation);
                 Run("external picker queue bounds, failure and disposal", PickerBounds);
@@ -478,8 +483,11 @@ namespace AppManager
             AppInfo script = new AppInfo { TargetPath = @"C:\not-real\script.ps1", IsFile = true };
             Set(form, "contentMode", SidebarControl.ContentMode.Software);
             Check(!(bool)Call(form, "IsEmbeddedViewerItem", script), "software script captured");
+            AppInfo archive = new AppInfo { TargetPath = @"C:\not-real\pack.tar.gz", IsFile = true };
+            Check(!(bool)Call(form, "IsEmbeddedViewerItem", archive), "software archive captured");
             Set(form, "contentMode", SidebarControl.ContentMode.Website);
             Check((bool)Call(form, "IsEmbeddedViewerItem", script), "resource script not previewed");
+            Check((bool)Call(form, "IsEmbeddedViewerItem", archive), "resource archive not previewed");
             foreach (string url in new string[] { "https://example.test/picture.png", "https://example.test/file.pdf", "https://example.test/file.txt" })
                 Check(!(bool)Call(form, "IsEmbeddedViewerItem", new AppInfo { TargetPath = url, IsFile = true }), "URL captured: " + url);
             Check(MediaRules.MatchCategoryExt("证件", "note.txt") && MediaRules.MatchCategoryExt("证件", "scan.pdf")
@@ -489,6 +497,286 @@ namespace AppManager
             Check(sequence.Count == 1, "background existence checks");
             // The uninitialized form is only used for methods that inspect these fields; never show/dispose it.
             GC.SuppressFinalize(form);
+        }
+
+        // ===== 压缩包 =====
+
+        private static readonly string[][] ArchiveSample =
+        {
+            new string[] { "说明 文件.txt", "hello" },
+            new string[] { "子目录 a/图片.png", new string('x', 5000) },
+            new string[] { "子目录 a/深层/e.md", "# t" },
+            new string[] { "空目录/", null },
+            new string[] { "./点开头.txt", "1" },
+            new string[] { "a\\b.txt", "22" },
+            new string[] { "file10.txt", "0123456789" },
+            new string[] { "file2.txt", "01" },
+        };
+
+        /// <summary>names 为 null 时由 ZipArchive 自行决定（非 ASCII 名设置 UTF-8 标记）。</summary>
+        private static string MakeZip(string name, Encoding names, string[][] entries)
+        {
+            string path = Path.Combine(root, name);
+            if (File.Exists(path)) File.Delete(path);
+            using (FileStream stream = new FileStream(path, FileMode.CreateNew))
+            using (ZipArchive zip = new ZipArchive(stream, ZipArchiveMode.Create, false, names))
+                foreach (string[] e in entries)
+                {
+                    ZipArchiveEntry entry = zip.CreateEntry(e[0]);
+                    entry.LastWriteTime = new DateTimeOffset(2024, 5, 6, 7, 8, 0, TimeSpan.Zero);
+                    if (e[1] != null)
+                        using (Stream body = entry.Open()) { byte[] data = Encoding.UTF8.GetBytes(e[1]); body.Write(data, 0, data.Length); }
+                }
+            return path;
+        }
+
+        private static ArchiveEntryInfo Find(ArchivePreview preview, string path)
+        {
+            ArchiveEntryInfo node = preview.Root;
+            foreach (string part in path.Split('/'))
+            {
+                string name = part;
+                node = node.Children == null ? null : node.Children.Find(delegate(ArchiveEntryInfo c) { return c.Name == name; });
+                if (node == null) return null;
+            }
+            return node;
+        }
+
+        private static void ArchiveZip()
+        {
+            List<Encoding> encodings = new List<Encoding> { null, new UTF8Encoding(false) };
+            if (Encoding.Default.CodePage == 936) encodings.Add(Encoding.Default);
+            foreach (Encoding names in encodings)
+            {
+                string label = names == null ? "flagged UTF-8" : names is UTF8Encoding ? "unflagged UTF-8" : "GBK";
+                string path = MakeZip("names.zip", names, ArchiveSample);
+                // 测试前提：后两种文件名确实没有 UTF-8 标记（通用标志位 bit 11）
+                byte[] head = File.ReadAllBytes(path);
+                Check(((head[7] & 0x08) != 0) == (names == null), label + ": unexpected UTF-8 flag");
+                ArchivePreview p = ArchivePreview.Read(path, CancellationToken.None);
+                Check(p.FileCount == 7 && p.FolderCount == 4, label + ": counts " + p.FileCount + "/" + p.FolderCount);
+                Check(p.TotalSize == 5 + 5000 + 3 + 1 + 2 + 10 + 2 && !p.SizeUnknown, label + ": total " + p.TotalSize);
+                Check(p.ArchiveBytes == new FileInfo(path).Length, label + ": archive bytes");
+                ArchiveEntryInfo sub = Find(p, "子目录 a");
+                Check(sub != null && sub.IsFolder && sub.Size == 5003 && sub.FileCount == 2 && sub.FolderCount == 1, label + ": folder aggregate");
+                ArchiveEntryInfo md = Find(p, "子目录 a/深层/e.md");
+                // zip 记录的是本地时钟时间（DOS 时间，无时区）
+                Check(md != null && md.Size == 3 && md.Modified == new DateTime(2024, 5, 6, 7, 8, 0),
+                    label + ": nested file " + (md == null ? "missing" : md.Size + " " + md.Modified.ToString("o")));
+                Check(Find(p, "说明 文件.txt") != null && Find(p, "点开头.txt") != null && Find(p, "a/b.txt") != null, label + ": names / normalization");
+                Check(Find(p, "空目录") != null && Find(p, "空目录").IsFolder && Find(p, "空目录").Children.Count == 0, label + ": explicit empty folder");
+                Check(p.Root.Children.TrueForAll(delegate(ArchiveEntryInfo c) { return c.Name.Length > 0 && c.Name != "."; }), label + ": empty segment node");
+            }
+        }
+
+        private static string SystemTar()
+        {
+            string tar = Path.Combine(Environment.SystemDirectory, "tar.exe");
+            return File.Exists(tar) && File.Exists(Path.Combine(Environment.SystemDirectory, "archiveint.dll")) ? tar : null;
+        }
+
+        private static void RunTar(string tar, string arguments)
+        {
+            ProcessStartInfo info = new ProcessStartInfo(tar, arguments) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+            using (Process process = Process.Start(info))
+            {
+                string error = process.StandardError.ReadToEnd();
+                Check(process.WaitForExit(60000) && process.ExitCode == 0, "tar " + arguments + " failed: " + error);
+            }
+        }
+
+        private static void ArchiveLibArchive()
+        {
+            string tar = SystemTar();
+            if (tar == null) { Console.WriteLine("  skipped: system libarchive (tar.exe / archiveint.dll) not present"); return; }
+            string src = Path.Combine(root, "arc-src");
+            Directory.CreateDirectory(Path.Combine(src, "子目录 a", "深层"));
+            File.WriteAllText(Path.Combine(src, "说明 文件.txt"), "hello");
+            File.WriteAllText(Path.Combine(src, "子目录 a", "图片.png"), new string('x', 5000));
+            File.WriteAllText(Path.Combine(src, "子目录 a", "深层", "e.md"), "# t");
+            File.WriteAllText(Path.Combine(src, "数据 2024.csv"), "a,b");
+            string[][] formats =
+            {
+                new string[] { "t.tar.gz", "-czf" }, new string[] { "t.tar.xz", "-cJf" }, new string[] { "t.tar.bz2", "-cjf" },
+                new string[] { "t.tar.zst", "--zstd -cf" }, new string[] { "t.7z", "--format 7zip -cf" }, new string[] { "t.tar", "-cf" },
+            };
+            foreach (string[] format in formats)
+            {
+                string path = Path.Combine(root, format[0]);
+                RunTar(tar, format[1] + " \"" + path + "\" -C \"" + src + "\" .");
+                ArchivePreview p = ArchivePreview.Read(path, CancellationToken.None);
+                Check(p.FileCount == 4 && p.FolderCount == 2, format[0] + ": counts " + p.FileCount + "/" + p.FolderCount);
+                Check(Find(p, "数据 2024.csv") != null && Find(p, "说明 文件.txt") != null, format[0] + ": unicode names");
+                ArchiveEntryInfo png = Find(p, "子目录 a/图片.png");
+                Check(png != null && png.Size == 5000 && png.Modified != DateTime.MinValue, format[0] + ": nested entry");
+                Check(p.TotalSize == 5 + 5000 + 3 + 3 && p.Warning == null && !p.Truncated, format[0] + ": totals");
+            }
+
+            // ZipArchive 读不了的 zip 走 libarchive：emoji（增补平面）名与 GBK 名都要正确
+            // （系统 tar.exe 打包含 emoji 的文件名会崩溃，这里用 .NET 生成 zip 后直接调用 libarchive 路径）
+            MethodInfo viaLibArchive = typeof(ArchivePreview).GetNestedType("LibArchive", BindingFlags.NonPublic)
+                .GetMethod("Read", BindingFlags.Public | BindingFlags.Static);
+            string[][] emojiSample = { new string[] { "😀 表情.txt", "emoji" }, new string[] { "目录/说明.txt", "x" } };
+            List<Encoding> zipNames = new List<Encoding> { null };
+            if (Encoding.Default.CodePage == 936) zipNames.Add(Encoding.Default);
+            foreach (Encoding names in zipNames)
+            {
+                string[][] sample = names == null ? emojiSample : new string[][] { emojiSample[1], new string[] { "中文 名.txt", "y" } };
+                string path = MakeZip("libarchive.zip", names, sample);
+                ArchivePreview p = (ArchivePreview)viaLibArchive.Invoke(null, new object[] { path, true, CancellationToken.None });
+                foreach (string[] e in sample)
+                    Check(Find(p, e[0]) != null, (names == null ? "UTF-8" : "GBK") + " zip via libarchive lost name: " + e[0]);
+            }
+
+            // 单文件压缩流：列出去掉 .gz 后的文件名，大小未知
+            string gz = Path.Combine(root, "log.txt.gz");
+            using (FileStream stream = File.Create(gz))
+            using (GZipStream zip = new GZipStream(stream, CompressionMode.Compress))
+            { byte[] data = Encoding.UTF8.GetBytes("hello world"); zip.Write(data, 0, data.Length); }
+            ArchivePreview raw = ArchivePreview.Read(gz, CancellationToken.None);
+            Check(raw.FileCount == 1 && raw.Root.Children[0].Name == "log.txt" && raw.Root.Children[0].Size == -1 && raw.SizeUnknown, "raw gz");
+
+            // 扩展名是压缩包、内容不是：raw 兜底不能把任意文件当成单文件压缩流
+            string fake = WriteText("fake.gz", "not a gzip stream", Encoding.ASCII);
+            Expect<InvalidDataException>(delegate { ArchivePreview.Read(fake, CancellationToken.None); });
+            string junk = Path.Combine(root, "junk.rar");
+            byte[] noise = new byte[4096]; new Random(7).NextBytes(noise); File.WriteAllBytes(junk, noise);
+            try { ArchivePreview.Read(junk, CancellationToken.None); throw new Exception("junk rar accepted"); }
+            catch (InvalidDataException ex) { Check(ex.Message == "无法识别的压缩包格式", "junk message: " + ex.Message); }
+            // 0 字节的 .zip：libarchive 视为空归档，查看器显示「压缩包为空」
+            string emptyZip = WriteText("empty.zip", "", Encoding.ASCII);
+            ArchivePreview empty = ArchivePreview.Read(emptyZip, CancellationToken.None);
+            Check(empty.FileCount == 0 && empty.Root.Children.Count == 0, "empty zip");
+
+            // 下载不完整的 tar.gz：列出已读到的部分并给出提示
+            string many = Path.Combine(root, "arc-many");
+            Directory.CreateDirectory(many);
+            Random random = new Random(11);
+            for (int i = 0; i < 20; i++) { byte[] data = new byte[20000]; random.NextBytes(data); File.WriteAllBytes(Path.Combine(many, "f" + i + ".bin"), data); }
+            string full = Path.Combine(root, "many.tar.gz");
+            RunTar(tar, "-czf \"" + full + "\" -C \"" + many + "\" .");
+            byte[] bytes = File.ReadAllBytes(full);
+            string cut = Path.Combine(root, "cut.tar.gz");
+            byte[] half = new byte[bytes.Length / 2];
+            Buffer.BlockCopy(bytes, 0, half, 0, half.Length);
+            File.WriteAllBytes(cut, half);
+            ArchivePreview partial = ArchivePreview.Read(cut, CancellationToken.None);
+            Check(partial.Warning != null && partial.FileCount > 0 && partial.FileCount < 20, "truncated: " + partial.FileCount + " " + partial.Warning);
+        }
+
+        private static void ArchiveSharing()
+        {
+            string zip = MakeZip("shared.zip", null, ArchiveSample);
+            List<string> targets = new List<string> { zip };
+            string tar = SystemTar();
+            if (tar != null)
+            {
+                string src = Path.Combine(root, "arc-share");
+                Directory.CreateDirectory(src);
+                File.WriteAllText(Path.Combine(src, "a.txt"), "a");
+                string tgz = Path.Combine(root, "shared.tar.gz");
+                RunTar(tar, "-czf \"" + tgz + "\" -C \"" + src + "\" .");
+                targets.Add(tgz);
+            }
+            foreach (string path in targets)
+            {
+                // 其他程序正以读写方式打开文件时仍能列出内容
+                using (new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+                    Check(ArchivePreview.Read(path, CancellationToken.None).FileCount > 0, "shared read: " + path);
+                Expect<OperationCanceledException>(delegate { ArchivePreview.Read(path, new CancellationToken(true)); });
+                ArchivePreview.Read(path, CancellationToken.None);
+                string moved = path + ".moved";
+                File.Move(path, moved); File.Delete(moved);   // 读取结束后不残留句柄
+            }
+        }
+
+        private static void ArchiveViewer()
+        {
+            using (Form form = new Form())
+            using (ArchiveViewerControl viewer = new ArchiveViewerControl())
+            {
+                form.Controls.Add(viewer); viewer.Size = new Size(900, 600);
+                IntPtr handle = form.Handle; handle = viewer.Handle;
+                string first = MakeZip("view1.zip", null, ArchiveSample);
+                string second = MakeZip("view2.zip", null, new string[][] { new string[] { "only.txt", "x" } });
+                string broken = WriteText("broken.zip", "PK not really", Encoding.ASCII);
+                for (int i = 0; i < 30; i++) { viewer.Open(new List<string> { first, second }, i % 2); viewer.ClosePreview(); }
+                viewer.Open(new List<string> { first, second }, 0);
+                Pump(delegate { return !(bool)Field(viewer, "loading"); });
+                Check(Field(viewer, "current") != null, "zip not loaded: " + Field(viewer, "failureText"));
+                List<ArchiveEntryInfo> rows = (List<ArchiveEntryInfo>)Field(viewer, "rows");
+                ListView list = (ListView)Field(viewer, "list");
+                // 窗体未显示时子控件不建句柄；虚拟列表的选中状态依赖句柄
+                handle = list.Handle;
+                Check(rows.Count == 7 && rows[0] != null && list.VirtualListSize == rows.Count && Shown(list), "root rows " + rows.Count);
+                int lastFolder = rows.FindLastIndex(delegate(ArchiveEntryInfo r) { return r.IsFolder; });
+                int firstFile = rows.FindIndex(delegate(ArchiveEntryInfo r) { return !r.IsFolder; });
+                Check(lastFolder < firstFile, "folders not first");
+                Check(rows.FindIndex(delegate(ArchiveEntryInfo r) { return r.Name == "file2.txt"; })
+                    < rows.FindIndex(delegate(ArchiveEntryInfo r) { return r.Name == "file10.txt"; }), "natural order");
+                Check(((string)Call(viewer, "Summary")).Contains("7 个文件"), "summary: " + Call(viewer, "Summary"));
+                for (int i = 0; i < rows.Count; i++) list.Items[i].ToString();   // 每一行都能生成列表项
+
+                ArchiveEntryInfo sub = rows.Find(delegate(ArchiveEntryInfo r) { return r.Name == "子目录 a"; });
+                Call(viewer, "ShowFolder", sub, null);
+                Check(rows.Count == 3 && rows[0] == null && rows[1].Name == "深层" && rows[2].Name == "图片.png", "sub rows");
+                Check(list.SelectedIndices.Count == 1 && list.SelectedIndices[0] == 1, "entering a folder should select its first entry, not the up row");
+                list.SelectedIndices.Clear(); list.SelectedIndices.Add(0);
+                Call(viewer, "SortBy", 1);
+                Check(list.SelectedIndices.Count == 1 && list.SelectedIndices[0] == 0 && rows[0] == null, "up row selection lost by sort");
+                Check(HeaderFormat(list, 1) == 0x0200 && HeaderFormat(list, 0) == 0, "sort arrow: name=" + HeaderFormat(list, 0) + " size=" + HeaderFormat(list, 1));
+                Call(viewer, "SortBy", 0);
+                Check(HeaderFormat(list, 0) == 0x0400 && HeaderFormat(list, 1) == 0, "sort arrow reset");
+                System.Collections.IList crumbs = (System.Collections.IList)Field(viewer, "crumbs");
+                FieldInfo target = crumbs.Count > 0 ? crumbs[0].GetType().GetField("Target") : null;
+                Check(crumbs.Count == 2 && target.GetValue(crumbs[0]) != null && target.GetValue(crumbs[1]) == null, "crumbs " + crumbs.Count);
+                Call(viewer, "GoUp");
+                Check(Field(viewer, "folder") == Field(viewer, "current").GetType().GetField("Root").GetValue(Field(viewer, "current"))
+                    && list.SelectedIndices.Count == 1 && rows[list.SelectedIndices[0]] == sub, "up did not reselect origin folder");
+
+                Call(viewer, "SortBy", 1);   // 大小：默认从大到小，文件夹仍在前
+                List<ArchiveEntryInfo> files = rows.FindAll(delegate(ArchiveEntryInfo r) { return !r.IsFolder; });
+                for (int i = 1; i < files.Count; i++) Check(files[i - 1].Size >= files[i].Size, "size order");
+                Check(rows.FindLastIndex(delegate(ArchiveEntryInfo r) { return r.IsFolder; }) < rows.FindIndex(delegate(ArchiveEntryInfo r) { return !r.IsFolder; }), "folders first after sort");
+                Call(viewer, "SortBy", 0);
+                Check(rows.FindIndex(delegate(ArchiveEntryInfo r) { return r.Name == "file2.txt"; })
+                    < rows.FindIndex(delegate(ArchiveEntryInfo r) { return r.Name == "file10.txt"; }), "name order restored");
+
+                list.SelectedIndices.Clear(); list.SelectedIndices.Add(firstFile);
+                Call(viewer, "ActivateSelected");
+                Check(Field(viewer, "hint") != null && Field(viewer, "folder") != null, "file activation hint");
+
+                Call(viewer, "Step", 1);
+                Pump(delegate { return !(bool)Field(viewer, "loading"); });
+                Check((int)Field(viewer, "index") == 1 && rows.Count == 1 && rows[0].Name == "only.txt", "step to next archive");
+                Check(Field(viewer, "hint") == null, "hint carried over to another archive");
+
+                viewer.Open(new List<string> { broken }, 0);
+                Pump(delegate { return !(bool)Field(viewer, "loading"); });
+                Check((bool)Field(viewer, "loadFailed") && ((string)Field(viewer, "failureText")).StartsWith("无法读取此压缩包：") && !Shown(list), "broken zip");
+                viewer.ClosePreview();
+                Check(rows.Count == 0 && list.VirtualListSize == 0 && !Shown(viewer), "closed viewer retained rows");
+            }
+            Application.DoEvents();
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+        private struct HDITEM
+        {
+            public uint mask; public int cxy; public IntPtr pszText; public IntPtr hbm; public int cchTextMax; public int fmt;
+            public IntPtr lParam; public int iImage; public int iOrder; public uint type; public IntPtr pvFilter; public uint state;
+        }
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, ref HDITEM lParam);
+        /// <summary>列头的排序箭头标志：0x400 升序，0x200 降序，0 无。</summary>
+        private static int HeaderFormat(ListView list, int column)
+        {
+            IntPtr header = SendMessage(list.Handle, 0x101F, IntPtr.Zero, IntPtr.Zero);   // LVM_GETHEADER
+            HDITEM item = new HDITEM { mask = 0x4 };                                        // HDI_FORMAT
+            Check(SendMessage(header, 0x120B, (IntPtr)column, ref item) != IntPtr.Zero, "HDM_GETITEM failed");
+            return item.fmt & 0x0600;
         }
 
         private static void PickerSerial()

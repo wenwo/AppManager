@@ -25,6 +25,7 @@ namespace AppManager
         private const uint SHGFI_SMALLICON = 0x00000001u;
         private const uint SHGFI_USEFILEATTRIBUTES = 0x00000010u;
         private const uint SHGFI_PIDL = 0x00000008u;
+        private const uint SHGFI_TYPENAME = 0x00000400u;
         private const uint FILE_ATTRIBUTE_NORMAL = 0x80u;
         private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10u;
 
@@ -600,6 +601,30 @@ namespace AppManager
             bool exists = File.Exists(path) || Directory.Exists(path);
             uint attr = Directory.Exists(path) ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
             return TryShGetInfoCore(path, attr, !exists, small);
+        }
+
+        /// <summary>
+        /// 按扩展名取系统图标（不访问磁盘）：用于压缩包内等不在磁盘上的条目。
+        /// extension 含点（".txt"）；folder 为 true 时取文件夹图标。调用方拥有返回的 Bitmap。
+        /// </summary>
+        internal static Bitmap ExtensionIcon(string extension, bool folder, bool small)
+        {
+            return TryShGetInfoCore(folder ? "folder" : "file" + (extension ?? string.Empty),
+                folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL, true, small);
+        }
+
+        /// <summary>按扩展名取系统类型名称（如「文本文档」），不访问磁盘；取不到时返回 null。</summary>
+        internal static string ExtensionTypeName(string extension, bool folder)
+        {
+            try
+            {
+                SHFILEINFO fi = new SHFILEINFO();
+                SHGetFileInfo(folder ? "folder" : "file" + (extension ?? string.Empty),
+                    folder ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL, ref fi,
+                    (uint)Marshal.SizeOf(typeof(SHFILEINFO)), SHGFI_TYPENAME | SHGFI_USEFILEATTRIBUTES);
+                return string.IsNullOrEmpty(fi.szTypeName) ? null : fi.szTypeName;
+            }
+            catch { return null; }
         }
 
         private static Bitmap TryShGetInfoCore(string path, uint attributes, bool useFileAttributes, bool small)
