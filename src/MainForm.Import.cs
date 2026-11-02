@@ -35,6 +35,7 @@ namespace AppManager
             public bool[] Folders;
             public bool Mixed, Executables;
             public readonly Dictionary<string, bool> Same = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            public readonly Dictionary<string, int> Mismatched = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         }
 
         private bool CanImportHere
@@ -114,6 +115,17 @@ namespace AppManager
             return dragProbe = probe;
         }
 
+        /// <summary>拖入的文件中不符合资源分类类型的数量（按分类缓存，DragOver 高频触发时不重复计算）。</summary>
+        private static int MismatchedFiles(DragProbe probe, string category)
+        {
+            int count;
+            if (probe.Mismatched.TryGetValue(category, out count)) return count;
+            for (int i = 0; i < probe.Paths.Length; i++)
+                if (!MediaRules.FitsCategory(category, probe.Paths[i], probe.Folders[i])) count++;
+            probe.Mismatched[category] = count;
+            return count;
+        }
+
         private bool ProbeSameVolume(DragProbe probe, string category, bool resource)
         {
             if (probe.Mixed) return false;
@@ -157,6 +169,14 @@ namespace AppManager
                 Keys modifiers = ((e.KeyState & 8) != 0 ? Keys.Control : Keys.None) | ((e.KeyState & 4) != 0 ? Keys.Shift : Keys.None);
                 bool choose = string.IsNullOrEmpty(category) || !CanEditCategory(category);
                 bool references = !resource && probe.Executables;
+                // 有类型限制的资源分类：拖动经过时就提示类型不符，而不是松手后才跳过（对齐资源管理器的禁止光标）。
+                int mismatched = resource && !choose ? MismatchedFiles(probe, category) : 0;
+                if (mismatched == probe.Paths.Length)
+                {
+                    if (drop) HideImportTip();
+                    else ShowImportTip(MediaRules.CategoryTypeHint(category), e);
+                    return DragDropEffects.None;
+                }
                 bool same = !choose && ProbeSameVolume(probe, category, resource);
                 DragDropEffects effect = FileImport.ResolveEffect(same, modifiers, e.AllowedEffect);
                 if (references) effect = (e.AllowedEffect & DragDropEffects.Copy) != 0 ? DragDropEffects.Copy : DragDropEffects.None;
@@ -165,6 +185,7 @@ namespace AppManager
                     : (effect == DragDropEffects.Move ? "移动到「" : "复制到「") + category + "」";
                 if (!references && (e.AllowedEffect & DragDropEffects.Move) == 0) text += "（来源仅可复制）";
                 else if (probe.Mixed && (modifiers & (Keys.Control | Keys.Shift)) == 0) text += "（多来源文件，默认复制）";
+                if (mismatched > 0) text += "（" + mismatched + " 个类型不符的文件将跳过）";
                 if (!drop) { ShowImportTip(text, e); return effect; }
                 HideImportTip();
                 dragProbe = null;
@@ -226,7 +247,7 @@ namespace AppManager
             {
                 if (choose)
                 {
-                    category = PickImportCategory(resource);
+                    category = PickImportCategory(resource, paths);
                     if (category == null) return;
                     collection = null;
                     if (!references)
@@ -255,7 +276,25 @@ namespace AppManager
             finally { if (!queued) completed(null); }
         }
 
-        private string PickImportCategory(bool resource)
+        // 选择导入分类时可自动选中的类型分类：「证件」同时收图片和文档、「文件」不限类型，都不作为自动推荐。
+        private static readonly string[] SuggestedResourceCategories = { "照片", "视频", "音乐", "文档", "压缩包" };
+
+        /// <summary>按待导入内容过滤资源分类：只保留至少能收下一项的分类；全部为同一类型的文件时推荐对应分类。</summary>
+        internal static List<string> ResourceImportChoices(IEnumerable<string> categories, IList<string> paths, bool[] folders, ref string preferred)
+        {
+            Func<string, int, bool> fits = (c, i) => MediaRules.FitsCategory(c, paths[i], folders[i]);
+            List<string> result = categories.Where(c => Enumerable.Range(0, paths.Count).Any(i => fits(c, i))).ToList();
+            if (folders.Any(f => f)) return result;
+            foreach (string suggested in SuggestedResourceCategories)
+                if (Enumerable.Range(0, paths.Count).All(i => fits(suggested, i))) { preferred = suggested; break; }
+            return result;
+        }
+
+        /// <summary>
+        /// 选择导入分类。资源模式下按待导入内容过滤：只列出至少能收下一项的分类，
+        /// 全部文件都属于同一类型时自动选中对应分类（如全是图片则选「照片」），否则默认「文件」。
+        /// </summary>
+        private string PickImportCategory(bool resource, IList<string> paths = null, bool[] folders = null)
         {
             using (Form dialog = new Form { Text = "导入到…", StartPosition = FormStartPosition.CenterParent,
                 FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ClientSize = new Size(360, 140) })
@@ -264,8 +303,11 @@ namespace AppManager
                 ComboBox choices = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(18, 45), Width = 322 };
                 IEnumerable<string> categories = resource ? CategoryRules.ResourceBuiltIn.Concat(config.ResourceCategories)
                     : CategoryRules.BuiltIn.Concat(config.CustomCategories).Concat(new string[] { QuickCenter });
+                string preferred = resource ? "文件" : "其他";
+                if (resource && paths != null && paths.Count > 0)
+                    categories = ResourceImportChoices(categories, paths, folders ?? paths.Select(p => Directory.Exists(p)).ToArray(), ref preferred);
                 foreach (string category in categories.Distinct()) choices.Items.Add(category);
-                choices.SelectedItem = resource ? "文件" : "其他";
+                choices.SelectedItem = preferred;
                 if (choices.SelectedIndex < 0 && choices.Items.Count > 0) choices.SelectedIndex = 0;
                 Button ok = new Button { Text = "确定", DialogResult = DialogResult.OK, Location = new Point(180, 94) };
                 Button cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Location = new Point(266, 94) };
@@ -295,8 +337,16 @@ namespace AppManager
                 if (sequence != GetClipboardSequenceNumber()) throw new IOException("剪贴板已变化，请重新粘贴。");
                 bool resource = contentMode == SidebarControl.ContentMode.Website;
                 bool choose = SearchActive || !CanEditCategory(currentCategory);
-                string category = choose ? PickImportCategory(resource) : currentCategory;
-                if (category != null) QueueImport(paths, operation, category, choose ? null : ImportCollectionKey, resource, sequence);
+                bool[] folders = resource ? paths.Select(p => Directory.Exists(p)).ToArray() : null;
+                string category = choose ? PickImportCategory(resource, paths, folders) : currentCategory;
+                if (category == null) return true;
+                // 与拖放一致：全部类型不符时直接提示，不排队一个注定全部跳过的导入批次
+                if (resource && Enumerable.Range(0, paths.Length).All(i => !MediaRules.FitsCategory(category, paths[i], folders[i])))
+                {
+                    ShowNotice("未导入：" + MediaRules.CategoryTypeHint(category));
+                    return true;
+                }
+                QueueImport(paths, operation, category, choose ? null : ImportCollectionKey, resource, sequence);
                 return true;
             }
             catch (Exception ex)
@@ -374,7 +424,7 @@ namespace AppManager
                     // 移动会让文件夹内已收录的项目全部指向旧路径而失效；复制不影响它们。
                     else if (folder && !reference && operation == ImportOperation.Move && config.AddedItems.EntriesUnder(source).Count > 0)
                     { item.State = FileImport.Failed; item.Error = "文件夹内包含已收录的项目，不能移动；请改用复制（拖放时按住 Ctrl）。"; }
-                    else if (resource && !folder && !MediaRules.MatchCategoryExt(category, source))
+                    else if (resource && !MediaRules.FitsCategory(category, source, folder))
                     { item.State = FileImport.Skipped; item.Error = "文件类型不符合目标分类。"; }
                     batch.Items.Add(item);
                 }
@@ -458,7 +508,7 @@ namespace AppManager
                         config.AddedItems.Add(entry); added.Add(entry);
                     }
                 }
-                if (batch.Collection != null && MediaRules.MatchCategoryExt(batch.Category, item.Target)
+                if (batch.Collection != null && MediaRules.FitsCategory(batch.Category, item.Target, item.Folder)
                     && CollectionOps.AddMember(config, "add:" + item.Target, batch.Collection)) memberships.Add("add:" + item.Target);
             }
             InvalidateAddedIndex();

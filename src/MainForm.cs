@@ -2378,6 +2378,7 @@ namespace AppManager
             else if (!CanEditCategory(category)) return;
 
             bool changed = false;
+            int mismatched = 0;
             List<Action> rollback = new List<Action>();
             for (int i = 0; i < apps.Count; i++)
             {
@@ -2385,6 +2386,8 @@ namespace AppManager
                 if (a == null || string.IsNullOrEmpty(a.Key)) continue;
                 if (isCollection && !CanJoinResourceCategory(a, col.Parent)) continue;
                 if (InCategory(a, category)) continue;
+                // 拖到侧栏分类 / 批量「加入分类」同样受资源分类类型约束（照片只收图片……），与导入一致
+                if (!isCollection && !FitsTargetCategory(a, category)) { mismatched++; continue; }
                 if (SetCategoryExcluded(a, category, false))
                 {
                     changed = true;
@@ -2396,7 +2399,13 @@ namespace AppManager
                     rollback.Add(delegate { CollectionOps.RemoveMember(config, a.Key, category); });
                 }
             }
-            if (!changed) return;
+            string skippedText = mismatched == 0 ? null
+                : (changed ? "已跳过 " + mismatched + " 个类型不符的项目：" : "未加入：") + MediaRules.CategoryTypeHint(category);
+            if (!changed)
+            {
+                if (skippedText != null) ShowNotice(skippedText);
+                return;
+            }
             if (!config.Save())
             {
                 for (int i = rollback.Count - 1; i >= 0; i--) rollback[i]();
@@ -2404,6 +2413,7 @@ namespace AppManager
                 return;
             }
             RefreshGrid();
+            if (skippedText != null) ShowNotice(skippedText);
         }
 
         /// <summary>把单个条目从指定分类「移出」（仅移除额外归属，不影响主分类与存储位置）。</summary>
@@ -2977,7 +2987,7 @@ namespace AppManager
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
                 dlg.Title = "选择集合封面";
-                dlg.Filter = MediaRules.ResourceCategoryFilter("照片");
+                dlg.Filter = MediaRules.DecodableImageFilter();
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 collectionInfo.SetEditCoverPath(dlg.FileName, dlg.FileName);
             }
@@ -4040,7 +4050,7 @@ namespace AppManager
             {
                 AppInfo a = targets[i];
                 if (a == null) continue;
-                if (!MediaRules.MatchCategoryExt(category, a.TargetPath)) return false;
+                if (!MediaRules.FitsCategory(category, a.TargetPath, a.IsFolder)) return false;
                 if (!string.Equals(a.Category, category, StringComparison.OrdinalIgnoreCase))
                     anyPending = true;
             }
@@ -4084,7 +4094,7 @@ namespace AppManager
                 AppInfo a = targets[i];
                 if (a == null) continue;
                 if (InCategory(a, category)) continue;
-                if (!MediaRules.MatchCategoryExt(category, a.TargetPath)) continue;
+                if (!FitsTargetCategory(a, category)) continue;
                 return true;
             }
             return false;
@@ -4192,7 +4202,7 @@ namespace AppManager
         private MenuWindow.MenuItem MkAddCatMenu(AppInfo app, string category)
         {
             MenuWindow.MenuItem m = MkMenu(category, delegate { AddItemToCategory(app, category); });
-            m.Disabled = InCategory(app, category) || !MediaRules.MatchCategoryExt(category, app.TargetPath);
+            m.Disabled = InCategory(app, category) || !FitsTargetCategory(app, category);
             return m;
         }
 
@@ -4211,7 +4221,17 @@ namespace AppManager
             if (app == null) return false;
             // 集合成员须属于父分类（搜索跨分类结果不可加入），且类型符合父分类约束
             if (!InCategory(app, category)) return false;
-            return MediaRules.MatchCategoryExt(category, app.TargetPath);
+            return MediaRules.FitsCategory(category, app.TargetPath, app.IsFolder);
+        }
+
+        /// <summary>
+        /// 加入/移动到分类时的类型约束：只在资源页生效。软件页的自定义分类可以与资源分类同名
+        /// （如「音乐」），软件、快捷方式不受资源类型限制。
+        /// </summary>
+        private bool FitsTargetCategory(AppInfo app, string category)
+        {
+            return contentMode != SidebarControl.ContentMode.Website
+                || MediaRules.FitsCategory(category, app.TargetPath, app.IsFolder);
         }
 
         /// <summary>构造置灰（不可点）菜单项，用作空态提示。</summary>
@@ -4597,6 +4617,36 @@ namespace AppManager
         }
 
         // ===== 状态栏 =====
+
+        private System.Windows.Forms.Timer noticeTimer;
+        private string noticeText;
+
+        /// <summary>
+        /// 状态栏短暂提示（不打断操作）：数秒后自动收起；期间状态栏被其它操作占用则不再收起。
+        /// 导入进行中或导入结果仍在展示（可点击查看记录）时不占用状态栏，改为在状态栏位置浮出提示。
+        /// </summary>
+        private void ShowNotice(string text)
+        {
+            if (importRunning || importStatusShown)
+            {
+                Point at = PointToClient(statusBar.Visible ? statusBar.PointToScreen(Point.Empty) : PointToScreen(new Point(16, ClientSize.Height - 40)));
+                importTip.Show(text, this, at.X + 8, Math.Max(0, at.Y - 28), 5000);
+                return;
+            }
+            ShowStatusBar(text, 0, 0);
+            noticeText = text;
+            if (noticeTimer == null)
+            {
+                noticeTimer = new System.Windows.Forms.Timer { Interval = 5000 };
+                noticeTimer.Tick += delegate
+                {
+                    noticeTimer.Stop();
+                    if (statusBar.Visible && statusLabel.Text == noticeText) HideStatusBar();
+                };
+            }
+            noticeTimer.Stop();
+            noticeTimer.Start();
+        }
 
         private void ShowStatusBar(string text, int value, int total)
         {

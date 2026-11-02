@@ -50,17 +50,33 @@ namespace AppManager
         /// <summary>压缩包扩展名（小写、含点）。</summary>
         public static readonly string[] ArchiveExt =
         {
-            ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz"
+            ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2", ".xz", ".tgz", ".zst", ".cab", ".lzh"
         };
 
-        /// <summary>证件扩展名：证件照、证件文档与文本。</summary>
-        private static readonly string[] CredentialExt = BuildCredentialExt();
+        // ===== 资源分类接收的类型 =====
+        // 分类可以收下内置查看器打不开的格式（双击交给系统默认程序），因此与查看器使用的
+        // ImageExt / VideoExt / DocExt 分开维护：这里加格式不会让查看器去解码它不支持的文件。
+        // 视频不收 .ts：它同时是 TypeScript 文本扩展名，会被文本查看器打开。
 
-        private static string[] BuildCredentialExt()
+        /// <summary>「照片」接收：查看器可解码的图片 + iPhone 照片（HEIC/HEIF）、扫描件（TIFF）、AVIF、SVG。</summary>
+        private static readonly string[] PhotoCategoryExt =
+            Merge(ImageExt, new[] { ".heic", ".heif", ".tif", ".tiff", ".avif", ".svg" });
+
+        /// <summary>「视频」接收：播放器常见格式 + 蓝光/DV 流、MPEG、手机 3GP、RMVB。</summary>
+        private static readonly string[] VideoCategoryExt =
+            Merge(VideoExt, new[] { ".m2ts", ".mts", ".mpg", ".mpeg", ".3gp", ".rmvb" });
+
+        /// <summary>「文档」接收：常见文档 + WPS（wps/et/dps）、OFD 电子发票/证照、OpenDocument、XPS。</summary>
+        private static readonly string[] DocCategoryExt =
+            Merge(DocExt, new[] { ".wps", ".et", ".dps", ".ofd", ".odt", ".ods", ".odp", ".xps" });
+
+        /// <summary>「证件」接收：证件照与证件文档（不含脚本、代码等纯文本类型）。</summary>
+        private static readonly string[] CredentialExt = Merge(PhotoCategoryExt, DocCategoryExt);
+
+        private static string[] Merge(string[] first, string[] second)
         {
-            List<string> list = new List<string>(ImageExt);
-            foreach (string ext in DocExt) if (!list.Contains(ext)) list.Add(ext);
-            foreach (string ext in TextExt) if (!list.Contains(ext)) list.Add(ext);
+            List<string> list = new List<string>(first);
+            foreach (string ext in second) if (!list.Contains(ext)) list.Add(ext);
             return list.ToArray();
         }
 
@@ -131,10 +147,10 @@ namespace AppManager
         {
             switch (category)
             {
-                case "照片": return ImageExt;
-                case "视频": return VideoExt;
+                case "照片": return PhotoCategoryExt;
+                case "视频": return VideoCategoryExt;
                 case "音乐": return AudioExt;
-                case "文档": return DocExt;
+                case "文档": return DocCategoryExt;
                 case "证件": return CredentialExt;
                 case "压缩包": return ArchiveExt;
                 default: return null;
@@ -163,6 +179,28 @@ namespace AppManager
             string[] exts = ResourceCategoryExt(category);
             if (exts == null) return true;
             return MatchExt(path, exts);
+        }
+
+        /// <summary>
+        /// 条目能否放进该资源分类：文件按分类类型约束；文件夹整体收纳，不按扩展名判断。
+        /// 导入、粘贴、拖放、移动到分类、加入集合都以此为准，避免各入口规则不一致。
+        /// </summary>
+        public static bool FitsCategory(string category, string path, bool folder)
+        {
+            return folder || MatchCategoryExt(category, path);
+        }
+
+        /// <summary>类型不符时的统一提示：「照片」只接收照片类型的文件。</summary>
+        public static string CategoryTypeHint(string category)
+        {
+            return "「" + category + "」只接收" + ResourceCategoryTypeName(category) + "类型的文件";
+        }
+
+        /// <summary>只含内置解码器能打开的图片（集合封面等需要应用自己绘制的场景），不含 HEIC/SVG 等分类可收但无法解码的格式。</summary>
+        public static string DecodableImageFilter()
+        {
+            string patterns = string.Join(";", Array.ConvertAll(ImageExt, e => "*" + e));
+            return "图片 (" + patterns + ")|" + patterns;
         }
 
         /// <summary>选文件对话框的过滤器：按资源分类限定类型，避免选中不符类型的文件。

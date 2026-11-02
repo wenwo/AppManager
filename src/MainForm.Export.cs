@@ -264,7 +264,8 @@ namespace AppManager
                 return;
             }
             bool choose = SearchActive || !CanEditCategory(currentCategory);
-            string category = choose ? PickImportCategory(resource) : currentCategory;
+            string category = choose ? PickImportCategory(resource, cut.Apps.Select(a => a.TargetPath).ToList(),
+                cut.Apps.Select(a => a.IsFolder).ToArray()) : currentCategory;
             if (category == null || cutState != cut) return;
             string collection = choose ? null : ImportCollectionKey;
 
@@ -275,12 +276,12 @@ namespace AppManager
                 // 剪切后列表可能已重扫：按 Key 取当前条目，保证分类变更作用在正在显示的对象上。
                 AppInfo app = allApps.FirstOrDefault(a => string.Equals(a.Key, stale.Key, StringComparison.OrdinalIgnoreCase)) ?? stale;
                 if (!File.Exists(app.TargetPath) && !Directory.Exists(app.TargetPath)) continue;   // 剪切后已被删除或移走
-                if (MediaRules.MatchCategoryExt(category, app.TargetPath)) items.Add(app); else skipped++;
+                if (FitsTargetCategory(app, category)) items.Add(app); else skipped++;
             }
+            string typeHint = MediaRules.CategoryTypeHint(category);
             if (items.Count == 0)
             {
-                MessageBox.Show(this, skipped > 0 ? "剪切的项目类型不符合「" + category + "」，未移动。" : "剪切的项目已不在原位置。",
-                    "粘贴", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                ShowNotice(skipped > 0 ? "未移动：" + typeHint : "剪切的项目已不在原位置");
                 return;
             }
             bool changed = items.Any(a => !string.Equals(a.Category, category, StringComparison.OrdinalIgnoreCase));
@@ -291,9 +292,7 @@ namespace AppManager
             EndCut();
             if (changed) SetHardCategory(items, category);
             if (collection != null) AddItemsToCategory(items, collection);
-            if (skipped > 0)
-                MessageBox.Show(this, "有 " + skipped + " 个项目类型不符合「" + category + "」，已跳过。", "粘贴",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (skipped > 0) ShowNotice("已跳过 " + skipped + " 个类型不符的项目：" + typeHint);
         }
     }
 }

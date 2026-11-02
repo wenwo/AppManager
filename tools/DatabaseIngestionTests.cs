@@ -43,6 +43,7 @@ namespace AppManager
             Run("path move preserves stable identity, favorites, hidden, ordering and collection", Move);
             Run("move guards: shortcut targets stay, reused path key saves, folder contents are found", MoveGuards);
             Run("cut and move-out: vanished sources purge entries, unavailable folders do not, in-app paste moves", MoveOut);
+            Run("resource types: drag, batch add, move menu, cut paste, hover and picker share one rule", ResourceTypes);
             Run("backup, restore, undo and redo match complete state fingerprints", Restore);
             Run("four writers and scanner publishing: no lost commits or orphan relationships", ConcurrentWriters);
             Run("live backup during ingestion is an internally consistent committed snapshot", ConcurrentBackup);
@@ -342,6 +343,86 @@ namespace AppManager
             Check(read.AddedItems.ByPath(offline).Count == 1, "entry purged although its folder is unavailable");
             string category; Check(read.CategoryOverride.TryGetValue(pasteKey, out category) && category == "另一分类" && File.Exists(paste), "in-app paste did not move the category");
             Integrity(read.Database);
+        }
+        private static void ResourceTypes()
+        {
+            AppConfig c = Fixture();
+            string jpg = Source("types\\a.jpg", "jpg"), zip = Source("types\\b.zip", "zip"), album = Path.Combine(scope, "source", "types", "album.jpg.d");
+            Directory.CreateDirectory(album);
+            foreach (string path in new[] { jpg, zip }) c.AddedItems.Add(new AddedEntry { Path = path, Category = "文件", IsResource = true });
+            c.AddedItems.Add(new AddedEntry { Path = album, Category = "文件", IsFolder = true, IsResource = true }); Save(c);
+            Func<string, bool, AppInfo> app = (path, folder) => new AppInfo { Key = "add:" + path, TargetPath = path, Name = Path.GetFileName(path), IsFile = true, IsFolder = folder, Category = "文件" };
+            AppInfo photo = app(jpg, false), archive = app(zip, false), folderItem = app(album, true);
+            MethodInfo canMove = typeof(MainForm).GetMethod("CanMoveTargetsTo", BindingFlags.Static | BindingFlags.NonPublic);
+            using (MainForm form = Form(c, true))
+            {
+                Func<AppInfo, string, bool> inCategory = (a, category) => (bool)Invoke(form, "InCategory", a, category);
+                // 拖到侧栏分类 / 批量加入：类型不符的跳过，文件夹整体收纳
+                Invoke(form, "AddItemsToCategory", new List<AppInfo> { photo, archive, folderItem }, "照片");
+                Check(inCategory(photo, "照片") && !inCategory(archive, "照片") && inCategory(folderItem, "照片"), "drag to category ignored type rule");
+                Control status = (Control)typeof(MainForm).GetField("statusLabel", Private).GetValue(form);
+                Check(status.Text.Contains("已跳过 1 个"), "partial skip not reported: " + status.Text);
+                Invoke(form, "AddItemsToCategory", new List<AppInfo> { archive }, "视频");
+                Check(!inCategory(archive, "视频") && status.Text.StartsWith("未加入"), "mismatched-only add not refused: " + status.Text);
+
+                // 「移动到分类」菜单可用性与导入一致：文件夹可移入类型分类，压缩包不能进照片
+                Check((bool)canMove.Invoke(null, new object[] { new List<AppInfo> { folderItem }, "视频" }), "folder refused by move menu");
+                Check(!(bool)canMove.Invoke(null, new object[] { new List<AppInfo> { archive }, "照片" }), "archive accepted by photo move menu");
+
+                // 拖动经过：全部不符时禁止，文件夹允许
+                Set(form, "currentCategory", "照片");
+                Func<string[], DragDropEffects> hover = paths =>
+                {
+                    DataObject data = new DataObject(); System.Collections.Specialized.StringCollection list = new System.Collections.Specialized.StringCollection();
+                    list.AddRange(paths); data.SetFileDropList(list); Set(form, "dragProbe", null);
+                    return (DragDropEffects)Invoke(form, "HandleExternalImport", null, null,
+                        new DragEventArgs(data, 1, 0, 0, DragDropEffects.Copy | DragDropEffects.Move, DragDropEffects.None), false);
+                };
+                Check(hover(new[] { zip }) == DragDropEffects.None, "mismatched drag accepted while hovering");
+                Check(hover(new[] { album }) != DragDropEffects.None && hover(new[] { zip, jpg }) != DragDropEffects.None, "valid drag refused while hovering");
+
+                // 应用内粘贴剪切：类型不符的跳过，剪切照常结束
+                Type stateType = typeof(MainForm).GetNestedType("CutState", BindingFlags.NonPublic);
+                object state = Activator.CreateInstance(stateType);
+                stateType.GetField("Apps").SetValue(state, new List<AppInfo> { archive, folderItem });
+                stateType.GetField("Resource").SetValue(state, true);
+                Set(form, "cutState", state); Set(form, "currentCategory", "音乐");
+                Invoke(form, "PasteCutItems");
+                Check(c.CategoryOverride.ContainsKey(folderItem.Key) && c.CategoryOverride[folderItem.Key] == "音乐" && !c.CategoryOverride.ContainsKey(archive.Key),
+                    "cut paste ignored type rule");
+
+                // 软件页的自定义分类可与资源分类同名：软件不受资源类型约束
+                c.CustomCategories.Add("音乐"); Save(c);
+                Set(form, "contentMode", Controls.SidebarControl.ContentMode.Software);
+                AppInfo tool = new AppInfo { Key = "lnk:C:\\Tools\\player.lnk", TargetPath = "C:\\Tools\\player.exe", Name = "player", Category = "其他" };
+                Invoke(form, "AddItemsToCategory", new List<AppInfo> { tool }, "音乐");
+                Check(inCategory(tool, "音乐"), "software item blocked by a resource type rule on a same-named software category");
+            }
+
+            // 选择导入分类：只列出能收下内容的分类，同类文件自动推荐
+            string[] all = CategoryRules.ResourceBuiltIn;
+            string preferred = "文件";
+            List<string> choices = MainForm.ResourceImportChoices(all, new[] { "x.jpg", "y.png" }, new[] { false, false }, ref preferred);
+            Check(preferred == "照片" && choices.Contains("证件") && choices.Contains("文件") && !choices.Contains("压缩包"), "photo picker wrong: " + string.Join(",", choices));
+            preferred = "文件";
+            choices = MainForm.ResourceImportChoices(all, new[] { "x.jpg", "y.pdf" }, new[] { false, false }, ref preferred);
+            Check(preferred == "文件" && choices.Contains("照片") && choices.Contains("文档"), "mixed picker wrong: " + preferred);
+            preferred = "文件";
+            choices = MainForm.ResourceImportChoices(all, new[] { "pack.zip", "album" }, new[] { false, true }, ref preferred);
+            Check(preferred == "文件" && choices.Count == all.Length, "folder picker wrong: " + string.Join(",", choices));
+
+            // 分类接收清单：补充常见格式；证件不收脚本；查看器清单不受影响（新格式双击交给系统程序）
+            string[][] accepted = {
+                new[] { "照片", "IMG_0001.HEIC", "scan.tiff", "a.avif" }, new[] { "视频", "clip.m2ts", "old.rmvb", "phone.3gp" },
+                new[] { "文档", "report.wps", "sheet.et", "invoice.ofd", "a.odt" }, new[] { "证件", "id.heic", "license.ofd", "id.pdf", "id.txt" },
+                new[] { "压缩包", "a.tar.zst", "setup.cab" } };
+            foreach (string[] row in accepted)
+                for (int i = 1; i < row.Length; i++) Check(MediaRules.MatchCategoryExt(row[0], row[i]), row[0] + " refused " + row[i]);
+            string[][] refused = { new[] { "证件", "run.bat", "tool.ps1", "app.js", "q.sql" }, new[] { "视频", "stream.ts" }, new[] { "照片", "a.pdf" } };
+            foreach (string[] row in refused)
+                for (int i = 1; i < row.Length; i++) Check(!MediaRules.MatchCategoryExt(row[0], row[i]), row[0] + " accepted " + row[i]);
+            Check(!MediaRules.IsImage("a.heic") && !MediaRules.IsVideo("a.rmvb") && MediaRules.IsText("a.ts"), "viewer type lists changed");
+            Integrity(Reload().Database);
         }
         private static void Restore()
         {
