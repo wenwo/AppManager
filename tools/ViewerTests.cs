@@ -31,8 +31,14 @@ namespace AppManager
         }
 
         [STAThread]
-        private static int Main()
+        private static int Main(string[] args)
         {
+            // 外部过滤器测试：本程序被复制成 lz4.exe，若被 libarchive 以「lz4 -d」启动，只留下标记文件后退出
+            if (args.Length > 0 && args[0] == "-d")
+            {
+                File.WriteAllText(Path.Combine(Environment.CurrentDirectory, "lz4-was-run.txt"), "ran");
+                return 0;
+            }
             Console.OutputEncoding = new UTF8Encoding(false);
             root = Path.Combine(Path.GetTempPath(), "AppManagerViewerTests_" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(root);
@@ -58,6 +64,8 @@ namespace AppManager
                 Run("archive tar.gz/xz/bz2/zst/7z and raw gz through system libarchive; corrupt and truncated input", ArchiveLibArchive);
                 Run("archive reading shares the file, honours cancellation and releases handles", ArchiveSharing);
                 Run("archive viewer browse, natural/size sort, breadcrumbs, hint and switching", ArchiveViewer);
+                Run("archive hostile input: odd names, raw GNU tar names, deep paths, no external filters, damaged tar.gz", ArchiveHostile);
+                Run("archive viewer sorts 60k rows by type/size/name without stalling the UI", ArchiveSortSpeed);
                 Run("external pickers serialize on STA, deduplicate and keep UI responsive", PickerSerial);
                 Run("external picker cancellation clears pending files and permits retry", PickerCancellation);
                 Run("external picker queue bounds, failure and disposal", PickerBounds);
@@ -623,7 +631,7 @@ namespace AppManager
             {
                 string[][] sample = names == null ? emojiSample : new string[][] { emojiSample[1], new string[] { "中文 名.txt", "y" } };
                 string path = MakeZip("libarchive.zip", names, sample);
-                ArchivePreview p = (ArchivePreview)viaLibArchive.Invoke(null, new object[] { path, true, CancellationToken.None });
+                ArchivePreview p = (ArchivePreview)viaLibArchive.Invoke(null, new object[] { path, CancellationToken.None });
                 foreach (string[] e in sample)
                     Check(Find(p, e[0]) != null, (names == null ? "UTF-8" : "GBK") + " zip via libarchive lost name: " + e[0]);
             }
@@ -758,6 +766,162 @@ namespace AppManager
                 Check(rows.Count == 0 && list.VirtualListSize == 0 && !Shown(viewer), "closed viewer retained rows");
             }
             Application.DoEvents();
+        }
+
+        // ===== 手工构造 tar（GNU 风格原始字节名称、pax 超长路径）=====
+
+        private static void Octal(byte[] header, int offset, int length, long value)
+        {
+            Encoding.ASCII.GetBytes(Convert.ToString(value, 8).PadLeft(length - 1, '0')).CopyTo(header, offset);
+            header[offset + length - 1] = 0;
+        }
+
+        private static byte[] TarHeader(byte[] name, long size, char type)
+        {
+            byte[] h = new byte[512];
+            Array.Copy(name, h, Math.Min(100, name.Length));
+            Octal(h, 100, 8, 420); Octal(h, 108, 8, 0); Octal(h, 116, 8, 0);
+            Octal(h, 124, 12, size); Octal(h, 136, 12, 1700000000);
+            h[156] = (byte)type;
+            Encoding.ASCII.GetBytes("ustar").CopyTo(h, 257); h[263] = (byte)'0'; h[264] = (byte)'0';
+            for (int i = 148; i < 156; i++) h[i] = 32;
+            int sum = 0; foreach (byte b in h) sum += b;
+            Encoding.ASCII.GetBytes(Convert.ToString(sum, 8).PadLeft(6, '0')).CopyTo(h, 148); h[154] = 0; h[155] = 32;
+            return h;
+        }
+
+        private static void TarBlock(Stream output, byte[] header, byte[] data)
+        {
+            output.Write(header, 0, 512);
+            output.Write(data, 0, data.Length);
+            if (data.Length % 512 != 0) output.Write(new byte[512 - data.Length % 512], 0, 512 - data.Length % 512);
+        }
+
+        /// <summary>names 为原始字节（不经 pax 转码，同 GNU tar 默认格式）；paxPath 非空时追加一个用 pax 记录写长路径的文件。</summary>
+        private static string MakeTar(string fileName, List<byte[]> names, string paxPath)
+        {
+            string path = Path.Combine(root, fileName);
+            using (FileStream output = File.Create(path))
+            {
+                foreach (byte[] name in names) TarBlock(output, TarHeader(name, 1, '0'), new byte[] { 65 });
+                if (paxPath != null)
+                {
+                    byte[] value = Encoding.UTF8.GetBytes(paxPath);
+                    int body = 1 + "path=".Length + value.Length + 1;   // 空格 + 键= + 值 + 换行
+                    int length = body + body.ToString().Length;
+                    if (length.ToString().Length != body.ToString().Length) length++;
+                    byte[] record = Concat(Concat(Encoding.ASCII.GetBytes(length + " path="), value), new byte[] { 10 });
+                    TarBlock(output, TarHeader(Encoding.ASCII.GetBytes("PaxHeader/deep"), record.Length, 'x'), record);
+                    TarBlock(output, TarHeader(Encoding.ASCII.GetBytes("deep-placeholder"), 1, '0'), new byte[] { 66 });
+                }
+                output.Write(new byte[1024], 0, 1024);
+            }
+            return path;
+        }
+
+        private static void ArchiveHostile()
+        {
+            if (SystemTar() == null) { Console.WriteLine("  skipped: system libarchive not present"); return; }
+            // GNU 风格原始字节名称：UTF-8、GBK，以及 .NET Framework 路径函数会拒绝的字符
+            string[] odd = { "utf8-中文.txt", "bad|name.txt", "quote\"x.md", "angle<>.log", "ctl\u0001.bin", "dir|x/inner.txt" };
+            List<byte[]> names = new List<byte[]>();
+            foreach (string name in odd) names.Add(Encoding.UTF8.GetBytes(name));
+            if (Encoding.Default.CodePage == 936) names.Add(Encoding.Default.GetBytes("gbk-中文.txt"));
+            string tar = MakeTar("odd.tar", names, null);
+            ArchivePreview p = ArchivePreview.Read(tar, CancellationToken.None);
+            foreach (string expected in odd)
+                Check(Find(p, expected) != null, "raw tar name lost or garbled: " + expected);
+            if (Encoding.Default.CodePage == 936) Check(Find(p, "gbk-中文.txt") != null, "GBK tar name garbled");
+            using (Form form = new Form())
+            using (ArchiveViewerControl viewer = new ArchiveViewerControl())
+            {
+                form.Controls.Add(viewer); viewer.Size = new Size(900, 600);
+                IntPtr handle = form.Handle; handle = viewer.Handle;
+                viewer.Open(new List<string> { tar }, 0);
+                Pump(delegate { return !(bool)Field(viewer, "loading"); });
+                Check(Field(viewer, "current") != null, "odd names: " + Field(viewer, "failureText"));
+                ListView list = (ListView)Field(viewer, "list");
+                foreach (int column in new int[] { 2, 1, 3, 0 })
+                {
+                    Call(viewer, "SortBy", column);
+                    for (int i = 0; i < list.VirtualListSize; i++) list.Items[i].ToString();   // 每一行都能生成（不因名称抛异常）
+                }
+                viewer.ClosePreview();
+            }
+
+            // zip 条目名含「|」：ZipArchive 拒绝整个压缩包，应改由 libarchive 列出
+            string zip = MakeZip("pipe.zip", null, new string[][] { new string[] { "a#b.txt", "x" }, new string[] { "ok.txt", "y" } });
+            byte[] bytes = File.ReadAllBytes(zip);
+            for (int i = 0; i + 2 < bytes.Length; i++) if (bytes[i] == 'a' && bytes[i + 1] == '#' && bytes[i + 2] == 'b') bytes[i + 1] = (byte)'|';
+            File.WriteAllBytes(zip, bytes);
+            ArchivePreview pipe = ArchivePreview.Read(zip, CancellationToken.None);
+            Check(Find(pipe, "a|b.txt") != null && Find(pipe, "ok.txt") != null, "zip with | in a name not listed");
+
+            // 超深路径：30 万层的 pax 路径不能拖死读取，也不生成海量文件夹
+            StringBuilder deep = new StringBuilder();
+            for (int i = 0; i < 300000; i++) deep.Append("a/");
+            deep.Append("x.txt");
+            string deepTar = MakeTar("deep.tar", new List<byte[]> { Encoding.ASCII.GetBytes("ok.txt") }, deep.ToString());
+            Stopwatch elapsed = Stopwatch.StartNew();
+            ArchivePreview deepPreview = ArchivePreview.Read(deepTar, CancellationToken.None);
+            Console.WriteLine("  300k-level path: " + elapsed.ElapsedMilliseconds + " ms");
+            Check(elapsed.ElapsedMilliseconds < 5000 && Find(deepPreview, "ok.txt") != null && deepPreview.FolderCount == 0
+                && deepPreview.Warning != null && deepPreview.Warning.Contains("层级过深"),
+                "deep path handling: files=" + deepPreview.FileCount + " folders=" + deepPreview.FolderCount + " warning=" + deepPreview.Warning);
+            StringBuilder within = new StringBuilder();
+            for (int i = 0; i < ArchivePreview.MaxDepth - 1; i++) within.Append("d/");
+            within.Append("leaf.txt");
+            ArchivePreview withinPreview = ArchivePreview.Read(MakeTar("within.tar", new List<byte[]>(), within.ToString()), CancellationToken.None);
+            Check(withinPreview.FolderCount == ArchivePreview.MaxDepth - 1 && withinPreview.Warning == null,
+                "path within depth limit: folders=" + withinPreview.FolderCount + " warning=" + withinPreview.Warning);
+
+            // lz4 魔数：libarchive 的 lz4 过滤器没有内置实现，注册后会去运行外部 lz4.exe
+            string sandbox = Path.Combine(root, "lz4-sandbox");
+            Directory.CreateDirectory(sandbox);
+            File.Copy(Assembly.GetEntryAssembly().Location, Path.Combine(sandbox, "lz4.exe"));
+            string evil = Path.Combine(sandbox, "evil.rar");
+            File.WriteAllBytes(evil, new byte[] { 0x04, 0x22, 0x4D, 0x18, 0x64, 0x40, 0xA7, 0, 0, 0, 0, 0, 0, 0 });
+            string previous = Environment.CurrentDirectory;
+            Environment.CurrentDirectory = sandbox;
+            try { Expect<InvalidDataException>(delegate { ArchivePreview.Read(evil, CancellationToken.None); }); }
+            finally { Environment.CurrentDirectory = previous; }
+            Thread.Sleep(500);
+            Check(!File.Exists(Path.Combine(sandbox, "lz4-was-run.txt")), "an external decompressor program was started");
+
+            // 损坏的 tar.gz（解压后不是 tar）：报告无法读取，而不是显示成一个名为 x.tar 的文件
+            string broken = Path.Combine(root, "broken.tar.gz");
+            using (FileStream stream = File.Create(broken))
+            using (GZipStream gzip = new GZipStream(stream, CompressionMode.Compress))
+            { byte[] noise = new byte[3000]; new Random(3).NextBytes(noise); gzip.Write(noise, 0, noise.Length); }
+            Expect<InvalidDataException>(delegate { ArchivePreview.Read(broken, CancellationToken.None); });
+        }
+
+        private static void ArchiveSortSpeed()
+        {
+            string path = Path.Combine(root, "sort-speed.zip");
+            string[] extensions = { ".txt", ".jpg", ".pdf", ".docx", ".md", ".zip", ".mp3", ".png" };
+            using (FileStream stream = File.Create(path))
+            using (ZipArchive zip = new ZipArchive(stream, ZipArchiveMode.Create))
+                for (int i = 0; i < 60000; i++) zip.CreateEntry("file" + i + extensions[i % 8], CompressionLevel.NoCompression);
+            using (Form form = new Form())
+            using (ArchiveViewerControl viewer = new ArchiveViewerControl())
+            {
+                form.Controls.Add(viewer); viewer.Size = new Size(900, 600);
+                IntPtr handle = form.Handle; handle = viewer.Handle;
+                viewer.Open(new List<string> { path }, 0);
+                Pump(delegate { return !(bool)Field(viewer, "loading"); });
+                List<ArchiveEntryInfo> rows = (List<ArchiveEntryInfo>)Field(viewer, "rows");
+                foreach (int column in new int[] { 2, 2, 1, 3, 0, 0 })
+                {
+                    Stopwatch elapsed = Stopwatch.StartNew();
+                    Call(viewer, "SortBy", column);
+                    long ms = elapsed.ElapsedMilliseconds;
+                    Console.WriteLine("  SortBy(" + column + ") 60k rows: " + ms + " ms");
+                    Check(ms < 1000, "sorting 60k rows stalled the UI for " + ms + " ms");
+                    Check(rows.Count == 60000, "rows lost by sort");
+                }
+                viewer.ClosePreview();
+            }
         }
 
         [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]

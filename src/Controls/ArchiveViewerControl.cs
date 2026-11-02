@@ -16,7 +16,7 @@ namespace AppManager.Controls
         public event Action CloseRequested;
 
         private const int MaxIconTypes = 512;      // 扩展名种类过多（构造的压缩包）时其余共用通用图标
-        private const int MaxTypeNames = 4096;
+        private const int MaxTypeNames = 256;      // 每种扩展名查一次系统类型名（约 0.6 ms）；超出后用「XXX 文件」
 
         private readonly ListView list;
         private readonly ImageList icons;
@@ -203,10 +203,7 @@ namespace AppManager.Controls
         {
             if (current == null || target == null) return;
             folder = target;
-            rows.Clear();
-            if (folder.Parent != null) rows.Add(null);
-            rows.AddRange(folder.Children);
-            if (sortColumn != 0 || sortDescending) SortRows();
+            FillRows();
             list.SelectedIndices.Clear();
             list.VirtualListSize = rows.Count;
             list.Visible = rows.Count > 0;
@@ -296,10 +293,18 @@ namespace AppManager.Controls
             return (mb / 1024.0).ToString("0.##") + " GB";
         }
 
-        private static string Extension(ArchiveEntryInfo entry)
+        /// <summary>
+        /// 扩展名（小写含点）。手工解析：压缩包内的名称可能含 " &lt; &gt; | 或控制字符，
+        /// .NET Framework 的 Path.GetExtension 遇到这些字符会抛异常。
+        /// </summary>
+        internal static string Extension(ArchiveEntryInfo entry)
         {
-            string ext = Path.GetExtension(entry.Name);
-            return ext.Length > 1 && ext.Length <= 16 ? ext.ToLowerInvariant() : string.Empty;
+            string name = entry.Name ?? string.Empty;
+            int dot = name.LastIndexOf('.');
+            if (dot < 0 || dot == name.Length - 1 || name.Length - dot > 16) return string.Empty;
+            string ext = name.Substring(dot);
+            if (ext.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || ext.IndexOf(' ') >= 0) return string.Empty;
+            return ext.ToLowerInvariant();
         }
 
         private string TypeText(ArchiveEntryInfo entry)
@@ -360,6 +365,7 @@ namespace AppManager.Controls
             return r != 0 ? r : string.CompareOrdinal(a.Name, b.Name);
         }
 
+        /// <summary>后台按名称排好每个文件夹的子项（文件夹在前、自然排序），界面上的其它排序以此名次决胜。</summary>
         private static void SortTree(ArchiveEntryInfo root, System.Threading.CancellationToken cancellation)
         {
             Stack<ArchiveEntryInfo> stack = new Stack<ArchiveEntryInfo>();
@@ -368,29 +374,62 @@ namespace AppManager.Controls
             {
                 cancellation.ThrowIfCancellationRequested();
                 ArchiveEntryInfo node = stack.Pop();
-                node.Children.Sort(CompareByName);
+                // StrCmpLogicalW 对全角/上标数字等不满足传递性，排序可能报比较结果不一致：退回序号比较
+                try { node.Children.Sort(CompareByName); }
+                catch (InvalidOperationException) { node.Children.Sort(CompareOrdinalFoldersFirst); }
                 foreach (ArchiveEntryInfo child in node.Children)
                     if (child.IsFolder && child.Children.Count > 0) stack.Push(child);
             }
         }
 
-        private int CompareRows(ArchiveEntryInfo a, ArchiveEntryInfo b)
+        private static int CompareOrdinalFoldersFirst(ArchiveEntryInfo a, ArchiveEntryInfo b)
         {
-            // 文件夹始终在前，与资源管理器一致；倒序只作用于同类之间
             if (a.IsFolder != b.IsFolder) return a.IsFolder ? -1 : 1;
-            int r = 0;
-            if (sortColumn == 1) r = a.Size.CompareTo(b.Size);
-            else if (sortColumn == 2) r = string.Compare(TypeText(a), TypeText(b), StringComparison.CurrentCulture);
-            else if (sortColumn == 3) r = a.Modified.CompareTo(b.Modified);
-            if (r == 0) r = CompareByName(a, b);
-            return sortDescending ? -r : r;
+            return string.CompareOrdinal(a.Name, b.Name);
         }
 
-        private void SortRows()
+        /// <summary>
+        /// 按当前列排列当前文件夹的行。每行的排序键只算一次（类型名先查好并按区域性排出名次），
+        /// 同值时用后台排好的名称名次决胜，界面线程上不再逐次调用系统接口或 StrCmpLogicalW。
+        /// 文件夹始终在前，与资源管理器一致；倒序只作用于同类之间。
+        /// </summary>
+        private void FillRows()
         {
-            int start = rows.Count > 0 && rows[0] == null ? 1 : 0;
-            if (rows.Count - start > 1)
-                rows.Sort(start, rows.Count - start, Comparer<ArchiveEntryInfo>.Create(CompareRows));
+            List<ArchiveEntryInfo> children = folder.Children;   // 已按名称排好
+            rows.Clear();
+            if (folder.Parent != null) rows.Add(null);
+            if (sortColumn == 0 && !sortDescending || children.Count < 2) { rows.AddRange(children); return; }
+            int n = children.Count;
+            long[] keys = new long[n];
+            if (sortColumn == 2)
+            {
+                string[] types = new string[n];
+                List<string> distinct = new List<string>();
+                HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+                for (int i = 0; i < n; i++)
+                {
+                    types[i] = TypeText(children[i]);
+                    if (seen.Add(types[i])) distinct.Add(types[i]);
+                }
+                distinct.Sort(StringComparer.CurrentCulture);
+                Dictionary<string, int> rank = new Dictionary<string, int>(StringComparer.Ordinal);
+                for (int i = 0; i < distinct.Count; i++) rank[distinct[i]] = i;
+                for (int i = 0; i < n; i++) keys[i] = rank[types[i]];
+            }
+            else if (sortColumn == 1) for (int i = 0; i < n; i++) keys[i] = children[i].Size;
+            else if (sortColumn == 3) for (int i = 0; i < n; i++) keys[i] = children[i].Modified.Ticks;
+            int[] order = new int[n];
+            for (int i = 0; i < n; i++) order[i] = i;
+            bool descending = sortDescending;
+            Array.Sort(order, delegate(int x, int y)
+            {
+                bool fx = children[x].IsFolder, fy = children[y].IsFolder;
+                if (fx != fy) return fx ? -1 : 1;
+                int r = keys[x].CompareTo(keys[y]);
+                if (r == 0) r = x.CompareTo(y);
+                return descending ? -r : r;
+            });
+            for (int i = 0; i < n; i++) rows.Add(children[order[i]]);
         }
 
         private void SortBy(int column)
@@ -401,13 +440,7 @@ namespace AppManager.Controls
             if (current == null || folder == null) return;
             int old = list.SelectedIndices.Count > 0 ? list.SelectedIndices[0] : -1;
             ArchiveEntryInfo selected = old >= 0 && old < rows.Count ? rows[old] : null;   // null 也可能是「上一级」行
-            if (sortColumn == 0 && !sortDescending)
-            {
-                rows.Clear();
-                if (folder.Parent != null) rows.Add(null);
-                rows.AddRange(folder.Children);   // 已按名称排好
-            }
-            else SortRows();
+            FillRows();
             list.SelectedIndices.Clear();
             int i = old < 0 ? -1 : selected != null ? rows.IndexOf(selected) : 0;   // 「上一级」行排序后仍在首行
             if (i >= 0) { list.SelectedIndices.Add(i); list.Items[i].Focused = true; list.EnsureVisible(i); }

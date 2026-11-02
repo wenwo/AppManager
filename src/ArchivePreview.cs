@@ -23,7 +23,7 @@ namespace AppManager
         public List<ArchiveEntryInfo> Children;
         /// <summary>子孙中的文件 / 文件夹数（仅文件夹）。</summary>
         public int FileCount, FolderCount;
-        // 构建期按名称查找子项，构建完成后释放
+        // 构建期按名称查找子项（首个子项加入时才创建），构建完成后释放
         internal Dictionary<string, ArchiveEntryInfo> Index;
     }
 
@@ -36,6 +36,8 @@ namespace AppManager
     {
         /// <summary>最多列出的条目数；超出部分不再读取，避免超大压缩包耗尽内存。</summary>
         internal const int MaxEntries = 200000;
+        /// <summary>路径层级与文件夹总数上限：恶意构造的超深路径会生成大量文件夹节点。</summary>
+        internal const int MaxDepth = 256, MaxFolders = 50000;
 
         public ArchiveEntryInfo Root;
         public int FileCount, FolderCount;
@@ -46,9 +48,9 @@ namespace AppManager
         /// <summary>压缩包文件本身的大小。</summary>
         public long ArchiveBytes;
         public bool HasEncrypted;
-        /// <summary>条目超过 MaxEntries，只列出了前一部分。</summary>
+        /// <summary>条目或文件夹超过上限，只列出了前一部分。</summary>
         public bool Truncated;
-        /// <summary>读取中途出错（压缩包损坏或不完整），只列出了可读取的部分。</summary>
+        /// <summary>读取中途出错（压缩包损坏或不完整）或有条目未能列出时的说明。</summary>
         public string Warning;
 
         public static ArchivePreview Read(string path, CancellationToken cancellation)
@@ -58,31 +60,44 @@ namespace AppManager
             ArchivePreview preview;
             if (path.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
             {
+                Exception zipError = null;
+                preview = null;
                 try { preview = ReadZip(path, cancellation); }
-                catch (InvalidDataException zipError)
+                catch (InvalidDataException ex) { zipError = ex; }   // 分卷、非常规结构
+                catch (ArgumentException ex) { zipError = ex; }      // 条目名含 " < > | 等字符，ZipArchive 拒绝整个压缩包
+                if (preview == null)
                 {
-                    // 非常规结构的 zip 交给 libarchive 再试；系统没有该组件时报告 zip 自身的错误
-                    try { preview = LibArchive.Read(path, true, cancellation); }
-                    catch (NotSupportedException) { throw zipError; }
+                    // 交给 libarchive 再试；系统没有该组件时报告 zip 自身的错误
+                    try { preview = LibArchive.Read(path, cancellation); }
+                    catch (NotSupportedException) { throw new InvalidDataException(zipError.Message, zipError); }
                 }
             }
-            else preview = LibArchive.Read(path, false, cancellation);
+            else preview = LibArchive.Read(path, cancellation);
             preview.ArchiveBytes = bytes;
             return preview;
+        }
+
+        // ===== 文件名解码 =====
+
+        private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
+
+        /// <summary>没有 Unicode 标记的文件名：合法 UTF-8 按 UTF-8 解，否则按系统 ANSI 代码页（GBK）解。</summary>
+        internal static Encoding PickNameEncoding(byte[] bytes, int index, int count)
+        {
+            try { StrictUtf8.GetCharCount(bytes, index, count); return StrictUtf8; }
+            catch (DecoderFallbackException) { return Encoding.Default; }
         }
 
         // ===== zip =====
 
         private static ArchivePreview ReadZip(string path, CancellationToken cancellation)
         {
-            Builder builder = new Builder();
+            Builder builder = new Builder(cancellation);
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (ZipArchive zip = new ZipArchive(stream, ZipArchiveMode.Read, false, new ZipNameEncoding()))
             {
-                int count = 0;
                 foreach (ZipArchiveEntry entry in zip.Entries)
                 {
-                    if ((count++ & 255) == 0) cancellation.ThrowIfCancellationRequested();
                     string name = entry.FullName;
                     bool folder = name.EndsWith("/", StringComparison.Ordinal) || name.EndsWith("\\", StringComparison.Ordinal);
                     DateTime modified;
@@ -100,63 +115,78 @@ namespace AppManager
         /// </summary>
         internal sealed class ZipNameEncoding : Encoding
         {
-            private static readonly Encoding Utf8 = new UTF8Encoding(false, true);
             private static readonly Encoding Legacy = Encoding.Default;
-
-            private static Encoding Pick(byte[] bytes, int index, int count)
-            {
-                try { Utf8.GetCharCount(bytes, index, count); return Utf8; }
-                catch (DecoderFallbackException) { return Legacy; }
-            }
 
             public override int GetByteCount(char[] chars, int index, int count) { return Legacy.GetByteCount(chars, index, count); }
             public override int GetBytes(char[] chars, int charIndex, int charCount, byte[] bytes, int byteIndex)
             { return Legacy.GetBytes(chars, charIndex, charCount, bytes, byteIndex); }
-            public override int GetCharCount(byte[] bytes, int index, int count) { return Pick(bytes, index, count).GetCharCount(bytes, index, count); }
+            public override int GetCharCount(byte[] bytes, int index, int count) { return PickNameEncoding(bytes, index, count).GetCharCount(bytes, index, count); }
             public override int GetChars(byte[] bytes, int byteIndex, int byteCount, char[] chars, int charIndex)
-            { return Pick(bytes, byteIndex, byteCount).GetChars(bytes, byteIndex, byteCount, chars, charIndex); }
-            public override string GetString(byte[] bytes, int index, int count) { return Pick(bytes, index, count).GetString(bytes, index, count); }
-            public override int GetMaxByteCount(int charCount) { return Math.Max(Legacy.GetMaxByteCount(charCount), Utf8.GetMaxByteCount(charCount)); }
-            public override int GetMaxCharCount(int byteCount) { return Math.Max(Legacy.GetMaxCharCount(byteCount), Utf8.GetMaxCharCount(byteCount)); }
+            { return PickNameEncoding(bytes, byteIndex, byteCount).GetChars(bytes, byteIndex, byteCount, chars, charIndex); }
+            public override string GetString(byte[] bytes, int index, int count) { return PickNameEncoding(bytes, index, count).GetString(bytes, index, count); }
+            public override int GetMaxByteCount(int charCount) { return Math.Max(Legacy.GetMaxByteCount(charCount), StrictUtf8.GetMaxByteCount(charCount)); }
+            public override int GetMaxCharCount(int byteCount) { return Math.Max(Legacy.GetMaxCharCount(byteCount), StrictUtf8.GetMaxCharCount(byteCount)); }
         }
 
         // ===== 目录树构建 =====
 
+        /// <summary>
+        /// 构建目录树：加入条目只做查找与挂接（与路径深度成正比），数量与大小在 Finish 中一次性自底向上汇总，
+        /// 避免超深路径下每新建一层都遍历全部祖先造成的平方级开销。
+        /// </summary>
         private sealed class Builder
         {
             private readonly ArchivePreview preview = new ArchivePreview();
             private readonly ArchiveEntryInfo root = NewFolder("", null);
-            private int entries;
+            private readonly CancellationToken cancellation;
+            private int entries, folders;
+            private bool tooDeep;
+
+            public Builder(CancellationToken cancellation)
+            {
+                this.cancellation = cancellation;
+            }
 
             private static ArchiveEntryInfo NewFolder(string name, ArchiveEntryInfo parent)
             {
-                return new ArchiveEntryInfo
-                {
-                    Name = name, IsFolder = true, Parent = parent, Modified = DateTime.MinValue,
-                    Children = new List<ArchiveEntryInfo>(), Index = new Dictionary<string, ArchiveEntryInfo>(StringComparer.Ordinal)
-                };
+                return new ArchiveEntryInfo { Name = name, IsFolder = true, Parent = parent, Modified = DateTime.MinValue, Children = new List<ArchiveEntryInfo>() };
             }
 
             public int Count { get { return entries; } }
 
+            private static ArchiveEntryInfo Find(ArchiveEntryInfo folder, string key)
+            {
+                ArchiveEntryInfo found;
+                return folder.Index != null && folder.Index.TryGetValue(key, out found) ? found : null;
+            }
+
+            private static void Attach(ArchiveEntryInfo folder, string key, ArchiveEntryInfo child)
+            {
+                if (folder.Index == null) folder.Index = new Dictionary<string, ArchiveEntryInfo>(StringComparer.Ordinal);
+                folder.Index[key] = child;
+                folder.Children.Add(child);
+            }
+
             /// <summary>加入一个条目；达到上限时返回 false，调用方应停止读取。</summary>
             public bool Add(string path, bool folder, long size, DateTime modified, bool encrypted)
             {
+                if ((entries & 255) == 0) cancellation.ThrowIfCancellationRequested();
                 if (entries >= MaxEntries) { preview.Truncated = true; return false; }
                 entries++;
                 List<string> parts = Split(path);
+                if (parts == null) { tooDeep = true; return true; }
                 if (parts.Count == 0) return true;   // 「./」等根目录条目
                 ArchiveEntryInfo parent = root;
                 int last = folder ? parts.Count : parts.Count - 1;
                 for (int i = 0; i < last; i++)
                 {
-                    ArchiveEntryInfo child;
-                    if (!parent.Index.TryGetValue("d:" + parts[i], out child))
+                    ArchiveEntryInfo child = Find(parent, "d:" + parts[i]);
+                    if (child == null)
                     {
+                        if (folders >= MaxFolders) { preview.Truncated = true; return false; }
+                        folders++;
                         child = NewFolder(parts[i], parent);
-                        parent.Index["d:" + parts[i]] = child;
-                        parent.Children.Add(child);
-                        for (ArchiveEntryInfo a = parent; a != null; a = a.Parent) a.FolderCount++;
+                        Attach(parent, "d:" + parts[i], child);
                     }
                     parent = child;
                 }
@@ -166,31 +196,35 @@ namespace AppManager
                     return true;
                 }
                 string name = parts[parts.Count - 1];
-                ArchiveEntryInfo file;
-                if (parent.Index.TryGetValue("f:" + name, out file))
-                {
-                    // 同名条目（tar 追加更新）以后出现的为准
-                    long delta = Math.Max(0, size) - Math.Max(0, file.Size);
-                    for (ArchiveEntryInfo a = parent; a != null; a = a.Parent) a.Size += delta;
-                }
-                else
+                ArchiveEntryInfo file = Find(parent, "f:" + name);   // 同名条目（tar 追加更新）以后出现的为准
+                if (file == null)
                 {
                     file = new ArchiveEntryInfo { Name = name, Parent = parent };
-                    parent.Index["f:" + name] = file;
-                    parent.Children.Add(file);
-                    for (ArchiveEntryInfo a = parent; a != null; a = a.Parent) { a.FileCount++; a.Size += Math.Max(0, size); }
+                    Attach(parent, "f:" + name, file);
                 }
-                file.Size = size;
+                file.Size = size < 0 ? -1 : size;
                 file.Modified = modified;
                 file.Encrypted = encrypted;
                 return true;
             }
 
+            /// <summary>按 / 与 \ 拆分路径，丢弃空段与「.」；层级超过 MaxDepth 时返回 null（不为其生成节点）。</summary>
             private static List<string> Split(string path)
             {
                 List<string> parts = new List<string>();
-                foreach (string part in (path ?? string.Empty).Replace('\\', '/').Split('/'))
-                    if (part.Length > 0 && part != ".") parts.Add(part);
+                if (string.IsNullOrEmpty(path)) return parts;
+                int start = 0;
+                for (int i = 0; i <= path.Length; i++)
+                {
+                    if (i < path.Length && path[i] != '/' && path[i] != '\\') continue;
+                    int length = i - start;
+                    if (length > 0 && !(length == 1 && path[start] == '.'))
+                    {
+                        if (parts.Count >= MaxDepth) return null;
+                        parts.Add(path.Substring(start, length));
+                    }
+                    start = i + 1;
+                }
                 return parts;
             }
 
@@ -199,25 +233,53 @@ namespace AppManager
                 preview.Warning = warning;
             }
 
+            private static long SaturatingAdd(long total, long value)
+            {
+                return total > long.MaxValue - value ? long.MaxValue : total + value;
+            }
+
             public ArchivePreview Finish()
             {
-                bool unknown = false, encrypted = false;
+                // 先序收集全部文件夹，再逆序汇总：子文件夹总在父文件夹之前完成
+                List<ArchiveEntryInfo> order = new List<ArchiveEntryInfo>();
                 Stack<ArchiveEntryInfo> stack = new Stack<ArchiveEntryInfo>();
                 stack.Push(root);
                 while (stack.Count > 0)
                 {
                     ArchiveEntryInfo folder = stack.Pop();
+                    order.Add(folder);
+                    foreach (ArchiveEntryInfo child in folder.Children) if (child.IsFolder) stack.Push(child);
+                }
+                bool unknown = false, encrypted = false;
+                for (int i = order.Count - 1; i >= 0; i--)
+                {
+                    if ((i & 1023) == 0) cancellation.ThrowIfCancellationRequested();
+                    ArchiveEntryInfo folder = order[i];
                     folder.Index = null;
+                    long size = 0;
+                    int files = 0, subfolders = 0;
                     foreach (ArchiveEntryInfo child in folder.Children)
                     {
-                        if (child.IsFolder) stack.Push(child);
+                        if (child.IsFolder)
+                        {
+                            size = SaturatingAdd(size, child.Size);
+                            files += child.FileCount;
+                            subfolders += child.FolderCount + 1;
+                        }
                         else
                         {
-                            if (child.Size < 0) unknown = true;
+                            files++;
+                            if (child.Size >= 0) size = SaturatingAdd(size, child.Size);
+                            else unknown = true;
                             if (child.Encrypted) encrypted = true;
                         }
                     }
+                    folder.Size = size;
+                    folder.FileCount = files;
+                    folder.FolderCount = subfolders;
                 }
+                if (tooDeep)
+                    preview.Warning = (preview.Warning == null ? string.Empty : preview.Warning + "；") + "部分条目路径层级过深，未列出";
                 preview.Root = root;
                 preview.FileCount = root.FileCount;
                 preview.FolderCount = root.FolderCount;
@@ -229,6 +291,19 @@ namespace AppManager
         }
 
         // ===== libarchive（Windows 自带 archiveint.dll）=====
+
+        /// <summary>libarchive 无法识别格式（区别于已识别但损坏）：只有这种情况才按单文件压缩流再试。</summary>
+        private static InvalidDataException Unrecognized()
+        {
+            InvalidDataException error = new InvalidDataException("无法识别的压缩包格式");
+            error.Data["unrecognized"] = true;
+            return error;
+        }
+
+        private static bool IsUnrecognized(Exception error)
+        {
+            return error.Data.Contains("unrecognized");
+        }
 
         private static class LibArchive
         {
@@ -245,11 +320,17 @@ namespace AppManager
 
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr archive_read_new();
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_free(IntPtr a);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_all(IntPtr a);
+            // 只注册进程内实现的解压过滤器：filter_all 还会启用 lz4/lzop/lrzip/grzip 等，
+            // 它们在库内没有实现时会启动外部程序（按当前目录与 PATH 查找），构造的文件即可借此运行任意程序。
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_gzip(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_bzip2(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_xz(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_lzma(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_lzip(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_zstd(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_compress(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_all(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_raw(IntPtr a);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, BestFitMapping = false)]
-            private static extern int archive_read_set_options(IntPtr a, string options);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_set_read_callback(IntPtr a, ReadCallback callback);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_set_skip_callback(IntPtr a, SkipCallback callback);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_set_seek_callback(IntPtr a, SeekCallback callback);
@@ -267,16 +348,18 @@ namespace AppManager
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_entry_mtime_is_set(IntPtr entry);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_entry_is_encrypted(IntPtr entry);
 
-            public static ArchivePreview Read(string path, bool zip, CancellationToken cancellation)
+            public static ArchivePreview Read(string path, CancellationToken cancellation)
             {
                 try
                 {
-                    try { return ReadPass(path, false, zip, cancellation); }
+                    try { return ReadPass(path, false, cancellation); }
                     catch (InvalidDataException first)
                     {
-                        // 不是归档格式时，可能是单个文件的压缩流（log.txt.gz）：按原始数据格式再读一次
+                        // 不是归档格式时，可能是单个文件的压缩流（log.txt.gz）：按原始数据格式再读一次。
+                        // 已识别但损坏的压缩包、tar 类（x.tar.gz、x.tgz）识别失败，都不能当成单个文件显示。
+                        if (!IsUnrecognized(first) || !RawCandidate(path)) throw;
                         ArchivePreview raw = null;
-                        try { raw = ReadPass(path, true, zip, cancellation); }
+                        try { raw = ReadPass(path, true, cancellation); }
                         catch (InvalidDataException) { }
                         if (raw == null) throw first;
                         return raw;
@@ -287,14 +370,20 @@ namespace AppManager
                 catch (BadImageFormatException) { throw Unsupported(); }
             }
 
+            private static bool RawCandidate(string path)
+            {
+                if (path.EndsWith(".tgz", StringComparison.OrdinalIgnoreCase)) return false;
+                return !RawName(path).EndsWith(".tar", StringComparison.OrdinalIgnoreCase);
+            }
+
             private static NotSupportedException Unsupported()
             {
                 return new NotSupportedException("当前系统缺少压缩包组件（archiveint.dll），无法查看此格式");
             }
 
-            private static ArchivePreview ReadPass(string path, bool raw, bool zip, CancellationToken cancellation)
+            private static ArchivePreview ReadPass(string path, bool raw, CancellationToken cancellation)
             {
-                Builder builder = new Builder();
+                Builder builder = new Builder(cancellation);
                 using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1, FileOptions.SequentialScan))
                 using (Source source = new Source(stream, cancellation))
                 {
@@ -302,11 +391,15 @@ namespace AppManager
                     if (a == IntPtr.Zero) throw new OutOfMemoryException();
                     try
                     {
-                        archive_read_support_filter_all(a);
+                        archive_read_support_filter_gzip(a);
+                        archive_read_support_filter_bzip2(a);
+                        archive_read_support_filter_xz(a);
+                        archive_read_support_filter_lzma(a);
+                        archive_read_support_filter_lzip(a);
+                        archive_read_support_filter_zstd(a);
+                        archive_read_support_filter_compress(a);
                         if (raw) archive_read_support_format_raw(a);
                         else archive_read_support_format_all(a);
-                        // ZipArchive 没能读的 zip：无 UTF-8 标记的文件名按系统代码页解码，避免中文乱码
-                        if (zip && !raw) archive_read_set_options(a, "zip:hdrcharset=CP" + Encoding.Default.CodePage);
                         archive_read_set_read_callback(a, source.ReadDelegate);
                         archive_read_set_skip_callback(a, source.SkipDelegate);
                         archive_read_set_seek_callback(a, source.SeekDelegate);
@@ -356,14 +449,15 @@ namespace AppManager
                 cancellation.ThrowIfCancellationRequested();
                 if (source.Error != null) return source.Error;
                 IntPtr message = archive_error_string(a);
-                return new InvalidDataException(Describe(message == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(message)));
+                string text = message == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(message);
+                if (string.IsNullOrEmpty(text) || text.IndexOf("Unrecognized archive format", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return Unrecognized();
+                return new InvalidDataException(Describe(text));
             }
 
             /// <summary>libarchive 的错误信息为英文：常见情形换成中文说明，其余保留原文便于排查。</summary>
             private static string Describe(string text)
             {
-                if (string.IsNullOrEmpty(text) || text.IndexOf("Unrecognized archive format", StringComparison.OrdinalIgnoreCase) >= 0)
-                    return "无法识别的压缩包格式";
                 if (text.IndexOf("ncrypt", StringComparison.OrdinalIgnoreCase) >= 0
                     || text.IndexOf("passphrase", StringComparison.OrdinalIgnoreCase) >= 0)
                     return "压缩包已加密（连文件名一起加密），需要密码才能查看";
@@ -374,12 +468,31 @@ namespace AppManager
                 return text;
             }
 
+            /// <summary>
+            /// 条目名。先取原始字节：没有 Unicode 信息的名称（GNU tar、RAR4、无标记 zip 等）只能从这里拿到原样字节，
+            /// 按「合法 UTF-8 优先、否则系统代码页」解码；宽字符形式会把每个字节当 Latin-1 而出现乱码。
+            /// 带 Unicode 信息的名称（pax、7z、rar5、有标记 zip）在 C 区域设置下取不到多字节形式，改用宽字符。
+            /// </summary>
             private static string EntryName(IntPtr entry)
             {
-                IntPtr wide = archive_entry_pathname_w(entry);
-                if (wide != IntPtr.Zero) return Marshal.PtrToStringUni(wide);
                 IntPtr narrow = archive_entry_pathname(entry);
-                return narrow == IntPtr.Zero ? null : Marshal.PtrToStringAnsi(narrow);
+                if (narrow != IntPtr.Zero)
+                {
+                    byte[] bytes = ReadBytes(narrow);
+                    return PickNameEncoding(bytes, 0, bytes.Length).GetString(bytes);
+                }
+                IntPtr wide = archive_entry_pathname_w(entry);
+                return wide == IntPtr.Zero ? null : Marshal.PtrToStringUni(wide);
+            }
+
+            /// <summary>读取以 0 结尾的字节串（最多 1 MB，超出部分截断；如此长的路径本身也会因层级过深被忽略）。</summary>
+            private static byte[] ReadBytes(IntPtr text)
+            {
+                int length = 0;
+                while (length < (1 << 20) && Marshal.ReadByte(text, length) != 0) length++;
+                byte[] bytes = new byte[length];
+                Marshal.Copy(text, bytes, 0, length);
+                return bytes;
             }
 
             /// <summary>单文件压缩流的内部文件名：去掉最后一层扩展名（log.txt.gz → log.txt）。</summary>
@@ -433,6 +546,10 @@ namespace AppManager
                     catch (Exception ex) { if (Error == null) Error = ex; return (IntPtr)(-1); }
                 }
 
+                /// <summary>
+                /// 跳过：返回实际跳过的字节数。出错或取消时必须返回 0——libarchive 把其它值都当作「已前进」，
+                /// 返回负数会被反复重试形成死循环；返回 0 时它改用 read，由 read 回调报告错误。
+                /// </summary>
                 private long Skip(IntPtr archive, IntPtr data, long request)
                 {
                     try
@@ -443,7 +560,7 @@ namespace AppManager
                         stream.Seek(step, SeekOrigin.Current);
                         return step;
                     }
-                    catch (Exception ex) { if (Error == null) Error = ex; return -30; }
+                    catch (Exception ex) { if (Error == null) Error = ex; return 0; }
                 }
 
                 private long Seek(IntPtr archive, IntPtr data, long offset, int whence)
