@@ -32,6 +32,11 @@ namespace AppManager
                     throw new IOException("目录超过安全扫描上限，操作已取消；原文件保持不变。");
                 Bytes += bytes;
             }
+
+            internal Budget ForCopy(int milliseconds)
+            {
+                return new Budget(maxEntries, maxBytes, milliseconds);
+            }
         }
 
         internal static void EnsureNoLinks(string path)
@@ -87,7 +92,7 @@ namespace AppManager
             EnsureNoLinks(target);
             List<string> entries = new List<string>();
             Visit(source, 0, budget, entries); // 写入前完成预检，错误不能变成不完整的成功快照。
-            Budget copyBudget = new Budget(200000, 2L * 1024 * 1024 * 1024, 600000);
+            Budget copyBudget = budget.ForCopy(600000);
             foreach (string path in entries)
             {
                 string relative = path.Substring(source.Length).TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);

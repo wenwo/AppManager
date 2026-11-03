@@ -245,16 +245,102 @@ namespace AppManager
             if (string.IsNullOrEmpty(path)) return false;
             bool isDir = Directory.Exists(path);
             if (!isDir && !File.Exists(path)) return false;
+            if (toRecycle) return RecycleWithNukeWarning(path);
             try
             {
-                RecycleOption mode = toRecycle ? RecycleOption.SendToRecycleBin : RecycleOption.DeletePermanently;
-                if (isDir) FileSystem.DeleteDirectory(path, UIOption.OnlyErrorDialogs, mode);
-                else FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, mode);
+                if (isDir) FileSystem.DeleteDirectory(path, UIOption.OnlyErrorDialogs, RecycleOption.DeletePermanently);
+                else FileSystem.DeleteFile(path, UIOption.OnlyErrorDialogs, RecycleOption.DeletePermanently);
                 return true;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine("删除失败 " + path + ": " + ex.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 路径所在卷是否“通常”有回收站：本地固定盘返回 true；网络路径、移动盘、光驱等返回 false。
+        /// 只用于提前提示；固定盘上具体能否回收（回收站被关闭、文件超过容量）由系统在删除时判断，
+        /// RecycleWithNukeWarning 会让系统先询问，绝不静默降级为永久删除。
+        /// </summary>
+        public static bool CanUseRecycleBin(string path)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(path)) return false;
+                string full = Path.GetFullPath(path);
+                if (full.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+                string root = Path.GetPathRoot(full);
+                if (string.IsNullOrEmpty(root)) return false;
+                DriveInfo drive = new DriveInfo(root);
+                return drive.IsReady && drive.DriveType == DriveType.Fixed;
+            }
+            catch { return false; }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct SHFILEOPSTRUCT
+        {
+            public IntPtr hwnd;
+            public uint wFunc;
+            [MarshalAs(UnmanagedType.LPWStr)] public string pFrom;
+            [MarshalAs(UnmanagedType.LPWStr)] public string pTo;
+            public ushort fFlags;
+            [MarshalAs(UnmanagedType.Bool)] public bool fAnyOperationsAborted;
+            public IntPtr hNameMappings;
+            [MarshalAs(UnmanagedType.LPWStr)] public string lpszProgressTitle;
+        }
+
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        private static extern int SHFileOperation(ref SHFILEOPSTRUCT op);
+
+        private const uint FO_DELETE = 3;
+        private const ushort FOF_SILENT = 0x0004, FOF_NOCONFIRMATION = 0x0010, FOF_ALLOWUNDO = 0x0040,
+            FOF_NOERRORUI = 0x0400, FOF_WANTNUKEWARNING = 0x4000;
+
+        /// <summary>
+        /// 移入回收站；系统无法回收时（回收站关闭、文件过大等）先弹系统确认，用户取消即返回 false。
+        /// （VB FileSystem 封装带 FOF_NOCONFIRMATION 而没有 FOF_WANTNUKEWARNING，会静默永久删除。）
+        /// shell 文件操作要求 STA：后台线程调用时转到临时 STA 线程执行。
+        /// </summary>
+        private static bool RecycleWithNukeWarning(string path)
+        {
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch { return false; }
+            Func<bool> work = delegate
+            {
+                SHFILEOPSTRUCT op = new SHFILEOPSTRUCT();
+                op.wFunc = FO_DELETE;
+                op.pFrom = full + "\0";   // 双 \0 结尾：封送再补一个
+                op.fFlags = (ushort)(FOF_SILENT | FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_NOERRORUI | FOF_WANTNUKEWARNING);
+                int rc = SHFileOperation(ref op);
+                if (rc != 0 || op.fAnyOperationsAborted)
+                {
+                    Debug.WriteLine("移入回收站失败 " + full + ": rc=" + rc + " aborted=" + op.fAnyOperationsAborted);
+                    return false;
+                }
+                return !Directory.Exists(full) && !File.Exists(full);
+            };
+            try
+            {
+                if (System.Threading.Thread.CurrentThread.GetApartmentState() == System.Threading.ApartmentState.STA) return work();
+                bool result = false;
+                System.Threading.Thread sta = new System.Threading.Thread(delegate()
+                {
+                    try { result = work(); }
+                    catch (Exception ex) { Debug.WriteLine("移入回收站失败 " + full + ": " + ex.Message); }
+                });
+                sta.SetApartmentState(System.Threading.ApartmentState.STA);
+                sta.IsBackground = true;
+                sta.Start();
+                sta.Join();
+                return result;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("移入回收站失败 " + full + ": " + ex.Message);
                 return false;
             }
         }

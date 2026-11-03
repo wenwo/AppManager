@@ -38,6 +38,7 @@ namespace AppManager
                 Run("latest-operation undo, redo and stale rollback rejection", Undo);
                 Run("stale writer rejected; failed transaction keeps all rows", Concurrency);
                 Run("consistent online backup and integrity", Backup);
+                Run("backup overwrite is atomic and reflects the latest commit", BackupOverwrite);
                 Run("indexed keyset pagination, exclusions, hidden and multi-membership", Paging);
                 Run("UI reads bounded database page and supports next/previous", UiPaging);
                 Run("mini music includes manual files and resources without duplicate paths", MiniMusic);
@@ -45,6 +46,14 @@ namespace AppManager
                 Run("corrupt XML/database refuse initialization or overwrite", Corruption);
                 Run("added item edits/deletes are incremental, rollback/reload preserves data", AddedEdits);
                 Run("mid-transaction failure and retry preserve all-or-nothing semantics", AtomicFailure);
+                Run("consecutive category moves and used rename targets leave a retryable session", CategoryConflicts);
+                Run("duplicate category membership merges instead of failing", DuplicateMembership);
+                Run("physical disk transactions cannot be undone piecemeal", PhysicalUndo);
+                Run("ambak import keeps local storage paths and drops forged desktop rows", AmbakSanitize);
+                Run("bulk path lookup matches case variants and staged rows", BulkLookup);
+                Run("case-insensitive entry lookup uses an index, also after online restore", NocaseIndex);
+                Run("batched save failures are deferred on the worker and reported once", BatchSaveFailure);
+                Run("recycle bin detection never treats network paths as recyclable", RecycleDetection);
                 Run("terminated writer recovers without exposing uncommitted rows", CrashRecovery);
                 Run("metadata sorting covers whole category, both directions and keyset pages", MetadataSorting);
                 Run("offline recovery keeps damaged original and restores validated snapshot", OfflineRecovery);
@@ -66,6 +75,7 @@ namespace AppManager
         }
         private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
         private static string Folder(string name) { string p = Path.Combine(root, name); Directory.CreateDirectory(p); return p; }
+        private static AppConfig Reload(string name) { return ConfigDatabase.Load(Path.Combine(root, name, "config.xml")); }
         private static AppConfig Fixture(string name)
         {
             string path = Path.Combine(Folder(name), "config.xml");
@@ -150,6 +160,27 @@ namespace AppManager
             string safety = c.Database.Restore(path);
             Check(File.Exists(safety) && c.Database.Read().Favorites.Count == 1, "restore or safety copy failed");
             Check(!c.Save(), "pre-restore in-memory state overwrote restored data");
+        }
+
+        private static void BackupOverwrite()
+        {
+            AppConfig c = Fixture("backup-overwrite");
+            string path = Path.Combine(root, "overwrite.db");
+            c.Database.Backup(path);
+            c.Favorites.Add("backup-second");
+            Check(c.Save(), c.DatabaseError);
+            c.Database.Backup(path);
+            using (Sqlite db = new Sqlite(path, true))
+            {
+                Check(db.Scalar("PRAGMA integrity_check") == "ok", "overwritten backup integrity");
+                Check(Convert.ToInt32(db.Scalar("SELECT count(*) FROM records WHERE section='Favorites'")) == 2,
+                    "overwritten backup kept stale rows");
+            }
+            bool rejected = false;
+            try { c.Database.Backup(c.Database.FilePath); }
+            catch (IOException) { rejected = true; }
+            Check(rejected, "backup over the live database was accepted");
+            Check(Directory.GetFiles(root, "overwrite.db.tmp-*").Length == 0, "backup temporary file left behind");
         }
         private static void Paging()
         {
@@ -257,9 +288,174 @@ namespace AppManager
             Check(!c.Save(), "injected failure accepted");
             AppConfig read = ConfigDatabase.Load(Path.Combine(root, "atomic", "config.xml"));
             Check(read.AddedItems.Count == count && read.Database.History(100).Count == operations, "partial transaction was committed");
+            Check(c.AddedItems.Count == count, "failed save left dirty in-memory rows");
             using (Sqlite db = new Sqlite(c.Database.FilePath, false)) db.Execute("DROP TRIGGER test_failure");
-            Check(c.Save() && c.AddedItems.Count == count + 2, "retry lost staged rows");
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\retry.jpg", Name = "retry", Category = "照片", IsResource = true });
+            Check(c.Save() && c.AddedItems.Count == count + 1, "retry after rollback failed");
+            Check(c.AddedItems.ByPath("C:\\first.jpg").Count == 0, "reload kept uncommitted rows");
         }
+        private static void CategoryConflicts()
+        {
+            AppConfig c = Fixture("category-conflicts");
+            string key = "add:C:\\file.txt";
+            c.CategoryOverride[key] = "办公软件";
+            Check(c.Save(), c.DatabaseError);
+            c.CategoryOverride[key] = "浏览器";
+            Check(c.Save(), "second category move failed: " + c.DatabaseError);
+            AppConfig read = Reload("category-conflicts");
+            Check(read.CategoryOverride[key] == "浏览器", "second category move was lost");
+            Check(read.Database.Page("浏览器", false, true, "", 10, null, true, false).Total == 1, "moved category projection missing");
+
+            AppConfig rename = Fixture("rename-conflicts");
+            rename.CustomCategories.Add("甲"); rename.CustomCategories.Add("乙");
+            rename.CategoryOverride["add:C:\\file.txt"] = "甲";
+            rename.CategoryOverride["add:C:\\image.jpg"] = "乙";
+            Check(rename.Save(), rename.DatabaseError);
+            rename.QueueCategoryRename("甲", "乙");
+            Check(!rename.Save() && !string.IsNullOrEmpty(rename.DatabaseError), "rename onto a used category was accepted");
+            Check(rename.CustomCategories.Contains("甲") && rename.CustomCategories.Contains("乙"), "failed rename polluted memory");
+            Check(rename.Save(), "used rename target poisoned the next save: " + rename.DatabaseError);
+        }
+
+        private static void DuplicateMembership()
+        {
+            AppConfig c = Fixture("duplicate-membership");
+            string path = Path.Combine(root, "duplicate-membership", "dup.txt");
+            File.WriteAllText(path, "x");
+            AddedEntry first = new AddedEntry { Path = path, Category = "照片", IsResource = true };
+            AddedEntry second = new AddedEntry { Path = path, Category = "文件", IsResource = true };
+            c.AddedItems.Add(first); c.AddedItems.Add(second);
+            Check(c.Save(), c.DatabaseError);
+            second.Category = "照片";
+            Check(c.Save(), "duplicate membership merge failed: " + c.DatabaseError);
+            AppConfig read = Reload("duplicate-membership");
+            Check(read.AddedItems.ByPath(path).Count == 1, "duplicate membership remained: " + read.AddedItems.ByPath(path).Count);
+            Check(read.Database.Page("照片", true, true, "", 10, null, true, false).Total == 2, "merged category listing missing");
+            Check(read.Database.Page("文件", true, true, "", 10, null, true, false).Total == 0, "old category listing remained");
+            Check(read.Database.Check().Contains("foreign_key_errors=0"), "merge broke foreign keys");
+        }
+
+        private static string NocasePlan(string path, string sql)
+        {
+            using (Sqlite s = new Sqlite(path, true))
+                return string.Join(" | ", s.Query("EXPLAIN QUERY PLAN " + sql, "add:C:\\X", 1).Select(r => r[r.Length - 1]).ToArray());
+        }
+
+        private static void NocaseIndex()
+        {
+            AppConfig c = Fixture("nocase-index");
+            string lookup = NocasePlan(c.Database.FilePath, "SELECT id FROM entries WHERE key=? COLLATE NOCASE AND id<>? LIMIT 1");
+            Check(lookup.Contains("ix_entries_key_nocase"), "case-insensitive lookup scans the table: " + lookup);
+            // 旧快照没有该索引：在线恢复后必须补齐，否则恢复后批量收录又退化成全表扫描。
+            string snapshot = Path.Combine(root, "nocase-index", "snapshot.db");
+            c.Database.Backup(snapshot);
+            using (Sqlite s = new Sqlite(snapshot, false)) s.Execute("DROP INDEX ix_entries_key_nocase");
+            c.Database.Restore(snapshot);
+            using (Sqlite s = new Sqlite(c.Database.FilePath, true))
+                Check(s.Scalar("SELECT count(*) FROM sqlite_master WHERE type='index' AND name='ix_entries_key_nocase'") == "1",
+                    "online restore dropped the case-insensitive index");
+        }
+
+        private static void BatchSaveFailure()
+        {
+            AppConfig c = Fixture("batch-failure");
+            int raised = 0;
+            c.SaveFailed += delegate { raised++; };
+            // 另一个写入者推进修订号：本会话接下来的保存都会被拒绝。
+            using (Sqlite s = new Sqlite(c.Database.FilePath, false))
+                s.Execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
+            c.Favorites.Add("batch-pending");
+            bool first, second;
+            string error;
+            AppConfig.BeginSaveBatch();
+            try { first = c.Save("batch.first"); second = c.Save("batch.second"); }
+            finally { error = AppConfig.EndSaveBatch(); }
+            Check(!first && !second, "stale batch save was accepted");
+            Check(raised == 0 && c.Favorites.Contains("batch-pending"), "batch failure reloaded or notified on the worker thread");
+            Check(error != null && AppConfig.EndSaveBatch() == null, "batch failure was not reported exactly once");
+            c.ReportSaveFailure(error);
+            Check(raised == 1 && !c.Favorites.Contains("batch-pending"), "report did not restore committed state");
+            c.Favorites.Add("after-report");
+            Check(c.Save("after.report"), c.DatabaseError);
+            // 批量范围外的失败保持原语义：立即恢复并通知。
+            using (Sqlite s = new Sqlite(c.Database.FilePath, false))
+                s.Execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
+            c.Favorites.Add("immediate-pending");
+            Check(!c.Save("immediate") && raised == 2 && !c.Favorites.Contains("immediate-pending"), "non-batch failure lost its reload");
+        }
+
+        private static void RecycleDetection()
+        {
+            Check(!Launcher.CanUseRecycleBin(@"\\server\share\file.txt"), "UNC path treated as recyclable");
+            Check(!Launcher.CanUseRecycleBin(null) && !Launcher.CanUseRecycleBin(""), "empty path treated as recyclable");
+            string local = Path.Combine(root, "recycle-detect.txt");
+            DriveInfo drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(local)));
+            Check(Launcher.CanUseRecycleBin(local) == (drive.IsReady && drive.DriveType == DriveType.Fixed),
+                "fixed local drive detection depends on per-user recycle folder");
+        }
+
+        private static void PhysicalUndo()
+        {
+            AppConfig c = Fixture("physical-undo");
+            c.Favorites.Add("physical-kept");
+            Check(c.Save("physical.files.move"), c.DatabaseError);
+            long operation = Convert.ToInt64(c.Database.History(1)[0][0]);
+            bool rejected = false;
+            try { c.Database.Undo(operation); }
+            catch (IOException) { rejected = true; }
+            Check(rejected, "physical transaction was undone without its files");
+            AppConfig read = c.Database.Read();
+            Check(read.Favorites.Contains("physical-kept"), "rejected undo changed data");
+        }
+
+        private static void AmbakSanitize()
+        {
+            AppConfig local = Fixture("ambak-local");
+            Directory.CreateDirectory(Paths.DesktopBackupDir);
+            string desktop = Path.Combine(DesktopOrganizer.UserDesktop, "ambak-" + Guid.NewGuid().ToString("N") + ".txt");
+            if (!DesktopOrganizer.IsSafeRestoreTarget(desktop))
+                desktop = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory),
+                    "ambak-" + Guid.NewGuid().ToString("N") + ".txt");
+            Check(DesktopOrganizer.IsSafeRestoreTarget(desktop), "no safe desktop fixture path");
+
+            string kept = Path.Combine(Paths.DesktopBackupDir, "kept.txt");
+            string unsafeOriginal = Path.Combine(Paths.DesktopBackupDir, "unsafe-original.txt");
+            string outside = Path.Combine(root, "ambak-outside.txt");
+            File.WriteAllText(kept, "kept"); File.WriteAllText(unsafeOriginal, "unsafe"); File.WriteAllText(outside, "outside");
+
+            AppConfig imported = new AppConfig();
+            imported.ManageRootPath = "D:\\foreign";
+            imported.FolderStorePath = "D:\\foreign-folders";
+            imported.FileStorePath = "D:\\foreign-files";
+            imported.ResourceStorePath = "D:\\foreign-resources";
+            imported.DesktopBackup.Add(new DesktopBackupEntry { CurrentPath = kept, OriginalPath = desktop, IsCopy = true });
+            imported.DesktopBackup.Add(new DesktopBackupEntry { CurrentPath = outside, OriginalPath = desktop, IsCopy = true });
+            imported.DesktopBackup.Add(new DesktopBackupEntry { CurrentPath = unsafeOriginal, OriginalPath = outside, IsCopy = true });
+            int dropped;
+            string error = imported.PrepareAmbakImport(local, out dropped);
+            Check(error == null, "valid ambak rejected: " + error);
+            Check(dropped == 2 && imported.DesktopBackup.Count == 1, "forged desktop rows were not dropped");
+            Check(!imported.DesktopBackup[0].IsCopy, "imported copy flag was trusted");
+            Check(imported.ManageRootPath == local.ManageRootPath && imported.FolderStorePath == local.FolderStorePath
+                && imported.FileStorePath == local.FileStorePath && imported.ResourceStorePath == local.ResourceStorePath,
+                "import overwrote local storage paths");
+
+            AppConfig bad = new AppConfig(); bad.CustomCategories.Add("Bad/Name");
+            Check(bad.PrepareAmbakImport(local, out dropped) != null, "slash category accepted");
+            AppConfig cross = new AppConfig(); cross.CustomCategories.Add("Same"); cross.ResourceCategories.Add("Same");
+            Check(cross.PrepareAmbakImport(local, out dropped) != null, "cross-mode duplicate accepted");
+        }
+
+        private static void BulkLookup()
+        {
+            AppConfig c = Fixture("bulk-lookup");
+            string staged = Path.Combine(root, "bulk-lookup", "staged.txt");
+            c.AddedItems.Add(new AddedEntry { Path = staged, Category = "工具" });
+            Dictionary<string, List<AddedEntry>> found = c.AddedItems.LookupMany(new string[] { "C:\\FILE.TXT", staged.ToUpperInvariant(), staged.ToUpperInvariant() });
+            Check(found["C:\\FILE.TXT"].Count == 1, "stored path lookup failed");
+            Check(found[staged.ToUpperInvariant()].Count == 1, "staged path lookup failed or duplicated");
+        }
+
         private static void CrashRecovery()
         {
             AppConfig c = Fixture("crash"); int operations = c.Database.History(100).Count;

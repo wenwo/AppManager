@@ -34,9 +34,29 @@ namespace AppManager
             {
                 RunOnUi(delegate
                 {
-                    MessageBox.Show(this, "变更未保存，数据库中的原数据已保留。\n" + error, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    ReloadUiAfterSaveFailure();
+                    MessageBox.Show(this, "变更未保存，已恢复为数据库中的原数据。\n" + error, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 });
             };
+        }
+
+        /// <summary>保存失败后配置已回滚到数据库状态：重建依赖配置的运行时对象并刷新列表。</summary>
+        private void ReloadUiAfterSaveFailure()
+        {
+            if (!_ready || IsDisposed || Disposing) return;
+            InvalidateAddedIndex();
+            scanner = new Scanner(config);
+            organizer = new DesktopOrganizer(config);
+            if (currentCollection != null && FindCollectionByKey(currentCollection) == null) currentCollection = null;
+            grid.GridMode = GetCategoryGridMode(currentCategory);
+            SyncHeaderStrip();
+            if (settingsPage != null)
+                settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
+                    config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
+            StartAutoScan();
+            RebuildSidebar();
+            StartScan();
+            Invalidate();
         }
 
         private void ScheduleDatabaseMetadata()

@@ -177,6 +177,25 @@ namespace AppManager
             finally { CloseClipboard(); }
         }
 
+        /// <summary>
+        /// 在应用内改名会主动让旧路径消失；这不是“移出”，必须取消旧路径观察，
+        /// 否则定时器会把条目误判为已移出并清掉收藏、集合和分类记录。
+        /// </summary>
+        private void ForgetMoveOutAfterRename(string oldPath)
+        {
+            if (string.IsNullOrEmpty(oldPath)) return;
+            moveOutWatches.RemoveAll(w => string.Equals(w.Path, oldPath, StringComparison.OrdinalIgnoreCase));
+            bool wasCut = cutState != null && cutState.Apps.Any(a =>
+                string.Equals(a.TargetPath, oldPath, StringComparison.OrdinalIgnoreCase));
+            if (wasCut)
+            {
+                uint sequence = cutState.Sequence;
+                ClearClipboardIfCurrent(sequence);
+                EndCut();
+            }
+            if (moveOutWatches.Count == 0 && moveOutTimer != null) moveOutTimer.Stop();
+        }
+
         private void WatchMoveOut(IEnumerable<AppInfo> apps, DateTime expires)
         {
             foreach (AppInfo app in apps)

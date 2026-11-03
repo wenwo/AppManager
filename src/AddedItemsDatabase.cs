@@ -21,10 +21,24 @@ namespace AppManager
                     foreach (long id in list.Removed)
                     { read.Bind(id); if (read.Read()) affected.Add(Number(read.Row()[0])); remove.Bind(id); remove.Read(); }
                 using (Sqlite.Statement update = db.Prepare("UPDATE added_items SET item_id=?,group_id=?,path=?,path_key=?,name=?,folder=?,resource=? WHERE id=? AND (item_id<>? OR group_id IS NOT ? OR path<>? OR name<>? OR folder<>? OR resource<>?)"))
+                using (Sqlite.Statement remove = db.Prepare("DELETE FROM added_items WHERE id=?"))
                     foreach (AddedEntry e in list.Dirty.Values)
                     {
                         if (list.Removed.Contains(e.RecordId)) continue;
                         long item = Entry(db, "add:" + e.Path), group = Group(db, e.Category);
+                        // 改分类后目标分类里已有同一路径时不能报唯一约束错误：合并到已有成员关系，
+                        // 删除本条旧关系，并让内存对象指向保留下来的记录。
+                        string target = db.Scalar("SELECT id FROM added_items WHERE item_id=? AND group_id IS ? AND id<>? LIMIT 1",
+                            item, Foreign(group), e.RecordId);
+                        if (target != null)
+                        {
+                            long targetId = Number(target);
+                            remove.Bind(e.RecordId); remove.Read();
+                            db.Execute("UPDATE added_items SET item_id=?,group_id=?,path=?,path_key=?,name=?,folder=?,resource=? WHERE id=?",
+                                item, Foreign(group), e.Path, e.Path.ToUpperInvariant(), e.Name, e.IsFolder, e.IsResource, targetId);
+                            e.RecordId = targetId; e.ItemId = item; affected.Add(item);
+                            continue;
+                        }
                         update.Bind(item, Foreign(group), e.Path, e.Path.ToUpperInvariant(), e.Name, e.IsFolder, e.IsResource, e.RecordId,
                             item, Foreign(group), e.Path, e.Name, e.IsFolder, e.IsResource); update.Read();
                         if (db.Changes != 0) { affected.Add(item); if (e.ItemId != 0) affected.Add(e.ItemId); }
@@ -36,8 +50,8 @@ namespace AppManager
                     if (string.IsNullOrWhiteSpace(e.Path)) throw new IOException("内容路径不能为空。");
                     long item = Entry(db, "add:" + e.Path), group = Group(db, e.Category);
                     insert.Bind(item, Foreign(group), e.Path, e.Path.ToUpperInvariant(), e.Name, e.IsFolder, e.IsResource); insert.Read();
-                    if (db.Changes != 0) { e.RecordId = db.LastId; e.ItemId = item; affected.Add(item); }
-                    else { e.RecordId = Number(db.Scalar("SELECT id FROM added_items WHERE item_id=? AND group_id IS ?", item, Foreign(group))); e.ItemId = item; }
+                    e.RecordId = Number(db.Scalar("SELECT id FROM added_items WHERE item_id=? AND group_id IS ?", item, Foreign(group)));
+                    e.ItemId = item; affected.Add(item);
                 }
         }
 

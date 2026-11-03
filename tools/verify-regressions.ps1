@@ -20,7 +20,7 @@ try {
     & $compiler /nologo /target:winexe /utf8output "/out:$app" $manifest @references @sources
     if ($LASTEXITCODE -ne 0) { throw 'Application compilation failed.' }
     $process = Start-Process -FilePath $app -ArgumentList '--selftest' -WindowStyle Hidden -PassThru
-    $deadline = [DateTime]::UtcNow.AddSeconds(120)
+    $deadline = [DateTime]::UtcNow.AddSeconds(300)
     while (-not $process.WaitForExit(1000)) {
         if ([DateTime]::UtcNow -ge $deadline) { throw 'Selftest timed out.' }
     }

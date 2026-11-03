@@ -77,7 +77,7 @@ namespace AppManager
                     db.Execute("DELETE FROM metadata WHERE key='catalog_invalid'");
                     db.Execute("COMMIT");
                 }
-                catch { db.Execute("ROLLBACK"); LoadBaseline(db); throw; }
+                catch { db.Rollback(); LoadBaseline(db); throw; }
             }
         }
 
@@ -109,7 +109,7 @@ namespace AppManager
                     db.Execute("COMMIT");
                     config.DatabaseRevision = revision;
                 }
-                catch { db.Execute("ROLLBACK"); LoadBaseline(db); throw; }
+                catch { db.Rollback(); LoadBaseline(db); throw; }
             }
         }
 
@@ -210,11 +210,22 @@ namespace AppManager
                     db.Execute("BEGIN IMMEDIATE");
                     try
                     {
+                        long operation = NewOperation(db, "catalog.repair");
+                        db.Execute("UPDATE write_context SET operation_id=? WHERE id=1", operation);
                         UpdateAddedCatalog(db, affected);
                         RebuildListings(db, null, affected);
+                        db.Execute("UPDATE write_context SET operation_id=NULL WHERE id=1");
+                        int changes = Convert.ToInt32(db.Scalar("SELECT count(*) FROM changes WHERE operation_id=?", operation));
+                        if (changes == 0) db.Execute("DELETE FROM operations WHERE id=?", operation);
+                        else
+                        {
+                            revision++;
+                            db.Execute("UPDATE metadata SET value=? WHERE key='revision'", revision.ToString(CultureInfo.InvariantCulture));
+                        }
                         db.Execute("COMMIT");
+                        LoadBaseline(db);
                     }
-                    catch { db.Execute("ROLLBACK"); throw; }
+                    catch { db.Rollback(); throw; }
                 }
             }
             catch (Exception ex) { Paths.LogError(new IOException("归属投影修复失败，后续保存时会重建。", ex)); }
@@ -243,14 +254,21 @@ namespace AppManager
         internal CatalogPage Page(string category, bool resources, bool showHidden, string keyword, int limit, CatalogPage after, bool byName, bool descending, string sortColumn = null)
         {
             if (limit < 1 || limit > 500) throw new ArgumentOutOfRangeException("limit");
-            lock (gate)
+            bool search = !string.IsNullOrEmpty(keyword);
+            long categoryGroup = 0;
+            if (!search)
+            {
+                lock (gate)
+                {
+                    if (!groups.TryGetValue(category, out categoryGroup)) return new CatalogPage();
+                }
+            }
             using (Sqlite db = Open())
             {
                 CatalogPage result = new CatalogPage();
                 List<object> args = new List<object>();
                 string from;
                 string where;
-                bool search = !string.IsNullOrEmpty(keyword);
                 bool metadataSort = sortColumn == "size" || sortColumn == "time";
                 if (search)
                 {
@@ -262,11 +280,9 @@ namespace AppManager
                 }
                 else
                 {
-                    long group;
-                    if (!groups.TryGetValue(category, out group)) return result;
                     from = "listing l JOIN catalog c ON c.item_id=l.item_id";
                     where = "l.group_id=? AND " + (resources ? "l.kind=2" : "l.kind=0") + (showHidden ? "" : " AND l.hidden=0");
-                    args.Add(group);
+                    args.Add(categoryGroup);
                 }
                 result.Total = after == null ? Convert.ToInt32(db.Scalar("SELECT count(*) FROM " + (search ? "catalog c" : "listing l") + " WHERE " + where, args.ToArray())) : after.Total;
                 string name = search ? "c.search_name" : "l.name";
@@ -348,7 +364,7 @@ namespace AppManager
                             }
                         db.Execute("COMMIT");
                     }
-                    catch { db.Execute("ROLLBACK"); throw; }
+                    catch { db.Rollback(); throw; }
                 }
             }
         }

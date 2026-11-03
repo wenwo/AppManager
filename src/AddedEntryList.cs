@@ -69,6 +69,54 @@ namespace AppManager
             if (Store == null) return LoadPath(null, path);
             using (Sqlite db = new Sqlite(Store.FilePath, true)) return LoadPath(db, path);
         }
+
+        /// <summary>批量查询路径归属：批量导入时只开少量只读连接，避免每个路径各开一次数据库。</summary>
+        internal Dictionary<string, List<AddedEntry>> LookupMany(IEnumerable<string> paths)
+        {
+            Dictionary<string, List<AddedEntry>> result =
+                new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
+            List<string> distinct = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths)
+            {
+                if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
+                distinct.Add(path);
+                result[path] = new List<AddedEntry>();
+            }
+            if (distinct.Count == 0) return result;
+
+            if (Store != null)
+            {
+                using (Sqlite db = new Sqlite(Store.FilePath, true))
+                {
+                    for (int offset = 0; offset < distinct.Count; offset += 256)
+                    {
+                        int count = Math.Min(256, distinct.Count - offset);
+                        List<string> chunk = distinct.GetRange(offset, count);
+                        List<string> marks = chunk.ConvertAll(delegate(string value) { return "?"; });
+                        object[] args = new object[count];
+                        for (int i = 0; i < count; i++) args[i] = chunk[i].ToUpperInvariant();
+                        foreach (string[] row in db.Query(Columns + " WHERE a.path_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY a.id", args))
+                        {
+                            if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
+                            AddedEntry entry = Hydrate(row);
+                            List<AddedEntry> list;
+                            if (result.TryGetValue(entry.Path, out list) && !list.Contains(entry)) list.Add(entry);
+                        }
+                    }
+                }
+            }
+            foreach (string path in distinct)
+            {
+                List<AddedEntry> staged;
+                if (!changedPaths.TryGetValue(path, out staged)) continue;
+                List<AddedEntry> list = result[path];
+                foreach (AddedEntry entry in staged)
+                    if (!Removed.Contains(entry.RecordId) && !list.Contains(entry)) list.Add(entry);
+            }
+            return result;
+        }
+
         /// <summary>批量预读未缓存的路径：共用一个只读连接，避免列表逐行查询时每条都新开数据库连接。</summary>
         internal void Prefetch(IEnumerable<string> paths)
         {

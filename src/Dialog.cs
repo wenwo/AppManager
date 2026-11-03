@@ -1146,9 +1146,10 @@ namespace AppManager
             ok.Click += delegate
             {
                 string name = (nameBox.Text ?? string.Empty).Trim();
-                if (name.Length == 0)
+                string error = CategoryRules.ValidateCollectionName(name);
+                if (error != null)
                 {
-                    MessageBox.Show("请输入集合名称。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show(error, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 result = new ResourceCollection();

@@ -285,6 +285,7 @@ namespace AppManager
                     || ex is ArgumentException || ex is NotSupportedException)) throw;
                 return "无法改名：" + ex.Message.TrimEnd('。', '.', '\r', '\n');
             }
+            ForgetMoveOutAfterRename(oldPath);
 
             // 从这里到保存之间没有模态窗口，RekeyEntry 取到的记录对象在保存前一直有效
             string oldKey = app.Key, newKey = "add:" + newPath;
@@ -296,7 +297,7 @@ namespace AppManager
             app.Key = newKey;
             app.Name = display;
             if (string.Equals(app.DisplayIcon, oldPath, StringComparison.OrdinalIgnoreCase)) app.DisplayIcon = newPath;
-            if (config.Save()) return null;
+            if (config.Save("physical.files.rename")) return null;
 
             // 资源库保存失败（具体原因由数据库错误提示另行说明）：把文件改回原名并撤回全部记录
             try { RenamePath(newPath, oldPath); }

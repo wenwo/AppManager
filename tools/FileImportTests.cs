@@ -258,6 +258,16 @@ namespace AppManager
                     string path = Path.Combine(root, "bad.xml"); File.WriteAllText(path, "<!DOCTYPE ImportBatch [<!ENTITY x 'bad'>]><ImportBatch />");
                     bool rejected = false; try { FileImport.Load(path); } catch { rejected = true; } Check(rejected, "DTD");
                 });
+                Test("journal round-trips XML-invalid characters", delegate
+                {
+                    ImportBatch batch = Batch(ImportOperation.Copy, "a.txt");
+                    string invalid = "bad\u0001\u000B\uD800end";
+                    batch.Error = invalid; batch.Items[0].Error = invalid; batch.Items[0].Source = invalid;
+                    FileImport.Save(batch);
+                    ImportBatch restored = Reload(batch);
+                    Check(restored.Error == invalid && restored.Items[0].Error == invalid
+                        && restored.Items[0].Source == invalid, "invalid XML characters were not preserved");
+                });
                 Test("same-volume move links instead of copying and keeps metadata", delegate
                 {
                     ImportBatch batch = Batch(ImportOperation.Move, "a.txt"); File.SetAttributes(batch.Items[0].Source, FileAttributes.ReadOnly | FileAttributes.Hidden);

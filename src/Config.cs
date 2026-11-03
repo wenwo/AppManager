@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -70,6 +70,14 @@ namespace AppManager
         {
             try
             {
+                // 日志只保留最近 5MB；轮转失败也不能影响主流程。
+                FileInfo log = new FileInfo(LogFile);
+                if (log.Exists && log.Length >= 5L * 1024 * 1024)
+                {
+                    string previous = LogFile + ".1";
+                    try { if (File.Exists(previous)) File.Delete(previous); } catch { }
+                    try { File.Move(LogFile, previous); } catch { }
+                }
                 string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss}] {1}\r\n{2}\r\n\r\n",
                     DateTime.Now, ex.Message, ex);
                 File.AppendAllText(LogFile, line, System.Text.Encoding.UTF8);
@@ -478,8 +486,95 @@ namespace AppManager
                 return false;
             }
             bool saved = Database != null ? Database.Save(this, action) : ConfigDatabase.SaveDetached(this, FilePath, action);
-            if (!saved && SaveFailed != null) SaveFailed(DatabaseError);
-            return saved;
+            if (saved) return true;
+            if (saveBatchDepth > 0)
+            {
+                // 后台批量操作（整理桌面、还原、自动收纳）里逐项保存：调用方已自行撤回失败的那一项。
+                // 这里不能在工作线程上整体替换集合（界面线程可能正在读），也不能每项弹一次窗；
+                // 只记下第一条原因，批量结束后由调用方在界面线程上 ReportSaveFailure 一次。
+                if (saveBatchError == null) saveBatchError = string.IsNullOrEmpty(DatabaseError) ? "保存失败。" : DatabaseError;
+                return false;
+            }
+            // 保存事务已整体回滚；此时内存里的差量修改仍指向未提交状态。若不立刻还原，
+            // 下一次保存会再次提交同一批冲突，表现为“失败一次后本次会话再也保存不了”。
+            ReloadFromDatabase();
+            if (SaveFailed != null) SaveFailed(DatabaseError);
+            return false;
+        }
+
+        [ThreadStatic] private static int saveBatchDepth;
+        [ThreadStatic] private static string saveBatchError;
+
+        /// <summary>在当前线程开始一段批量保存；必须与 EndSaveBatch 成对出现（try/finally）。</summary>
+        internal static void BeginSaveBatch()
+        {
+            saveBatchDepth++;
+        }
+
+        /// <summary>结束当前线程的批量保存；最外层结束时返回期间第一条保存失败原因，没有失败返回 null。</summary>
+        internal static string EndSaveBatch()
+        {
+            if (saveBatchDepth > 0) saveBatchDepth--;
+            if (saveBatchDepth > 0) return null;
+            string error = saveBatchError;
+            saveBatchError = null;
+            return error;
+        }
+
+        /// <summary>批量操作结束后在界面线程调用：恢复为数据库已提交状态，并只通知一次保存失败。</summary>
+        internal void ReportSaveFailure(string error)
+        {
+            ReloadFromDatabase();
+            DatabaseError = error;
+            if (SaveFailed != null) SaveFailed(error);
+        }
+
+        /// <summary>保存失败后把当前对象恢复为数据库已提交状态；失败时保持原内存不动并记录日志。</summary>
+        internal bool ReloadFromDatabase()
+        {
+            if (Database == null) return false;
+            try
+            {
+                AppConfig fresh = Database.Read();
+                if (fresh == null || fresh.LoadFailed) return false;
+                ViewGrid = fresh.ViewGrid;
+                ShowHidden = fresh.ShowHidden;
+                AutoScan = fresh.AutoScan;
+                AutoOrganizeDesktop = fresh.AutoOrganizeDesktop;
+                CloseToTray = fresh.CloseToTray;
+                Favorites = fresh.Favorites;
+                Hidden = fresh.Hidden;
+                CustomCategories = fresh.CustomCategories;
+                ResourceCategories = fresh.ResourceCategories;
+                Collections = fresh.Collections;
+                CategoryOverride = fresh.CategoryOverride;
+                AddedItems = fresh.AddedItems;
+                DesktopBackup = fresh.DesktopBackup;
+                CategoryViewMode = fresh.CategoryViewMode;
+                CategoryIconNames = fresh.CategoryIconNames;
+                ManageRootPath = fresh.ManageRootPath;
+                FolderStorePath = fresh.FolderStorePath;
+                FileStorePath = fresh.FileStorePath;
+                ResourceStorePath = fresh.ResourceStorePath;
+                ItemOrder = fresh.ItemOrder;
+                ItemCategories = fresh.ItemCategories;
+                ExcludedCategories = fresh.ExcludedCategories;
+                SidebarOrder = fresh.SidebarOrder;
+                OrganizeCopy = fresh.OrganizeCopy;
+                OrganizeShortcut = fresh.OrganizeShortcut;
+                OrganizeFile = fresh.OrganizeFile;
+                OrganizeDir = fresh.OrganizeDir;
+                LoadedLegacy = fresh.LoadedLegacy;
+                DatabaseRevision = fresh.DatabaseRevision;
+                // 保留本次失败原因给 SaveFailed 提示；下一次成功保存会自行清空。
+                LoadFailed = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Paths.LogError(new IOException("保存失败后重新加载已提交配置失败。", ex));
+                return false;
+            }
         }
 
         /// <summary>
@@ -723,6 +818,92 @@ namespace AppManager
                 return null;
             }
             return LoadFrom(filePath);
+        }
+
+        /// <summary>校验导入内容中会参与键结构或磁盘还原的名称；返回 null 表示通过。</summary>
+        internal string ValidateImportedContent(bool rejectCrossModeDuplicates)
+        {
+            HashSet<string> software = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in CategoryRules.BuiltIn) software.Add(name);
+            foreach (string name in CategoryRules.ResourceBuiltIn) resources.Add(name);
+            foreach (string name in CustomCategories)
+            {
+                string error = CategoryRules.ValidateName(name);
+                if (error != null) return "软件分类“" + name + "”无效：" + error;
+                if (!software.Add(name)) return "软件分类“" + name + "”重复。";
+            }
+            foreach (string name in ResourceCategories)
+            {
+                string error = CategoryRules.ValidateName(name);
+                if (error != null) return "资源分类“" + name + "”无效：" + error;
+                if (!resources.Add(name)) return "资源分类“" + name + "”重复。";
+            }
+            foreach (string name in software)
+                if (name == "全部软件" || name == "常用" || name == "快捷中心")
+                    return "软件分类“" + name + "”是系统保留名称。";
+            foreach (string name in resources)
+                if (name == "全部资源") return "资源分类“" + name + "”是系统保留名称。";
+            if (rejectCrossModeDuplicates)
+            {
+                foreach (string name in resources)
+                    if (software.Contains(name)) return "软件分类与资源分类不能同名：“" + name + "”。";
+            }
+            HashSet<string> collections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ResourceCollection collection in Collections)
+            {
+                string error = CategoryRules.ValidateCollectionName(collection.Name);
+                if (error != null) return "集合“" + collection.Name + "”无效：" + error;
+                error = CategoryRules.ValidateCollectionName(collection.Parent);
+                if (error != null) return "集合“" + collection.Name + "”的父分类“" + collection.Parent + "”无效：" + error;
+                string key = CollectionKeys.Make(collection.Parent, collection.Name);
+                if (!collections.Add(key)) return "集合“" + collection.Parent + " / " + collection.Name + "”重复。";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 导入 .ambak 前的本机适配：保留本机存储路径，并只接收当前收纳目录内确实存在的桌面记录。
+        /// 导入包里的 IsCopy 一律按搬家处理，避免伪造记录在“还原”时递归删除唯一副本。
+        /// </summary>
+        internal string PrepareAmbakImport(AppConfig local, out int droppedDesktop)
+        {
+            droppedDesktop = 0;
+            if (local == null) return "当前配置不可用，已中止导入。";
+            string error = ValidateImportedContent(true);
+            if (error != null) return error;
+
+            ManageRootPath = local.ManageRootPath;
+            FolderStorePath = local.FolderStorePath;
+            FileStorePath = local.FileStorePath;
+            ResourceStorePath = local.ResourceStorePath;
+
+            List<DesktopBackupEntry> safe = new List<DesktopBackupEntry>();
+            foreach (DesktopBackupEntry entry in DesktopBackup)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.CurrentPath)) { droppedDesktop++; continue; }
+                string current;
+                string original;
+                try
+                {
+                    current = Path.GetFullPath(entry.CurrentPath);
+                    original = Path.GetFullPath(entry.OriginalPath);
+                }
+                catch { droppedDesktop++; continue; }
+                bool exists = entry.IsDir ? Directory.Exists(current) : File.Exists(current);
+                if (!exists || !DesktopOrganizer.IsManagedBackupPath(current)
+                    || !DesktopOrganizer.IsSafeRestoreTarget(original))
+                {
+                    droppedDesktop++;
+                    continue;
+                }
+                entry.CurrentPath = current;
+                entry.OriginalPath = original;
+                entry.IsCopy = false;
+                safe.Add(entry);
+            }
+            DesktopBackup = safe;
+            return null;
         }
 
         // ===== 旧版配置导入 =====

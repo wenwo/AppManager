@@ -91,17 +91,35 @@ namespace AppManager
         /// </summary>
         private static int RunTidyDesktop()
         {
-            int count = 0;
-            string error = null;
-            try
+            bool createdNew;
+            using (Mutex mutex = new Mutex(true, MutexName, out createdNew))
             {
-                AppConfig config = AppConfig.Load();
-                DesktopOrganizer organizer = new DesktopOrganizer(config);
-                count = organizer.TidyDesktop(Application.ExecutablePath);
+                if (!createdNew)
+                {
+                    // 与 GUI 共用单实例锁：两边同时写数据库会丢收纳记录，或让界面后续保存持续失败。
+                    WriteTidyLog(0, "主程序正在运行，已跳过命令行整理，避免同时修改数据库。");
+                    return 1;
+                }
+                try
+                {
+                    int count = 0;
+                    string error = null;
+                    try
+                    {
+                        AppConfig config = AppConfig.Load();
+                        if (config.LoadFailed) throw new IOException("配置读取失败，已停止整理：" + config.DatabaseError);
+                        DesktopOrganizer organizer = new DesktopOrganizer(config);
+                        count = organizer.TidyDesktop(Application.ExecutablePath);
+                    }
+                    catch (Exception ex) { error = ex.Message; }
+                    WriteTidyLog(count, error);
+                    return error == null ? 0 : 1;
+                }
+                finally
+                {
+                    try { mutex.ReleaseMutex(); } catch { }
+                }
             }
-            catch (Exception ex) { error = ex.Message; }
-            WriteTidyLog(count, error);
-            return error == null ? 0 : 1;
         }
 
         /// <summary>把整理结果写入 %LocalAppData%\AppManager\tidy.log（静默，不抛异常）。</summary>

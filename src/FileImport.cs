@@ -275,13 +275,113 @@ namespace AppManager
         {
             Directory.CreateDirectory(batch.JournalDirectory);
             string path = Path.Combine(batch.JournalDirectory, batch.Id + ".xml"), temp = path + ".tmp";
-            using (FileStream stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            EscapeBatch(batch);
+            try
             {
-                new XmlSerializer(typeof(ImportBatch)).Serialize(stream, batch);
-                stream.Flush(true);
+                using (FileStream stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    new XmlSerializer(typeof(ImportBatch)).Serialize(stream, batch);
+                    stream.Flush(true);
+                }
             }
+            finally { UnescapeBatch(batch); }
             if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
             batch.SavedAt = Environment.TickCount;
+        }
+
+        private const char EscapeOpen = '\uE000';
+        private const char EscapeClose = '\uE001';
+
+        private static string EscapeValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            StringBuilder text = new StringBuilder(value.Length);
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                bool valid = c == '\t' || c == '\n' || c == '\r'
+                    || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD);
+                if (char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]))
+                {
+                    text.Append(c).Append(value[++i]);
+                    continue;
+                }
+                if (c == EscapeOpen || c == EscapeClose || !valid || char.IsSurrogate(c))
+                {
+                    text.Append(EscapeOpen).Append(((int)c).ToString("X4")).Append(EscapeClose);
+                    continue;
+                }
+                text.Append(c);
+            }
+            return text.ToString();
+        }
+
+        private static string UnescapeValue(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.IndexOf(EscapeOpen) < 0) return value;
+            StringBuilder text = new StringBuilder(value.Length);
+            for (int i = 0; i < value.Length; i++)
+            {
+                if (value[i] == EscapeOpen && i + 5 < value.Length && value[i + 5] == EscapeClose)
+                {
+                    int code;
+                    if (int.TryParse(value.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture, out code))
+                    {
+                        text.Append((char)code); i += 5; continue;
+                    }
+                }
+                text.Append(value[i]);
+            }
+            return text.ToString();
+        }
+
+        private static void EscapeBatch(ImportBatch batch)
+        {
+            batch.Id = EscapeValue(batch.Id); batch.Category = EscapeValue(batch.Category);
+            batch.Collection = EscapeValue(batch.Collection); batch.Error = EscapeValue(batch.Error);
+            foreach (ImportItem item in batch.Items)
+            {
+                item.Source = EscapeValue(item.Source); item.Target = EscapeValue(item.Target);
+                item.Error = EscapeValue(item.Error); item.TargetId = EscapeValue(item.TargetId);
+                item.StagingId = EscapeValue(item.StagingId);
+                for (int i = 0; i < item.Directories.Count; i++) item.Directories[i] = EscapeValue(item.Directories[i]);
+                foreach (ImportFileStamp file in item.Files)
+                {
+                    file.Relative = EscapeValue(file.Relative); file.Hash = EscapeValue(file.Hash);
+                    file.TargetId = EscapeValue(file.TargetId); file.DetachedPath = EscapeValue(file.DetachedPath);
+                    foreach (ImportStreamStamp stream in file.Streams) { stream.Name = EscapeValue(stream.Name); stream.Hash = EscapeValue(stream.Hash); }
+                }
+                foreach (ImportDirectoryStamp dir in item.TargetDirectories)
+                {
+                    dir.Relative = EscapeValue(dir.Relative); dir.TargetId = EscapeValue(dir.TargetId);
+                    foreach (ImportStreamStamp stream in dir.Streams) { stream.Name = EscapeValue(stream.Name); stream.Hash = EscapeValue(stream.Hash); }
+                }
+            }
+        }
+
+        private static void UnescapeBatch(ImportBatch batch)
+        {
+            batch.Id = UnescapeValue(batch.Id); batch.Category = UnescapeValue(batch.Category);
+            batch.Collection = UnescapeValue(batch.Collection); batch.Error = UnescapeValue(batch.Error);
+            foreach (ImportItem item in batch.Items)
+            {
+                item.Source = UnescapeValue(item.Source); item.Target = UnescapeValue(item.Target);
+                item.Error = UnescapeValue(item.Error); item.TargetId = UnescapeValue(item.TargetId);
+                item.StagingId = UnescapeValue(item.StagingId);
+                for (int i = 0; i < item.Directories.Count; i++) item.Directories[i] = UnescapeValue(item.Directories[i]);
+                foreach (ImportFileStamp file in item.Files)
+                {
+                    file.Relative = UnescapeValue(file.Relative); file.Hash = UnescapeValue(file.Hash);
+                    file.TargetId = UnescapeValue(file.TargetId); file.DetachedPath = UnescapeValue(file.DetachedPath);
+                    foreach (ImportStreamStamp stream in file.Streams) { stream.Name = UnescapeValue(stream.Name); stream.Hash = UnescapeValue(stream.Hash); }
+                }
+                foreach (ImportDirectoryStamp dir in item.TargetDirectories)
+                {
+                    dir.Relative = UnescapeValue(dir.Relative); dir.TargetId = UnescapeValue(dir.TargetId);
+                    foreach (ImportStreamStamp stream in dir.Streams) { stream.Name = UnescapeValue(stream.Name); stream.Hash = UnescapeValue(stream.Hash); }
+                }
+            }
         }
 
         // 逐项进度最多每秒落盘一次；阶段边界（开始、提交前后、结束）始终落盘，恢复不依赖逐项状态。
@@ -297,6 +397,7 @@ namespace AppManager
             using (XmlReader reader = XmlReader.Create(path, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null }))
             {
                 ImportBatch batch = (ImportBatch)new XmlSerializer(typeof(ImportBatch)).Deserialize(reader);
+                UnescapeBatch(batch);
                 if (batch.Id != Path.GetFileNameWithoutExtension(path)) throw new IOException("导入记录标识不匹配。");
                 batch.JournalDirectory = Path.GetDirectoryName(path);
                 return batch;

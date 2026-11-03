@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -30,6 +31,8 @@ namespace AppManager
             {
                 Run("restore targets: missing desktop path / traversal / ADS / relative", Targets);
                 Run("unsafe restore keeps source and creates no destination", RejectRestore);
+                Run("copy restore checks the original and suppresses auto stash", RestoreCopySafety);
+                Run("desktop copy mode keeps same-name files and rolls back failed save", DesktopCopySafety);
                 Run("copy: complete tree and file contents", CopyComplete);
                 Run("copy limits: entries / bytes / timeout / depth", CopyLimits);
                 Run("organizer copy failure leaves no partial target; retry succeeds", CopyRetry);
@@ -55,6 +58,8 @@ namespace AppManager
                 Run("rename: invalid names, conflicts, extension rule/confirm, case-only, locked file, save-failure rollback", RenameValidation);
                 Run("rename: folders rebase covers and refuse nested entries; software/referenced items keep display-name rename", RenameFoldersAndSoftware);
                 Run("move into folder keeps favorite, hidden, order, membership and cover", MoveIntoFolderKeepsRecords);
+                Run("resource page creates entries in the resource store", ResourceCreateEntries);
+                Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
             }
             finally
             {
@@ -81,6 +86,19 @@ namespace AppManager
         {
             Type[] types = Array.ConvertAll(args, delegate(object arg) { return arg.GetType(); });
             return typeof(MainForm).GetMethod(method, Private, null, types, null).Invoke(form, args);
+        }
+
+        private static void PumpUntil(Func<bool> done)
+        {
+            Stopwatch timer = Stopwatch.StartNew();
+            while (!done())
+            {
+                Application.DoEvents();
+                Thread.Sleep(10);
+                if (timer.ElapsedMilliseconds > 10000) throw new Exception("background operation timeout");
+            }
+            Stopwatch drain = Stopwatch.StartNew();
+            while (drain.ElapsedMilliseconds < 1000) { Application.DoEvents(); Thread.Sleep(10); }
         }
 
         private static MainForm CategoryForm(AppConfig config, params AppInfo[] apps)
@@ -438,7 +456,10 @@ namespace AppManager
             string dest = Path.Combine(target.TargetPath, "a.png"), newKey = "add:" + dest;
             using (MainForm form = ResourceForm(config, "照片", image, target))
             {
+                IntPtr handle = form.Handle;
+                Check(handle != IntPtr.Zero, "resource form handle not created");
                 Invoke(form, "OnGridMoveIntoFolder", image, target);
+                PumpUntil(() => File.Exists(dest) && config.Favorites.Contains(newKey));
                 Check(File.Exists(dest) && !File.Exists(Path.Combine(photos, "a.png")), "file not moved");
                 // 本次运行内的状态（重启前常用星标、隐藏与排序都以内存为准）
                 Check(config.Favorites.Contains(newKey) && !config.Favorites.Contains(key), "favorite stale in session");
@@ -883,6 +904,114 @@ namespace AppManager
             DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = source, OriginalPath = target };
             Check(!new DesktopOrganizer(new AppConfig()).RestoreOne(entry), "unsafe restore succeeded");
             Check(File.ReadAllText(source) == "keep" && !Directory.Exists(Path.GetDirectoryName(target)), "restore changed files");
+        }
+
+        private static string SafeDesktopTarget(string name)
+        {
+            string path = Path.Combine(DesktopOrganizer.UserDesktop, name);
+            if (DesktopOrganizer.IsSafeRestoreTarget(path)) return path;
+            path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), name);
+            Check(DesktopOrganizer.IsSafeRestoreTarget(path), "no safe desktop fixture path");
+            return path;
+        }
+
+        private static void RestoreCopySafety()
+        {
+            Directory.CreateDirectory(Paths.DesktopBackupDir);
+            string name = "AppManagerCopyRestore_" + Guid.NewGuid().ToString("N") + ".lnk";
+            string original = SafeDesktopTarget(name);
+            string backup = Path.Combine(Paths.DesktopBackupDir, name);
+            File.WriteAllText(backup, "payload");
+            AppConfig config = new AppConfig();
+            DesktopOrganizer organizer = new DesktopOrganizer(config);
+            try
+            {
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = backup, OriginalPath = original, IsCopy = true };
+                Check(organizer.RestoreOne(entry), "copy restore failed: " + organizer.LastRestoreError);
+                Check(File.Exists(original) && File.ReadAllText(original) == "payload" && !File.Exists(backup),
+                    "copy restore deleted the only copy");
+                int failed;
+                Check(DesktopOrganizer.AutoStashShortcuts(config, new List<string> { original }, out failed) == 0
+                    && File.Exists(original), "restored shortcut was stashed again");
+            }
+            finally { try { if (File.Exists(original)) File.Delete(original); } catch { } }
+
+            string unsafeBackup = Path.Combine(Paths.DesktopBackupDir, "unsafe-" + Guid.NewGuid().ToString("N") + ".txt");
+            string unsafeOriginal = Path.Combine(root, "outside-copy-original.txt");
+            File.WriteAllText(unsafeBackup, "keep");
+            try
+            {
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = unsafeBackup, OriginalPath = unsafeOriginal, IsCopy = true };
+                Check(!organizer.RestoreOne(entry) && File.Exists(unsafeBackup), "unsafe copy restore deleted the backup");
+            }
+            finally { try { if (File.Exists(unsafeBackup)) File.Delete(unsafeBackup); } catch { } }
+        }
+
+        private static void DesktopCopySafety()
+        {
+            AppConfig config = RenameConfig("desktop-copy");
+            config.OrganizeCopy = true;
+            Check(config.Save(), config.DatabaseError);
+            DesktopOrganizer organizer = new DesktopOrganizer(config);
+            MethodInfo backup = typeof(DesktopOrganizer).GetMethod("BackupItem", Private);
+            string sourceDir = Path.Combine(root, "desktop-copy", "source"), destDir = Path.Combine(root, "desktop-copy", "backup");
+            Directory.CreateDirectory(sourceDir); Directory.CreateDirectory(destDir);
+            string source = Path.Combine(sourceDir, "same.txt");
+            File.WriteAllText(source, "new");
+            File.WriteAllText(Path.Combine(destDir, "same.txt"), "old");
+            int moved = (int)backup.Invoke(organizer, new object[] { source, destDir, "same.txt", false, false });
+            Check(moved == 1 && File.Exists(source) && File.ReadAllText(source) == "new", "copy mode removed the source");
+            Check(File.ReadAllText(Path.Combine(destDir, "same.txt")) == "old", "copy mode overwrote an existing file");
+            Check(config.DesktopBackup.Count == 1 && config.DesktopBackup[0].IsCopy
+                && string.Equals(config.DesktopBackup[0].CurrentPath, Path.Combine(destDir, "same_1.txt"), StringComparison.OrdinalIgnoreCase),
+                "same-name copy was not preserved under a unique name");
+
+            string source2 = Path.Combine(sourceDir, "rollback.txt");
+            File.WriteAllText(source2, "rollback");
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                db.Execute("CREATE TRIGGER fail_desktop_backup BEFORE INSERT ON records WHEN NEW.section='DesktopBackup' BEGIN SELECT RAISE(ABORT,'test failure'); END");
+            try
+            {
+                int failed = (int)backup.Invoke(organizer, new object[] { source2, destDir, "rollback.txt", false, false });
+                Check(failed == 0, "save failure was reported as success");
+            }
+            finally
+            {
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false)) db.Execute("DROP TRIGGER IF EXISTS fail_desktop_backup");
+            }
+            Check(File.Exists(source2) && !File.Exists(Path.Combine(destDir, "rollback.txt")), "failed save left an orphan copy");
+        }
+
+        private static void ResourceCreateEntries()
+        {
+            AppConfig config = RenameConfig("resource-create");
+            config.ResourceCategories.Add("资料");
+            using (MainForm form = ResourceForm(config, "资料"))
+            {
+                IntPtr handle = form.Handle;
+                Check(handle != IntPtr.Zero, "resource form handle not created");
+                Invoke(form, "CreateManagedEntry", false);
+                Invoke(form, "CreateManagedEntry", true);
+            }
+            string dir = Path.Combine(config.ResourceStorePath, "资料");
+            List<AddedEntry> created = config.AddedItems.Where(e => string.Equals(Path.GetDirectoryName(e.Path), dir, StringComparison.OrdinalIgnoreCase)).ToList();
+            Check(created.Count == 2 && created.All(e => e.IsResource), "resource page created entries outside the resource store");
+            Check(created.Any(e => !e.IsFolder) && created.Any(e => e.IsFolder), "resource page did not create both file and folder");
+        }
+
+        private static void PrerestoreListing()
+        {
+            string id = "_prerestore_" + Guid.NewGuid().ToString("N");
+            string dir = Path.Combine(Paths.BackupsDir, id);
+            Directory.CreateDirectory(dir);
+            try
+            {
+                new AppConfig().SaveTo(Path.Combine(dir, "config.xml"));
+                File.WriteAllText(Path.Combine(dir, "incomplete"), "");
+                LayoutBackupInfo info = LayoutBackup.List().FirstOrDefault(i => i.Id == id);
+                Check(info != null && info.IsPreRestore && info.Incomplete, "pre-restore leftover not exposed as incomplete");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
         }
 
         private static void CopyComplete()

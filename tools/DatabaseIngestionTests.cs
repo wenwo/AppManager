@@ -283,13 +283,23 @@ namespace AppManager
         }
         private static void Move()
         {
-            AppConfig c = Fixture(); string path = Source("move.txt", "keep physical contents"); string key = "add:" + path;
+            AppConfig c = Fixture();
+            string path = Path.Combine(scope, "files", "move.txt");
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            File.WriteAllText(path, "keep physical contents", new UTF8Encoding(false));
+            string key = "add:" + path;
             c.AddedItems.Add(new AddedEntry { Path = path, Category = "资料", IsResource = true });
             c.Favorites.Add(key); c.Hidden.Add(key); c.ItemOrder["资料"] = new List<string> { key }; c.ItemCategories[key] = new List<string> { Collection }; Save(c);
             long id = Id(c.Database, key); string folder = Path.Combine(scope, "target"); Directory.CreateDirectory(folder);
-            using (MainForm form = Form(c, true)) Invoke(form, "OnGridMoveIntoFolder",
-                new AppInfo { Key = key, TargetPath = path, Name = "move", IsFile = true }, new AppInfo { TargetPath = folder, IsFolder = true });
-            AppConfig read = Reload(); string moved = Path.Combine(folder, "move.txt"), newKey = "add:" + moved;
+            string moved = Path.Combine(folder, "move.txt");
+            using (MainForm form = Form(c, true))
+            {
+                Invoke(form, "OnGridMoveIntoFolder",
+                    new AppInfo { Key = key, TargetPath = path, Name = "move", IsFile = true }, new AppInfo { TargetPath = folder, IsFolder = true });
+                // The move runs on the background thread; wait for the save transaction before checking stable identity.
+                PumpUntil(() => c.Database.History(5).Any(row => row[2] == "physical.files.move"));
+            }
+            AppConfig read = Reload(); string newKey = "add:" + moved;
             Check(!File.Exists(path) && File.ReadAllText(moved) == "keep physical contents", "file move corrupt");
             Check(Id(read.Database, newKey) == id && read.AddedItems.ByPath(moved).Count == 1, "identity changed on move");
             Check(read.Favorites.Contains(newKey) && read.Hidden.Contains(newKey) && read.ItemOrder["资料"][0] == newKey && read.ItemCategories[newKey].Contains(Collection), "relationship not moved");

@@ -15,7 +15,7 @@ namespace AppManager
     {
         private readonly Queue<Action> importQueue = new Queue<Action>();
         private bool importRunning, importExitPending, importStatusShown;
-        private readonly CancellationTokenSource importCancel = new CancellationTokenSource();
+        private CancellationTokenSource importCancel = new CancellationTokenSource();
         private readonly ToolTip importTip = new ToolTip();
         private System.Windows.Forms.Timer importStatusTimer;
         private string importTipText;
@@ -380,7 +380,14 @@ namespace AppManager
             if (importQueue.Count == 0)
             {
                 importRunning = false;
-                if (importExitPending) ExitApp();
+                if (importExitPending)
+                {
+                    // Cancelling imports must not poison this session if the subsequent exit is cancelled.
+                    importExitPending = false;
+                    importCancel.Dispose();
+                    importCancel = new CancellationTokenSource();
+                    ExitApp();
+                }
                 return;
             }
             importRunning = true;
@@ -421,13 +428,27 @@ namespace AppManager
             ImportBatch batch = new ImportBatch { Category = category, Collection = collection, Resource = resource,
                 Operation = operation, ClipboardSequence = sequence, JournalDirectory = ImportJournal };
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            List<string> lookupPaths = new List<string>();
+            HashSet<string> lookupSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths)
+            {
+                try
+                {
+                    string source = Path.GetFullPath(path);
+                    if (lookupSeen.Add(source)) lookupPaths.Add(source);
+                }
+                catch { }
+            }
+            Dictionary<string, List<AddedEntry>> knownPaths = AddedIndexLookups(lookupPaths);
             foreach (string path in paths)
             {
                 try
                 {
                     string source = Path.GetFullPath(path);
                     if (!seen.Add(source)) continue;
-                    List<AddedEntry> known = AddedIndexLookup(source);
+                    List<AddedEntry> known;
+                    knownPaths.TryGetValue(source, out known);
+                    if (known != null && known.Count == 0) known = null;
                     if (known != null && known.Count > 0) source = known[0].Path;
                     bool folder = Directory.Exists(source);
                     string dir = StoreDirectory(category, resource, folder);
@@ -505,12 +526,16 @@ namespace AppManager
             List<string> memberships = new List<string>();
             List<string> categories = new List<string>();
             List<string> exclusions = new List<string>();
-            foreach (ImportItem item in batch.Items.Where(i => i.State == FileImport.Copied || i.State == FileImport.Linked))
+            List<ImportItem> committed = batch.Items.Where(i => i.State == FileImport.Copied || i.State == FileImport.Linked).ToList();
+            Dictionary<string, List<AddedEntry>> knownTargets = AddedIndexLookups(committed.Select(i => i.Target));
+            foreach (ImportItem item in committed)
             {
                 if (SetCategoryExcluded(new AppInfo { Key = "add:" + item.Target }, batch.Category, false)) exclusions.Add(item.Target);
                 if (FindAddedEntry(item.Target, batch.Category) < 0)
                 {
-                    List<AddedEntry> known = AddedIndexLookup(item.Target);
+                    List<AddedEntry> known;
+                    knownTargets.TryGetValue(item.Target, out known);
+                    if (known != null && known.Count == 0) known = null;
                     if (known != null && known.Any(entry => entry.IsResource == batch.Resource))
                     {
                         if (CollectionOps.AddMember(config, "add:" + item.Target, batch.Category)) categories.Add("add:" + item.Target);
@@ -525,7 +550,7 @@ namespace AppManager
                     && CollectionOps.AddMember(config, "add:" + item.Target, batch.Collection)) memberships.Add("add:" + item.Target);
             }
             InvalidateAddedIndex();
-            bool saved = config.Save();
+            bool saved = config.Save("physical.files.import");
             if (!saved)
             {
                 foreach (AddedEntry entry in added) config.AddedItems.Remove(entry);

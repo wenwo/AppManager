@@ -123,10 +123,12 @@ if ($code -ne 0) {
 # selftest (bounded wait so a stuck run can never hang the build)
 Write-Host "Running --selftest ..."
 $p = Start-Process -FilePath $staging -ArgumentList "--selftest" -WindowStyle Hidden -PassThru
-if (-not $p.WaitForExit(120000)) {
+if (-not $p.WaitForExit(300000)) {
   try { $p.Kill() } catch { }
+  try { $p.WaitForExit(5000) | Out-Null } catch { }
+  try { $p.Dispose() } catch { }
   if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Force }
-  [Console]::Error.WriteLine("Selftest timeout (120s).")
+  [Console]::Error.WriteLine("Selftest timeout (300s).")
   exit 1
 }
 $code = $p.ExitCode

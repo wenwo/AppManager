@@ -35,6 +35,27 @@ namespace AppManager
             new string[] { } // "其他"：兜底，无关键词
         };
 
+        /// <summary>分类名只用于展示与集合键；拒绝会破坏 col:父分类/集合名 结构的字符。</summary>
+        public static string ValidateName(string name)
+        {
+            return ValidateName(name, "分类名称");
+        }
+
+        /// <summary>集合名与分类名共享键分隔规则，但错误提示按集合名称展示。</summary>
+        public static string ValidateCollectionName(string name)
+        {
+            return ValidateName(name, "集合名称");
+        }
+
+        private static string ValidateName(string name, string label)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return label + "不能为空";
+            if (name.IndexOf('/') >= 0) return label + "不能包含“/”";
+            if (name.StartsWith("col:", StringComparison.OrdinalIgnoreCase)) return label + "不能以“col:”开头";
+            if (name.Length > 80) return label + "过长（最多 80 个字符）";
+            return null;
+        }
+
         /// <summary>按名称归类；未命中任何规则返回"其他"。</summary>
         public static string Classify(string name)
         {

@@ -121,6 +121,7 @@ namespace AppManager
             Case62_XmlDtdRejected();
             Case63_DpiScaling();
             Case64_SelfTargetExclusion();
+            Case65_CategoryNameValidation();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1459,32 +1460,56 @@ namespace AppManager
             Begin("61 收纳还原拒绝删除管理目录外路径");
             string outside = Path.Combine(Paths.DataDir, "outside-restore");
             string managed = Path.Combine(Paths.DesktopBackupDir, "restore-copy");
+            string orphan = Path.Combine(Paths.DesktopBackupDir, "restore-orphan");
             try
             {
                 Directory.CreateDirectory(outside);
                 Directory.CreateDirectory(managed);
+                Directory.CreateDirectory(orphan);
                 DesktopOrganizer organizer = new DesktopOrganizer(new AppConfig());
                 DesktopBackupEntry outsideEntry = new DesktopBackupEntry();
                 outsideEntry.CurrentPath = outside;
                 outsideEntry.IsDir = true;
                 outsideEntry.IsCopy = true;
                 DesktopBackupEntry managedEntry = new DesktopBackupEntry();
+                managedEntry.OriginalPath = outside;
                 managedEntry.CurrentPath = managed;
                 managedEntry.IsDir = true;
                 managedEntry.IsCopy = true;
+                // 缺原路径的副本无法安全还原，必须原样保留，不能借“还原”永久删除。
+                DesktopBackupEntry orphanEntry = new DesktopBackupEntry();
+                orphanEntry.CurrentPath = orphan;
+                orphanEntry.IsDir = true;
+                orphanEntry.IsCopy = true;
                 bool ok = !organizer.RestoreOne(outsideEntry)
                     && Directory.Exists(outside)
-                    && organizer.RestoreOne(managedEntry)
-                    && !Directory.Exists(managed)
+                    && !organizer.RestoreOne(orphanEntry)
+                    && Directory.Exists(orphan)
+                    && !organizer.RestoreOne(managedEntry)
+                    && Directory.Exists(managed)
                     && !DesktopOrganizer.IsManagedBackupPath(Paths.DesktopBackupDir);
-                Assert(ok, "外部目录保留=True 管理副本清理=True 根目录拦截=True");
+                Assert(ok, "外部目录保留=True 缺原路径保留=True 非桌面原件保留=True 根目录拦截=True");
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally
             {
                 try { if (Directory.Exists(outside)) Directory.Delete(outside, true); } catch { }
                 try { if (Directory.Exists(managed)) Directory.Delete(managed, true); } catch { }
+                try { if (Directory.Exists(orphan)) Directory.Delete(orphan, true); } catch { }
             }
+        }
+
+        private static void Case65_CategoryNameValidation()
+        {
+            Begin("65 分类名和集合名拒绝空值、斜杠和 col: 前缀");
+            bool ok = CategoryRules.ValidateName("") != null
+                && CategoryRules.ValidateName("软件/工具") != null
+                && CategoryRules.ValidateName("col:照片/旅行") != null
+                && CategoryRules.ValidateName("开发工具") == null
+                && CategoryRules.ValidateCollectionName("批次/一") != null
+                && CategoryRules.ValidateCollectionName("col:合集") != null
+                && CategoryRules.ValidateCollectionName("批次一") == null;
+            Assert(ok, "分类空值=True 分类斜杠=True 分类col前缀=True 分类正常=False 集合斜杠=True 集合col前缀=True 集合正常=False");
         }
 
         private static void Case62_XmlDtdRejected()
