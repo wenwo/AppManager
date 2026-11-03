@@ -651,12 +651,18 @@ namespace AppManager.Controls
         }
 
         /// <summary>鼠标滚轮滚动分类列表（由窗体消息过滤器按光标位置路由到此）。delta 为 WM_MOUSEWHEEL 增量。</summary>
+        private int wheelRemainder;   // 不足一像素的滚轮累计量（单位：delta × 像素）
+
         public void ScrollByWheel(int delta)
         {
             if (delta == 0 || MaxScroll <= 0) return;
             int lines = SystemInformation.MouseWheelScrollLines;
             if (lines <= 0) lines = 3;
-            SetScroll(scrollOffset - (delta / 120) * ItemHeight * lines);
+            // 按像素换算并累计余数：精确式触控板/高分辨率滚轮每次 delta 小于 120，整除会得到 0 而完全滚不动
+            wheelRemainder += delta * ItemHeight * lines;
+            int pixels = wheelRemainder / 120;
+            wheelRemainder -= pixels * 120;
+            if (pixels != 0) SetScroll(scrollOffset - pixels);
         }
 
         /// <summary>中间区块（可排序）起始下标，无则 -1。</summary>

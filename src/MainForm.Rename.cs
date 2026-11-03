@@ -278,6 +278,7 @@ namespace AppManager
                 }
             }
 
+            Paths.LogRenameIntent("改名", oldPath, newPath);   // 先记意图再动磁盘：中断时最后一条「改名」即未完成的意图
             try { RenamePath(oldPath, newPath); }
             catch (Exception ex)
             {
@@ -285,6 +286,7 @@ namespace AppManager
                     || ex is ArgumentException || ex is NotSupportedException)) throw;
                 return "无法改名：" + ex.Message.TrimEnd('。', '.', '\r', '\n');
             }
+            ForgetMoveOutAfterRename(oldPath);
 
             // 从这里到保存之间没有模态窗口，RekeyEntry 取到的记录对象在保存前一直有效
             string oldKey = app.Key, newKey = "add:" + newPath;
@@ -296,9 +298,10 @@ namespace AppManager
             app.Key = newKey;
             app.Name = display;
             if (string.Equals(app.DisplayIcon, oldPath, StringComparison.OrdinalIgnoreCase)) app.DisplayIcon = newPath;
-            if (config.Save()) return null;
+            if (config.Save("physical.files.rename")) { Paths.LogRenameIntent("已保存", oldPath, newPath); return null; }
 
             // 资源库保存失败（具体原因由数据库错误提示另行说明）：把文件改回原名并撤回全部记录
+            Paths.LogRenameIntent("保存失败，撤销改名", newPath, oldPath);
             try { RenamePath(newPath, oldPath); }
             catch (Exception ex)
             {

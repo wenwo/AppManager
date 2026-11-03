@@ -57,7 +57,98 @@ namespace AppManager
                     CreateSchema(db);
                 }
                 if (db.Scalar("PRAGMA quick_check") != "ok") throw new IOException("数据库完整性检查失败，请从备份恢复。");
+                EnsureIndexes(db);
                 LoadBaseline(db);
+            }
+        }
+
+        /// <summary>
+        /// 补齐后加的索引（旧库升级、在线恢复的快照都可能缺少）。只建索引不改表结构，旧版本程序仍可读写。
+        /// add: 路径键按 NOCASE 查找；没有这个索引时每次查找都全表扫描，批量收录会退化成平方级耗时。
+        /// </summary>
+        private static void EnsureIndexes(Sqlite db)
+        {
+            db.Execute("CREATE INDEX IF NOT EXISTS ix_entries_key_nocase ON entries(key COLLATE NOCASE)");
+        }
+
+        /// <summary>
+        /// 一次性合并历史遗留的大小写重复条目：修复前同一路径的大小写变体会各自生成 entries 行，
+        /// 收藏、归属、排序分散在两个 ID 上，列表里出现两条。保留收录记录最多（其次最早）的条目，
+        /// 其余条目的记录与收录项改指向保留条目；保留条目已有同类记录/归属时删除重复那条（主分类覆盖每条目只留一条）。
+        /// 被合并条目的键改为退役键（ID 不回收），之后的 NOCASE 查找只会命中保留条目。
+        /// 一个审计事务完成，失败整体回滚、下次加载重试；完成后记标记，之后不再全表扫描
+        /// （恢复旧快照时标记随快照回到未合并，会自动重新执行）。返回合并掉的条目数。
+        /// </summary>
+        internal int MergeCaseDuplicateEntries()
+        {
+            lock (gate)
+            using (Sqlite db = Open())
+            {
+                if (db.Scalar("SELECT value FROM metadata WHERE key='entries_case_merged'") == "1") return 0;
+                List<string[]> heads = db.Query("SELECT min(id) FROM entries WHERE key LIKE 'add:%' GROUP BY key COLLATE NOCASE HAVING count(*) > 1");
+                if (heads.Count == 0)
+                {
+                    db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('entries_case_merged','1')");
+                    return 0;
+                }
+                db.Execute("BEGIN IMMEDIATE");
+                try
+                {
+                    long operation = NewOperation(db, "migration.entries.case");
+                    db.Execute("UPDATE write_context SET operation_id=? WHERE id=1", operation);
+                    HashSet<long> affected = new HashSet<long>();
+                    int merged = 0;
+                    foreach (string[] head in heads)
+                    {
+                        List<string[]> ids = db.Query("SELECT e.id FROM entries e WHERE e.key=(SELECT key FROM entries WHERE id=?) COLLATE NOCASE " +
+                            "ORDER BY (SELECT count(*) FROM added_items a WHERE a.item_id=e.id) DESC, e.id", Number(head[0]));
+                        long keep = Number(ids[0][0]);
+                        for (int i = 1; i < ids.Count; i++)
+                        {
+                            long dup = Number(ids[i][0]);
+                            foreach (string[] r in db.Query("SELECT id,section,group_id,slot FROM records WHERE item_id=?", dup))
+                            {
+                                string key = r[1] + ":" + keep + ":" + Number(r[2]) + ":" + (r[3] ?? string.Empty);
+                                bool clash = db.Scalar("SELECT 1 FROM records WHERE record_key=?", key) != null
+                                    || (r[1] == "CategoryOverrides" && db.Scalar("SELECT 1 FROM records WHERE section='CategoryOverrides' AND item_id=?", keep) != null);
+                                if (clash) db.Execute("DELETE FROM records WHERE id=?", Number(r[0]));
+                                else db.Execute("UPDATE records SET item_id=?,record_key=? WHERE id=?", keep, key, Number(r[0]));
+                            }
+                            foreach (string[] a in db.Query("SELECT id,group_id FROM added_items WHERE item_id=?", dup))
+                            {
+                                if (db.Scalar("SELECT 1 FROM added_items WHERE item_id=? AND group_id IS ?", keep, Foreign(Number(a[1]))) != null)
+                                    db.Execute("DELETE FROM added_items WHERE id=?", Number(a[0]));
+                                else db.Execute("UPDATE added_items SET item_id=? WHERE id=?", keep, Number(a[0]));
+                            }
+                            db.Execute("DELETE FROM listing WHERE item_id=?", dup);
+                            db.Execute("DELETE FROM catalog WHERE item_id=?", dup);
+                            db.Execute("UPDATE entries SET key=? WHERE id=?", "__merged__:" + dup.ToString(CultureInfo.InvariantCulture)
+                                + ":" + keep.ToString(CultureInfo.InvariantCulture), dup);
+                            merged++;
+                        }
+                        affected.Add(keep);
+                    }
+                    UpdateAddedCatalog(db, affected);
+                    RebuildListings(db, null, affected);
+                    db.Execute("UPDATE write_context SET operation_id=NULL WHERE id=1");
+                    if (db.Scalar("SELECT count(*) FROM changes WHERE operation_id=?", operation) == "0") db.Execute("DELETE FROM operations WHERE id=?", operation);
+                    else
+                    {
+                        db.Execute("UPDATE operations SET summary=? WHERE id=?", "merged case duplicates=" + merged, operation);
+                        revision++;
+                        db.Execute("UPDATE metadata SET value=? WHERE key='revision'", revision.ToString(CultureInfo.InvariantCulture));
+                    }
+                    db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('entries_case_merged','1')");
+                    db.Execute("COMMIT");
+                    LoadBaseline(db);
+                    return merged;
+                }
+                catch
+                {
+                    db.Rollback();
+                    LoadBaseline(db);
+                    throw;
+                }
             }
         }
 
@@ -90,6 +181,9 @@ namespace AppManager
                         if (!store.Save(legacy, "migration.xml")) throw new IOException(legacy.DatabaseError);
                     }
                 }
+                // 历史大小写重复条目：合并失败只记日志、不影响加载，下次加载重试
+                try { store.MergeCaseDuplicateEntries(); }
+                catch (Exception mergeError) { Paths.LogError(new IOException("合并大小写重复条目失败，下次加载会重试。", mergeError)); }
                 AppConfig result = store.Read();
                 result.Database = store;
                 store.EnsureCatalog(result);
@@ -165,7 +259,7 @@ namespace AppManager
                 db.Execute("PRAGMA user_version=" + SchemaVersion);
                 db.Execute("COMMIT");
             }
-            catch { db.Execute("ROLLBACK"); throw; }
+            catch { db.Rollback(); throw; }
         }
 
         private static void Audit(Sqlite db, string table, string[] columns)
@@ -240,17 +334,23 @@ namespace AppManager
                 if (slash > 4) { parent = Group(db, key.Substring(4, slash - 4)); name = key.Substring(slash + 1); }
             }
             db.Execute("INSERT INTO groups(key,name,parent_id) VALUES(?,?,?)", key, name, Foreign(parent));
-            id = db.LastId; groups[key] = id; return id;
+            // audit triggers also insert rows and change last_insert_rowid();
+            // resolve the real identity by its unique key instead.
+            id = Number(db.Scalar("SELECT id FROM groups WHERE key=?", key)); groups[key] = id; return id;
         }
         private long Entry(Sqlite db, string key)
         {
             if (string.IsNullOrEmpty(key)) return 0;
             long id;
             if (entries.TryGetValue(key, out id)) return id;
-            string existing = db.Scalar("SELECT id FROM entries WHERE key=?", key);
+            // 路径键按 Windows 语义不区分大小写：同一路径的大小写变体必须复用同一条目，
+            // 否则会生成两个项目并破坏集合/分类关系。
+            string existing = key.StartsWith("add:", StringComparison.OrdinalIgnoreCase)
+                ? db.Scalar("SELECT id FROM entries WHERE key=? COLLATE NOCASE LIMIT 1", key)
+                : db.Scalar("SELECT id FROM entries WHERE key=?", key);
             if (existing != null) { id = Number(existing); if (entries.Count >= 4096) entries.Clear(); entries[key] = id; return id; }
             db.Execute("INSERT INTO entries(key) VALUES(?)", key);
-            id = db.LastId; if (entries.Count >= 4096) entries.Clear(); entries[key] = id; return id;
+            id = Number(db.Scalar("SELECT id FROM entries WHERE key=?", key)); if (entries.Count >= 4096) entries.Clear(); entries[key] = id; return id;
         }
         internal void QueueRename(string oldKey, string newKey) { lock (gate) { if (oldKey != newKey) renames.Add(new string[] { oldKey, newKey }); } }
         internal void QueueEntryRename(string oldKey, string newKey) { lock (gate) { if (oldKey != newKey) entryRenames.Add(new string[] { oldKey, newKey }); } }
@@ -263,7 +363,10 @@ namespace AppManager
                 if (id == null) continue;
                 // entries 行不回收：新路径曾登记过时直接改名会违反唯一约束，使本次及之后的保存全部失败。
                 // 跳过改名即可，记录与收录项按新键差量写入（复用已有行），结果与未排队改名一致。
-                if (db.Scalar("SELECT id FROM entries WHERE key=?", rename[1]) != null) continue;
+                string target = rename[1].StartsWith("add:", StringComparison.OrdinalIgnoreCase)
+                    ? db.Scalar("SELECT id FROM entries WHERE key=? COLLATE NOCASE AND id<>? LIMIT 1", rename[1], Number(id))
+                    : db.Scalar("SELECT id FROM entries WHERE key=? AND id<>?", rename[1], Number(id));
+                if (target != null) continue;
                 db.Execute("UPDATE entries SET key=? WHERE id=?", rename[1], Number(id));
                 entries.Remove(rename[0]); entries[rename[1]] = Number(id);
             }
@@ -271,7 +374,17 @@ namespace AppManager
             {
                 long id;
                 if (!groups.TryGetValue(rename[0], out id)) continue;
-                if (groups.ContainsKey(rename[1])) throw new IOException("目标分类标识已存在，不能合并不同分类。");
+                long targetId;
+                if (groups.TryGetValue(rename[1], out targetId) && targetId != id)
+                {
+                    // 目标行若仍被任何记录、收录项或子集合引用，改名会静默合并两个分类，必须阻止。
+                    // 完全无引用的历史残留行先换成退役键，再让原名复用，既允许沿用旧名字又不丢数据。
+                    if (GroupHasReferences(db, targetId))
+                        throw new IOException("目标分类名称已被其它分类或记录使用，不能合并不同分类。");
+                    string retired = RetiredGroupKey(db, targetId);
+                    db.Execute("UPDATE groups SET key=? WHERE id=?", retired, targetId);
+                    groups.Remove(rename[1]); groups[retired] = targetId;
+                }
                 int slash = CollectionKeys.IsCollectionKey(rename[1]) ? rename[1].IndexOf('/', 4) : -1;
                 string displayName = slash < 0 ? rename[1] : rename[1].Substring(slash + 1);
                 db.Execute("UPDATE groups SET key=?,name=? WHERE id=?", rename[1], displayName, id);
@@ -283,6 +396,21 @@ namespace AppManager
                     groups.Remove(child[1]); groups[key] = Number(child[0]);
                 }
             }
+        }
+
+        private static bool GroupHasReferences(Sqlite db, long id)
+        {
+            if (db.Scalar("SELECT count(*) FROM records WHERE group_id=?", id) != "0") return true;
+            if (db.Scalar("SELECT count(*) FROM added_items WHERE group_id=?", id) != "0") return true;
+            return db.Scalar("SELECT count(*) FROM groups WHERE parent_id=?", id) != "0";
+        }
+
+        private static string RetiredGroupKey(Sqlite db, long id)
+        {
+            string key = "__retired__:" + id.ToString(CultureInfo.InvariantCulture);
+            while (db.Scalar("SELECT id FROM groups WHERE key=?", key) != null)
+                key += "_" + Guid.NewGuid().ToString("N");
+            return key;
         }
 
         internal bool Save(AppConfig config, string action)
@@ -309,6 +437,13 @@ namespace AppManager
                             using (Sqlite.Statement update = db.Prepare("UPDATE records SET ordinal=?,payload=? WHERE record_key=?"))
                             using (Sqlite.Statement remove = db.Prepare("DELETE FROM records WHERE record_key=?"))
                             {
+                                // 先删后改再插：分类覆盖有 (item_id) 唯一索引，先插新行再删旧行会
+                                // 在“同一项连续移动到另一个分类”时稳定触发唯一约束错误。
+                                foreach (Record r in baseline.Values) if (!next.ContainsKey(r.Key))
+                                {
+                                    remove.Bind(r.Key); remove.Read(); deleted++;
+                                    if (r.Item != 0) affected.Add(r.Item);
+                                }
                                 foreach (Record r in next.Values)
                                 {
                                     Record before;
@@ -318,11 +453,6 @@ namespace AppManager
                                     }
                                     else if (!r.Same(before)) { update.Bind(r.Ordinal, r.Payload, r.Key); update.Read(); updated++; }
                                     else continue;
-                                    if (r.Item != 0) affected.Add(r.Item);
-                                }
-                                foreach (Record r in baseline.Values) if (!next.ContainsKey(r.Key))
-                                {
-                                    remove.Bind(r.Key); remove.Read(); deleted++;
                                     if (r.Item != 0) affected.Add(r.Item);
                                 }
                             }
@@ -351,6 +481,9 @@ namespace AppManager
                         {
                             db.Rollback();
                             foreach (AddedEntry entry in config.AddedItems.New) { entry.RecordId = 0; entry.ItemId = 0; }
+                            // 改名是本次保存的待办状态，失败后不能留在队列里反复重试；
+                            // 调用方还会从数据库重载配置，保证内存状态与已提交状态一致。
+                            renames.Clear(); entryRenames.Clear();
                             LoadBaseline(db); throw;
                         }
                     }
@@ -468,7 +601,44 @@ namespace AppManager
             XmlElement node = (XmlElement)doc.ImportNode(fragment.DocumentElement, true); parent.AppendChild(node); return node;
         }
 
-        internal void Backup(string path) { lock (gate) using (Sqlite db = Open()) db.Backup(path); }
+        internal void Backup(string path)
+        {
+            lock (gate)
+            using (Sqlite db = Open())
+            {
+                string target = Path.GetFullPath(path);
+                if (string.Equals(target, Path.GetFullPath(FilePath), StringComparison.OrdinalIgnoreCase))
+                    throw new IOException("备份目标不能是当前数据库。");
+                string dir = Path.GetDirectoryName(target);
+                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                string temp = target + ".tmp-" + Guid.NewGuid().ToString("N");
+                try
+                {
+                    db.Backup(temp);
+                    if (!File.Exists(target)) { File.Move(temp, target); return; }
+                    try { File.Replace(temp, target, null); return; }
+                    catch { }
+
+                    // 文件系统不支持 Replace 时先保留旧备份，再原子换名；失败恢复旧文件。
+                    string previous = target + ".previous-" + Guid.NewGuid().ToString("N");
+                    File.Move(target, previous);
+                    try
+                    {
+                        File.Move(temp, target);
+                        File.Delete(previous);
+                    }
+                    catch
+                    {
+                        if (!File.Exists(target) && File.Exists(previous)) File.Move(previous, target);
+                        throw;
+                    }
+                }
+                finally
+                {
+                    try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+                }
+            }
+        }
         internal void NoteRecovery(string safety)
         {
             lock (gate) using (Sqlite db = Open())
@@ -494,6 +664,8 @@ namespace AppManager
                 db.Restore(path);
                 try
                 {
+                    // 恢复的快照可能来自旧版本，没有后加的索引。
+                    EnsureIndexes(db);
                     long restoredRevision = Number(db.Scalar("SELECT value FROM metadata WHERE key='revision'"));
                     long nextRevision = Math.Max(revision, restoredRevision) + 1;
                     db.Execute("BEGIN IMMEDIATE");
@@ -555,7 +727,12 @@ namespace AppManager
                 {
                     if (Number(db.Scalar("SELECT max(id) FROM operations WHERE action NOT IN('catalog.discover','catalog.rebuild')")) != operation) throw new IOException("只允许撤销最新业务事务；请先检查操作记录。");
                     string action = db.Scalar("SELECT action FROM operations WHERE id=?", operation);
-                    if (action == "migration.xml" || action == "restore.snapshot") throw new IOException("初始化或整库恢复请使用完整备份恢复，不能逐项撤销。");
+                    // 迁移类事务（XML 迁入、大小写条目合并、同名分类拆分）带有不受审计的完成标记或会在启动时重做，
+                    // 逐项撤销会让数据与标记不一致或来回反复，只能用完整备份恢复。
+                    if ((action != null && action.StartsWith("migration.", StringComparison.Ordinal)) || action == "restore.snapshot")
+                        throw new IOException("初始化、数据迁移或整库恢复请使用完整备份恢复，不能逐项撤销。");
+                    if (!string.IsNullOrEmpty(action) && action.StartsWith("physical.", StringComparison.OrdinalIgnoreCase))
+                        throw new IOException("该事务同时改动了磁盘文件，不能只撤销数据库记录；请使用布局备份恢复。");
                     long undo = NewOperation(db, "rollback", "", operation);
                     db.Execute("UPDATE write_context SET operation_id=? WHERE id=1", undo);
                     db.Execute("DELETE FROM listing"); db.Execute("DELETE FROM catalog");
@@ -574,7 +751,7 @@ namespace AppManager
                     db.Execute("COMMIT");
                     LoadBaseline(db); renames.Clear();
                 }
-                catch { db.Execute("ROLLBACK"); throw; }
+                catch { db.Rollback(); throw; }
             }
         }
     }

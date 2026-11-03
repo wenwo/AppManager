@@ -69,6 +69,54 @@ namespace AppManager
             if (Store == null) return LoadPath(null, path);
             using (Sqlite db = new Sqlite(Store.FilePath, true)) return LoadPath(db, path);
         }
+
+        /// <summary>批量查询路径归属：批量导入时只开少量只读连接，避免每个路径各开一次数据库。</summary>
+        internal Dictionary<string, List<AddedEntry>> LookupMany(IEnumerable<string> paths)
+        {
+            Dictionary<string, List<AddedEntry>> result =
+                new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
+            List<string> distinct = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths)
+            {
+                if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
+                distinct.Add(path);
+                result[path] = new List<AddedEntry>();
+            }
+            if (distinct.Count == 0) return result;
+
+            if (Store != null)
+            {
+                using (Sqlite db = new Sqlite(Store.FilePath, true))
+                {
+                    for (int offset = 0; offset < distinct.Count; offset += 256)
+                    {
+                        int count = Math.Min(256, distinct.Count - offset);
+                        List<string> chunk = distinct.GetRange(offset, count);
+                        List<string> marks = chunk.ConvertAll(delegate(string value) { return "?"; });
+                        object[] args = new object[count];
+                        for (int i = 0; i < count; i++) args[i] = chunk[i].ToUpperInvariant();
+                        foreach (string[] row in db.Query(Columns + " WHERE a.path_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY a.id", args))
+                        {
+                            if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
+                            AddedEntry entry = Hydrate(row);
+                            List<AddedEntry> list;
+                            if (result.TryGetValue(entry.Path, out list) && !list.Contains(entry)) list.Add(entry);
+                        }
+                    }
+                }
+            }
+            foreach (string path in distinct)
+            {
+                List<AddedEntry> staged;
+                if (!changedPaths.TryGetValue(path, out staged)) continue;
+                List<AddedEntry> list = result[path];
+                foreach (AddedEntry entry in staged)
+                    if (!Removed.Contains(entry.RecordId) && !list.Contains(entry)) list.Add(entry);
+            }
+            return result;
+        }
+
         /// <summary>批量预读未缓存的路径：共用一个只读连接，避免列表逐行查询时每条都新开数据库连接。</summary>
         internal void Prefetch(IEnumerable<string> paths)
         {
@@ -98,6 +146,78 @@ namespace AppManager
             if (pathCache.Count >= 512) pathCache.Clear(); pathCache[path ?? ""] = result;
             return result;
         }
+
+        /// <summary>指定分类下的收录项（含尚未保存的改动）；删除分类时只读这些行，不遍历整张表。</summary>
+        internal List<AddedEntry> InCategory(string category)
+        {
+            List<AddedEntry> result = new List<AddedEntry>();
+            if (string.IsNullOrEmpty(category)) return result;
+            if (Store != null)
+            {
+                using (Sqlite db = new Sqlite(Store.FilePath, true))
+                    foreach (string[] row in db.Query(Columns + " WHERE g.key=? ORDER BY a.id", category))
+                    {
+                        if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
+                        AddedEntry entry = Hydrate(row);
+                        if (entry.Category == category && !result.Contains(entry)) result.Add(entry);
+                    }
+                foreach (AddedEntry entry in Dirty.Values)
+                    if (!Removed.Contains(entry.RecordId) && entry.Category == category && !result.Contains(entry)) result.Add(entry);
+            }
+            foreach (AddedEntry entry in New)
+                if (entry.Category == category && !result.Contains(entry)) result.Add(entry);
+            return result;
+        }
+
+        /// <summary>
+        /// 文件夹内（不含自身）的 path_key 范围 [前缀, 上界)：前缀以“\”结尾，上界把末尾的“\”换成下一个字符“]”。
+        /// 用范围条件代替 substr(...)，可以走 path_key 索引，不再整表扫描。
+        /// </summary>
+        internal static string[] PrefixRange(string folder)
+        {
+            string prefix = (folder.TrimEnd('\\', '/') + "\\").ToUpperInvariant();
+            return new string[] { prefix, prefix.Substring(0, prefix.Length - 1) + "]" };
+        }
+
+        /// <summary>后台线程用：直接读库、不经过实例缓存（实例不是线程安全的）。文件夹内是否已有收录项。</summary>
+        internal static bool HasEntriesUnder(string databaseFile, string folder)
+        {
+            if (string.IsNullOrEmpty(folder)) return false;
+            string[] range = PrefixRange(folder);
+            using (Sqlite db = new Sqlite(databaseFile, true))
+                return db.Scalar("SELECT 1 FROM added_items WHERE path_key>=? AND path_key<? LIMIT 1", range[0], range[1]) != null;
+        }
+
+        /// <summary>后台线程用：直接读库、不经过实例缓存。返回 输入路径 → 已登记的路径（最早一条，保留登记时的大小写）。</summary>
+        internal static Dictionary<string, string> RegisteredPaths(string databaseFile, IEnumerable<string> paths)
+        {
+            Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> byKey = new Dictionary<string, string>(StringComparer.Ordinal);
+            List<string> distinct = new List<string>();
+            foreach (string path in paths)
+            {
+                if (string.IsNullOrEmpty(path)) continue;
+                string key = path.ToUpperInvariant();
+                if (byKey.ContainsKey(key)) continue;
+                byKey[key] = path;
+                distinct.Add(key);
+            }
+            if (distinct.Count == 0) return result;
+            using (Sqlite db = new Sqlite(databaseFile, true))
+                for (int offset = 0; offset < distinct.Count; offset += 256)
+                {
+                    List<string> chunk = distinct.GetRange(offset, Math.Min(256, distinct.Count - offset));
+                    List<string> marks = chunk.ConvertAll(delegate(string value) { return "?"; });
+                    foreach (string[] row in db.Query("SELECT path,path_key FROM added_items WHERE path_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY id",
+                        chunk.ConvertAll(delegate(string value) { return (object)value; }).ToArray()))
+                    {
+                        string input;
+                        if (byKey.TryGetValue(row[1], out input) && !result.ContainsKey(input)) result[input] = row[0];
+                    }
+                }
+            return result;
+        }
+
         /// <summary>位于指定文件夹之内（不含文件夹自身）的收录项，包括尚未保存的改动。</summary>
         internal List<AddedEntry> EntriesUnder(string folder)
         {
@@ -108,9 +228,9 @@ namespace AppManager
             { return e.Path != null && e.Path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && !result.Contains(e); };
             if (Store != null)
             {
-                string key = prefix.ToUpperInvariant();
+                string[] range = PrefixRange(folder);
                 using (Sqlite db = new Sqlite(Store.FilePath, true))
-                    foreach (string[] row in db.Query(Columns + " WHERE substr(a.path_key,1,?)=? ORDER BY a.id", key.Length, key))
+                    foreach (string[] row in db.Query(Columns + " WHERE a.path_key>=? AND a.path_key<? ORDER BY a.id", range[0], range[1]))
                     {
                         if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
                         AddedEntry entry = Hydrate(row);   // 未保存的改名以内存对象为准，下面按当前路径复核

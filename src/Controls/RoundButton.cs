@@ -41,6 +41,32 @@ namespace AppManager.Controls
             base.OnMouseDown(e);
         }
         protected override void OnMouseUp(MouseEventArgs e) { _pressed = false; Invalidate(); base.OnMouseUp(e); }
+        protected override void OnLostFocus(EventArgs e) { _pressed = false; Invalidate(); base.OnLostFocus(e); }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Space)
+            {
+                _pressed = true;
+                Invalidate();
+                e.Handled = true;
+            }
+            base.OnKeyDown(e);
+        }
+        protected override void OnKeyUp(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Space)
+            {
+                e.Handled = true;
+                if (_pressed)
+                {
+                    _pressed = false;
+                    Invalidate();
+                    OnClick(EventArgs.Empty);
+                }
+                return;
+            }
+            base.OnKeyUp(e);
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {

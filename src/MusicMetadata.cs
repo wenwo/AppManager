@@ -32,6 +32,8 @@ namespace AppManager
     internal static class MusicMetadata
     {
         private const int MaxMetadataBytes = 8 * 1024 * 1024;
+        private const int MaxCoverBytes = 32 * 1024 * 1024;
+        private const long MaxCoverPixels = 16L * 1024 * 1024;
         internal const int MaxLyricsChars = 1024 * 1024;
 
         public static MusicTrackInfo Read(string path)
@@ -163,14 +165,19 @@ namespace AppManager
         private static string Id3Text(byte[] data, int offset, int size)
         {
             if (size < 2) return "";
-            return CleanTag(Decode(Id3Encoding(data[offset]), data, offset + 1, size - 1));
+            int end = offset + size;
+            int start = offset + 1;
+            Encoding encoding = Id3TextEncoding(data, data[offset], start, end, out start);
+            return CleanTag(Decode(encoding, data, start, end - start));
         }
 
         private static string Id3Lyrics(byte[] data, int offset, int size)
         {
             if (size < 6) return "";
             int cursor = SkipTerminated(data, offset + 4, offset + size, data[offset] == 1 || data[offset] == 2);
-            return cursor < offset + size ? CleanTag(Decode(Id3Encoding(data[offset]), data, cursor, offset + size - cursor)) : "";
+            if (cursor >= offset + size) return "";
+            Encoding encoding = Id3TextEncoding(data, data[offset], cursor, offset + size, out cursor);
+            return CleanTag(Decode(encoding, data, cursor, offset + size - cursor));
         }
 
         private static Image Id3Cover(byte[] data, int offset, int size, int version)
@@ -215,15 +222,16 @@ namespace AppManager
         {
             int cursor = 0;
             int vendorLength = LE32(data, cursor);
-            cursor += 4 + vendorLength;
-            if (vendorLength < 0 || cursor < 0 || cursor + 4 > data.Length) return;
+            if (vendorLength < 0 || vendorLength > data.Length - 4) return;
+            cursor = 4 + vendorLength;
+            if (cursor > data.Length - 4) return;
             int count = LE32(data, cursor);
             cursor += 4;
             for (int i = 0; i < count && cursor + 4 <= data.Length; i++)
             {
                 int length = LE32(data, cursor);
                 cursor += 4;
-                if (length < 0 || cursor + length > data.Length) return;
+                if (length < 0 || length > data.Length - cursor) return;
                 string pair = Encoding.UTF8.GetString(data, cursor, length);
                 cursor += length;
                 int split = pair.IndexOf('=');
@@ -240,24 +248,37 @@ namespace AppManager
 
         private static Image FlacCover(byte[] data)
         {
+            if (data == null || data.Length < 8) return null;
             int cursor = 4;
             int mimeLength = BE32(data, cursor);
-            cursor += 4 + mimeLength;
-            if (cursor + 4 > data.Length) return null;
+            if (mimeLength < 0 || mimeLength > data.Length - 8) return null;
+            cursor = 8 + mimeLength;
+            if (data.Length - cursor < 4) return null;
             int descriptionLength = BE32(data, cursor);
-            cursor += 4 + descriptionLength + 16;
-            if (cursor < 0 || cursor + 4 > data.Length) return null;
+            cursor += 4;
+            if (descriptionLength < 0 || descriptionLength > data.Length - cursor) return null;
+            cursor += descriptionLength;
+            if (data.Length - cursor < 20) return null;
+            cursor += 16;
             int imageLength = BE32(data, cursor);
             cursor += 4;
-            return imageLength > 0 && cursor + imageLength <= data.Length ? DecodeImage(data, cursor, imageLength) : null;
+            return imageLength > 0 && imageLength <= data.Length - cursor
+                ? DecodeImage(data, cursor, imageLength) : null;
         }
 
         private static Image DecodeImage(byte[] data, int offset, int length)
         {
+            if (data == null || offset < 0 || length <= 0 || length > MaxCoverBytes
+                || offset > data.Length - length) return null;
             try
             {
                 using (MemoryStream stream = new MemoryStream(data, offset, length, false))
-                using (Image source = Image.FromStream(stream)) return new Bitmap(source);
+                using (Image source = Image.FromStream(stream))
+                {
+                    if (source.Width <= 0 || source.Height <= 0
+                        || (long)source.Width * source.Height > MaxCoverPixels) return null;
+                    return new Bitmap(source);
+                }
             }
             catch { return null; }
         }
@@ -275,6 +296,23 @@ namespace AppManager
             if (value == 2) return Encoding.BigEndianUnicode;
             if (value == 3) return Encoding.UTF8;
             return Encoding.Default;
+        }
+
+        /// <summary>ID3 的 UTF-16 文本可能带 BOM；按 BOM 选择字节序并跳过它。</summary>
+        private static Encoding Id3TextEncoding(byte[] data, byte value, int offset, int end, out int start)
+        {
+            start = offset;
+            if (value != 1) return Id3Encoding(value);
+            if (end - offset >= 2)
+            {
+                if (data[offset] == 0xFE && data[offset + 1] == 0xFF)
+                {
+                    start = offset + 2;
+                    return Encoding.BigEndianUnicode;
+                }
+                if (data[offset] == 0xFF && data[offset + 1] == 0xFE) start = offset + 2;
+            }
+            return Encoding.Unicode;
         }
 
         private static int SkipTerminated(byte[] data, int cursor, int end, bool wide)

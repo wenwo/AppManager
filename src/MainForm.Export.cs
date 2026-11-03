@@ -12,7 +12,7 @@ namespace AppManager
     /// <summary>
     /// 导出：复制/剪切到剪贴板、拖出到其它程序，语义对齐资源管理器。
     /// 剪贴板只放文件列表与首选效果，由粘贴方（资源管理器等）执行复制或移动；
-    /// 剪切与移动拖出是否完成以磁盘为准：源文件消失且所在目录仍在，才视为已移出并清理条目。
+    /// 剪切与移动拖出是否完成以磁盘为准：源文件连续两次消失且所在目录仍在，才视为已移出并清理条目。
     /// 不实现「粘贴成功后由来源删除」：目标只复制时源文件保留，失败方向是多一份文件而不是丢文件。
     /// </summary>
     public partial class MainForm
@@ -27,6 +27,7 @@ namespace AppManager
             public AppInfo App;
             public string Path;
             public DateTime Expires;
+            public int MissingChecks;
         }
 
         /// <summary>当前剪贴板上由本应用放入的剪切内容。</summary>
@@ -35,6 +36,7 @@ namespace AppManager
             public uint Sequence;
             public bool Resource;
             public List<AppInfo> Apps;
+            public string Category;   // 剪切时所在分类：粘贴时只从这里移出，其他归属保留
         }
 
         private readonly List<MoveOutWatch> moveOutWatches = new List<MoveOutWatch>();
@@ -153,7 +155,8 @@ namespace AppManager
             EndCut();
             if (!cut) return;
             cutState = new CutState { Sequence = GetClipboardSequenceNumber(),
-                Resource = contentMode == SidebarControl.ContentMode.Website, Apps = new List<AppInfo>(apps) };
+                Resource = contentMode == SidebarControl.ContentMode.Website, Apps = new List<AppInfo>(apps),
+                Category = currentCategory };
             WatchMoveOut(apps, DateTime.MaxValue);
             grid.SetCutKeys(apps.Select(a => a.Key));
         }
@@ -175,6 +178,25 @@ namespace AppManager
             if (!OpenClipboard(Handle)) return;
             try { if (GetClipboardSequenceNumber() == sequence) EmptyClipboard(); }
             finally { CloseClipboard(); }
+        }
+
+        /// <summary>
+        /// 在应用内改名会主动让旧路径消失；这不是“移出”，必须取消旧路径观察，
+        /// 否则定时器会把条目误判为已移出并清掉收藏、集合和分类记录。
+        /// </summary>
+        private void ForgetMoveOutAfterRename(string oldPath)
+        {
+            if (string.IsNullOrEmpty(oldPath)) return;
+            moveOutWatches.RemoveAll(w => string.Equals(w.Path, oldPath, StringComparison.OrdinalIgnoreCase));
+            bool wasCut = cutState != null && cutState.Apps.Any(a =>
+                string.Equals(a.TargetPath, oldPath, StringComparison.OrdinalIgnoreCase));
+            if (wasCut)
+            {
+                uint sequence = cutState.Sequence;
+                ClearClipboardIfCurrent(sequence);
+                EndCut();
+            }
+            if (moveOutWatches.Count == 0 && moveOutTimer != null) moveOutTimer.Stop();
         }
 
         private void WatchMoveOut(IEnumerable<AppInfo> apps, DateTime expires)
@@ -221,8 +243,16 @@ namespace AppManager
             for (int i = moveOutWatches.Count - 1; i >= 0; i--)
             {
                 MoveOutWatch watch = moveOutWatches[i];
-                if (SourceMovedAway(watch.Path)) { moved.Add(watch.App); moveOutWatches.RemoveAt(i); }
-                else if (now >= watch.Expires) moveOutWatches.RemoveAt(i);
+                if (SourceMovedAway(watch.Path))
+                {
+                    // 资源管理器跨盘移动存在短暂的“源已删、目标未写完”，连续两次缺失才清理。
+                    if (++watch.MissingChecks >= 2) { moved.Add(watch.App); moveOutWatches.RemoveAt(i); }
+                }
+                else
+                {
+                    watch.MissingChecks = 0;
+                    if (now >= watch.Expires) moveOutWatches.RemoveAt(i);
+                }
             }
             if (moveOutWatches.Count == 0 && moveOutTimer != null) moveOutTimer.Stop();
             if (moved.Count == 0) return;
@@ -290,7 +320,7 @@ namespace AppManager
             moveOutWatches.RemoveAll(w => cut.Apps.Any(a => string.Equals(a.Key, w.App.Key, StringComparison.OrdinalIgnoreCase)));
             ClearClipboardIfCurrent(cut.Sequence);
             EndCut();
-            if (changed) SetHardCategory(items, category);
+            if (changed) SetHardCategory(items, category, cut.Category);
             if (collection != null) AddItemsToCategory(items, collection);
             if (skipped > 0) ShowNotice("已跳过 " + skipped + " 个类型不符的项目：" + typeHint);
         }

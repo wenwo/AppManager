@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -16,6 +17,7 @@ namespace AppManager
     {
         private const string MutexName = "AppManager.SingleInstance.9F2E1C70";
         private const string MainFormTitle = "应用中心";
+        private static string InstancePidFile { get { return Path.Combine(Path.GetTempPath(), MutexName + ".pid"); } }
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
@@ -80,7 +82,9 @@ namespace AppManager
                     config = AppConfig.Load();
                     if (config.LoadFailed) return 1;
                 }
-                Application.Run(new MainForm(config));
+                WriteInstancePid();
+                try { Application.Run(new MainForm(config)); }
+                finally { RemoveInstancePid(); }
             }
             return 0;
         }
@@ -91,17 +95,35 @@ namespace AppManager
         /// </summary>
         private static int RunTidyDesktop()
         {
-            int count = 0;
-            string error = null;
-            try
+            bool createdNew;
+            using (Mutex mutex = new Mutex(true, MutexName, out createdNew))
             {
-                AppConfig config = AppConfig.Load();
-                DesktopOrganizer organizer = new DesktopOrganizer(config);
-                count = organizer.TidyDesktop(Application.ExecutablePath);
+                if (!createdNew)
+                {
+                    // 与 GUI 共用单实例锁：两边同时写数据库会丢收纳记录，或让界面后续保存持续失败。
+                    WriteTidyLog(0, "主程序正在运行，已跳过命令行整理，避免同时修改数据库。");
+                    return 1;
+                }
+                try
+                {
+                    int count = 0;
+                    string error = null;
+                    try
+                    {
+                        AppConfig config = AppConfig.Load();
+                        if (config.LoadFailed) throw new IOException("配置读取失败，已停止整理：" + config.DatabaseError);
+                        DesktopOrganizer organizer = new DesktopOrganizer(config);
+                        count = organizer.TidyDesktop(Application.ExecutablePath);
+                    }
+                    catch (Exception ex) { error = ex.Message; }
+                    WriteTidyLog(count, error);
+                    return error == null ? 0 : 1;
+                }
+                finally
+                {
+                    try { mutex.ReleaseMutex(); } catch { }
+                }
             }
-            catch (Exception ex) { error = ex.Message; }
-            WriteTidyLog(count, error);
-            return error == null ? 0 : 1;
         }
 
         /// <summary>把整理结果写入 %LocalAppData%\AppManager\tidy.log（静默，不抛异常）。</summary>
@@ -122,12 +144,51 @@ namespace AppManager
         /// <summary>重复启动时把已有窗口恢复到前台，不再新开进程。</summary>
         private static void ActivateExistingInstance()
         {
+            IntPtr h = IntPtr.Zero;
             try
             {
-                IntPtr h = FindWindow(null, MainFormTitle);
-                if (h == IntPtr.Zero) return;
-                if (!IsWindowVisible(h)) ShowWindow(h, SW_RESTORE);
-                SetForegroundWindow(h);
+                // 通过 PID 文件定位首个实例，避免窗口标题变化（本地化/用户改名）后失去激活入口。
+                int pid;
+                if (File.Exists(InstancePidFile)
+                    && int.TryParse(File.ReadAllText(InstancePidFile).Trim(), out pid))
+                {
+                    string processName = Process.GetCurrentProcess().ProcessName;
+                    for (int attempt = 0; attempt < 20 && h == IntPtr.Zero; attempt++)
+                    {
+                        try
+                        {
+                            using (Process process = Process.GetProcessById(pid))
+                            {
+                                if (!string.Equals(process.ProcessName, processName, StringComparison.OrdinalIgnoreCase)) break;
+                                process.Refresh();
+                                h = process.MainWindowHandle;
+                            }
+                        }
+                        catch (ArgumentException) { break; }   // 进程已退出
+                        if (h == IntPtr.Zero) Thread.Sleep(100);   // 首个实例可能还在创建主窗口
+                    }
+                }
+            }
+            catch { }
+            if (h == IntPtr.Zero) h = FindWindow(null, MainFormTitle);   // 旧版本没有 PID 文件
+            if (h == IntPtr.Zero) return;
+            if (!IsWindowVisible(h)) ShowWindow(h, SW_RESTORE);
+            SetForegroundWindow(h);
+        }
+
+        private static void WriteInstancePid()
+        {
+            try { File.WriteAllText(InstancePidFile, Process.GetCurrentProcess().Id.ToString()); }
+            catch { }
+        }
+
+        private static void RemoveInstancePid()
+        {
+            try
+            {
+                if (!File.Exists(InstancePidFile)) return;
+                if (File.ReadAllText(InstancePidFile).Trim() == Process.GetCurrentProcess().Id.ToString())
+                    File.Delete(InstancePidFile);
             }
             catch { }
         }

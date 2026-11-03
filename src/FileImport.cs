@@ -275,13 +275,113 @@ namespace AppManager
         {
             Directory.CreateDirectory(batch.JournalDirectory);
             string path = Path.Combine(batch.JournalDirectory, batch.Id + ".xml"), temp = path + ".tmp";
-            using (FileStream stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+            EscapeBatch(batch);
+            try
             {
-                new XmlSerializer(typeof(ImportBatch)).Serialize(stream, batch);
-                stream.Flush(true);
+                using (FileStream stream = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    new XmlSerializer(typeof(ImportBatch)).Serialize(stream, batch);
+                    stream.Flush(true);
+                }
             }
+            finally { UnescapeBatch(batch); }
             if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
             batch.SavedAt = Environment.TickCount;
+        }
+
+        private const char EscapeOpen = '\uE000';
+        private const char EscapeClose = '\uE001';
+
+        private static string EscapeValue(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            StringBuilder text = new StringBuilder(value.Length);
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                bool valid = c == '\t' || c == '\n' || c == '\r'
+                    || (c >= 0x20 && c <= 0xD7FF) || (c >= 0xE000 && c <= 0xFFFD);
+                if (char.IsHighSurrogate(c) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1]))
+                {
+                    text.Append(c).Append(value[++i]);
+                    continue;
+                }
+                if (c == EscapeOpen || c == EscapeClose || !valid || char.IsSurrogate(c))
+                {
+                    text.Append(EscapeOpen).Append(((int)c).ToString("X4")).Append(EscapeClose);
+                    continue;
+                }
+                text.Append(c);
+            }
+            return text.ToString();
+        }
+
+        private static string UnescapeValue(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.IndexOf(EscapeOpen) < 0) return value;
+            StringBuilder text = new StringBuilder(value.Length);
+            for (int i = 0; i < value.Length; i++)
+            {
+                if (value[i] == EscapeOpen && i + 5 < value.Length && value[i + 5] == EscapeClose)
+                {
+                    int code;
+                    if (int.TryParse(value.Substring(i + 1, 4), System.Globalization.NumberStyles.HexNumber,
+                        System.Globalization.CultureInfo.InvariantCulture, out code))
+                    {
+                        text.Append((char)code); i += 5; continue;
+                    }
+                }
+                text.Append(value[i]);
+            }
+            return text.ToString();
+        }
+
+        private static void EscapeBatch(ImportBatch batch)
+        {
+            batch.Id = EscapeValue(batch.Id); batch.Category = EscapeValue(batch.Category);
+            batch.Collection = EscapeValue(batch.Collection); batch.Error = EscapeValue(batch.Error);
+            foreach (ImportItem item in batch.Items)
+            {
+                item.Source = EscapeValue(item.Source); item.Target = EscapeValue(item.Target);
+                item.Error = EscapeValue(item.Error); item.TargetId = EscapeValue(item.TargetId);
+                item.StagingId = EscapeValue(item.StagingId);
+                for (int i = 0; i < item.Directories.Count; i++) item.Directories[i] = EscapeValue(item.Directories[i]);
+                foreach (ImportFileStamp file in item.Files)
+                {
+                    file.Relative = EscapeValue(file.Relative); file.Hash = EscapeValue(file.Hash);
+                    file.TargetId = EscapeValue(file.TargetId); file.DetachedPath = EscapeValue(file.DetachedPath);
+                    foreach (ImportStreamStamp stream in file.Streams) { stream.Name = EscapeValue(stream.Name); stream.Hash = EscapeValue(stream.Hash); }
+                }
+                foreach (ImportDirectoryStamp dir in item.TargetDirectories)
+                {
+                    dir.Relative = EscapeValue(dir.Relative); dir.TargetId = EscapeValue(dir.TargetId);
+                    foreach (ImportStreamStamp stream in dir.Streams) { stream.Name = EscapeValue(stream.Name); stream.Hash = EscapeValue(stream.Hash); }
+                }
+            }
+        }
+
+        private static void UnescapeBatch(ImportBatch batch)
+        {
+            batch.Id = UnescapeValue(batch.Id); batch.Category = UnescapeValue(batch.Category);
+            batch.Collection = UnescapeValue(batch.Collection); batch.Error = UnescapeValue(batch.Error);
+            foreach (ImportItem item in batch.Items)
+            {
+                item.Source = UnescapeValue(item.Source); item.Target = UnescapeValue(item.Target);
+                item.Error = UnescapeValue(item.Error); item.TargetId = UnescapeValue(item.TargetId);
+                item.StagingId = UnescapeValue(item.StagingId);
+                for (int i = 0; i < item.Directories.Count; i++) item.Directories[i] = UnescapeValue(item.Directories[i]);
+                foreach (ImportFileStamp file in item.Files)
+                {
+                    file.Relative = UnescapeValue(file.Relative); file.Hash = UnescapeValue(file.Hash);
+                    file.TargetId = UnescapeValue(file.TargetId); file.DetachedPath = UnescapeValue(file.DetachedPath);
+                    foreach (ImportStreamStamp stream in file.Streams) { stream.Name = UnescapeValue(stream.Name); stream.Hash = UnescapeValue(stream.Hash); }
+                }
+                foreach (ImportDirectoryStamp dir in item.TargetDirectories)
+                {
+                    dir.Relative = UnescapeValue(dir.Relative); dir.TargetId = UnescapeValue(dir.TargetId);
+                    foreach (ImportStreamStamp stream in dir.Streams) { stream.Name = UnescapeValue(stream.Name); stream.Hash = UnescapeValue(stream.Hash); }
+                }
+            }
         }
 
         // 逐项进度最多每秒落盘一次；阶段边界（开始、提交前后、结束）始终落盘，恢复不依赖逐项状态。
@@ -297,6 +397,7 @@ namespace AppManager
             using (XmlReader reader = XmlReader.Create(path, new XmlReaderSettings { DtdProcessing = DtdProcessing.Prohibit, XmlResolver = null }))
             {
                 ImportBatch batch = (ImportBatch)new XmlSerializer(typeof(ImportBatch)).Deserialize(reader);
+                UnescapeBatch(batch);
                 if (batch.Id != Path.GetFileNameWithoutExtension(path)) throw new IOException("导入记录标识不匹配。");
                 batch.JournalDirectory = Path.GetDirectoryName(path);
                 return batch;
@@ -569,18 +670,24 @@ namespace AppManager
         }
 
         // 临时落点归本批所有，整体删除（不触碰源文件；硬链接只移除名字）。
-        private static void RemoveStaging(string staging)
+        // 返回 false 表示有残留：正常结束的批次不会再走启动恢复，残留必须记日志并写进导入记录，不能静默留下。
+        private static bool RemoveStaging(string staging)
         {
             try
             {
-                if (File.Exists(staging)) { DeleteFile(staging); return; }
-                if (!Directory.Exists(staging)) return;
+                if (File.Exists(staging)) { DeleteFile(staging); return true; }
+                if (!Directory.Exists(staging)) return true;
                 List<string> files = new List<string>(), dirs = new List<string>();
                 Collect(new DirectoryInfo(staging), "", files, dirs, 0);
                 foreach (string file in files) DeleteFile(Path.Combine(staging, file));
                 foreach (string dir in dirs.OrderByDescending(d => d.Length)) Directory.Delete(Path.Combine(staging, dir), false);
+                return true;
             }
-            catch { /* 本次临时落地残留不影响保源，下次启动恢复时再清理。 */ }
+            catch (Exception ex)
+            {
+                Paths.LogError(new IOException("导入临时副本未能清理：" + staging, ex));
+                return false;
+            }
         }
 
         private static void CopyAll(ImportBatch batch, Action<int, string> progress, CancellationToken cancel)
@@ -634,7 +741,8 @@ namespace AppManager
                 }
                 finally
                 {
-                    if (staging != null && stagingOwned) RemoveStaging(staging);
+                    if (staging != null && stagingOwned && !RemoveStaging(staging))
+                        item.Error = (string.IsNullOrEmpty(item.Error) ? "" : item.Error + "；") + "临时副本未能清理，已保留：" + staging;
                 }
                 SaveSoon(batch);
             }
@@ -735,19 +843,20 @@ namespace AppManager
                 SaveSoon(batch);
                 if (batch.SpaceLimited) break;
             }
-            DetachRetained(batch);
+            DetachRetained(batch, cancel);
             Save(batch);
         }
 
         // ===== 撤回与恢复 =====
 
         // 仅保源异常路径复制数据；正常同卷移动保持零数据复制。
-        private static void DetachRetained(ImportBatch batch)
+        private static void DetachRetained(ImportBatch batch, CancellationToken cancel = default(CancellationToken))
         {
             foreach (ImportItem item in batch.Items.Where(i => !i.Reference && (i.State == Copied || i.State == DeleteFailed)))
             {
                 foreach (ImportFileStamp stamp in item.Files.Where(f => f.Linked && !f.Deleted))
                 {
+                    if (cancel.IsCancellationRequested) return;
                     string target = At(item, item.Target, stamp.Relative);
                     string temporary = target + ".detach-" + batch.Id;
                     try
@@ -768,7 +877,7 @@ namespace AppManager
                             if (Identity(handle) != stamp.TargetId) throw new IOException("目标文件身份已变化。");
                             independent = new ImportFileStamp { Relative = stamp.Relative, Length = new FileInfo(target).Length,
                                 Modified = File.GetLastWriteTimeUtc(target).Ticks };
-                            Place(target, temporary, independent, false, CancellationToken.None);
+                            Place(target, temporary, independent, false, cancel);
                             MarkDelete(handle);
                         }
                         File.Move(temporary, target);
@@ -776,6 +885,10 @@ namespace AppManager
                         stamp.Length = independent.Length; stamp.Modified = independent.Modified; stamp.Streams = independent.Streams;
                         stamp.DetachedPath = null;
                         if (!item.Folder) item.TargetId = stamp.TargetId;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;   // 保留已写入的临时名，下次恢复时可按 DetachedPath 继续核对
                     }
                     catch (Exception ex)
                     {
@@ -875,6 +988,24 @@ namespace AppManager
             }
         }
 
+        /// <summary>
+        /// 取消移动导入：同卷硬链接的入库项直接撤回（只删除入库位置的链接名，零成本，源文件不受影响），
+        /// 不提交、也不留下与保留的源文件共用同一份数据的副本；跨卷已完整复制的项照常提交，避免重复复制。
+        /// 撤回前按身份与内容核对，核对不通过时保留并记录错误。
+        /// </summary>
+        private static void WithdrawLinkedOnCancel(ImportBatch batch)
+        {
+            foreach (ImportItem item in batch.Items.Where(i => !i.Reference && i.State == Copied && i.Files.Any(f => f.Linked)))
+            {
+                try
+                {
+                    if (RemoveDuplicate(item, item.Target, item.TargetId)) item.State = RolledBack;
+                    else item.Error = "入库链接与源文件不一致，已保留：" + item.Target;
+                }
+                catch (Exception ex) { item.Error = "入库链接未能撤回：" + ex.Message; }
+            }
+        }
+
         private static void Rollback(ImportBatch batch)
         {
             foreach (ImportItem item in batch.Items.Where(i => !i.Reference && i.State == Copied))
@@ -938,8 +1069,9 @@ namespace AppManager
             Save(batch); // 不能持久化任务时，不开始文件 IO。
             File.WriteAllText(Marker(batch), string.Empty);
             CopyAll(batch, progress, cancel);
+            if (batch.Operation == ImportOperation.Move && cancel.IsCancellationRequested) WithdrawLinkedOnCancel(batch);
             if (batch.Operation == ImportOperation.Move && (cancel.IsCancellationRequested || batch.Items.Any(i => i.State == Failed)))
-                DetachRetained(batch);
+                DetachRetained(batch, cancel);
             try { batch.Committed = commit(batch); }
             catch (Exception ex) { batch.Committed = false; batch.Error = "入库记录保存失败：" + ex.Message; }
             batch.DeleteAuthorized = batch.Committed && batch.Items.All(i => i.State == Copied || i.State == Linked || i.State == Skipped);

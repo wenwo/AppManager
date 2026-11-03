@@ -40,6 +40,10 @@ namespace AppManager.Controls
 
         public string CollectionKey { get { return collectionKey; } }
         public int CurrentIndex { get { return index; } }
+        public double Position { get { return position; } }
+        public bool IsPlaying { get { return playing; } }
+        /// <summary>当前播放列表快照：展开到完整播放器时复用同一顺序，避免重新查询导致下标错位。</summary>
+        public List<string> SongPaths { get { return new List<string>(paths); } }
 
         public MiniMusicPlayerControl()
         {
@@ -76,8 +80,11 @@ namespace AppManager.Controls
             Capture = seeking = volumeDrag = false;
             if (engine != null)
             {
-                try { engine.Dispose(); } catch { }
+                // 先暂停（同步、很快）再交给后台销毁，界面线程不等 mpv 收尾。
+                MiniMpvEngine old = engine;
                 engine = null;
+                try { old.SetPause(true); } catch { }
+                MpvShutdown.Destroy(old, null);
             }
             Invalidate();
         }
@@ -119,10 +126,19 @@ namespace AppManager.Controls
                 title = "无法播放此音乐";
                 pollTimer.Stop();
             }
-            else if (ended) { PlayNext(); return; }
+            else
+            {
+                // keep-open=yes 时播到结尾只会暂停并置 eof-reached，不发结束事件：两者都算播完。
+                // duration > 0 表示当前文件已加载，避免切歌瞬间读到旧文件状态而连跳两首。
+                bool eof;
+                if (!ended && duration > 0 && engine.TryGetFlag("eof-reached", out eof) && eof) ended = true;
+                if (ended) { PlayNext(); return; }
+            }
             double value;
+            bool paused;
             if (engine.TryGetDouble("duration", out value) && value >= 0) duration = value;
             if (!seeking && engine.TryGetDouble("time-pos", out value) && value >= 0) position = value;
+            if (!error && engine.TryGetFlag("pause", out paused)) playing = !paused;   // 与引擎实际状态同步
             Invalidate();
         }
 
@@ -149,6 +165,18 @@ namespace AppManager.Controls
             externalPlayerActive = false;
             playing = false;
             position = duration = 0;
+            Invalidate();
+        }
+
+        /// <summary>
+        /// 迷你播放器因窗口过窄被隐藏时调用：暂停自己的播放，避免声音继续却无处可暂停。
+        /// 完整播放器在播放（外部状态）时不受影响；可重复调用。
+        /// </summary>
+        public void PauseOwnPlayback()
+        {
+            if (engine == null || !playing || externalPlayerActive) return;
+            try { engine.SetPause(true); } catch { }
+            playing = false;
             Invalidate();
         }
 
@@ -441,14 +469,16 @@ namespace AppManager.Controls
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { pollTimer.Dispose(); Stop(); }
+            if (disposing) { pollTimer.Dispose(); Stop(); MpvShutdown.WaitAll(3000); }
             base.Dispose(disposing);
         }
 
         private sealed class MiniMpvEngine : IDisposable
         {
             private const string Dll = "libmpv-2.dll";
+            private const int EventStartFile = 6, EventEndFile = 7;
             private IntPtr context;
+            private bool awaitingStart;   // loadfile 之后、START_FILE 之前到达的事件属于上一首
 
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr mpv_create();
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int mpv_initialize(IntPtr context);
@@ -456,6 +486,8 @@ namespace AppManager.Controls
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)] private static extern int mpv_set_property_string(IntPtr context, string name, string value);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
             private static extern int mpv_get_property_double(IntPtr context, string name, int format, ref double value);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
+            private static extern int mpv_get_property_flag(IntPtr context, string name, int format, ref int value);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int mpv_command(IntPtr context, IntPtr args);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr mpv_wait_event(IntPtr context, double timeout);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern void mpv_terminate_destroy(IntPtr context);
@@ -490,7 +522,11 @@ namespace AppManager.Controls
                 catch { Dispose(); throw; }
             }
 
-            public void LoadFile(string path) { Command("loadfile", path); }
+            public void LoadFile(string path)
+            {
+                awaitingStart = true;
+                Command("loadfile", path);
+            }
             public void SetPause(bool paused) { mpv_set_property_string(context, "pause", paused ? "yes" : "no"); }
             public void SetVolume(int value) { mpv_set_property_string(context, "volume", value.ToString(CultureInfo.InvariantCulture)); }
             public void SetMute(bool mute) { mpv_set_property_string(context, "mute", mute ? "yes" : "no"); }
@@ -502,6 +538,15 @@ namespace AppManager.Controls
                 return context != IntPtr.Zero && mpv_get_property_double(context, name, 5, ref value) >= 0;
             }
 
+            public bool TryGetFlag(string name, out bool value)
+            {
+                value = false;
+                int raw = 0;
+                if (context == IntPtr.Zero || mpv_get_property_flag(context, name, 3, ref raw) < 0) return false;   // MPV_FORMAT_FLAG
+                value = raw != 0;
+                return true;
+            }
+
             public void DrainEvents(out bool ended, out bool error)
             {
                 ended = error = false;
@@ -511,7 +556,9 @@ namespace AppManager.Controls
                     if (pointer == IntPtr.Zero) return;
                     MpvEvent mediaEvent = (MpvEvent)Marshal.PtrToStructure(pointer, typeof(MpvEvent));
                     if (mediaEvent.EventId == 0) return;
-                    if (mediaEvent.EventId != 7 || mediaEvent.Data == IntPtr.Zero) continue;
+                    if (mediaEvent.EventId == EventStartFile) { awaitingStart = false; continue; }
+                    if (awaitingStart) continue;   // 上一首遗留的事件不能算到新曲目上
+                    if (mediaEvent.EventId != EventEndFile || mediaEvent.Data == IntPtr.Zero) continue;
                     MpvEventEndFile end = (MpvEventEndFile)Marshal.PtrToStructure(mediaEvent.Data, typeof(MpvEventEndFile));
                     if (end.Reason == 0) ended = true;
                     else if (end.Reason == 4) error = true;

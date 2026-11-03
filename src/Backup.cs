@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
@@ -19,12 +20,15 @@ namespace AppManager
         public int CustomCount;
         public int CategoryCount;
         public long SizeBytes;
+        public bool IsPreRestore;
+        public bool Incomplete;
 
         public string Summary
         {
             get
             {
-                return Created + " · 收纳 " + StashCount + " · 自定义 " + CustomCount
+                string prefix = IsPreRestore ? (Incomplete ? "恢复前残留（可能不完整） · " : "恢复前留底 · ") : string.Empty;
+                return prefix + Created + " · 收纳 " + StashCount + " · 自定义 " + CustomCount
                     + " · 分类 " + CategoryCount + " · " + FormatSize(SizeBytes);
             }
         }
@@ -66,26 +70,39 @@ namespace AppManager
             try
             {
                 if (!Directory.Exists(RootDir)) { return result; }
-                SafeDirectory.Budget scanBudget = new SafeDirectory.Budget();
                 foreach (string dir in Directory.EnumerateDirectories(RootDir))
                 {
-                    scanBudget.Add(0, 0);
                     string id = Path.GetFileName(dir);
-                    if (id.StartsWith("_", StringComparison.Ordinal)) { continue; }   // 恢复前的临时目录
+                    bool preRestore = id.StartsWith("_prerestore_", StringComparison.Ordinal);
+                    if (id.StartsWith("_", StringComparison.Ordinal) && !preRestore) { continue; }
                     if (id.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) { continue; }
+                    if (id.EndsWith(".old", StringComparison.OrdinalIgnoreCase)) { continue; }
                     try { SafeDirectory.EnsureNoLinks(dir); }
                     catch (IOException) { continue; }
                     catch (UnauthorizedAccessException) { continue; }
-                    // 只认真正的布局备份：config.xml + meta.xml 缺一不可
-                    // （部署时留的 deploy_before_* 快照只有 config.xml，不在列表里冒充备份）
                     if (!File.Exists(Path.Combine(dir, "config.xml"))) { continue; }
-                    if (!File.Exists(Path.Combine(dir, "meta.xml"))) { continue; }
 
                     LayoutBackupInfo info = new LayoutBackupInfo();
                     info.Id = id;
                     info.Name = id;
-                    ReadMeta(dir, info);
-                    info.SizeBytes = DirSize(dir, scanBudget);
+                    info.IsPreRestore = preRestore;
+                    if (preRestore)
+                    {
+                        // 恢复前留底同样可以恢复或删除，必须出现在列表里，不能只留在磁盘深处。
+                        info.Name = "恢复前留底 " + id.Substring("_prerestore_".Length);
+                        info.Incomplete = File.Exists(Path.Combine(dir, "incomplete"));
+                        try { info.Created = Directory.GetLastWriteTime(dir).ToString("yyyy-MM-dd HH:mm:ss"); } catch { }
+                        info.StashCount = CountTop(Path.Combine(dir, "DesktopBackup")) + CountTop(Path.Combine(dir, "DesktopStash"));
+                    }
+                    else
+                    {
+                        // 只认真正的布局备份：config.xml + meta.xml 缺一不可
+                        // （部署时留的 deploy_before_* 快照只有 config.xml，不在列表里冒充备份）
+                        if (!File.Exists(Path.Combine(dir, "meta.xml"))) { continue; }
+                        ReadMeta(dir, info);
+                    }
+                    // 每份备份独立预算：单份过大只显示“大小未统计”，不能截断后续备份列表。
+                    info.SizeBytes = DirSize(dir, LayoutBudget());
                     result.Add(info);
                 }
             }
@@ -100,6 +117,17 @@ namespace AppManager
                 return string.Compare(b.Id, a.Id, StringComparison.OrdinalIgnoreCase);
             });
             return result;
+        }
+
+        private static int CountTop(string dir)
+        {
+            try { return Directory.Exists(dir) ? Directory.GetFileSystemEntries(dir).Length : 0; }
+            catch { return 0; }
+        }
+
+        private static SafeDirectory.Budget LayoutBudget()
+        {
+            return new SafeDirectory.Budget(2000000, 100L * 1024 * 1024 * 1024, 600000);
         }
 
         private static void ReadMeta(string dir, LayoutBackupInfo info)
@@ -145,36 +173,47 @@ namespace AppManager
         {
             id = null;
             error = null;
-            try
+            lock (DesktopOrganizer.OperationSync)
             {
-                Directory.CreateDirectory(RootDir);
-
-                string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
-                string dirId = stamp;
-                int n = 2;
-                while (Directory.Exists(Path.Combine(RootDir, dirId)))
+                try
                 {
-                    dirId = stamp + "-" + n;
-                    n++;
+                    Directory.CreateDirectory(RootDir);
+                    CleanupTemporaryDirectories();
+
+                    string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+                    string dirId = stamp;
+                    int n = 2;
+                    while (Directory.Exists(Path.Combine(RootDir, dirId)))
+                    {
+                        dirId = stamp + "-" + n;
+                        n++;
+                    }
+
+                    string target = Path.Combine(RootDir, dirId);
+                    string temp = target + ".tmp";
+                    if (Directory.Exists(temp)) { Directory.Delete(temp, true); }
+                    Directory.CreateDirectory(temp);
+
+                    string showName = string.IsNullOrEmpty(name) ? DefaultName() : name.Trim();
+                    try
+                    {
+                        WriteSnapshot(temp, showName, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                        Directory.Move(temp, target);
+                    }
+                    catch
+                    {
+                        TryDeleteDirectory(temp);   // 失败的半成品不能留在备份目录里
+                        throw;
+                    }
+                    id = dirId;
+                    return true;
                 }
-
-                string target = Path.Combine(RootDir, dirId);
-                string temp = target + ".tmp";
-                if (Directory.Exists(temp)) { Directory.Delete(temp, true); }
-                Directory.CreateDirectory(temp);
-
-                string showName = string.IsNullOrEmpty(name) ? DefaultName() : name.Trim();
-                WriteSnapshot(temp, showName, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-
-                Directory.Move(temp, target);
-                id = dirId;
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Paths.LogError(ex);
-                error = ex.Message;
-                return false;
+                catch (Exception ex)
+                {
+                    Paths.LogError(ex);
+                    error = ex.Message;
+                    return false;
+                }
             }
         }
 
@@ -233,46 +272,55 @@ namespace AppManager
         public static bool Update(string id, out string error)
         {
             error = null;
-            try
+            lock (DesktopOrganizer.OperationSync)
             {
-                string target = Path.Combine(RootDir, id);
-                string metaFile = Path.Combine(target, "meta.xml");
-                if (!File.Exists(metaFile))
-                {
-                    error = "备份不完整（缺少 meta.xml）。";
-                    return false;
-                }
-
-                string showName = id;
-                string created = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-                ReadNameCreated(metaFile, ref showName, ref created);
-
-                string temp = target + ".tmp";
-                if (Directory.Exists(temp)) { Directory.Delete(temp, true); }
-                Directory.CreateDirectory(temp);
-                WriteSnapshot(temp, showName, created);
-
-                // 先把旧备份整体挪到 .old 留底，再换入新快照；换入失败则回滚，任何时刻都有一份完整备份
-                string old = target + ".old";
-                if (Directory.Exists(old)) { Directory.Delete(old, true); }
-                if (Directory.Exists(target)) { Directory.Move(target, old); }
                 try
                 {
-                    Directory.Move(temp, target);
+                    CleanupTemporaryDirectories();
+                    string target = Path.Combine(RootDir, id);
+                    string metaFile = Path.Combine(target, "meta.xml");
+                    if (!File.Exists(metaFile))
+                    {
+                        error = "备份不完整（缺少 meta.xml）。";
+                        return false;
+                    }
+
+                    string showName = id;
+                    string created = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
+                    ReadNameCreated(metaFile, ref showName, ref created);
+
+                    string temp = target + ".tmp";
+                    if (Directory.Exists(temp)) { Directory.Delete(temp, true); }
+                    Directory.CreateDirectory(temp);
+                    try { WriteSnapshot(temp, showName, created); }
+                    catch
+                    {
+                        TryDeleteDirectory(temp);
+                        throw;
+                    }
+
+                    // 先把旧备份整体挪到 .old 留底，再换入新快照；换入失败则回滚，任何时刻都有一份完整备份
+                    string old = target + ".old";
+                    if (Directory.Exists(old)) { Directory.Delete(old, true); }
+                    if (Directory.Exists(target)) { Directory.Move(target, old); }
+                    try
+                    {
+                        Directory.Move(temp, target);
+                    }
+                    catch
+                    {
+                        if (!Directory.Exists(target) && Directory.Exists(old)) Directory.Move(old, target);
+                        throw;
+                    }
+                    if (Directory.Exists(old)) { Directory.Delete(old, true); }
+                    return true;
                 }
-                catch
+                catch (Exception ex)
                 {
-                    if (!Directory.Exists(target) && Directory.Exists(old)) Directory.Move(old, target);
-                    throw;
+                    Paths.LogError(ex);
+                    error = ex.Message;
+                    return false;
                 }
-                if (Directory.Exists(old)) { Directory.Delete(old, true); }
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Paths.LogError(ex);
-                error = ex.Message;
-                return false;
             }
         }
 
@@ -280,53 +328,130 @@ namespace AppManager
         /// 恢复到指定备份：用备份里的配置与收纳目录覆盖当前状态。
         /// 当前收纳目录先整体挪到 Backups\_prerestore_&lt;时间&gt; 下留底，避免误删用户文件。
         /// </summary>
+        /// <summary>
+        /// 快照清单里没有、当前清单里有且文件仍在的收纳条目（快照之后新收纳的）：
+        /// 所在目录被快照替换时，把文件从留底目录挪回新装的收纳目录（同名另取名）；目录未被替换时原地保留。
+        /// 记录一并加入恢复后的清单。moves 记录（留底位置, 新位置），失败回滚时据此放回。
+        /// </summary>
+        private static void CarryNewerStash(AppConfig live, AppConfig restored, bool replaceDesktop, string oldDesktop,
+            bool replaceStash, string oldStash, List<string[]> moves)
+        {
+            HashSet<string> known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (DesktopBackupEntry e in restored.DesktopBackup)
+                if (e != null && !string.IsNullOrEmpty(e.CurrentPath)) known.Add(e.CurrentPath);
+            foreach (DesktopBackupEntry e in live.DesktopBackup)
+            {
+                if (e == null || string.IsNullOrEmpty(e.CurrentPath) || known.Contains(e.CurrentPath)) continue;
+                string target = e.CurrentPath;
+                string aside = null;
+                string rel = RelativeUnder(Paths.DesktopBackupDir, target);
+                if (rel != null && replaceDesktop) aside = Path.Combine(oldDesktop, rel);
+                else
+                {
+                    rel = RelativeUnder(Paths.LegacyStashDir, target);
+                    if (rel != null && replaceStash) aside = Path.Combine(oldStash, rel);
+                }
+                if (aside != null)
+                {
+                    if (!(e.IsDir ? Directory.Exists(aside) : File.Exists(aside))) continue;
+                    if (File.Exists(target) || Directory.Exists(target)) target = UniqueSibling(target);
+                    string parent = Path.GetDirectoryName(target);
+                    if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                    if (e.IsDir) Directory.Move(aside, target); else File.Move(aside, target);
+                    moves.Add(new string[] { aside, target });
+                }
+                else if (!(e.IsDir ? Directory.Exists(target) : File.Exists(target))) continue;
+                restored.DesktopBackup.Add(new DesktopBackupEntry
+                {
+                    OriginalPath = e.OriginalPath, CurrentPath = target,
+                    IsShortcut = e.IsShortcut, IsDir = e.IsDir, IsCopy = e.IsCopy
+                });
+                known.Add(target);
+            }
+        }
+
+        /// <summary>path 位于 root 之内时返回相对路径，否则返回 null。</summary>
+        private static string RelativeUnder(string root, string path)
+        {
+            try
+            {
+                string prefix = Path.GetFullPath(root).TrimEnd('\\') + "\\";
+                string full = Path.GetFullPath(path);
+                return full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && full.Length > prefix.Length
+                    ? full.Substring(prefix.Length) : null;
+            }
+            catch { return null; }
+        }
+
+        private static string UniqueSibling(string path)
+        {
+            string dir = Path.GetDirectoryName(path);
+            string name = Path.GetFileNameWithoutExtension(path), ext = Path.GetExtension(path);
+            for (int i = 2; ; i++)
+            {
+                string candidate = Path.Combine(dir, name + " (" + i + ")" + ext);
+                if (!File.Exists(candidate) && !Directory.Exists(candidate)) return candidate;
+            }
+        }
+
         public static bool Restore(string id, out string error)
         {
             error = null;
-            string transaction = null;
-            try
+            lock (DesktopOrganizer.OperationSync)
             {
-                string dir = Path.Combine(RootDir, id);
-                string cfgFile = Path.Combine(dir, "config.xml");
-                if (!File.Exists(cfgFile))
-                {
-                    error = "备份不完整（缺少 config.xml）。";
-                    return false;
-                }
-                AppConfig restoredConfig = AppConfig.ImportFrom(cfgFile);
-                if (restoredConfig == null || restoredConfig.LoadFailed)
-                {
-                    error = "备份配置已损坏，已取消恢复。";
-                    return false;
-                }
-
-                string snapStash = Path.Combine(dir, "DesktopStash");
-                if (!Directory.Exists(snapStash) && Directory.Exists(Path.Combine(dir, "stash")))
-                    snapStash = Path.Combine(dir, "stash");
-                string snapDesktop = Path.Combine(dir, "DesktopBackup");
-                bool replaceDesktop = Directory.Exists(snapDesktop);
-                bool replaceStash = Directory.Exists(snapStash);
-
-                CheckRestoreCapacity();
-                transaction = Path.Combine(RootDir, "_prerestore_" + DateTime.Now.ToString("yyyyMMdd-HHmmss")
-                    + "-" + Guid.NewGuid().ToString("N"));
-                Directory.CreateDirectory(transaction);
-                string oldConfig = Path.Combine(transaction, "config.xml");
-                AppConfig liveConfig = AppConfig.Load();
-                if (liveConfig.LoadFailed || !liveConfig.SaveTo(oldConfig)) throw new IOException("无法保存恢复前配置。");
-                bool hadConfig = true;
-
-                string newDesktop = Path.Combine(transaction, "newDesktopBackup");
-                string newStash = Path.Combine(transaction, "newDesktopStash");
-                if (replaceDesktop) CopyDir(snapDesktop, newDesktop);
-                if (replaceStash) CopyDir(snapStash, newStash);
-
-                string oldDesktop = Path.Combine(transaction, "DesktopBackup");
-                string oldStash = Path.Combine(transaction, "DesktopStash");
-                bool desktopAside = false, desktopInstalled = false;
-                bool stashAside = false, stashInstalled = false;
+                string transaction = null;
                 try
                 {
+                    string dir = Path.Combine(RootDir, id);
+                    string cfgFile = Path.Combine(dir, "config.xml");
+                    if (!File.Exists(cfgFile))
+                    {
+                        error = "备份不完整（缺少 config.xml）。";
+                        return false;
+                    }
+                    AppConfig restoredConfig = AppConfig.ImportFrom(cfgFile);
+                    if (restoredConfig == null || restoredConfig.LoadFailed)
+                    {
+                        error = "备份配置已损坏，已取消恢复。";
+                        return false;
+                    }
+                    string validation = restoredConfig.ValidateImportedContent(false);
+                    if (validation != null)
+                    {
+                        error = "备份配置包含无效名称，已取消恢复：" + validation;
+                        return false;
+                    }
+
+                    string snapStash = Path.Combine(dir, "DesktopStash");
+                    if (!Directory.Exists(snapStash) && Directory.Exists(Path.Combine(dir, "stash")))
+                        snapStash = Path.Combine(dir, "stash");
+                    string snapDesktop = Path.Combine(dir, "DesktopBackup");
+                    bool replaceDesktop = Directory.Exists(snapDesktop);
+                    bool replaceStash = Directory.Exists(snapStash);
+
+                    CheckRestoreCapacity();
+                    transaction = Path.Combine(RootDir, "_prerestore_" + DateTime.Now.ToString("yyyyMMdd-HHmmss")
+                        + "-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(transaction);
+                    // 成功完成后移除；异常中断留下的残留会带此标记，不再永久占用 3 份额度。
+                    File.WriteAllText(Path.Combine(transaction, "incomplete"), string.Empty);
+                    string oldConfig = Path.Combine(transaction, "config.xml");
+                    AppConfig liveConfig = AppConfig.Load();
+                    if (liveConfig.LoadFailed || !liveConfig.SaveTo(oldConfig)) throw new IOException("无法保存恢复前配置。");
+                    bool hadConfig = true;
+
+                    string newDesktop = Path.Combine(transaction, "newDesktopBackup");
+                    string newStash = Path.Combine(transaction, "newDesktopStash");
+                    if (replaceDesktop) CopyDir(snapDesktop, newDesktop);
+                    if (replaceStash) CopyDir(snapStash, newStash);
+
+                    string oldDesktop = Path.Combine(transaction, "DesktopBackup");
+                    string oldStash = Path.Combine(transaction, "DesktopStash");
+                    bool desktopAside = false, desktopInstalled = false;
+                    bool stashAside = false, stashInstalled = false;
+                    List<string[]> carried = new List<string[]>();
+                    try
+                    {
                     if (replaceDesktop)
                     {
                         if (Directory.Exists(Paths.DesktopBackupDir))
@@ -347,12 +472,25 @@ namespace AppManager
                         Directory.Move(newStash, Paths.LegacyStashDir);
                         stashInstalled = true;
                     }
+                    // 快照之后才收纳的条目：文件挪回新收纳目录、记录并入恢复后的清单，否则它们会失去还原入口
+                    CarryNewerStash(liveConfig, restoredConfig, replaceDesktop, oldDesktop, replaceStash, oldStash, carried);
                     if (hadConfig)
                         File.Copy(oldConfig, Path.Combine(Paths.DataDir, "config.before-restore.xml"), true);
-                    if (!restoredConfig.Save()) throw new IOException("恢复配置写入失败：" + restoredConfig.DatabaseError);
-                }
-                catch
-                {
+                        if (!restoredConfig.Save("physical.layout.restore")) throw new IOException("恢复配置写入失败：" + restoredConfig.DatabaseError);
+                    }
+                    catch
+                    {
+                    // 先把挪进新目录的较新收纳文件放回留底目录，再删除新装的目录，不能连带删掉
+                    for (int m = carried.Count - 1; m >= 0; m--)
+                    {
+                        string from = carried[m][0], to = carried[m][1];
+                        try
+                        {
+                            if (Directory.Exists(to) && !Directory.Exists(from)) Directory.Move(to, from);
+                            else if (File.Exists(to) && !File.Exists(from)) File.Move(to, from);
+                        }
+                        catch (Exception moveBack) { Paths.LogError(moveBack); }
+                    }
                     if (desktopInstalled && Directory.Exists(Paths.DesktopBackupDir))
                         Directory.Delete(Paths.DesktopBackupDir, true);
                     if (desktopAside && Directory.Exists(oldDesktop) && !Directory.Exists(Paths.DesktopBackupDir))
@@ -361,16 +499,40 @@ namespace AppManager
                         Directory.Delete(Paths.LegacyStashDir, true);
                     if (stashAside && Directory.Exists(oldStash) && !Directory.Exists(Paths.LegacyStashDir))
                         Directory.Move(oldStash, Paths.LegacyStashDir);
-                    throw;
+                        throw;
+                    }
+                    try { File.Delete(Path.Combine(transaction, "incomplete")); } catch { }
+                    return true;
                 }
-                return true;
+                catch (Exception ex)
+                {
+                    Paths.LogError(ex);
+                    error = ex.Message;
+                    return false;
+                }
             }
-            catch (Exception ex)
+        }
+
+        /// <summary>清理上次中断留下的 .tmp 半成品目录；调用方必须持有 OperationSync。</summary>
+        private static void CleanupTemporaryDirectories()
+        {
+            try
             {
-                Paths.LogError(ex);
-                error = ex.Message;
-                return false;
+                if (!Directory.Exists(RootDir)) return;
+                foreach (string dir in Directory.EnumerateDirectories(RootDir))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (!name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) continue;
+                    TryDeleteDirectory(dir);
+                }
             }
+            catch (Exception ex) { Paths.LogError(ex); }
+        }
+
+        private static void TryDeleteDirectory(string dir)
+        {
+            try { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+            catch (Exception ex) { Paths.LogError(ex); }
         }
 
         public static bool Delete(string id, out string error)
@@ -441,22 +603,19 @@ namespace AppManager
         private static void CopyDir(string from, string to)
         {
             if (!Directory.Exists(from)) return;
-            SafeDirectory.Copy(from, to, true);
+            SafeDirectory.Copy(from, to, true, LayoutBudget());
         }
 
-        // 留底可能是唯一副本；达到限额时阻止继续增长，不在列出备份时删除数据。
+        // 留底可能是唯一副本；只统计完整留底，异常残留由界面列出供用户安全删除。
         private static void CheckRestoreCapacity()
         {
-            SafeDirectory.Budget budget = new SafeDirectory.Budget();
             int count = 0;
             foreach (string dir in Directory.EnumerateDirectories(RootDir, "_prerestore_*"))
             {
+                if (File.Exists(Path.Combine(dir, "incomplete"))) continue;
                 if (++count >= 3)
-                    throw new IOException("恢复留底已达 3 份，请先检查并手动归档或清理：" + RootDir);
-                SafeDirectory.Measure(dir, budget);
+                    throw new IOException("恢复留底已达 3 份，请先在布局备份列表中检查并删除旧留底：" + RootDir);
             }
-            if (Directory.Exists(Paths.DesktopBackupDir)) SafeDirectory.Measure(Paths.DesktopBackupDir, budget);
-            if (Directory.Exists(Paths.LegacyStashDir)) SafeDirectory.Measure(Paths.LegacyStashDir, budget);
         }
     }
 
@@ -487,7 +646,7 @@ namespace AppManager
             BackColor = Theme.Background;
             ClientSize = new Size(620, 486);
             KeyPreview = true;
-            try { Region = new Region(Draw.RoundedPath(ClientRectangle, Theme.CornerRadius)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(ClientRectangle, Theme.CornerRadius)) Region = new Region(path); } catch { }
 
             int pad = 24;
             list = new ListBox();
@@ -665,9 +824,10 @@ namespace AppManager
         private void UpdateButtons()
         {
             bool has = Selected != null && !operationRunning;
-            btnRestore.Enabled = has;
-            btnUpdate.Enabled = has;
-            btnRename.Enabled = has;
+            bool editable = has && Selected != null && !Selected.IsPreRestore;
+            btnRestore.Enabled = has && Selected != null && !Selected.Incomplete;
+            btnUpdate.Enabled = editable;
+            btnRename.Enabled = editable;
             btnDelete.Enabled = has;
         }
 
@@ -708,6 +868,7 @@ namespace AppManager
         {
             LayoutBackupInfo info = Selected;
             if (info == null) return;
+            if (info.IsPreRestore) return;
             if (!ConfirmDialog.Show("更新备份", "用当前布局刷新备份「" + info.Name + "」？\r\n\r\n" +
                 "备份里的内容会被当前状态覆盖，名称与创建时间保持不变。")) return;
 
@@ -722,6 +883,12 @@ namespace AppManager
         {
             LayoutBackupInfo info = Selected;
             if (info == null) return;
+            if (info.Incomplete)
+            {
+                MessageBox.Show(this, "这份恢复前残留可能不完整，只能删除，不能恢复。", "布局备份",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             if (!ConfirmDialog.Show("恢复备份", "恢复备份「" + info.Name + "」？\r\n\r\n" + info.Summary +
                 "\r\n\r\n当前布局会被换成备份时的状态，列表内容与桌面收纳都会一起回到那个时间点。")) return;
 
@@ -742,6 +909,7 @@ namespace AppManager
         {
             LayoutBackupInfo info = Selected;
             if (info == null) return;
+            if (info.IsPreRestore) return;
             string name = InputDialog.Show("重命名备份", "输入新的备份名称。", info.Name);
             if (name == null) return;
 

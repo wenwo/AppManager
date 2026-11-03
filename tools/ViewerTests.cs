@@ -6,6 +6,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.IO.Compression;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Runtime.Serialization;
 using System.Text;
 using System.Threading;
@@ -55,9 +56,16 @@ namespace AppManager
                 Run("PDF corrupt/missing/oversize/cancelled inputs recover", PdfFailures);
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
+                Run("music players advance to the next track when a song ends", MusicAutoAdvance);
+                Run("music stops on a missing track and the hidden mini player pauses", MusicSilencedWhenUnreachable);
+                Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
+                Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
+                Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
                 Run("text edits save with original encoding, BOM and newlines", TextSaving);
+                Run("lossy decoding opens read-only; mixed newlines detected; failed save keeps original", TextSafety);
+                Run("text save keeps hard links, resolves symlinks and recreates missing files", TextLinks);
                 Run("PDF page navigation and image pan in both directions", ViewerNavigation);
                 Run("resource routing preserves software scripts; credentials accept text", Routing);
                 Run("archive zip names (UTF-8 flag, unflagged UTF-8, GBK), tree, sizes and path normalization", ArchiveZip);
@@ -65,6 +73,7 @@ namespace AppManager
                 Run("archive reading shares the file, honours cancellation and releases handles", ArchiveSharing);
                 Run("archive viewer browse, natural/size sort, breadcrumbs, hint and switching", ArchiveViewer);
                 Run("archive hostile input: odd names, raw GNU tar names, deep paths, no external filters, damaged tar.gz", ArchiveHostile);
+                Run("archive entry-count precheck (EOCD/ZIP64/fake comment), streaming fallback and read budget", ArchiveLimits);
                 Run("archive viewer sorts 60k rows by type/size/name without stalling the UI", ArchiveSortSpeed);
                 Run("external pickers serialize on STA, deduplicate and keep UI responsive", PickerSerial);
                 Run("external picker cancellation clears pending files and permits retry", PickerCancellation);
@@ -191,6 +200,224 @@ namespace AppManager
                 Check(TextPreview.Read(legacy, CancellationToken.None).Content == Encoding.Default.GetString(File.ReadAllBytes(legacy)), "BOM prefix false positive");
             }
         }
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern bool SetDllDirectory(string path);
+
+        private static string WriteSilence(string name, double seconds)
+        {
+            string path = Path.Combine(root, name);
+            int rate = 8000, samples = (int)(rate * seconds);
+            using (BinaryWriter w = new BinaryWriter(File.Create(path)))
+            {
+                w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + samples * 2); w.Write(Encoding.ASCII.GetBytes("WAVE"));
+                w.Write(Encoding.ASCII.GetBytes("fmt ")); w.Write(16); w.Write((short)1); w.Write((short)1);
+                w.Write(rate); w.Write(rate * 2); w.Write((short)2); w.Write((short)16);
+                w.Write(Encoding.ASCII.GetBytes("data")); w.Write(samples * 2); w.Write(new byte[samples * 2]);
+            }
+            return path;
+        }
+
+        private static bool PumpUntil(Func<bool> done, int milliseconds)
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            while (!done() && watch.ElapsedMilliseconds < milliseconds) { Application.DoEvents(); Thread.Sleep(15); }
+            return done();
+        }
+
+        private static void MusicAutoAdvance()
+        {
+            // 播放器依赖运行目录里的 libmpv-2.dll；未安装时跳过（构建脚本会自动下载）。
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string first = WriteSilence("auto-first.wav", 0.4), second = WriteSilence("auto-second.wav", 0.4);
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+            {
+                host.Controls.Add(mini);
+                host.Controls.Add(player);
+                host.Show();
+                player.Open(new List<string> { first, second }, 0);
+                Check(PumpUntil(delegate { return string.Equals(player.CurrentPath, second, StringComparison.OrdinalIgnoreCase); }, 15000),
+                    "full player did not advance after the song ended (current: " + player.CurrentPath + ")");
+                string resume = WriteSilence("resume.wav", 3);
+                player.Open(new List<string> { resume }, 0, 1.2, true);
+                Check(PumpUntil(delegate { return EngineFlag(player, "pause") && !EngineFlag(player, "idle-active"); }, 10000),
+                    "expanded player did not restore the paused state");
+                Check(PumpUntil(delegate { return player.Position >= 1.0; }, 5000),
+                    "expanded player restarted from zero (position: " + player.Position + ")");
+                player.Visible = false;
+                mini.LoadPlaylist(new List<string> { first, second }, "回归", "regression", 0);
+                Check(PumpUntil(delegate { return mini.CurrentIndex == 1; }, 15000), "mini player did not advance after the song ended");
+                mini.Stop();
+                host.Hide();
+            }
+        }
+
+        // 随机播放只有一首时重播这一首；顺序播放到末尾停下且状态落到“未在播放”，不会卡在播放中。
+        private static void MusicSingleTrackModes()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string song = WriteSilence("single-track.wav", 0.4);
+            FieldInfo modeField = typeof(MusicPlayerControl).GetField("mode", BindingFlags.Instance | BindingFlags.NonPublic);
+            FieldInfo playingField = typeof(MusicPlayerControl).GetField("playing", BindingFlags.Instance | BindingFlags.NonPublic);
+            foreach (string mode in new[] { "Shuffle", "Sequential" })
+            {
+                using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+                using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+                {
+                    host.Controls.Add(player);
+                    host.Show();
+                    int starts = 0;
+                    player.PlaybackStarting += delegate { starts++; };
+                    modeField.SetValue(player, Enum.Parse(modeField.FieldType, mode));
+                    player.Open(new List<string> { song }, 0);
+                    if (mode == "Shuffle")
+                        Check(PumpUntil(delegate { return starts >= 2; }, 10000), "shuffle with a single track did not replay it (starts: " + starts + ")");
+                    else
+                    {
+                        Check(PumpUntil(delegate { return starts >= 1 && !(bool)playingField.GetValue(player); }, 10000),
+                            "sequential single track stayed in the playing state after it ended");
+                        Check(starts == 1, "sequential single track restarted");
+                    }
+                    host.Hide();
+                }
+            }
+        }
+
+        // 视频输出只用有效的 vo 列表；有视频轨却没有画面时能识别出来，纯音频文件不误报。
+        private static void VideoOutputCheck()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string image = Path.Combine(root, "video-frame.png");
+            using (Bitmap frame = new Bitmap(64, 48))
+            {
+                using (Graphics g = Graphics.FromImage(frame)) g.Clear(Color.SteelBlue);
+                frame.Save(image, ImageFormat.Png);
+            }
+            string song = WriteSilence("video-audio-only.wav", 1);
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (VideoPlayerControl video = new VideoPlayerControl { Dock = DockStyle.Fill })
+            {
+                host.Controls.Add(video);
+                host.Show();
+                video.Open(new List<string> { image }, 0);
+                FieldInfo field = typeof(VideoPlayerControl).GetField("mpv", BindingFlags.Instance | BindingFlags.NonPublic);
+                object engine = field.GetValue(video);
+                Check(engine != null, "video engine failed to initialize with the configured video outputs");
+                Func<bool> missing = delegate { return (bool)engine.GetType().GetMethod("VideoOutputMissing").Invoke(engine, null); };
+                Func<string, bool> flag = delegate(string name)
+                {
+                    object[] args = { name, false };
+                    return (bool)engine.GetType().GetMethod("TryGetFlag").Invoke(engine, args) && (bool)args[1];
+                };
+                Check(PumpUntil(delegate { return flag("vo-configured"); }, 10000), "video output never came up for a still image");
+                Check(!missing(), "configured video output reported as missing");
+                // 模拟“有视频轨、视频输出没起来”：取消视频轨后 VO 被撤掉，track-list 里仍有视频轨。
+                engine.GetType().GetMethod("SetString", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(engine, new object[] { "vid", "no" });
+                Check(PumpUntil(delegate { return !flag("vo-configured"); }, 5000), "fixture: video output stayed configured");
+                Check(missing(), "video track without an output was not detected");
+                video.Open(new List<string> { song }, 0);
+                FieldInfo loaded = typeof(VideoPlayerControl).GetField("fileLoaded", BindingFlags.Instance | BindingFlags.NonPublic);
+                Check(PumpUntil(delegate { return (bool)loaded.GetValue(video); }, 10000), "audio-only file never loaded");
+                Check(!missing(), "audio-only file reported as missing video output");
+                // 关闭播放器：内核转到后台销毁，旧渲染宿主等销毁完成后才在界面线程释放
+                video.Visible = false;
+                Check(field.GetValue(video) == null, "engine still referenced after the player closed");
+                Check(PumpUntil(delegate { return MpvShutdown.Pending == 0; }, 5000), "background destroy never finished");
+                Check(PumpUntil(delegate { return video.Controls.Count == 0; }, 2000), "old video host was not released after destroy");
+                host.Hide();
+            }
+            Check(MpvShutdown.WaitAll(1000), "player disposal left an engine behind");
+        }
+
+        private static bool EngineFlag(object control, string property)
+        {
+            object engine = control.GetType().GetField("engine", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(control);
+            if (engine == null) return false;
+            object[] args = { property, false };
+            bool ok = (bool)engine.GetType().GetMethod("TryGetFlag").Invoke(engine, args);
+            return ok && (bool)args[1];
+        }
+
+        private static void MusicSilencedWhenUnreachable()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string song = WriteSilence("long-song.wav", 8);
+            string missing = Path.Combine(root, "deleted-song.wav");
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+            {
+                host.Controls.Add(mini);
+                host.Controls.Add(player);
+                host.Show();
+                player.Open(new List<string> { song, missing }, 0);
+                Check(PumpUntil(delegate { return !EngineFlag(player, "idle-active") && !EngineFlag(player, "pause"); }, 10000), "full player never started");
+                player.StepFromMiniPlayer(1);   // 下一首已被删除
+                Check(PumpUntil(delegate { return EngineFlag(player, "idle-active"); }, 5000), "previous song kept playing after switching to a missing file");
+                player.Visible = false;
+                mini.LoadPlaylist(new List<string> { song }, "回归", "regression", 0);
+                Check(PumpUntil(delegate { return !EngineFlag(mini, "pause") && !EngineFlag(mini, "idle-active"); }, 10000), "mini player never started");
+                mini.PauseOwnPlayback();
+                Check(PumpUntil(delegate { return EngineFlag(mini, "pause"); }, 5000), "hidden mini player kept playing");
+                mini.Stop();
+                host.Hide();
+            }
+        }
+
+        private static void TextSafety()
+        {
+            // 合法 UTF-8、带 BOM 的 UTF-8、UTF-16 与合法的系统编码文本都能无损往返，可以编辑。
+            foreach (Encoding encoding in new Encoding[] { new UTF8Encoding(false), new UTF8Encoding(true), Encoding.Unicode })
+            {
+                string ok = WriteText("roundtrip.txt", "中文 abc\r\n第二行", encoding);
+                Check(TextPreview.Read(ok, CancellationToken.None).ReadOnlyReason == null, "lossless " + encoding.WebName + " opened read-only");
+            }
+            string ansi = WriteText("roundtrip-ansi.txt", Encoding.Default.GetString(Encoding.Default.GetBytes("中文ABC")), Encoding.Default);
+            Check(TextPreview.Read(ansi, CancellationToken.None).ReadOnlyReason == null, "lossless code page text opened read-only");
+            // 带 UTF-8 BOM 但内容含非法字节：解码会替换字符，必须只读。
+            string bomBroken = Path.Combine(root, "bom-broken.txt");
+            File.WriteAllBytes(bomBroken, new byte[] { 0xEF, 0xBB, 0xBF, 0x61, 0xFF, 0xFE, 0x62 });
+            Check(TextPreview.Read(bomBroken, CancellationToken.None).ReadOnlyReason != null, "lossy BOM text is editable");
+            // 不是 UTF-8、系统编码也无法表示的字节序列（如 GBK 下的 0x80/0xFF）：必须只读。
+            string legacyBroken = Path.Combine(root, "legacy-broken.txt");
+            File.WriteAllBytes(legacyBroken, new byte[] { 0x41, 0xFF, 0x80, 0x42, 0x81 });
+            TextPreview broken = TextPreview.Read(legacyBroken, CancellationToken.None);
+            bool exact = TextPreview.RoundTrips(File.ReadAllBytes(legacyBroken), broken.Content, broken.Encoding);
+            Check(exact == (broken.ReadOnlyReason == null), "read-only flag disagrees with round trip");
+            if (Encoding.Default.CodePage == 936) Check(broken.ReadOnlyReason != null, "lossy GBK text is editable");
+            // 换行：混用才提示。
+            Check(TextPreview.HasMixedNewlines("a\r\nb\nc") && TextPreview.HasMixedNewlines("a\rb\nc")
+                && !TextPreview.HasMixedNewlines("a\r\nb\r\nc") && !TextPreview.HasMixedNewlines("a\nb\n"), "mixed newline detection");
+            string mixed = WriteText("mixed.csv", "h1,h2\r\n\"x\ny\",z\r\n", new UTF8Encoding(false));
+            Check(TextPreview.Read(mixed, CancellationToken.None).MixedNewlines, "mixed newline file not flagged");
+            // 写入失败（只读目标）：原文件内容不变，不留临时文件或备份。
+            string locked = WriteText("locked.txt", "original", new UTF8Encoding(false));
+            File.SetAttributes(locked, FileAttributes.ReadOnly);
+            try
+            {
+                Check(TextPreview.Read(locked, CancellationToken.None).ReadOnlyReason != null,
+                    "read-only file opened editable");
+                bool failed = false;
+                try { TextPreview.Write(locked, "changed", new UTF8Encoding(false)); }
+                catch (UnauthorizedAccessException) { failed = true; }
+                catch (IOException) { failed = true; }
+                Check(failed && File.ReadAllText(locked) == "original", "read-only target was modified");
+            }
+            finally { File.SetAttributes(locked, FileAttributes.Normal); }
+            TextPreview.Write(locked, "saved", new UTF8Encoding(false));
+            Check(File.ReadAllText(locked) == "saved", "save after unlock failed");
+            Check(Directory.GetFiles(root, ".am-*").Length == 0, "temporary or backup file left behind");
+        }
+
         private static void TextBounds()
         {
             string path = WriteText("large.txt", new string('x', TextPreview.MaxCharacters + 1), new UTF8Encoding(false));
@@ -362,6 +589,41 @@ namespace AppManager
                 return box.Text;
             }
         }
+        private static void MarkdownHostile()
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            // 每层引用/链接都会递归：没有上限时这些输入会把调用栈压穿，进程直接退出。
+            string quotes = new string('>', 100000) + " deep";
+            Check(MarkdownRtf.Render(quotes, 9000).Contains("deep"), "deep quote lost its text");
+            StringBuilder links = new StringBuilder();
+            for (int i = 0; i < 20000; i++) links.Append('[');
+            links.Append("core");
+            for (int i = 0; i < 20000; i++) links.Append("](u)");
+            Check(MarkdownRtf.Render(links.ToString(), 9000).Contains("core"), "deep link lost its text");
+            StringBuilder nested = new StringBuilder();   // 不超过长度上限，专门走嵌套深度上限
+            for (int i = 0; i < 1000; i++) nested.Append('[');
+            nested.Append("mid");
+            for (int i = 0; i < 1000; i++) nested.Append("](u)");
+            Check(nested.Length < MarkdownRtf.MaxInlineLength && MarkdownRtf.Render(nested.ToString(), 9000).Contains("mid"), "nested link lost its text");
+            StringBuilder lines = new StringBuilder();
+            for (int depth = 1; depth <= MarkdownRtf.MaxBlockDepth + 8; depth++)
+                lines.Append(new string('>', depth)).Append(" level").Append(depth).Append('\n');
+            Check(MarkdownRtf.Render(lines.ToString(), 9000).Contains("level" + (MarkdownRtf.MaxBlockDepth + 8)), "text beyond depth limit dropped");
+            // 未闭合的起始符：每个都会扫描到行尾，超长段落必须跳过行内解析。
+            StringBuilder emphasis = new StringBuilder();
+            for (int i = 0; i < 30000; i++) emphasis.Append("*a [b ");
+            MarkdownRtf.Render(emphasis.ToString(), 9000);
+            Check(watch.ElapsedMilliseconds < 8000, "hostile markdown took " + watch.ElapsedMilliseconds + " ms");
+            using (CancellationTokenSource cancel = new CancellationTokenSource())
+            {
+                cancel.Cancel();
+                bool canceled = false;
+                try { MarkdownRtf.Render("# a\n\nb\n", 9000, cancel.Token); }
+                catch (OperationCanceledException) { canceled = true; }
+                Check(canceled, "markdown render ignored cancellation");
+            }
+        }
+
         private static void MarkdownRendering()
         {
             string text = RenderedText("# 标题 #\n\n**粗体** *斜体* ~~删除~~ `a{b}\\c` [链接](http://x) ![图](a.png)\n"
@@ -422,6 +684,14 @@ namespace AppManager
                 Pump(delegate { return !((bool)Field(viewer, "loading")); });
                 Console.WriteLine("  256K markdown preview load/display: " + elapsed.ElapsedMilliseconds + " ms");
                 Check(markdown.TextLength > 0, "large markdown preview empty");
+                string resizeMd = WriteText("resize.md", "# 标题\n\n正文", new UTF8Encoding(false));
+                viewer.Open(new List<string> { resizeMd }, 0);
+                Pump(delegate { return !((bool)Field(viewer, "loading")); });
+                int renderedWidth = (int)Field(viewer, "renderedWidth");
+                viewer.Width -= 180;
+                Check(PumpUntil(delegate { return (int)Field(viewer, "renderedWidth") != renderedWidth; }, 10000),
+                    "markdown resize render did not finish");
+                Check(markdown.Text.Contains("标题"), "markdown resize lost content");
                 viewer.ClosePreview();
             }
         }
@@ -447,7 +717,7 @@ namespace AppManager
                             "bytes differ: " + encoding.WebName + " " + (newline == "\n" ? "LF" : "CRLF"));
                         Check(!(bool)Field(viewer, "dirty") && !Shown((Control)Field(viewer, "saveButton")), "saved state");
                     }
-                Check(Directory.GetFiles(root, ".save.txt.*").Length == 0, "temporary file left behind");
+                Check(Directory.GetFiles(root, ".am-*").Length == 0, "temporary file left behind");
                 string truncatedPath = WriteText("huge.txt", new string('x', TextPreview.MaxCharacters + 1), new UTF8Encoding(false));
                 viewer.Open(new List<string> { truncatedPath }, 0);
                 Pump(delegate { return !((bool)Field(viewer, "loading")); });
@@ -466,6 +736,40 @@ namespace AppManager
             byte[] result = new byte[a.Length + b.Length];
             Buffer.BlockCopy(a, 0, result, 0, a.Length); Buffer.BlockCopy(b, 0, result, a.Length, b.Length);
             return result;
+        }
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateHardLink(string link, string source, IntPtr security);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateSymbolicLink(string link, string target, int flags);
+
+        /// <summary>链接感知保存：硬链接就地重写、符号链接写到最终目标、原文件缺失时直接落位（另存为）。</summary>
+        private static void TextLinks()
+        {
+            // 硬链接：就地重写，其它名字同步看到新内容
+            string original = WriteText("link-src.txt", "old", new UTF8Encoding(false));
+            string second = Path.Combine(root, "link-second.txt");
+            if (!CreateHardLink(second, original, IntPtr.Zero)) throw new Exception("hardlink fixture failed: " + Marshal.GetLastWin32Error());
+            TextPreview.Write(second, "new", new UTF8Encoding(false));
+            Check(File.ReadAllText(original) == "new", "hardlink broken by save");
+            Check(File.ReadAllText(second) == "new", "hardlink source not updated");
+            Check(Directory.GetFiles(root, ".am-*").Length == 0, "in-place save left backup");
+            // 符号链接：写入解析到最终目标，链接本身保留
+            string linkTarget = WriteText("link-target.txt", "old", new UTF8Encoding(false));
+            string sym = Path.Combine(root, "link-sym.txt");
+            // flags：0 = 文件符号链接；2 = 允许非管理员（开发者模式）
+            if (CreateSymbolicLink(sym, linkTarget, 0) || CreateSymbolicLink(sym, linkTarget, 2))
+            {
+                TextPreview.Write(sym, "new", new UTF8Encoding(false));
+                Check(File.ReadAllText(linkTarget) == "new", "symlink target not updated");
+                Check((File.GetAttributes(sym) & FileAttributes.ReparsePoint) != 0, "symlink replaced by a regular file");
+            }
+            else Console.WriteLine("  skipped: symbolic link creation not permitted");
+            // 原文件不存在：直接落位（供查看器「另存为」使用）
+            string missing = Path.Combine(root, "missing.txt");
+            TextPreview.Write(missing, "created", new UTF8Encoding(false));
+            Check(File.ReadAllText(missing) == "created", "write to missing path failed");
         }
         private static void ViewerNavigation()
         {
@@ -583,6 +887,95 @@ namespace AppManager
             return File.Exists(tar) && File.Exists(Path.Combine(Environment.SystemDirectory, "archiveint.dll")) ? tar : null;
         }
 
+        /// <summary>4-9：EOCD 预读条目数（含 ZIP64 与注释里的假签名）；声明超限的 zip 改走流式；耗时预算截断。</summary>
+        private static void ArchiveLimits()
+        {
+            MethodInfo declared = typeof(ArchivePreview).GetMethod("ZipDeclaredEntries", BindingFlags.NonPublic | BindingFlags.Static);
+            Func<string, long> declaredEntries = delegate(string p) { return (long)declared.Invoke(null, new object[] { p }); };
+
+            // 普通 zip 读到真实条目数；空 zip 为 0
+            string path = MakeZip("limits.zip", null, ArchiveSample);
+            Check(declaredEntries(path) == 8, "declared entries of sample zip");
+            string empty = Path.Combine(root, "empty.zip");
+            if (File.Exists(empty)) File.Delete(empty);
+            using (FileStream s = new FileStream(empty, FileMode.CreateNew))
+            using (ZipArchive zip = new ZipArchive(s, ZipArchiveMode.Create)) { }
+            Check(declaredEntries(empty) == 0, "declared entries of empty zip");
+
+            // 注释里藏一个假 EOCD（声称 999 条）：预读必须仍按真实记录返回
+            byte[] eocd = File.ReadAllBytes(empty);   // 22 字节、无注释
+            List<byte> crafted = new List<byte>();
+            byte[] realEocd = (byte[])eocd.Clone();
+            realEocd[20] = 30;   // 注释长度 30
+            crafted.AddRange(realEocd);
+            byte[] fakeEocd = new byte[22];
+            fakeEocd[0] = 0x50; fakeEocd[1] = 0x4B; fakeEocd[2] = 0x05; fakeEocd[3] = 0x06;
+            fakeEocd[10] = 0xE7; fakeEocd[11] = 0x03;   // 999 条
+            crafted.AddRange(fakeEocd);
+            crafted.AddRange(new byte[8]);
+            string commented = Path.Combine(root, "commented.zip");
+            File.WriteAllBytes(commented, crafted.ToArray());
+            Check(declaredEntries(commented) == 0, "fake EOCD in comment must not win");
+
+            // ZIP64：EOCD 条目数 0xFFFF，真实条目数在 ZIP64 EOCD 记录里
+            byte[] record = new byte[56];
+            record[0] = 0x50; record[1] = 0x4B; record[2] = 0x06; record[3] = 0x06;
+            BitConverter.GetBytes((long)44).CopyTo(record, 4);        // 记录剩余长度
+            BitConverter.GetBytes((long)300000).CopyTo(record, 24);   // 本盘条目数
+            BitConverter.GetBytes((long)300000).CopyTo(record, 32);   // 条目总数
+            byte[] locator = new byte[20];
+            locator[0] = 0x50; locator[1] = 0x4B; locator[2] = 0x06; locator[3] = 0x07;
+            BitConverter.GetBytes((long)0).CopyTo(locator, 8);        // ZIP64 EOCD 在文件开头
+            BitConverter.GetBytes(1).CopyTo(locator, 16);             // 总磁盘数 1
+            byte[] zip64Eocd = (byte[])eocd.Clone();
+            zip64Eocd[8] = 0xFF; zip64Eocd[9] = 0xFF; zip64Eocd[10] = 0xFF; zip64Eocd[11] = 0xFF;
+            crafted.Clear();
+            crafted.AddRange(record); crafted.AddRange(locator); crafted.AddRange(zip64Eocd);
+            string zip64 = Path.Combine(root, "zip64.zip");
+            File.WriteAllBytes(zip64, crafted.ToArray());
+            Check(declaredEntries(zip64) == 300000, "ZIP64 declared entries");
+
+            // 声明条目数超限：改走 libarchive 流式读取，真实条目照常列出
+            if (SystemTar() == null) { Console.WriteLine("  skipped: system libarchive missing, streaming fallback untested"); }
+            else
+            {
+                byte[] big = File.ReadAllBytes(path);   // limits.zip，无注释
+                int eocdAt = big.Length - 22;
+                Check(BitConverter.ToUInt32(big, eocdAt) == 0x06054b50u, "sample zip EOCD located");
+                byte[] record2 = new byte[56];
+                record2[0] = 0x50; record2[1] = 0x4B; record2[2] = 0x06; record2[3] = 0x06;
+                BitConverter.GetBytes((long)44).CopyTo(record2, 4);
+                BitConverter.GetBytes((long)300000).CopyTo(record2, 24);
+                BitConverter.GetBytes((long)300000).CopyTo(record2, 32);
+                BitConverter.GetBytes((long)BitConverter.ToUInt32(big, eocdAt + 12)).CopyTo(record2, 40);   // 中央目录大小
+                BitConverter.GetBytes((long)BitConverter.ToUInt32(big, eocdAt + 16)).CopyTo(record2, 48);   // 中央目录偏移
+                byte[] locator2 = new byte[20];
+                locator2[0] = 0x50; locator2[1] = 0x4B; locator2[2] = 0x06; locator2[3] = 0x07;
+                BitConverter.GetBytes((long)eocdAt).CopyTo(locator2, 8);
+                BitConverter.GetBytes(1).CopyTo(locator2, 16);
+                big[eocdAt + 8] = 0xFF; big[eocdAt + 9] = 0xFF; big[eocdAt + 10] = 0xFF; big[eocdAt + 11] = 0xFF;
+                byte[] head = new byte[eocdAt];
+                Array.Copy(big, head, eocdAt);
+                List<byte> huge = new List<byte>();
+                huge.AddRange(head); huge.AddRange(record2); huge.AddRange(locator2);
+                huge.AddRange(new List<byte>(big).GetRange(eocdAt, big.Length - eocdAt));
+                string hugePath = Path.Combine(root, "huge.zip");
+                File.WriteAllBytes(hugePath, huge.ToArray());
+                ArchivePreview p = ArchivePreview.Read(hugePath, CancellationToken.None);
+                Check(p.FileCount == 7 && p.FolderCount == 4, "huge declared zip streams real entries: " + p.FileCount + "/" + p.FolderCount);
+            }
+
+            // 耗时预算：预算耗尽后截断并说明
+            TimeSpan oldBudget = ArchivePreview.ReadBudget;
+            ArchivePreview.ReadBudget = TimeSpan.FromTicks(-1);
+            try
+            {
+                ArchivePreview p = ArchivePreview.Read(path, CancellationToken.None);
+                Check(p.Truncated && p.Warning != null && p.Warning.IndexOf("耗时") >= 0, "budget truncates with warning");
+            }
+            finally { ArchivePreview.ReadBudget = oldBudget; }
+        }
+
         private static void RunTar(string tar, string arguments)
         {
             ProcessStartInfo info = new ProcessStartInfo(tar, arguments) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
@@ -651,6 +1044,10 @@ namespace AppManager
             byte[] noise = new byte[4096]; new Random(7).NextBytes(noise); File.WriteAllBytes(junk, noise);
             try { ArchivePreview.Read(junk, CancellationToken.None); throw new Exception("junk rar accepted"); }
             catch (InvalidDataException ex) { Check(ex.Message == "无法识别的压缩包格式", "junk message: " + ex.Message); }
+            // mtree 清单伪装成 .tar：不能被当成压缩包解析（mtree 读取器会按 contents= 访问外部/网络路径）
+            string mtreeTarget = WriteText("mtree-target.txt", "x", Encoding.ASCII);
+            string mtree = WriteText("mtree.tar", "#mtree\n./probe.txt type=file size=1 contents=" + mtreeTarget.Replace('\\', '/') + "\n", Encoding.ASCII);
+            Expect<InvalidDataException>(delegate { ArchivePreview.Read(mtree, CancellationToken.None); });
             // 0 字节的 .zip：libarchive 视为空归档，查看器显示「压缩包为空」
             string emptyZip = WriteText("empty.zip", "", Encoding.ASCII);
             ArchivePreview empty = ArchivePreview.Read(emptyZip, CancellationToken.None);

@@ -89,7 +89,11 @@ namespace AppManager
             if (history.SelectedItems.Count != 1) { status.Text = "请先选择最新一条事务。"; return; }
             long id = (long)history.SelectedItems[0].Tag;
             if (MessageBox.Show(this, "撤销事务 " + id + " 的配置与关系变更？\n撤销会保留新记录；磁盘文件的位置与内容需通过布局备份恢复。", "撤销确认", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
-            Work(delegate { database.Undo(id); return "已撤销事务 " + id; }, true);
+            Work(delegate
+            {
+                DesktopOrganizer.RunExclusive(delegate { database.Undo(id); });
+                return "已撤销事务 " + id;
+            }, true);
         }
         private void Restore()
         {
@@ -98,7 +102,11 @@ namespace AppManager
                 if (dialog.ShowDialog(this) != DialogResult.OK) return;
                 string path = dialog.FileName;
                 if (MessageBox.Show(this, "将恢复所选数据库中的配置和关系。\n恢复前会自动保留当前数据库完整副本；磁盘文件保持现有状态。", "恢复确认", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
-                Work(delegate { return "恢复完成，原数据保留在：" + database.Restore(path); }, true);
+                Work(delegate
+                {
+                    string safety = DesktopOrganizer.RunExclusive<string>(delegate { return database.Restore(path); });
+                    return "恢复完成，原数据保留在：" + safety;
+                }, true);
             }
         }
         private void Export()

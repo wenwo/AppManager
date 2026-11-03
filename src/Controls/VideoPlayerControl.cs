@@ -47,6 +47,8 @@ namespace AppManager.Controls
         private double duration;        // 当前媒体时长（秒），0 表示未知
         private double position;        // 当前播放位置（秒）
         private DateTime loadDeadline;  // 打开后超过该时刻仍未加载成功视为失败
+        private DateTime voCheckAt;     // 加载完成后到该时刻仍在播放却没有画面，视为视频输出失败
+        private bool voChecked;         // 当前文件已复核过视频输出
         private readonly Timer pollTimer = new Timer { Interval = 400 };
 
         // 界面按钮悬停/按下态：-1 无；0 上一张 1 播放/暂停 2 下一张 3 返回 4 静音
@@ -184,6 +186,7 @@ namespace AppManager.Controls
         {
             loadFailed = false;
             fileLoaded = false;
+            voChecked = false;
             eofReached = false;
             duration = 0;
             position = 0;
@@ -238,6 +241,7 @@ namespace AppManager.Controls
                 bool loaded = false;
                 bool endError = false;
                 p.DrainEvents(ref loaded, ref endError);
+                if (loaded && !fileLoaded) voCheckAt = DateTime.UtcNow.AddSeconds(3);
                 if (loaded) fileLoaded = true;
                 if (endError) { MarkFailed("无法播放此视频（解码失败）"); return; }
                 if (!fileLoaded)
@@ -259,6 +263,17 @@ namespace AppManager.Controls
                     if (!p.TryGetFlag("pause", out paused)) paused = true;
                     playing = !paused && !eofReached;
                     if (eofReached && duration > 0) position = duration;   // 停在终点，按钮回到「播放」
+                    // 声音已在走、加载后 3 秒仍没有画面：显卡后端起不来，明确提示而不是只放声音。
+                    if (!voChecked && playing && position >= 1 && DateTime.UtcNow > voCheckAt)
+                    {
+                        voChecked = true;
+                        if (p.VideoOutputMissing())
+                        {
+                            Paths.LogError(new InvalidOperationException("视频输出未能初始化（vo=" + MpvEngine.VideoOutputs + "）"));
+                            MarkFailed("无法显示画面：视频输出初始化失败，可尝试更新显卡驱动");
+                            return;
+                        }
+                    }
                 }
             }
             catch { }
@@ -450,13 +465,15 @@ namespace AppManager.Controls
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            Capture = false;
-            if (volDrag) { volDrag = false; return; }
-            if (seeking) { seeking = false; return; }
+            bool dragged = volDrag || seeking;
+            if (volDrag) { SetVolumeByX(e.X); volDrag = false; }
+            else if (seeking) { SeekTo(e.X); seeking = false; }
+            if (dragged) { Capture = false; return; }
             if (e.Button == MouseButtons.Left && press >= 0)
             {
                 int btn = press;
                 press = -1;
+                Capture = false;
                 Invalidate();
                 if (HitButton(e.Location) == btn)
                 {
@@ -469,7 +486,21 @@ namespace AppManager.Controls
                         case 4: ToggleMute(); break;
                     }
                 }
+                return;
             }
+            Capture = false;
+        }
+
+        /// <summary>鼠标捕获被系统/其它窗口抢走时结束拖动，避免进度条一直停在拖动态。</summary>
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (Capture) return;
+            if (!volDrag && !seeking && press < 0) return;
+            volDrag = false;
+            seeking = false;
+            press = -1;
+            Invalidate();
         }
 
         /// <summary>视频区单击：挂起到双击间隔，仍无第二击才暂停/播放（双击由 OnMouseDoubleClick 接管全屏）。</summary>
@@ -538,8 +569,27 @@ namespace AppManager.Controls
         /// <summary>释放 mpv 内核与宿主窗口；下次播放由 EnsureEngine 惰性重建（mpvUnavailable 语义不变）。</summary>
         private void ReleaseEngine()
         {
-            if (mpv != null) { try { mpv.Dispose(); } catch { } mpv = null; }
-            if (host != null) { Controls.Remove(host); host.Dispose(); host = null; }
+            MpvEngine engine = mpv;
+            VideoHost oldHost = host;
+            mpv = null;
+            host = null;
+            if (oldHost == null) { MpvShutdown.Destroy(engine, null); return; }
+            // mpv 要求 wid 窗口在实例销毁前一直有效：先隐藏，内核在后台销毁完再回界面线程释放宿主。
+            oldHost.Visible = false;
+            MpvShutdown.Destroy(engine, delegate { RetireHost(oldHost); });
+        }
+
+        /// <summary>内核销毁后释放旧宿主（可在任意线程调用）；控件已释放时宿主已随父控件销毁，无需处理。</summary>
+        private void RetireHost(VideoHost oldHost)
+        {
+            Action retire = delegate
+            {
+                if (!IsDisposed && Controls.Contains(oldHost)) Controls.Remove(oldHost);
+                oldHost.Dispose();
+            };
+            if (!InvokeRequired) { retire(); return; }
+            try { BeginInvoke(retire); }
+            catch (InvalidOperationException) { }   // 句柄已销毁（含 ObjectDisposedException）
         }
 
         protected override void Dispose(bool disposing)
@@ -550,7 +600,9 @@ namespace AppManager.Controls
                 clickTimer.Stop();
                 pollTimer.Dispose();
                 clickTimer.Dispose();
-                if (mpv != null) { mpv.Dispose(); mpv = null; }
+                ReleaseEngine();
+                // 子控件（含待释放的旧宿主窗口）随 base.Dispose 销毁，必须等内核先销毁完；退出时最多等 3 秒。
+                MpvShutdown.WaitAll(3000);
             }
             base.Dispose(disposing);
         }
@@ -891,12 +943,15 @@ namespace AppManager.Controls
         {
             private const string Dll = "libmpv-2.dll";
             private const int FormatFlag = 3;
+            private const int FormatInt64 = 4;
             private const int FormatDouble = 5;
+            private const int EventStartFile = 6;
             private const int EventEndFile = 7;
             private const int EventFileLoaded = 8;
             private const int EndFileReasonError = 4;
 
             private IntPtr ctx;
+            private bool awaitingStart;   // loadfile 之后、START_FILE 之前到达的事件属于上一首
 
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
             private static extern IntPtr mpv_create();
@@ -910,6 +965,12 @@ namespace AppManager.Controls
             private static extern int mpv_get_property_double(IntPtr ctx, string name, int format, ref double data);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
             private static extern int mpv_get_property_flag(IntPtr ctx, string name, int format, ref int data);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
+            private static extern int mpv_get_property_int64(IntPtr ctx, string name, int format, ref long data);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+            private static extern IntPtr mpv_get_property_string(IntPtr ctx, string name);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+            private static extern void mpv_free(IntPtr data);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
             private static extern int mpv_command(IntPtr ctx, IntPtr args);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -938,50 +999,51 @@ namespace AppManager.Controls
                 public int PlaylistInsertNumEntries;
             }
 
+            /// <summary>视频输出：gpu 起不来时由 mpv 在同一实例内回退到 direct3d。
+            /// 渲染后端在首次加载文件时才真正初始化，initialize 成功不代表画面可用，播放后另由 vo-configured 复核。</summary>
+            internal const string VideoOutputs = "gpu,direct3d";
+
             /// <summary>创建并初始化内核；wid 为渲染宿主窗口句柄。失败时抛异常（DLL 缺失/选项或初始化失败）。</summary>
             public MpvEngine(IntPtr wid)
             {
-                // vo=gpu 在部分显卡驱动/远程桌面下初始化失败：按候选顺序回退渲染后端
-                string[] voCandidates = { "gpu", "win" };
-                Exception last = null;
-                for (int vi = 0; vi < voCandidates.Length; vi++)
+                ctx = mpv_create();
+                if (ctx == IntPtr.Zero) throw new InvalidOperationException("mpv_create 失败");
+                try
                 {
-                    ctx = mpv_create();
-                    if (ctx == IntPtr.Zero) { last = new InvalidOperationException("mpv_create 失败"); continue; }
-                    try
-                    {
-                        // 绑定渲染窗口（必须在 initialize 之前设置），并关闭所有自带交互/界面：
-                        // 鼠标键盘输入全部由本控件接管，OSC/OSD 不显示
-                        if (SetOption("wid", wid.ToInt64().ToString(CultureInfo.InvariantCulture)) < 0)
-                            throw new InvalidOperationException("mpv 绑定渲染窗口失败");
-                        SetOption("vo", voCandidates[vi]);
-                        SetOption("hwdec", "auto-safe");
-                        SetOption("keep-open", "yes");
-                        SetOption("idle", "yes");
-                        SetOption("terminal", "no");
-                        SetOption("config", "no");
-                        SetOption("osc", "no");
-                        SetOption("osd-level", "0");
-                        SetOption("input-default-bindings", "no");
-                        SetOption("input-vo-keyboard", "no");
-                        SetOption("input-cursor", "no");
-                        SetOption("input-media-keys", "no");
-                        int r = mpv_initialize(ctx);
-                        if (r < 0) throw new InvalidOperationException("mpv_initialize 失败(vo=" + voCandidates[vi] + "): " + r);
-                        mpv_request_log_messages(ctx, "no");
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        last = ex;
-                        mpv_terminate_destroy(ctx);
-                        ctx = IntPtr.Zero;
-                    }
+                    // 绑定渲染窗口（必须在 initialize 之前设置），并关闭所有自带交互/界面：
+                    // 鼠标键盘输入全部由本控件接管，OSC/OSD 不显示
+                    if (SetOption("wid", wid.ToInt64().ToString(CultureInfo.InvariantCulture)) < 0)
+                        throw new InvalidOperationException("mpv 绑定渲染窗口失败");
+                    if (SetOption("vo", VideoOutputs) < 0)
+                        throw new InvalidOperationException("mpv 不支持视频输出 " + VideoOutputs);
+                    SetOption("hwdec", "auto-safe");
+                    SetOption("keep-open", "yes");
+                    SetOption("idle", "yes");
+                    SetOption("terminal", "no");
+                    SetOption("config", "no");
+                    SetOption("osc", "no");
+                    SetOption("osd-level", "0");
+                    SetOption("input-default-bindings", "no");
+                    SetOption("input-vo-keyboard", "no");
+                    SetOption("input-cursor", "no");
+                    SetOption("input-media-keys", "no");
+                    int r = mpv_initialize(ctx);
+                    if (r < 0) throw new InvalidOperationException("mpv_initialize 失败(vo=" + VideoOutputs + "): " + r);
+                    mpv_request_log_messages(ctx, "no");
                 }
-                throw last ?? new InvalidOperationException("mpv 初始化失败");
+                catch
+                {
+                    mpv_terminate_destroy(ctx);
+                    ctx = IntPtr.Zero;
+                    throw;
+                }
             }
 
-            public void LoadFile(string path) { Command("loadfile", path); }
+            public void LoadFile(string path)
+            {
+                awaitingStart = true;
+                Command("loadfile", path);
+            }
             public void SetPause(bool paused) { SetString("pause", paused ? "yes" : "no"); }
             public void SetVolume(int volume)
             {
@@ -1010,6 +1072,35 @@ namespace AppManager.Controls
                 return true;
             }
 
+            /// <summary>
+            /// 当前文件有视频轨，但视频输出没有配置起来（显卡驱动/后端初始化失败时 mpv 会撤掉视频轨，只剩声音）。
+            /// 视频轨按 track-list 判断，不看当前选中轨道：初始化失败的视频轨会被取消选中。
+            /// </summary>
+            public bool VideoOutputMissing()
+            {
+                if (ctx == IntPtr.Zero) return false;
+                // 视频输出创建失败时 mpv 没有 VO 对象，vo-configured 属性不可用，同样按“没有画面”处理。
+                bool configured;
+                if (TryGetFlag("vo-configured", out configured) && configured) return false;
+                long count = 0;
+                if (mpv_get_property_int64(ctx, "track-list/count", FormatInt64, ref count) < 0) return false;
+                for (int i = 0; i < count && i < 64; i++)
+                {
+                    string prefix = "track-list/" + i.ToString(CultureInfo.InvariantCulture) + "/";
+                    bool albumArt;
+                    if (GetString(prefix + "type") == "video" && !(TryGetFlag(prefix + "albumart", out albumArt) && albumArt)) return true;
+                }
+                return false;
+            }
+
+            private string GetString(string name)
+            {
+                IntPtr p = mpv_get_property_string(ctx, name);
+                if (p == IntPtr.Zero) return null;
+                try { return Marshal.PtrToStringAnsi(p); }
+                finally { mpv_free(p); }
+            }
+
             /// <summary>排空事件队列：识别文件加载完成与解码失败（END_FILE reason=ERROR）。</summary>
             public void DrainEvents(ref bool fileLoaded, ref bool error)
             {
@@ -1020,6 +1111,8 @@ namespace AppManager.Controls
                     if (evp == IntPtr.Zero) return;
                     MpvEvent ev = (MpvEvent)Marshal.PtrToStructure(evp, typeof(MpvEvent));
                     if (ev.EventId == 0) return;   // MPV_EVENT_NONE：队列已空
+                    if (ev.EventId == EventStartFile) { awaitingStart = false; continue; }
+                    if (awaitingStart) continue;   // 上一首遗留的 FILE_LOADED/END_FILE 不能算到新文件上
                     if (ev.EventId == EventFileLoaded) fileLoaded = true;
                     else if (ev.EventId == EventEndFile && ev.Data != IntPtr.Zero)
                     {

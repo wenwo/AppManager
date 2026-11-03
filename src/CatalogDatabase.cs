@@ -77,7 +77,7 @@ namespace AppManager
                     db.Execute("DELETE FROM metadata WHERE key='catalog_invalid'");
                     db.Execute("COMMIT");
                 }
-                catch { db.Execute("ROLLBACK"); LoadBaseline(db); throw; }
+                catch { db.Rollback(); LoadBaseline(db); throw; }
             }
         }
 
@@ -109,7 +109,7 @@ namespace AppManager
                     db.Execute("COMMIT");
                     config.DatabaseRevision = revision;
                 }
-                catch { db.Execute("ROLLBACK"); LoadBaseline(db); throw; }
+                catch { db.Rollback(); LoadBaseline(db); throw; }
             }
         }
 
@@ -118,6 +118,7 @@ namespace AppManager
             using (Sqlite.Statement read = db.Prepare("SELECT c.metadata,c.kind,c.active,g.key,c.size,c.modified FROM catalog c LEFT JOIN groups g ON g.id=c.base_group WHERE c.item_id=?"))
             using (Sqlite.Statement relations = db.Prepare("SELECT r.section,g.key,r.ordinal,r.item_id FROM records r LEFT JOIN groups g ON g.id=r.group_id WHERE r.item_id=? OR r.item_id=(SELECT id FROM entries WHERE key=?) ORDER BY CASE WHEN r.item_id=? THEN 0 ELSE 1 END"))
             using (Sqlite.Statement memberships = db.Prepare("SELECT g.key,a.resource FROM added_items a LEFT JOIN groups g ON g.id=a.group_id WHERE a.item_id=?"))
+            using (Sqlite.Statement sectionOf = db.Prepare("SELECT r.section FROM records r JOIN groups g ON g.id=r.group_id WHERE g.key=? AND r.section IN ('ResourceCategories','CustomCategories') LIMIT 1"))
             using (Sqlite.Statement remove = db.Prepare("DELETE FROM listing WHERE item_id=?"))
             using (Sqlite.Statement insert = db.Prepare("INSERT OR IGNORE INTO listing(group_id,item_id,kind,hidden,rank,name,size,modified) VALUES(?,?,?,?,?,?,?,?)"))
             using (Sqlite.Statement setHidden = db.Prepare("UPDATE catalog SET hidden=? WHERE item_id=?"))
@@ -150,21 +151,22 @@ namespace AppManager
                         }
                     }
                     setHidden.Bind(isHidden, id); setHidden.Read();
-                    AddCategory(categories, primary, kind == 2 ? 2 : 0);
-                    if (!overridden)
+                    // 分类覆盖属于哪个模式：按覆盖目标分类本身判断（资源/软件），不能一律当作条目的展示模式。
+                    bool overrideResource = overridden ? IsResourceCategory(sectionOf, primary, kind == 2) : kind == 2;
+                    AddCategory(categories, primary, overrideResource ? 2 : 0);
+                    // 同一路径可同时登记在软件分类和资源分类（跨模式复制）：每条归属都要投影，不能只保留主分类。
+                    // 显式分类覆盖表示在该模式里「移动到分类」：只有同一模式下的原归属不再展示，
+                    // 另一模式的归属保持不变（在资源里移动不能让软件侧的分类跟着消失）。
+                    memberships.Bind(id);
+                    while (memberships.Read())
                     {
-                        // 同一路径可同时登记在软件分类和资源分类（跨模式复制）：每条归属都要投影，不能只保留主分类。
-                        // 显式分类覆盖表示「移动到分类」，原分类不再展示，只保留覆盖后的主分类与额外归属。
-                        memberships.Bind(id);
-                        while (memberships.Read())
-                        {
-                            string[] membership = memberships.Row();
-                            bool resource = membership[1] == "1";
-                            if (resource) resourceMember = true; else softwareMember = true;
-                            AddCategory(categories, membership[0], resource ? 2 : 0);
-                        }
-                        if (a.IsDesktop) AddCategory(categories, "快捷中心", kind == 2 ? 2 : 0);
+                        string[] membership = memberships.Row();
+                        bool resource = membership[1] == "1";
+                        if (overridden && resource == overrideResource) continue;
+                        if (resource) resourceMember = true; else softwareMember = true;
+                        AddCategory(categories, membership[0], resource ? 2 : 0);
                     }
+                    if (!overridden && a.IsDesktop) AddCategory(categories, "快捷中心", kind == 2 ? 2 : 0);
                     foreach (string cat in excluded) categories.Remove(cat);
                     // 集合成员必须仍属于父分类，集合关系自身保留，移回父分类后可恢复。
                     List<string> invalid = new List<string>();
@@ -210,14 +212,40 @@ namespace AppManager
                     db.Execute("BEGIN IMMEDIATE");
                     try
                     {
+                        long operation = NewOperation(db, "catalog.repair");
+                        db.Execute("UPDATE write_context SET operation_id=? WHERE id=1", operation);
                         UpdateAddedCatalog(db, affected);
                         RebuildListings(db, null, affected);
+                        db.Execute("UPDATE write_context SET operation_id=NULL WHERE id=1");
+                        int changes = Convert.ToInt32(db.Scalar("SELECT count(*) FROM changes WHERE operation_id=?", operation));
+                        if (changes == 0) db.Execute("DELETE FROM operations WHERE id=?", operation);
+                        else
+                        {
+                            revision++;
+                            db.Execute("UPDATE metadata SET value=? WHERE key='revision'", revision.ToString(CultureInfo.InvariantCulture));
+                        }
                         db.Execute("COMMIT");
+                        LoadBaseline(db);
                     }
-                    catch { db.Execute("ROLLBACK"); throw; }
+                    catch { db.Rollback(); throw; }
                 }
             }
             catch (Exception ex) { Paths.LogError(new IOException("归属投影修复失败，后续保存时会重建。", ex)); }
+        }
+
+        /// <summary>
+        /// 分类属于资源模式还是软件模式：内置名单直接判定，自定义分类看它登记在哪个分类列表；
+        /// 都判断不出时沿用条目的展示模式（fallback）。软件/资源分类不允许重名，结论唯一。
+        /// </summary>
+        private static bool IsResourceCategory(Sqlite.Statement sectionOf, string category, bool fallback)
+        {
+            if (string.IsNullOrEmpty(category)) return fallback;
+            if (Array.IndexOf(CategoryRules.ResourceBuiltIn, category) >= 0 || category == "全部资源") return true;
+            if (Array.IndexOf(CategoryRules.BuiltIn, category) >= 0 || category == "快捷中心" || category == "常用"
+                || category == "全部软件" || category == "全部文件") return false;
+            sectionOf.Bind(category);
+            if (!sectionOf.Read()) return fallback;
+            return sectionOf.Row()[0] == "ResourceCategories";
         }
 
         private static void AddCategory(Dictionary<string, int> categories, string category, int kind)
@@ -240,17 +268,24 @@ namespace AppManager
         }
 
         // 游标翻页，不使用深 OFFSET。name/id 为稳定次序，防止同名条目跨页重复或漏读。
-        internal CatalogPage Page(string category, bool resources, bool showHidden, string keyword, int limit, CatalogPage after, bool byName, bool descending, string sortColumn = null)
+        internal CatalogPage Page(string category, bool resources, bool showHidden, string keyword, int limit, CatalogPage after, bool byName, bool descending, string sortColumn = null, string[] extensions = null)
         {
             if (limit < 1 || limit > 500) throw new ArgumentOutOfRangeException("limit");
-            lock (gate)
+            bool search = !string.IsNullOrEmpty(keyword);
+            long categoryGroup = 0;
+            if (!search)
+            {
+                lock (gate)
+                {
+                    if (!groups.TryGetValue(category, out categoryGroup)) return new CatalogPage();
+                }
+            }
             using (Sqlite db = Open())
             {
                 CatalogPage result = new CatalogPage();
                 List<object> args = new List<object>();
                 string from;
                 string where;
-                bool search = !string.IsNullOrEmpty(keyword);
                 bool metadataSort = sortColumn == "size" || sortColumn == "time";
                 if (search)
                 {
@@ -262,13 +297,26 @@ namespace AppManager
                 }
                 else
                 {
-                    long group;
-                    if (!groups.TryGetValue(category, out group)) return result;
                     from = "listing l JOIN catalog c ON c.item_id=l.item_id";
                     where = "l.group_id=? AND " + (resources ? "l.kind=2" : "l.kind=0") + (showHidden ? "" : " AND l.hidden=0");
-                    args.Add(group);
+                    args.Add(categoryGroup);
                 }
-                result.Total = after == null ? Convert.ToInt32(db.Scalar("SELECT count(*) FROM " + (search ? "catalog c" : "listing l") + " WHERE " + where, args.ToArray())) : after.Total;
+                if (extensions != null && extensions.Length > 0)
+                {
+                    // 先按扩展名收窄再解包 XML：曲库等场景不需要把整个分类的条目都反序列化一遍。
+                    StringBuilder filter = new StringBuilder(" AND (");
+                    for (int i = 0; i < extensions.Length; i++)
+                    {
+                        if (i > 0) filter.Append(" OR ");
+                        filter.Append("c.metadata LIKE ?");
+                        args.Add("%" + extensions[i] + "\"%");
+                    }
+                    filter.Append(")");
+                    where += filter.ToString();
+                }
+                string countFrom = extensions != null && extensions.Length > 0
+                    ? from : (search ? "catalog c" : "listing l");
+                result.Total = after == null ? Convert.ToInt32(db.Scalar("SELECT count(*) FROM " + countFrom + " WHERE " + where, args.ToArray())) : after.Total;
                 string name = search ? "c.search_name" : "l.name";
                 string itemId = search ? "c.item_id" : "l.item_id";
                 string rank = metadataSort ? (search ? "c." : "l.") + (sortColumn == "size" ? "size" : "modified") : (search || byName ? "0" : "l.rank");
@@ -297,6 +345,60 @@ namespace AppManager
                 }
                 return result;
             }
+        }
+
+        /// <summary>
+        /// 集合侧边栏封面的批量查询：一次 GROUP BY 取每个集合按（名称, item_id）排序的首个成员（与 Page 的
+        /// 摘要次序一致），替代逐集合分页查询。imagesOnly 时先按图片扩展名收窄；返回集合键到成员的映射，
+        /// 空集合不出现在结果里。SQLite 恰好一个 MIN 聚合时裸列取达到最小值那一行的值。
+        /// </summary>
+        internal Dictionary<string, AppInfo> CollectionFirstMembers(IList<string> collectionKeys, bool showHidden, bool imagesOnly)
+        {
+            Dictionary<string, AppInfo> result = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+            if (collectionKeys == null || collectionKeys.Count == 0) return result;
+            StringBuilder ids = new StringBuilder();
+            lock (gate)
+            {
+                foreach (string key in collectionKeys)
+                {
+                    long id;
+                    if (!groups.TryGetValue(key, out id)) continue;
+                    if (ids.Length > 0) ids.Append(',');
+                    ids.Append(id);   // 内部自增 id，不是用户输入，直接拼接
+                }
+            }
+            if (ids.Length == 0) return result;
+            List<object> args = new List<object>();
+            string where = "l.group_id IN (" + ids + ") AND l.kind=2" + (showHidden ? "" : " AND l.hidden=0");
+            if (imagesOnly)
+            {
+                // 与 Page 的扩展名过滤同口径：先收窄再解包 XML
+                StringBuilder filter = new StringBuilder(" AND (");
+                string[] extensions = MediaRules.ImageExt;
+                for (int i = 0; i < extensions.Length; i++)
+                {
+                    if (i > 0) filter.Append(" OR ");
+                    filter.Append("c.metadata LIKE ?");
+                    args.Add("%" + extensions[i] + "\"%");
+                }
+                filter.Append(")");
+                where += filter.ToString();
+            }
+            using (Sqlite db = Open())
+            {
+                foreach (string[] row in db.Query(
+                    "SELECT gl.key,c.metadata,c.hidden,g.key,MIN(l.name || char(31) || printf('%020d', l.item_id)) FROM listing l"
+                    + " JOIN catalog c ON c.item_id=l.item_id LEFT JOIN groups g ON g.id=c.base_group JOIN groups gl ON gl.id=l.group_id"
+                    + " WHERE " + where + " GROUP BY l.group_id", args.ToArray()))
+                {
+                    AppInfo a = Unpack(row[1]);
+                    a.IsHidden = row[2] == "1";
+                    if (row[3] != null) a.Category = row[3];
+                    a.DatabaseKind = 2;
+                    result[row[0]] = a;
+                }
+            }
+            return result;
         }
 
         // 文件元数据分批索引，目录切换和分页不触发全分类同步读盘。
@@ -348,7 +450,7 @@ namespace AppManager
                             }
                         db.Execute("COMMIT");
                     }
-                    catch { db.Execute("ROLLBACK"); throw; }
+                    catch { db.Rollback(); throw; }
                 }
             }
         }

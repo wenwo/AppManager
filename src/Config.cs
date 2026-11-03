@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -8,11 +8,17 @@ namespace AppManager
 {
     internal static class SafeXml
     {
+        internal const long MaxXmlBytes = 128L * 1024 * 1024;
+
         public static XmlDocument Load(string filePath)
         {
+            FileInfo info = new FileInfo(filePath);
+            if (info.Length > MaxXmlBytes)
+                throw new InvalidDataException("XML 文件超过 128 MB 上限：" + filePath);
             XmlReaderSettings settings = new XmlReaderSettings();
             settings.DtdProcessing = DtdProcessing.Prohibit;
             settings.XmlResolver = null;
+            settings.MaxCharactersInDocument = MaxXmlBytes;
             using (XmlReader reader = XmlReader.Create(filePath, settings))
             {
                 XmlDocument doc = new XmlDocument();
@@ -65,11 +71,43 @@ namespace AppManager
 
         public static string LogFile { get { return Path.Combine(DataDir, "error.log"); } }
 
+        public static string RenameLogFile { get { return Path.Combine(DataDir, "rename.log"); } }
+
+        /// <summary>
+        /// 改名意图日志：磁盘改名前先记意图，资源库保存后再记结果；进程在两者之间中断时，
+        /// 最后一条「改名」行就是未完成的意图（磁盘已改、记录未迁移）。绝不抛出。
+        /// </summary>
+        public static void LogRenameIntent(string stage, string oldPath, string newPath)
+        {
+            try
+            {
+                // 与 error.log 同一口径：只保留最近 5MB；轮转失败也不能影响主流程。
+                FileInfo log = new FileInfo(RenameLogFile);
+                if (log.Exists && log.Length >= 5L * 1024 * 1024)
+                {
+                    string previous = RenameLogFile + ".1";
+                    try { if (File.Exists(previous)) File.Delete(previous); } catch { }
+                    try { File.Move(RenameLogFile, previous); } catch { }
+                }
+                File.AppendAllText(RenameLogFile, string.Format("[{0:yyyy-MM-dd HH:mm:ss}] {1}：{2} => {3}\r\n",
+                    DateTime.Now, stage, oldPath, newPath), System.Text.Encoding.UTF8);
+            }
+            catch { }
+        }
+
         /// <summary>异常写入 error.log，绝不抛出。</summary>
         public static void LogError(Exception ex)
         {
             try
             {
+                // 日志只保留最近 5MB；轮转失败也不能影响主流程。
+                FileInfo log = new FileInfo(LogFile);
+                if (log.Exists && log.Length >= 5L * 1024 * 1024)
+                {
+                    string previous = LogFile + ".1";
+                    try { if (File.Exists(previous)) File.Delete(previous); } catch { }
+                    try { File.Move(LogFile, previous); } catch { }
+                }
                 string line = string.Format("[{0:yyyy-MM-dd HH:mm:ss}] {1}\r\n{2}\r\n\r\n",
                     DateTime.Now, ex.Message, ex);
                 File.AppendAllText(LogFile, line, System.Text.Encoding.UTF8);
@@ -478,8 +516,95 @@ namespace AppManager
                 return false;
             }
             bool saved = Database != null ? Database.Save(this, action) : ConfigDatabase.SaveDetached(this, FilePath, action);
-            if (!saved && SaveFailed != null) SaveFailed(DatabaseError);
-            return saved;
+            if (saved) return true;
+            if (saveBatchDepth > 0)
+            {
+                // 后台批量操作（整理桌面、还原、自动收纳）里逐项保存：调用方已自行撤回失败的那一项。
+                // 这里不能在工作线程上整体替换集合（界面线程可能正在读），也不能每项弹一次窗；
+                // 只记下第一条原因，批量结束后由调用方在界面线程上 ReportSaveFailure 一次。
+                if (saveBatchError == null) saveBatchError = string.IsNullOrEmpty(DatabaseError) ? "保存失败。" : DatabaseError;
+                return false;
+            }
+            // 保存事务已整体回滚；此时内存里的差量修改仍指向未提交状态。若不立刻还原，
+            // 下一次保存会再次提交同一批冲突，表现为“失败一次后本次会话再也保存不了”。
+            ReloadFromDatabase();
+            if (SaveFailed != null) SaveFailed(DatabaseError);
+            return false;
+        }
+
+        [ThreadStatic] private static int saveBatchDepth;
+        [ThreadStatic] private static string saveBatchError;
+
+        /// <summary>在当前线程开始一段批量保存；必须与 EndSaveBatch 成对出现（try/finally）。</summary>
+        internal static void BeginSaveBatch()
+        {
+            saveBatchDepth++;
+        }
+
+        /// <summary>结束当前线程的批量保存；最外层结束时返回期间第一条保存失败原因，没有失败返回 null。</summary>
+        internal static string EndSaveBatch()
+        {
+            if (saveBatchDepth > 0) saveBatchDepth--;
+            if (saveBatchDepth > 0) return null;
+            string error = saveBatchError;
+            saveBatchError = null;
+            return error;
+        }
+
+        /// <summary>批量操作结束后在界面线程调用：恢复为数据库已提交状态，并只通知一次保存失败。</summary>
+        internal void ReportSaveFailure(string error)
+        {
+            ReloadFromDatabase();
+            DatabaseError = error;
+            if (SaveFailed != null) SaveFailed(error);
+        }
+
+        /// <summary>保存失败后把当前对象恢复为数据库已提交状态；失败时保持原内存不动并记录日志。</summary>
+        internal bool ReloadFromDatabase()
+        {
+            if (Database == null) return false;
+            try
+            {
+                AppConfig fresh = Database.Read();
+                if (fresh == null || fresh.LoadFailed) return false;
+                ViewGrid = fresh.ViewGrid;
+                ShowHidden = fresh.ShowHidden;
+                AutoScan = fresh.AutoScan;
+                AutoOrganizeDesktop = fresh.AutoOrganizeDesktop;
+                CloseToTray = fresh.CloseToTray;
+                Favorites = fresh.Favorites;
+                Hidden = fresh.Hidden;
+                CustomCategories = fresh.CustomCategories;
+                ResourceCategories = fresh.ResourceCategories;
+                Collections = fresh.Collections;
+                CategoryOverride = fresh.CategoryOverride;
+                AddedItems = fresh.AddedItems;
+                DesktopBackup = fresh.DesktopBackup;
+                CategoryViewMode = fresh.CategoryViewMode;
+                CategoryIconNames = fresh.CategoryIconNames;
+                ManageRootPath = fresh.ManageRootPath;
+                FolderStorePath = fresh.FolderStorePath;
+                FileStorePath = fresh.FileStorePath;
+                ResourceStorePath = fresh.ResourceStorePath;
+                ItemOrder = fresh.ItemOrder;
+                ItemCategories = fresh.ItemCategories;
+                ExcludedCategories = fresh.ExcludedCategories;
+                SidebarOrder = fresh.SidebarOrder;
+                OrganizeCopy = fresh.OrganizeCopy;
+                OrganizeShortcut = fresh.OrganizeShortcut;
+                OrganizeFile = fresh.OrganizeFile;
+                OrganizeDir = fresh.OrganizeDir;
+                LoadedLegacy = fresh.LoadedLegacy;
+                DatabaseRevision = fresh.DatabaseRevision;
+                // 保留本次失败原因给 SaveFailed 提示；下一次成功保存会自行清空。
+                LoadFailed = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Paths.LogError(new IOException("保存失败后重新加载已提交配置失败。", ex));
+                return false;
+            }
         }
 
         /// <summary>
@@ -706,7 +831,7 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 从备份包导入配置；根节点校验失败返回 null（调用方据此中止覆盖，避免脏数据）。
+        /// 从备份包导入配置；根节点或内容校验失败返回 null（调用方据此中止覆盖，避免脏数据）。
         /// </summary>
         public static AppConfig ImportFrom(string filePath)
         {
@@ -716,13 +841,219 @@ namespace AppManager
                 XmlDocument doc = SafeXml.Load(filePath);
                 if (doc.DocumentElement == null || doc.DocumentElement.Name != "AppManagerConfig")
                     return null;
+                AppConfig imported = ReadDocument(doc);
+                return imported.LoadFailed ? null : imported;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine("备份包校验失败: " + ex.Message);
                 return null;
             }
-            return LoadFrom(filePath);
+        }
+
+        // ===== 历史跨模式同名分类拆分 =====
+
+        private const int SideResource = 1, SideSoftware = 2;
+
+        /// <summary>
+        /// 一次性拆分历史遗留的跨模式同名分类（新建/改名已禁止同名，这里处理禁止之前留下的数据）。
+        /// 软件与资源分类在数据库里共用同名分组，改名或删除一侧会连带另一侧的覆盖、收录项、归属与排序。
+        /// 规则：两边都是自定义分类时改资源一侧；一侧是另一模式的内置/保留名时改自定义的那一侧。
+        /// 只迁移被改名一侧模式的条目；同一路径同时登记在两种模式时无法区分，归属两边都保留。
+        /// 只改内存，调用方负责保存；没有重名时不改动任何数据，返回空列表（可重复调用）。
+        /// 返回每项 { 旧名, 新名, "resource"/"software" }。
+        /// </summary>
+        internal List<string[]> SeparateCrossModeCategories()
+        {
+            List<string[]> renamed = new List<string[]>();
+            foreach (string name in new List<string>(ResourceCategories))
+                if (CustomCategories.Contains(name) || IsSoftwareSystemName(name))
+                    renamed.Add(MoveCategorySide(name, true));
+            foreach (string name in new List<string>(CustomCategories))
+                if (IsResourceSystemName(name))
+                    renamed.Add(MoveCategorySide(name, false));
+            return renamed;
+        }
+
+        private static bool IsSoftwareSystemName(string name)
+        {
+            return Array.IndexOf(CategoryRules.BuiltIn, name) >= 0 || Array.IndexOf(CategoryRules.SoftwareReservedNames, name) >= 0;
+        }
+
+        private static bool IsResourceSystemName(string name)
+        {
+            return Array.IndexOf(CategoryRules.ResourceBuiltIn, name) >= 0 || Array.IndexOf(CategoryRules.ResourceReservedNames, name) >= 0;
+        }
+
+        private bool CategoryNameTaken(string name)
+        {
+            foreach (string n in CustomCategories) if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (string n in ResourceCategories) if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) return true;
+            return IsSoftwareSystemName(name) || IsResourceSystemName(name) || CategoryRules.IsAnyReservedName(name);
+        }
+
+        /// <summary>条目键属于哪种模式：add: 键按收录记录判断（可能两边都有），其余（扫描到的软件）属于软件。</summary>
+        private int KeySides(string key)
+        {
+            if (string.IsNullOrEmpty(key) || !key.StartsWith("add:", StringComparison.OrdinalIgnoreCase)) return SideSoftware;
+            int sides = 0;
+            foreach (AddedEntry e in AddedItems.ByPath(key.Substring(4))) sides |= e.IsResource ? SideResource : SideSoftware;
+            return sides == 0 ? SideSoftware : sides;
+        }
+
+        private string[] MoveCategorySide(string oldName, bool resource)
+        {
+            int side = resource ? SideResource : SideSoftware;
+            string suffix = resource ? "（资源）" : "（软件）";
+            string newName = oldName + suffix;
+            for (int i = 2; CategoryNameTaken(newName) || CategoryRules.ValidateName(newName) != null; i++)
+                newName = oldName + suffix.Substring(0, suffix.Length - 1) + i + "）";
+
+            List<string> list = resource ? ResourceCategories : CustomCategories;
+            list[list.IndexOf(oldName)] = newName;
+            if (!resource)
+                for (int i = 0; i < SidebarOrder.Count; i++) if (SidebarOrder[i] == oldName) SidebarOrder[i] = newName;
+
+            // 收录项：只改本模式的记录（软件、资源记录各自独立成行）
+            foreach (AddedEntry e in AddedItems.InCategory(oldName))
+                if (e.IsResource == resource) e.Category = newName;
+
+            Dictionary<string, int> sides = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            Func<string, int> sideOf = delegate(string key)
+            {
+                int value;
+                if (!sides.TryGetValue(key, out value)) { value = KeySides(key); sides[key] = value; }
+                return value;
+            };
+            // 主分类覆盖是单值：只有完全属于本模式的条目才跟随改名，两边都登记的保持原值
+            foreach (string key in new List<string>(CategoryOverride.Keys))
+                if (CategoryOverride[key] == oldName && sideOf(key) == side) CategoryOverride[key] = newName;
+            MoveMemberships(ItemCategories, oldName, newName, side, sideOf);
+            MoveMemberships(ExcludedCategories, oldName, newName, side, sideOf);
+
+            List<string> order;
+            if (ItemOrder.TryGetValue(oldName, out order))
+            {
+                List<string> moved = new List<string>(), kept = new List<string>();
+                foreach (string key in order)
+                {
+                    int s = sideOf(key);
+                    if ((s & side) != 0) moved.Add(key);
+                    if (s != side) kept.Add(key);
+                }
+                if (moved.Count > 0) ItemOrder[newName] = moved;
+                if (kept.Count > 0) ItemOrder[oldName] = kept; else ItemOrder.Remove(oldName);
+            }
+            bool view;
+            if (CategoryViewMode.TryGetValue(oldName, out view)) CategoryViewMode[newName] = view;
+            string icon;
+            if (CategoryIconNames.TryGetValue(CategoryIcons.ConfigKey(resource, oldName), out icon))
+            {
+                CategoryIconNames[CategoryIcons.ConfigKey(resource, newName)] = icon;
+                CategoryIconNames.Remove(CategoryIcons.ConfigKey(resource, oldName));
+            }
+            if (resource) CollectionOps.RenameParent(this, oldName, newName);   // 集合只属于资源分类
+            return new string[] { oldName, newName, resource ? "resource" : "software" };
+        }
+
+        /// <summary>额外归属/排除：完全属于本模式的条目改为新名；两边都登记的同时保留新旧两个名字。</summary>
+        private static void MoveMemberships(Dictionary<string, List<string>> map, string oldName, string newName, int side, Func<string, int> sideOf)
+        {
+            foreach (KeyValuePair<string, List<string>> kv in map)
+            {
+                int index = kv.Value.IndexOf(oldName);
+                if (index < 0) continue;
+                int s = sideOf(kv.Key);
+                if ((s & side) == 0) continue;
+                if (s == side) kv.Value[index] = newName;
+                else if (!kv.Value.Contains(newName)) kv.Value.Add(newName);
+            }
+        }
+
+        /// <summary>校验导入内容中会参与键结构或磁盘还原的名称；返回 null 表示通过。</summary>
+        internal string ValidateImportedContent(bool rejectCrossModeDuplicates)
+        {
+            HashSet<string> software = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string name in CategoryRules.BuiltIn) software.Add(name);
+            foreach (string name in CategoryRules.ResourceBuiltIn) resources.Add(name);
+            foreach (string name in CustomCategories)
+            {
+                string error = CategoryRules.ValidateName(name);
+                if (error != null) return "软件分类“" + name + "”无效：" + error;
+                if (!software.Add(name)) return "软件分类“" + name + "”重复。";
+            }
+            foreach (string name in ResourceCategories)
+            {
+                string error = CategoryRules.ValidateName(name);
+                if (error != null) return "资源分类“" + name + "”无效：" + error;
+                if (!resources.Add(name)) return "资源分类“" + name + "”重复。";
+            }
+            foreach (string name in software)
+                if (CategoryRules.IsAnyReservedName(name))
+                    return "软件分类“" + name + "”是系统保留名称。";
+            foreach (string name in resources)
+                if (CategoryRules.IsAnyReservedName(name)) return "资源分类“" + name + "”是系统保留名称。";
+            if (rejectCrossModeDuplicates)
+            {
+                foreach (string name in resources)
+                    if (software.Contains(name)) return "软件分类与资源分类不能同名：“" + name + "”。";
+            }
+            HashSet<string> collections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (ResourceCollection collection in Collections)
+            {
+                string error = CategoryRules.ValidateCollectionName(collection.Name);
+                if (error != null) return "集合“" + collection.Name + "”无效：" + error;
+                error = CategoryRules.ValidateCollectionName(collection.Parent);
+                if (error != null) return "集合“" + collection.Name + "”的父分类“" + collection.Parent + "”无效：" + error;
+                string key = CollectionKeys.Make(collection.Parent, collection.Name);
+                if (!collections.Add(key)) return "集合“" + collection.Parent + " / " + collection.Name + "”重复。";
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// 导入 .ambak 前的本机适配：保留本机存储路径，并只接收当前收纳目录内确实存在的桌面记录。
+        /// 导入包里的 IsCopy 一律按搬家处理，避免伪造记录在“还原”时递归删除唯一副本。
+        /// </summary>
+        internal string PrepareAmbakImport(AppConfig local, out int droppedDesktop)
+        {
+            droppedDesktop = 0;
+            if (local == null) return "当前配置不可用，已中止导入。";
+            string error = ValidateImportedContent(true);
+            if (error != null) return error;
+
+            ManageRootPath = local.ManageRootPath;
+            FolderStorePath = local.FolderStorePath;
+            FileStorePath = local.FileStorePath;
+            ResourceStorePath = local.ResourceStorePath;
+
+            List<DesktopBackupEntry> safe = new List<DesktopBackupEntry>();
+            foreach (DesktopBackupEntry entry in DesktopBackup)
+            {
+                if (entry == null || string.IsNullOrEmpty(entry.CurrentPath)) { droppedDesktop++; continue; }
+                string current;
+                string original;
+                try
+                {
+                    current = Path.GetFullPath(entry.CurrentPath);
+                    original = Path.GetFullPath(entry.OriginalPath);
+                }
+                catch { droppedDesktop++; continue; }
+                bool exists = entry.IsDir ? Directory.Exists(current) : File.Exists(current);
+                if (!exists || !DesktopOrganizer.IsManagedBackupPath(current)
+                    || !DesktopOrganizer.IsSafeRestoreTarget(original))
+                {
+                    droppedDesktop++;
+                    continue;
+                }
+                entry.CurrentPath = current;
+                entry.OriginalPath = original;
+                entry.IsCopy = false;
+                safe.Add(entry);
+            }
+            DesktopBackup = safe;
+            return null;
         }
 
         // ===== 旧版配置导入 =====

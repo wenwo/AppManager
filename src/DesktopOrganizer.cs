@@ -20,10 +20,46 @@ namespace AppManager
         private const string FilesSub = "Files";
         private const string FoldersSub = "Folders";
 
+        // 自动收纳、手动整理、还原共用一把锁，避免后台监听与“还原全部”同时改写同一份清单。
+        private static readonly object OperationLock = new object();
+        private static readonly Dictionary<string, DateTime> AutoStashIgnore =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static int restoreDepth;   // 进行中的还原层数（RestoreAll 内嵌 RestoreOne），只在持有 OperationLock 时读写
+
         public DesktopOrganizer(AppConfig cfg) { config = cfg; }
+
+        /// <summary>最近一次 RestoreOne 的失败原因，供界面显示，避免统一误报“备份已不存在”。</summary>
+        public string LastRestoreError { get; private set; }
 
         /// <summary>备份目录路径（供外部判断/重扫使用）。</summary>
         public static string BackupPath { get { return BackupDir; } }
+
+        /// <summary>布局备份等需要与桌面搬动串行化的操作共用此入口。</summary>
+        internal static void RunExclusive(Action operation)
+        {
+            lock (OperationLock) operation();
+        }
+
+        internal static T RunExclusive<T>(Func<T> operation)
+        {
+            lock (OperationLock) return operation();
+        }
+
+        internal static object OperationSync { get { return OperationLock; } }
+
+        /// <summary>
+        /// 是否有整理/还原/自动收纳/布局恢复正在搬动文件（另一线程持有操作锁）。
+        /// 退出前检查：搬到一半被结束会留下已移动但未登记的文件。
+        /// </summary>
+        internal static bool IsOperationRunning
+        {
+            get
+            {
+                if (!System.Threading.Monitor.TryEnter(OperationLock)) return true;
+                System.Threading.Monitor.Exit(OperationLock);
+                return false;
+            }
+        }
 
         /// <summary>快捷中心收纳主目录：文件夹收进此目录，文件收进其 Files 子目录。</summary>
         public static string QuickCenterDir { get { return QuickCenterDirPath; } }
@@ -57,38 +93,112 @@ namespace AppManager
         public static int AutoStashShortcuts(AppConfig cfg, List<string> paths, out int failed)
         {
             failed = 0;
-            if (cfg == null || paths == null) return 0;
-            int moved = 0;
-            foreach (string path in paths)
+            if (cfg == null || paths == null || cfg.LoadFailed) return 0;
+            lock (OperationLock)
             {
-                try
+                int moved = 0;
+                foreach (string path in paths)
                 {
-                    if (string.IsNullOrEmpty(path) || !File.Exists(path)) continue;
+                    if (string.IsNullOrEmpty(path) || !File.Exists(path) || IsAutoStashSuppressed(path)) continue;
                     if (!IsShortcutFile(path) || IsSelfShortcut(path)) continue;
-                    if (!Directory.Exists(ShortcutDestDir)) Directory.CreateDirectory(ShortcutDestDir);
-                    string dest = Path.Combine(ShortcutDestDir, Path.GetFileName(path));
-                    if (File.Exists(dest)) dest = UniquePath(ShortcutDestDir, Path.GetFileName(path), false);
-                    File.Copy(path, dest, false);
-                    File.Delete(path);
-                    DesktopBackupEntry entry = new DesktopBackupEntry();
-                    entry.OriginalPath = path;
-                    entry.CurrentPath = dest;
-                    entry.IsShortcut = true;
-                    entry.IsDir = false;
-                    entry.IsCopy = false;
-                    cfg.DesktopBackup.Add(entry);
-                    moved++;
+                    string dest = null;
+                    bool sourceRemoved = false;
+                    try
+                    {
+                        if (!Directory.Exists(ShortcutDestDir)) Directory.CreateDirectory(ShortcutDestDir);
+                        dest = Path.Combine(ShortcutDestDir, Path.GetFileName(path));
+                        if (File.Exists(dest)) dest = UniquePath(ShortcutDestDir, Path.GetFileName(path), false);
+                        File.Copy(path, dest, false);
+                        try { File.Delete(path); sourceRemoved = true; }
+                        catch (Exception ex) { Paths.LogError(new IOException("自动收纳已复制但源快捷方式未删除: " + path, ex)); }
+
+                        DesktopBackupEntry entry = new DesktopBackupEntry();
+                        entry.OriginalPath = path;
+                        entry.CurrentPath = dest;
+                        entry.IsShortcut = true;
+                        entry.IsDir = false;
+                        entry.IsCopy = !sourceRemoved;
+                        cfg.DesktopBackup.Add(entry);
+                        if (!cfg.Save("physical.desktop.autostash"))
+                        {
+                            cfg.DesktopBackup.Remove(entry);
+                            RollbackBackedItem(path, dest, false, sourceRemoved);
+                            failed++;
+                            continue;
+                        }
+                        moved++;
+                    }
+                    catch (Exception ex)
+                    {
+                        Paths.LogError(ex);
+                        failed++;
+                        if (dest != null)
+                            try { if (File.Exists(dest)) File.Delete(dest); } catch { }
+                    }
                 }
-                catch (Exception ex)
-                {
-                    Paths.LogError(ex);
-                    failed++;
-                }
+                return moved;
             }
-            if (moved > 0) cfg.Save();
-            return moved;
         }
 
+        /// <summary>还原后抑制自动收纳的时长，从整个还原操作结束时起算。</summary>
+        internal static readonly TimeSpan AutoStashQuiet = TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// 还原后短暂抑制自动收纳，避免刚回到桌面的快捷方式又被监听器收走。
+        /// 还原操作进行中先登记为“挂起”（不过期），整个操作结束时再统一开始计时：
+        /// “还原全部”耗时超过抑制时长时，早先还原的项不会在补扫时已经过期。
+        /// </summary>
+        private static void SuppressAutoStash(params string[] paths)
+        {
+            lock (AutoStashIgnore)
+            {
+                DateTime until = restoreDepth > 0 ? DateTime.MaxValue : DateTime.UtcNow + AutoStashQuiet;
+                foreach (string path in paths)
+                    if (!string.IsNullOrEmpty(path)) AutoStashIgnore[path] = until;
+            }
+        }
+
+        /// <summary>结束一层还原操作（持有 OperationLock 时调用）；最外层结束时挂起的抑制项开始计时。</summary>
+        private static void EndRestore()
+        {
+            if (--restoreDepth > 0) return;
+            lock (AutoStashIgnore)
+            {
+                DateTime until = DateTime.UtcNow + AutoStashQuiet;
+                foreach (string path in new List<string>(AutoStashIgnore.Keys))
+                    if (AutoStashIgnore[path] == DateTime.MaxValue) AutoStashIgnore[path] = until;
+            }
+        }
+
+        private static bool IsAutoStashSuppressed(string path)
+        {
+            lock (AutoStashIgnore)
+            {
+                DateTime until;
+                if (!AutoStashIgnore.TryGetValue(path, out until)) return false;
+                if (DateTime.UtcNow <= until) return true;
+                AutoStashIgnore.Remove(path);
+                return false;
+            }
+        }
+
+        /// <summary>保存失败时撤回本次收纳：搬家移回原位，副本删除本次新建的目标。</summary>
+        private static void RollbackBackedItem(string source, string dest, bool isDir, bool sourceRemoved)
+        {
+            try
+            {
+                bool exists = isDir ? Directory.Exists(dest) : File.Exists(dest);
+                if (!exists) return;
+                if (sourceRemoved)
+                {
+                    if (isDir) MoveDirectory(dest, source);
+                    else MoveFile(dest, source);
+                }
+                else if (isDir) Directory.Delete(dest, true);
+                else File.Delete(dest);
+            }
+            catch (Exception ex) { Paths.LogError(new IOException("收纳保存失败后撤回失败: " + dest, ex)); }
+        }
         // 各类目标的备份落点：快捷方式沿用历史扁平布局，文件/文件夹各归子目录
         private static string ShortcutDestDir { get { return BackupDir; } }
         private static string FileDestDir { get { return Path.Combine(BackupDir, FilesSub); } }
@@ -100,9 +210,12 @@ namespace AppManager
         /// </summary>
         public int TidyDesktop(string exePath)
         {
-            int count = Organize();
-            EnsureLauncherShortcutOnDesktop(exePath);
-            return count;
+            lock (OperationLock)
+            {
+                int count = Organize();
+                EnsureLauncherShortcutOnDesktop(exePath);
+                return count;
+            }
         }
 
         /// <summary>在桌面生成/刷新「应用中心」快捷方式（收纳后桌面仅留它）。</summary>
@@ -156,32 +269,35 @@ namespace AppManager
             return a;
         }
 
-        /// <summary>收纳桌面条目（按配置的范围与模式）；返回收纳条目数。</summary>
+        /// <summary>收纳桌面条目（按配置的范围与模式）；返回收纳条目数。配置读取失败时拒绝执行。</summary>
         public int Organize()
         {
-            List<string> desktops = new List<string>
+            lock (OperationLock)
             {
-                Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory)
-            };
-            if (!Directory.Exists(BackupDir)) Directory.CreateDirectory(BackupDir);
-            // 合并而非清空：保留历史收纳记录（二次收纳不丢上一批的还原信息），
-            // 只剔除备份文件已被手动删除/还原的旧记录
-            config.DesktopBackup.RemoveAll(delegate(DesktopBackupEntry e)
-            {
-                if (e == null || string.IsNullOrEmpty(e.CurrentPath)) return true;
-                return e.IsDir ? !Directory.Exists(e.CurrentPath) : !File.Exists(e.CurrentPath);
-            });
-            int count = 0;
-            foreach (string desk in desktops)
-            {
-                if (!Directory.Exists(desk)) continue;
-                count += ScanAndMove(desk, 0);
+                if (config.LoadFailed) throw new IOException("配置读取失败，已停止整理桌面：" + config.DatabaseError);
+                List<string> desktops = new List<string>
+                {
+                    Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory)
+                };
+                if (!Directory.Exists(BackupDir)) Directory.CreateDirectory(BackupDir);
+                // 合并而非清空：保留历史收纳记录（二次收纳不丢上一批的还原信息），
+                // 只剔除备份文件已被手动删除/还原的旧记录。
+                int removed = config.DesktopBackup.RemoveAll(delegate(DesktopBackupEntry e)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.CurrentPath)) return true;
+                    return e.IsDir ? !Directory.Exists(e.CurrentPath) : !File.Exists(e.CurrentPath);
+                });
+                if (removed > 0 && !config.Save("physical.desktop.organize")) throw new IOException("整理清单未能保存：" + config.DatabaseError);
+                int count = 0;
+                foreach (string desk in desktops)
+                {
+                    if (!Directory.Exists(desk)) continue;
+                    count += ScanAndMove(desk, 0);
+                }
+                return count;
             }
-            config.Save();
-            return count;
         }
-
         private int ScanAndMove(string dir, int depth)
         {
             if (depth > 2) return 0;
@@ -215,50 +331,54 @@ namespace AppManager
                 if (IsSkippable(name, s) || IsReparsePoint(s)) continue;
                 if (config.OrganizeDir)
                     count += BackupItem(s, FolderDestDir, name, true, false);   // 整目录收纳
-                else
-                    count += ScanAndMove(s, depth + 1);                          // 仅深入找快捷方式/文件
+                // 未勾选“收纳文件夹”时不得进入桌面文件夹内部抽取文件，否则会破坏用户目录结构。
             }
             return count;
         }
 
         /// <summary>
         /// 备份单个桌面条目：搬家=移动（默认），副本=拷贝（保留原件）。
-        /// 副本模式下目标已存在视为已备份，仅登记既有副本，避免重复拷贝堆积。返回 1 表示已纳入备份。
+        /// 同名目标始终另存新名字；只有源确实已移除才登记为搬家，保存失败则撤回本次搬运。
         /// </summary>
         private int BackupItem(string source, string destDir, string name, bool isDir, bool isShortcut)
         {
+            string dest = null;
+            bool sourceRemoved = false;
             try
             {
                 if (!Directory.Exists(destDir)) Directory.CreateDirectory(destDir);
-                string dest = Path.Combine(destDir, name);
+                dest = Path.Combine(destDir, name);
                 bool destExists = isDir ? Directory.Exists(dest) : File.Exists(dest);
+                if (destExists) dest = UniquePath(destDir, name, isDir);
 
                 if (config.OrganizeCopy)
                 {
-                    if (destExists)
-                    {
-                        Record(source, dest, isDir, isShortcut, true);
-                        return 1;
-                    }
                     if (isDir) CopyDir(source, dest);
                     else File.Copy(source, dest, false);
                 }
                 else
                 {
-                    if (destExists) dest = UniquePath(destDir, name, isDir);
-                    if (isDir) MoveDirectory(source, dest);
-                    else MoveFile(source, dest);
+                    sourceRemoved = isDir ? MoveDirectory(source, dest) : MoveFile(source, dest);
                 }
-                Record(source, dest, isDir, isShortcut, config.OrganizeCopy);
+
+                Record(source, dest, isDir, isShortcut, config.OrganizeCopy || !sourceRemoved);
+                if (!config.Save("physical.desktop.organize"))
+                {
+                    DesktopBackupEntry added = config.DesktopBackup.Count == 0 ? null : config.DesktopBackup[config.DesktopBackup.Count - 1];
+                    if (added != null && string.Equals(added.CurrentPath, dest, StringComparison.OrdinalIgnoreCase))
+                        config.DesktopBackup.Remove(added);
+                    RollbackBackedItem(source, dest, isDir, sourceRemoved);
+                    throw new IOException("收纳清单未能保存：" + config.DatabaseError);
+                }
                 return 1;
             }
             catch (Exception ex)
             {
                 Debug.WriteLine("收纳失败 " + source + ": " + ex.Message);
+                Paths.LogError(ex);
                 return 0;
             }
         }
-
         private void Record(string original, string current, bool isDir, bool isShortcut, bool isCopy)
         {
             // 同一当前路径只保留最新记录，避免合并模式下重复登记
@@ -451,64 +571,192 @@ namespace AppManager
         /// <summary>一键还原全部收纳项；返回成功还原条目数（失败项保留在清单中）。</summary>
         public int RestoreAll()
         {
-            int count = 0;
-            List<DesktopBackupEntry> remaining = new List<DesktopBackupEntry>();
-            List<DesktopBackupEntry> snapshot = new List<DesktopBackupEntry>(config.DesktopBackup);
-            foreach (DesktopBackupEntry e in snapshot)
+            lock (OperationLock)
             {
-                if (RestoreOne(e)) count++;
-                else remaining.Add(e);   // 失败项保留，避免丢失还原线索
+                int count = 0;
+                restoreDepth++;   // 整批结束后才开始计抑制时间，早还原的项不会在批量还原途中过期
+                try
+                {
+                    List<DesktopBackupEntry> snapshot = new List<DesktopBackupEntry>(config.DesktopBackup);
+                    foreach (DesktopBackupEntry e in snapshot)
+                    {
+                        if (!RestoreOne(e)) continue;   // 失败项保留，避免丢失还原线索
+                        count++;
+                        config.DesktopBackup.Remove(e);
+                        if (!config.Save("physical.desktop.restore"))
+                        {
+                            // Save 失败会从数据库重载配置；仅在重载也失败、记录确实缺失时补回线索。
+                            bool present = config.DesktopBackup.Exists(delegate(DesktopBackupEntry value)
+                            { return value != null && string.Equals(value.CurrentPath, e.CurrentPath, StringComparison.OrdinalIgnoreCase); });
+                            if (!present) config.DesktopBackup.Add(e);
+                            break;
+                        }
+                    }
+                }
+                finally { EndRestore(); }
+                return count;
             }
-            config.DesktopBackup.Clear();
-            config.DesktopBackup.AddRange(remaining);
-            config.Save();
-            return count;
         }
 
         /// <summary>
-        /// 还原单条：副本模式删除备份副本（原件仍在）；搬家模式把备份项移回原位置。
-        /// 返回是否已处理（搬家模式下备份缺失视为失败，保留清单项）。
+        /// 还原单条：副本模式先核对原件，原件仍在且内容一致才清理备份副本（进回收站）；
+        /// 原件已丢失则按搬家逻辑移回。搬家模式把备份项移回原位置。
+        /// 返回是否已处理（备份缺失或移动不完整时保留清单项）。
         /// </summary>
         public bool RestoreOne(DesktopBackupEntry e)
         {
-            if (e == null) return false;
-            try
+            LastRestoreError = null;
+            if (e == null) { LastRestoreError = "还原记录为空。"; return false; }
+            lock (OperationLock)
             {
-                if (!IsManagedBackupPath(e.CurrentPath))
+                restoreDepth++;
+                try
                 {
-                    Debug.WriteLine("还原失败: 当前路径不在收纳目录内 " + e.CurrentPath);
-                    return false;
-                }
-                bool backupExists = e.IsDir ? Directory.Exists(e.CurrentPath) : File.Exists(e.CurrentPath);
-                if (e.IsCopy)
-                {
-                    // 副本模式：桌面原件仍在，还原即清理备份副本
-                    if (backupExists)
+                    if (!IsManagedBackupPath(e.CurrentPath))
                     {
-                        if (e.IsDir) Directory.Delete(e.CurrentPath, true);
-                        else File.Delete(e.CurrentPath);
+                        Debug.WriteLine("还原失败: 当前路径不在收纳目录内 " + e.CurrentPath);
+                        LastRestoreError = "备份路径不在当前收纳目录内：" + e.CurrentPath;
+                        return false;
                     }
+                    bool backupExists = e.IsDir ? Directory.Exists(e.CurrentPath) : File.Exists(e.CurrentPath);
+                    bool originalExists = IsSafeRestoreTarget(e.OriginalPath)
+                        && (e.IsDir ? Directory.Exists(e.OriginalPath) : File.Exists(e.OriginalPath));
+                    if (e.IsCopy)
+                    {
+                        // 副本模式且原件仍在：备份副本是多余数据，还原即清理；没有回收站时拒绝永久删除。
+                        if (originalExists)
+                        {
+                            if (!backupExists) return true;
+                            if (!SameCopyContent(e))
+                            {
+                                Debug.WriteLine("还原失败: 原件与备份内容不一致，未删除副本 " + e.CurrentPath);
+                                LastRestoreError = "原件与备份内容不一致，已保留备份：" + e.CurrentPath;
+                                return false;
+                            }
+                            if (!Launcher.CanUseRecycleBin(e.CurrentPath))
+                            {
+                                Debug.WriteLine("还原失败: 该位置没有可用回收站，未永久删除副本 " + e.CurrentPath);
+                                LastRestoreError = "该位置没有可用回收站，未永久删除副本：" + e.CurrentPath;
+                                return false;
+                            }
+                            bool deleted = Launcher.DeletePath(e.CurrentPath, true);
+                            if (!deleted) LastRestoreError = "无法把副本移入回收站，已保留：" + e.CurrentPath;
+                            return deleted;
+                        }
+                        // 原件已不在：不能直接删副本，按搬家项移回原位置。
+                    }
+                    if (!IsSafeRestoreTarget(e.OriginalPath))
+                    {
+                        Debug.WriteLine("还原失败: 原始路径不在桌面目录内 " + e.OriginalPath);
+                        LastRestoreError = "原始路径不在当前桌面目录内：" + e.OriginalPath;
+                        return false;
+                    }
+                    if (!backupExists) { LastRestoreError = "备份文件已不存在：" + e.CurrentPath; return false; }
+                    string dir = Path.GetDirectoryName(e.OriginalPath);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    string dest = UniqueRestoreTarget(e);
+                    if (!IsSafeRestoreTarget(dest)) { LastRestoreError = "还原落点不安全：" + dest; return false; }
+                    bool sourceRemoved = e.IsDir ? MoveDirectory(e.CurrentPath, dest) : MoveFile(e.CurrentPath, dest);
+                    if (!sourceRemoved)
+                    {
+                        LastRestoreError = "已复制到桌面，但原备份未能删除（可能被占用）：" + e.CurrentPath;
+                        return false;
+                    }
+                    SuppressAutoStash(dest, e.OriginalPath);
                     return true;
                 }
-                if (!IsSafeRestoreTarget(e.OriginalPath))
+                catch (Exception ex)
                 {
-                    Debug.WriteLine("还原失败: 原始路径不在桌面目录内 " + e.OriginalPath);
+                    Debug.WriteLine("还原失败: " + ex.Message);
+                    LastRestoreError = "还原失败：" + ex.Message;
+                    Paths.LogError(ex);
                     return false;
                 }
-                if (!backupExists) return false;
-                string dir = Path.GetDirectoryName(e.OriginalPath);
-                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                string dest = UniqueRestoreTarget(e);
-                if (!IsSafeRestoreTarget(dest)) return false;
-                if (e.IsDir) MoveDirectory(e.CurrentPath, dest);
-                else MoveFile(e.CurrentPath, dest);
-                return true;
+                finally { EndRestore(); }
+            }
+        }
+
+        /// <summary>副本还原前核对两份内容；任何无法完整读取或安全比较的情况都返回 false，保留备份。</summary>
+        private static bool SameCopyContent(DesktopBackupEntry entry)
+        {
+            try
+            {
+                return entry.IsDir
+                    ? SameDirectoryContent(entry.OriginalPath, entry.CurrentPath, 0)
+                    : SameFileContent(entry.OriginalPath, entry.CurrentPath);
             }
             catch (Exception ex)
             {
-                Debug.WriteLine("还原失败: " + ex.Message);
+                Debug.WriteLine("副本内容核对失败，保留备份: " + ex.Message);
                 return false;
             }
+        }
+
+        private static bool SameDirectoryContent(string original, string backup, int depth)
+        {
+            if (depth > 64 || !Directory.Exists(original) || !Directory.Exists(backup)) return false;
+            if (IsReparsePoint(original) || IsReparsePoint(backup)) return false;
+
+            string[] originalFiles = Directory.GetFiles(original);
+            string[] backupFiles = Directory.GetFiles(backup);
+            if (originalFiles.Length != backupFiles.Length) return false;
+            Array.Sort(originalFiles, StringComparer.OrdinalIgnoreCase);
+            Array.Sort(backupFiles, StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < originalFiles.Length; i++)
+            {
+                if (!string.Equals(Path.GetFileName(originalFiles[i]), Path.GetFileName(backupFiles[i]), StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (!SameFileContent(originalFiles[i], backupFiles[i])) return false;
+            }
+
+            string[] originalDirs = Directory.GetDirectories(original);
+            string[] backupDirs = Directory.GetDirectories(backup);
+            if (originalDirs.Length != backupDirs.Length) return false;
+            Array.Sort(originalDirs, StringComparer.OrdinalIgnoreCase);
+            Array.Sort(backupDirs, StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < originalDirs.Length; i++)
+            {
+                if (!string.Equals(Path.GetFileName(originalDirs[i]), Path.GetFileName(backupDirs[i]), StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (!SameDirectoryContent(originalDirs[i], backupDirs[i], depth + 1)) return false;
+            }
+            return true;
+        }
+
+        private static bool SameFileContent(string original, string backup)
+        {
+            if (!File.Exists(original) || !File.Exists(backup)) return false;
+            if (IsReparsePoint(original) || IsReparsePoint(backup)) return false;
+            if (new FileInfo(original).Length != new FileInfo(backup).Length) return false;
+
+            const int bufferSize = 64 * 1024;
+            byte[] originalBuffer = new byte[bufferSize];
+            byte[] backupBuffer = new byte[bufferSize];
+            using (FileStream left = new FileStream(original, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan))
+            using (FileStream right = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan))
+            {
+                for (;;)
+                {
+                    int leftRead = ReadBlock(left, originalBuffer);
+                    int rightRead = ReadBlock(right, backupBuffer);
+                    if (leftRead != rightRead) return false;
+                    if (leftRead == 0) return true;
+                    for (int i = 0; i < leftRead; i++)
+                        if (originalBuffer[i] != backupBuffer[i]) return false;
+                }
+            }
+        }
+
+        private static int ReadBlock(FileStream stream, byte[] buffer)
+        {
+            int total = 0;
+            while (total < buffer.Length)
+            {
+                int read = stream.Read(buffer, total, buffer.Length - total);
+                if (read <= 0) break;
+                total += read;
+            }
+            return total;
         }
 
         internal static bool IsManagedBackupPath(string path)
@@ -529,21 +777,22 @@ namespace AppManager
             string full = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             if (string.Equals(root, full, StringComparison.OrdinalIgnoreCase)) return false;
             if (!(full + Path.DirectorySeparatorChar).StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
-            return !HasReparsePoint(root, full);
+            return !HasReparsePointBelow(root, full);
         }
 
-        private static bool HasReparsePoint(string root, string path)
+        /// <summary>检查 root 之下（不含 root 自身）是否有重解析点；root 本身是 junction 时仍视为可信起点。</summary>
+        private static bool HasReparsePointBelow(string root, string path)
         {
             string current = path;
             while (!string.IsNullOrEmpty(current))
             {
+                if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) return false;
                 try
                 {
                     if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
                 }
                 catch (FileNotFoundException) { }
                 catch (DirectoryNotFoundException) { }
-                if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) return false;
                 string parent = Path.GetDirectoryName(current);
                 if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase)) return false;
                 current = parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -573,26 +822,35 @@ namespace AppManager
 
         internal static bool IsSafeRestoreTarget(string path)
         {
-            if (string.IsNullOrEmpty(path) || !Path.IsPathRooted(path) || path.Length < 3
-                || path[1] != ':' || (path[2] != '\\' && path[2] != '/') || path.IndexOf(':', 2) >= 0)
-                return false;
+            if (string.IsNullOrEmpty(path) || !Path.IsPathRooted(path)) return false;
             try
             {
-                SafeDirectory.EnsureNoLinks(path);
                 string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                bool drive = full.Length >= 3 && full[1] == ':' && (full[2] == '\\' || full[2] == '/');
+                bool unc = full.StartsWith("\\\\", StringComparison.Ordinal) || full.StartsWith("//", StringComparison.Ordinal);
+                if (!drive && !unc) return false;
+                // 拒绝 NTFS 备用数据流；UNC 路径中任何冒号都属于非法文件名
+                if (full.IndexOf(':', drive ? 2 : 0) >= 0) return false;
                 string user = Path.GetFullPath(UserDesktop).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                 string shared = Path.GetFullPath(PublicDesktop).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                return IsStrictChildOf(user, full) || IsStrictChildOf(shared, full);
+                string root = IsStrictChildOf(user, full) ? user : (IsStrictChildOf(shared, full) ? shared : null);
+                return root != null && !HasReparsePointBelow(root, full);
             }
             catch { return false; }
         }
 
         /// <summary>从清单中移除某条记录（不触碰磁盘文件）。</summary>
-        public void RemoveEntry(DesktopBackupEntry e)
+        public bool RemoveEntry(DesktopBackupEntry e, out string error)
         {
-            if (e == null) return;
+            error = null;
+            if (e == null) return true;
             config.DesktopBackup.Remove(e);
-            config.Save();
+            if (!config.Save("physical.desktop.remove"))
+            {
+                error = config.DatabaseError;
+                return false;
+            }
+            return true;
         }
 
         /// <summary>是否存在已收纳备份。</summary>
@@ -604,34 +862,47 @@ namespace AppManager
         /// </summary>
         public int UpdateBackup()
         {
-            if (!Directory.Exists(BackupDir))
+            lock (OperationLock)
             {
+                Dictionary<string, DesktopBackupEntry> existing =
+                    new Dictionary<string, DesktopBackupEntry>(StringComparer.OrdinalIgnoreCase);
+                foreach (DesktopBackupEntry e in config.DesktopBackup)
+                    if (!string.IsNullOrEmpty(e.CurrentPath)) existing[e.CurrentPath] = e;
+
+                List<DesktopBackupEntry> fresh = new List<DesktopBackupEntry>();
+                HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // 快捷方式（备份根，历史扁平布局）与普通文件（Files 子目录）
+                foreach (string f in SafeFiles(BackupDir))
+                    if (!IsTemporaryBackupName(f) && seen.Add(f)) fresh.Add(MatchOrNew(existing, f, IsShortcutFile(f), false));
+                foreach (string f in SafeFiles(FileDestDir))
+                    if (!IsTemporaryBackupName(f) && seen.Add(f)) fresh.Add(MatchOrNew(existing, f, IsShortcutFile(f), false));
+                // 目录（Folders 子目录，仅顶层目录各成一条）
+                foreach (string d in SafeDirs(FolderDestDir))
+                    if (!IsTemporaryBackupName(d) && seen.Add(d)) fresh.Add(MatchOrNew(existing, d, false, true));
+
+                // 旧版 DesktopStash 或用户自定义旧目录里的现有记录不能因本次重扫而消失。
+                foreach (DesktopBackupEntry e in config.DesktopBackup)
+                {
+                    if (e == null || string.IsNullOrEmpty(e.CurrentPath) || seen.Contains(e.CurrentPath)) continue;
+                    bool exists = e.IsDir ? Directory.Exists(e.CurrentPath) : File.Exists(e.CurrentPath);
+                    if (exists && !IsTemporaryBackupName(e.CurrentPath)) { fresh.Add(e); seen.Add(e.CurrentPath); }
+                }
+
                 config.DesktopBackup.Clear();
-                config.Save();
-                return 0;
+                config.DesktopBackup.AddRange(fresh);
+                if (!config.Save("physical.desktop.update")) throw new IOException("备份清单未能保存：" + config.DatabaseError);
+                return fresh.Count;
             }
-            Dictionary<string, DesktopBackupEntry> existing =
-                new Dictionary<string, DesktopBackupEntry>(StringComparer.OrdinalIgnoreCase);
-            foreach (DesktopBackupEntry e in config.DesktopBackup)
-                if (!string.IsNullOrEmpty(e.CurrentPath)) existing[e.CurrentPath] = e;
-
-            List<DesktopBackupEntry> fresh = new List<DesktopBackupEntry>();
-
-            // 快捷方式（备份根，历史扁平布局）与普通文件（Files 子目录）
-            foreach (string f in SafeFiles(BackupDir))
-                fresh.Add(MatchOrNew(existing, f, IsShortcutFile(f), false));
-            foreach (string f in SafeFiles(FileDestDir))
-                fresh.Add(MatchOrNew(existing, f, IsShortcutFile(f), false));
-            // 目录（Folders 子目录，仅顶层目录各成一条）
-            foreach (string d in SafeDirs(FolderDestDir))
-                fresh.Add(MatchOrNew(existing, d, false, true));
-
-            config.DesktopBackup.Clear();
-            config.DesktopBackup.AddRange(fresh);
-            config.Save();
-            return fresh.Count;
         }
 
+        private static bool IsTemporaryBackupName(string path)
+        {
+            string name = Path.GetFileName(path) ?? string.Empty;
+            return name.IndexOf(".copy-", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf(".restore-", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase);
+        }
         private static string[] SafeFiles(string dir)
         {
             try { return Directory.Exists(dir) ? Directory.GetFiles(dir) : new string[0]; }
@@ -654,7 +925,7 @@ namespace AppManager
             ne.CurrentPath = path;
             ne.IsShortcut = isShortcut;
             ne.IsDir = isDir;
-            ne.IsCopy = config.OrganizeCopy;
+            ne.IsCopy = false;   // 补登的历史条目按搬家处理，避免“还原”误删唯一副本
             // 原路径只能靠猜：公共桌面存在同名项时优先猜公共桌面，否则猜用户桌面
             string name = Path.GetFileName(path);
             string userGuess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), name);

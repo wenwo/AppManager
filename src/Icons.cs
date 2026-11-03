@@ -72,12 +72,23 @@ namespace AppManager
         // PrivateExtractIcons/SHGetFileInfo 抽取（较慢）。缓存持有 master 位图，对外一律返回副本，
         // 调用方照常 Dispose，二者互不影响。
         private static readonly object CacheLock = new object();
-        private static readonly Dictionary<string, Bitmap> Cache =
-            new Dictionary<string, Bitmap>(StringComparer.Ordinal);
+        private sealed class CacheEntry
+        {
+            public string Key;
+            public Bitmap Bitmap;
+            public long Bytes;
+            public LinkedListNode<CacheEntry> Node;
+        }
+        private static readonly Dictionary<string, CacheEntry> Cache =
+            new Dictionary<string, CacheEntry>(StringComparer.Ordinal);
+        private static readonly LinkedList<CacheEntry> CacheLru = new LinkedList<CacheEntry>();
         // 封面基础键 → 当前完整缓存键：UI 只查内存映射，文件时间戳由后台加载时刷新。
         private static readonly Dictionary<string, string> CoverCacheKeys =
             new Dictionary<string, string>(StringComparer.Ordinal);
         private const int CacheCap = 2000;
+        // 按 32bpp 位图估算；超过预算时从最久未使用的条目开始淘汰，而不是整体清空。
+        private const long CacheByteCap = 64L * 1024 * 1024;
+        private static long CacheBytes;
 
         /// <summary>缓存键：涵盖影响提取结果的全部字段（含 Name，用于占位图首字母区分），并追加图标来源时间戳。</summary>
         private static string CacheKey(AppInfo app, int size, bool small)
@@ -138,9 +149,10 @@ namespace AppManager
         {
             lock (CacheLock)
             {
-                Bitmap b;
-                if (!Cache.TryGetValue(key, out b)) return null;
-                return SafeClone(b);
+                CacheEntry entry;
+                if (!Cache.TryGetValue(key, out entry)) return null;
+                TouchCacheEntry(entry);
+                return SafeClone(entry.Bitmap);
             }
         }
 
@@ -150,17 +162,52 @@ namespace AppManager
             if (bmp == null) return null;
             lock (CacheLock)
             {
-                Bitmap exist;
-                if (Cache.TryGetValue(key, out exist)) { bmp.Dispose(); return SafeClone(exist); }
-                if (Cache.Count >= CacheCap)
+                CacheEntry exist;
+                if (Cache.TryGetValue(key, out exist))
                 {
-                    foreach (Bitmap v in Cache.Values) { try { v.Dispose(); } catch { } }
-                    Cache.Clear();
-                    CoverCacheKeys.Clear();
+                    bmp.Dispose();
+                    TouchCacheEntry(exist);
+                    return SafeClone(exist.Bitmap);
                 }
-                Cache[key] = bmp;
+                long bytes = (long)bmp.Width * bmp.Height * 4L;
+                while (Cache.Count > 0 && (Cache.Count >= CacheCap || CacheBytes + bytes > CacheByteCap))
+                    EvictOldestCacheEntry();
+                CacheEntry entry = new CacheEntry { Key = key, Bitmap = bmp, Bytes = bytes };
+                entry.Node = CacheLru.AddLast(entry);
+                Cache[key] = entry;
+                CacheBytes += bytes;
+                // 单个条目就超过预算时仍保留它，否则本次抽取无法复用，且调用方仍持有副本。
+                while (CacheBytes > CacheByteCap && Cache.Count > 1)
+                    EvictOldestCacheEntry();
                 return SafeClone(bmp);
             }
+        }
+
+        private static void TouchCacheEntry(CacheEntry entry)
+        {
+            if (entry == null || entry.Node == null || entry.Node.List == null) return;
+            if (entry.Node == CacheLru.Last) return;
+            CacheLru.Remove(entry.Node);
+            CacheLru.AddLast(entry.Node);
+        }
+
+        private static void EvictOldestCacheEntry()
+        {
+            CacheEntry entry = CacheLru.First.Value;
+            CacheLru.RemoveFirst();
+            Cache.Remove(entry.Key);
+            CacheBytes -= entry.Bytes;
+            try { entry.Bitmap.Dispose(); } catch { }
+            // 封面映射指向被淘汰的完整键时必须一起移除，避免 UI 读到不存在的缓存。
+            List<string> stale = null;
+            foreach (KeyValuePair<string, string> pair in CoverCacheKeys)
+            {
+                if (pair.Value != entry.Key) continue;
+                if (stale == null) stale = new List<string>();
+                stale.Add(pair.Key);
+            }
+            if (stale != null)
+                foreach (string baseKey in stale) CoverCacheKeys.Remove(baseKey);
         }
 
         /// <summary>复制位图作为返回值；失败时返回 null（由调用方按占位处理）。</summary>

@@ -120,6 +120,8 @@ namespace AppManager
             Case61_RestorePathBoundary();
             Case62_XmlDtdRejected();
             Case63_DpiScaling();
+            Case64_SelfTargetExclusion();
+            Case65_CategoryNameValidation();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1257,6 +1259,22 @@ namespace AppManager
                 bool ok = MediaInfo.TryGetTakenDate(path, out taken)
                     && taken.Year == 2020 && taken.Month == 1 && taken.Day == 2
                     && taken.Hour == 3 && taken.Minute == 4 && taken.Second == 5;
+                // DateTimeOriginal 是占位值时，必须回退到 DateTimeDigitized
+                string placeholder = TempFile(".jpg");
+                try
+                {
+                    using (Bitmap bmp = new Bitmap(1, 1))
+                    {
+                        SetExifAscii(bmp, 0x9003, "0000:00:00 00:00:00\0");
+                        SetExifAscii(bmp, 0x9004, "2021:05:06 07:08:09\0");
+                        bmp.Save(placeholder, ImageFormat.Jpeg);
+                    }
+                    DateTime fallback;
+                    bool fallbackOk = MediaInfo.TryGetTakenDate(placeholder, out fallback)
+                        && fallback.Year == 2021 && fallback.Month == 5 && fallback.Day == 6;
+                    ok = ok && fallbackOk;
+                }
+                finally { try { if (File.Exists(placeholder)) File.Delete(placeholder); } catch { } }
                 // 非媒体文件返回 false
                 string txt = TempFile(".txt");
                 File.WriteAllText(txt, "x");
@@ -1297,6 +1315,23 @@ namespace AppManager
                 // 转成本地时区后比较：本地时间可能因时区有偏移，换算回 UTC 再比
                 DateTime backUtc = taken.ToUniversalTime();
                 bool timeOk = ok && Math.Abs((backUtc - want).TotalSeconds) < 1;
+                // creation_time=0 表示未写入，不能显示 1904-01-01
+                string zero = TempFile(".mp4");
+                try
+                {
+                    using (FileStream fs = new FileStream(zero, FileMode.Create, FileAccess.Write))
+                    {
+                        WriteBox(fs, "ftyp", new byte[] { 0x69, 0x73, 0x6F, 0x6D, 0, 0, 0, 1 });
+                        byte[] payload = new byte[100];
+                        payload[0] = 0;
+                        WriteU32BE(payload, 12, 1000);
+                        WriteU32BE(payload, 16, 5000);
+                        WriteBox(fs, "moov", Box("mvhd", payload));
+                    }
+                    DateTime none;
+                    timeOk = timeOk && !MediaInfo.TryGetTakenDate(zero, out none);
+                }
+                finally { try { if (File.Exists(zero)) File.Delete(zero); } catch { } }
                 // 空文件应失败
                 string bad = TempFile(".mp4");
                 File.WriteAllBytes(bad, new byte[0]);
@@ -1331,6 +1366,13 @@ namespace AppManager
             try
             {
                 byte[] title = Id3Frame("TIT2", new byte[] { 3 }.Concat(Encoding.UTF8.GetBytes("测试歌曲")).ToArray());
+                byte[] artistText = Encoding.BigEndianUnicode.GetBytes("大端艺术家");
+                byte[] artistPayload = new byte[3 + artistText.Length];
+                artistPayload[0] = 1;
+                artistPayload[1] = 0xFE;
+                artistPayload[2] = 0xFF;
+                Array.Copy(artistText, 0, artistPayload, 3, artistText.Length);
+                byte[] artist = Id3Frame("TPE1", artistPayload);
                 List<byte> picture = new List<byte>();
                 picture.Add(3);
                 picture.AddRange(Encoding.ASCII.GetBytes("image/png\0"));
@@ -1338,20 +1380,21 @@ namespace AppManager
                 picture.Add(0);
                 picture.AddRange(Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="));
                 byte[] cover = Id3Frame("APIC", picture.ToArray());
-                int tagSize = title.Length + cover.Length;
+                int tagSize = title.Length + artist.Length + cover.Length;
                 using (FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write))
                 {
                     stream.Write(Encoding.ASCII.GetBytes("ID3"), 0, 3);
                     stream.Write(new byte[] { 3, 0, 0, (byte)(tagSize >> 21), (byte)(tagSize >> 14), (byte)(tagSize >> 7), (byte)tagSize }, 0, 7);
                     stream.Write(title, 0, title.Length);
+                    stream.Write(artist, 0, artist.Length);
                     stream.Write(cover, 0, cover.Length);
                 }
                 File.WriteAllText(Path.ChangeExtension(path, ".lrc"), "[00:01.00]测试歌词", new UTF8Encoding(false));
                 MusicTrackInfo info = MusicMetadata.Read(path);
-                bool ok = info.Title == "测试歌曲" && info.Cover != null
+                bool ok = info.Title == "测试歌曲" && info.Artist == "大端艺术家" && info.Cover != null
                     && MusicMetadata.ParseLyrics(info.Lyrics).Count == 1;
                 info.Dispose();
-                Assert(ok, "标题=True 封面=True 同名LRC=True");
+                Assert(ok, "标题=True 大端BOM艺术家=True 封面=True 同名LRC=True");
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally
@@ -1458,32 +1501,56 @@ namespace AppManager
             Begin("61 收纳还原拒绝删除管理目录外路径");
             string outside = Path.Combine(Paths.DataDir, "outside-restore");
             string managed = Path.Combine(Paths.DesktopBackupDir, "restore-copy");
+            string orphan = Path.Combine(Paths.DesktopBackupDir, "restore-orphan");
             try
             {
                 Directory.CreateDirectory(outside);
                 Directory.CreateDirectory(managed);
+                Directory.CreateDirectory(orphan);
                 DesktopOrganizer organizer = new DesktopOrganizer(new AppConfig());
                 DesktopBackupEntry outsideEntry = new DesktopBackupEntry();
                 outsideEntry.CurrentPath = outside;
                 outsideEntry.IsDir = true;
                 outsideEntry.IsCopy = true;
                 DesktopBackupEntry managedEntry = new DesktopBackupEntry();
+                managedEntry.OriginalPath = outside;
                 managedEntry.CurrentPath = managed;
                 managedEntry.IsDir = true;
                 managedEntry.IsCopy = true;
+                // 缺原路径的副本无法安全还原，必须原样保留，不能借“还原”永久删除。
+                DesktopBackupEntry orphanEntry = new DesktopBackupEntry();
+                orphanEntry.CurrentPath = orphan;
+                orphanEntry.IsDir = true;
+                orphanEntry.IsCopy = true;
                 bool ok = !organizer.RestoreOne(outsideEntry)
                     && Directory.Exists(outside)
-                    && organizer.RestoreOne(managedEntry)
-                    && !Directory.Exists(managed)
+                    && !organizer.RestoreOne(orphanEntry)
+                    && Directory.Exists(orphan)
+                    && !organizer.RestoreOne(managedEntry)
+                    && Directory.Exists(managed)
                     && !DesktopOrganizer.IsManagedBackupPath(Paths.DesktopBackupDir);
-                Assert(ok, "外部目录保留=True 管理副本清理=True 根目录拦截=True");
+                Assert(ok, "外部目录保留=True 缺原路径保留=True 非桌面原件保留=True 根目录拦截=True");
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally
             {
                 try { if (Directory.Exists(outside)) Directory.Delete(outside, true); } catch { }
                 try { if (Directory.Exists(managed)) Directory.Delete(managed, true); } catch { }
+                try { if (Directory.Exists(orphan)) Directory.Delete(orphan, true); } catch { }
             }
+        }
+
+        private static void Case65_CategoryNameValidation()
+        {
+            Begin("65 分类名和集合名拒绝空值、斜杠和 col: 前缀");
+            bool ok = CategoryRules.ValidateName("") != null
+                && CategoryRules.ValidateName("软件/工具") != null
+                && CategoryRules.ValidateName("col:照片/旅行") != null
+                && CategoryRules.ValidateName("开发工具") == null
+                && CategoryRules.ValidateCollectionName("批次/一") != null
+                && CategoryRules.ValidateCollectionName("col:合集") != null
+                && CategoryRules.ValidateCollectionName("批次一") == null;
+            Assert(ok, "分类空值=True 分类斜杠=True 分类col前缀=True 分类正常=False 集合斜杠=True 集合col前缀=True 集合正常=False");
         }
 
         private static void Case62_XmlDtdRejected()
@@ -1514,6 +1581,34 @@ namespace AppManager
                 && DpiHelper.Scale(240, 168) == 420
                 && DpiHelper.Scale(34, 144) == 51;
             Assert(ok, "100%=240 125%=300 150%=360 175%=420");
+        }
+
+        private static void Case64_SelfTargetExclusion()
+        {
+            Begin("64 扫描排除当前程序自身");
+            try
+            {
+                string self = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                bool direct = Scanner.IsSelfTarget(self);
+                bool caseInsensitive = Scanner.IsSelfTarget(self.ToUpperInvariant());
+                bool other = !Scanner.IsSelfTarget(Path.Combine(Environment.SystemDirectory, "notepad.exe"));
+                bool empty = !Scanner.IsSelfTarget(string.Empty);
+                Assert(direct && caseInsensitive && other && empty,
+                    "direct=" + direct + " case=" + caseInsensitive
+                    + " other=" + other + " empty=" + empty);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void SetExifAscii(Image image, int id, string text)
+        {
+            PropertyItem item = (PropertyItem)System.Runtime.Serialization.FormatterServices
+                .GetUninitializedObject(typeof(PropertyItem));
+            item.Id = id;
+            item.Type = 2;
+            item.Value = System.Text.Encoding.ASCII.GetBytes(text);
+            item.Len = item.Value.Length;
+            image.SetPropertyItem(item);
         }
 
         private static void WriteBox(Stream s, string type, byte[] payload)

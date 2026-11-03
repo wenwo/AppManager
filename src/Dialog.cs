@@ -80,7 +80,7 @@ namespace AppManager
             for (int i = 0; i < items.Count; i++)
                 h += items[i].Separator ? 9 : ItemH;
             ClientSize = new Size(width, h);
-            try { Region = new Region(Draw.RoundedPath(ClientRectangle, S(12))); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(ClientRectangle, S(12))) Region = new Region(path); } catch { }
             if (!isSubmenu)
             {
                 // 仅根菜单持有收起定时器：光标离开级联链后延时收起子菜单
@@ -592,6 +592,12 @@ namespace AppManager
     {
         public static bool Show(string title, string message)
         {
+            return Show(title, message, "确定", "取消");
+        }
+
+        /// <summary>按钮文字可定制：取消一侧会产生后果（如放弃修改）时，用明确的动词代替“取消”。Esc 等同点击右侧按钮。</summary>
+        public static bool Show(string title, string message, string okText, string cancelText)
+        {
             bool result = false;
             Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
@@ -599,7 +605,25 @@ namespace AppManager
             f.ClientSize = new Size(400, 200);
             f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
+            f.KeyPreview = true;
+            f.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    result = false;
+                    f.DialogResult = DialogResult.Cancel;
+                    f.Close();
+                    e.Handled = true;
+                }
+                else if (e.KeyCode == Keys.Enter)
+                {
+                    result = true;
+                    f.DialogResult = DialogResult.OK;
+                    f.Close();
+                    e.Handled = true;
+                }
+            };
+            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -615,10 +639,10 @@ namespace AppManager
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(S(24), S(60), f.Width - S(48), S(60)));
             };
-            RoundButton ok = MakeBtn("确定", true);
+            RoundButton ok = MakeBtn(okText, true);
             ok.Bounds = new Rectangle(192, 142, 84, 34);
             ok.Click += delegate { result = true; f.DialogResult = DialogResult.OK; f.Close(); };
-            RoundButton cancel = MakeBtn("取消", false);
+            RoundButton cancel = MakeBtn(cancelText, false);
             cancel.Bounds = new Rectangle(292, 142, 84, 34);
             cancel.Click += delegate { result = false; f.DialogResult = DialogResult.Cancel; f.Close(); };
             f.Controls.Add(ok);
@@ -728,7 +752,7 @@ namespace AppManager
             form.BackColor = Theme.Card;
             form.ShowInTaskbar = false;
             form.KeyPreview = true;
-            try { form.Region = new Region(Draw.RoundedPath(form.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(form.ClientRectangle, 18)) form.Region = new Region(path); } catch { }
             form.Paint += delegate(object sender, PaintEventArgs e)
             {
                 Graphics graphics = e.Graphics;
@@ -836,7 +860,7 @@ namespace AppManager
             form.ClientSize = new Size(420, 324);
             form.BackColor = Theme.Card;
             form.ShowInTaskbar = false;
-            try { form.Region = new Region(Draw.RoundedPath(form.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(form.ClientRectangle, 18)) form.Region = new Region(path); } catch { }
             form.Paint += delegate(object sender, PaintEventArgs e)
             {
                 Graphics graphics = e.Graphics;
@@ -967,7 +991,7 @@ namespace AppManager
             f.ClientSize = new Size(400, 218 + extra);
             f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -1092,7 +1116,7 @@ namespace AppManager
             f.ClientSize = new Size(400, 260);
             f.BackColor = Theme.Background;
             f.ShowInTaskbar = false;
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -1146,9 +1170,10 @@ namespace AppManager
             ok.Click += delegate
             {
                 string name = (nameBox.Text ?? string.Empty).Trim();
-                if (name.Length == 0)
+                string error = CategoryRules.ValidateCollectionName(name);
+                if (error != null)
                 {
-                    MessageBox.Show("请输入集合名称。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show(error, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 result = new ResourceCollection();
@@ -1610,7 +1635,7 @@ namespace AppManager
             return Encoding.ASCII.GetString(value).Trim('\0', ' ');
         }
 
-        /// <summary>EXIF 时间统一为「yyyy-MM-dd HH:mm:ss」；解析失败时保留原始文本。</summary>
+        /// <summary>EXIF 时间统一为「yyyy-MM-dd HH:mm:ss」；占位/解析失败返回 null，让后续字段回退。</summary>
         private static string ExifDate(byte[] value)
         {
             string s = ExifAscii(value);
@@ -1618,7 +1643,7 @@ namespace AppManager
             if (DateTime.TryParseExact(s, "yyyy:MM:dd HH:mm:ss", CultureInfo.InvariantCulture,
                     DateTimeStyles.None, out t))
                 return t.ToString("yyyy-MM-dd HH:mm:ss");
-            return s;
+            return null;
         }
 
         /// <summary>GPS 度分秒（3 组有理数）换算为十进制度；非法数据返回 NaN。</summary>

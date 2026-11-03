@@ -21,6 +21,25 @@ namespace AppManager
     {
         private readonly AppConfig config;
         private const int ShortcutTextCapacity = 32768;
+        private static readonly string SelfExecutablePath = ResolveSelfExecutablePath();
+
+        private static string ResolveSelfExecutablePath()
+        {
+            try { return Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName); }
+            catch { return string.Empty; }
+        }
+
+        /// <summary>判断启动目标是否为当前程序自身（扫描时跳过自己的快捷方式）。</summary>
+        internal static bool IsSelfTarget(string target)
+        {
+            if (string.IsNullOrEmpty(target) || string.IsNullOrEmpty(SelfExecutablePath)) return false;
+            try
+            {
+                string path = Path.GetFullPath(target.Trim());
+                return string.Equals(path, SelfExecutablePath, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
 
         // COM 快捷方式解析：IShellLinkW 接口。
         // 注意：COM 接口按 vtable 槽位顺序调用，方法声明顺序必须与 shobjidl_core.h 中
@@ -61,10 +80,21 @@ namespace AppManager
         // 按名称去重的索引（NormalizeEntryName → 条目）：MergeByName 由 O(n²) 遍历改为 O(1) 查找
         private Dictionary<string, AppInfo> nameIndex;
         private Sqlite registeredItems;
+        private List<AddedEntry> addedSnapshot;   // 本次扫描使用的收录快照（界面线程拷贝）
 
-        /// <summary>执行全量扫描，返回去重后的应用列表。</summary>
+        /// <summary>执行全量扫描，返回去重后的应用列表（在调用线程套用收藏/隐藏/分类覆盖）。</summary>
         public List<AppInfo> ScanAll()
         {
+            return ScanAll(true, null);
+        }
+
+        /// <summary>
+        /// 后台扫描用：applyConfig=false 时不读收藏、隐藏、分类覆盖等界面线程会改写的集合，由调用方回到界面线程后再 ApplyConfig；
+        /// added 为界面线程预先拷贝的收录快照（仅无数据库会话使用，为空时读 config.AddedItems）。
+        /// </summary>
+        internal List<AppInfo> ScanAll(bool applyConfig, List<AddedEntry> added)
+        {
+            addedSnapshot = added;
             registeredItems = config.Database == null ? null : new Sqlite(config.Database.FilePath, true);
             try
             {
@@ -80,10 +110,14 @@ namespace AppManager
 
             List<AppInfo> list = new List<AppInfo>(dict.Values);
             if (config.Database != null) config.Database.PublishCatalog(config, list);
-            ApplyConfig(list);
+            if (applyConfig) ApplyConfig(list);
             return list;
             }
-            finally { if (registeredItems != null) { registeredItems.Dispose(); registeredItems = null; } }
+            finally
+            {
+                addedSnapshot = null;
+                if (registeredItems != null) { registeredItems.Dispose(); registeredItems = null; }
+            }
         }
 
         /// <summary>
@@ -188,7 +222,7 @@ namespace AppManager
         private void ScanAdded(Dictionary<string, AppInfo> dict)
         {
             if (config.Database != null) return;
-            foreach (AddedEntry e in config.Database == null ? config.AddedItems : config.AddedItems.SoftwareEntries())
+            foreach (AddedEntry e in addedSnapshot ?? (IEnumerable<AddedEntry>)config.AddedItems)
             {
                 // 资源记录已建立数据库目录；扫描系统应用时不再展开十万级资源列表。
                 if (config.Database != null && e.IsResource) continue;
@@ -229,13 +263,15 @@ namespace AppManager
         /// 桌面应用的解析路径为可执行文件路径；打包/UWP 应用无文件路径，以 shell:AppsFolder\&lt;AUMID&gt; 作为启动目标。
         /// 返回枚举到的条目数（0 表示枚举失败，调用方回退开始菜单扫描）。
         /// </summary>
+        /// <summary>返回 AppsFolder 收录的条目数；枚举不完整时返回 0，让调用方补扫开始菜单（按名称去重，不会重复）。</summary>
         private int ScanAppsFolder(Dictionary<string, AppInfo> dict)
         {
-            List<string[]> items = EnumerateAppsFolder();
+            bool complete;
+            List<string[]> items = EnumerateAppsFolder(out complete);
             foreach (string[] it in items)
             {
                 string name = it[0];
-                string id = it[1];
+                string id = ResolveKnownFolderPath(it[1]);
                 if (IsNonAppEntry(name, id)) continue;
 
                 AppInfo app = new AppInfo();
@@ -270,7 +306,31 @@ namespace AppManager
                 }
                 MergeByName(dict, app);
             }
-            return items.Count;
+            return complete ? items.Count : 0;
+        }
+
+        [DllImport("shell32.dll")]
+        private static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint flags, IntPtr token, out IntPtr path);
+
+        /// <summary>
+        /// AppsFolder 对 Program Files、System32 等位置下的 Win32 程序返回“{已知文件夹GUID}\相对路径”而不是真实路径；
+        /// 不还原就会因文件“不存在”被当成 UWP：图标发糊、显示为打包应用、排除自身失效。还原后路径不存在时保持原值。
+        /// </summary>
+        internal static string ResolveKnownFolderPath(string id)
+        {
+            if (string.IsNullOrEmpty(id) || id.Length < 40 || id[0] != '{' || id[37] != '}' || id[38] != '\\') return id;
+            Guid folder;
+            try { folder = new Guid(id.Substring(0, 38)); }
+            catch (FormatException) { return id; }
+            IntPtr raw = IntPtr.Zero;
+            try
+            {
+                if (SHGetKnownFolderPath(folder, 0, IntPtr.Zero, out raw) != 0 || raw == IntPtr.Zero) return id;
+                string resolved = Path.Combine(Marshal.PtrToStringUni(raw), id.Substring(39));
+                return File.Exists(resolved) || Directory.Exists(resolved) ? resolved : id;
+            }
+            catch (Exception) { return id; }
+            finally { if (raw != IntPtr.Zero) Marshal.FreeCoTaskMem(raw); }
         }
 
         /// <summary>
@@ -278,8 +338,10 @@ namespace AppManager
         /// 打包/UWP 应用的解析路径为 AppUserModelID（如 Chrome、cn.apifox.app）；
         /// 传统桌面应用的解析路径为可执行文件路径。失败时返回空列表。
         /// </summary>
-        private static List<string[]> EnumerateAppsFolder()
+        /// <summary>complete=false 表示枚举中途失败，结果只是一部分，调用方需要补扫开始菜单。</summary>
+        private static List<string[]> EnumerateAppsFolder(out bool complete)
         {
+            complete = false;
             List<string[]> result = new List<string[]>();
             object shell = null;
             object folder = null;
@@ -312,11 +374,17 @@ namespace AppManager
                             CultureInfo.InvariantCulture);
                         if (!string.IsNullOrEmpty(name)) result.Add(new string[] { name, id ?? string.Empty });
                     }
+                    catch (Exception ex)
+                    {
+                        // 单项读取失败只跳过这一项，不能打断整个枚举（否则后续软件全部丢失）
+                        Debug.WriteLine("读取 AppsFolder 条目失败: " + ex.Message);
+                    }
                     finally
                     {
                         ReleaseCom(item);
                     }
                 }
+                complete = true;
             }
             catch (Exception ex)
             {
@@ -344,7 +412,7 @@ namespace AppManager
         private static readonly string[] NonAppNameFragments = new string[]
         {
             "release note", "faq", "manual", "documentation", "readme", "website",
-            "getting started", "install additional", "uninstall", "卸载", "帮助", "使用说明", "说明文档"
+            "getting started", "install additional", "帮助", "使用说明", "说明文档"
         };
 
         /// <summary>
@@ -496,18 +564,20 @@ namespace AppManager
             try
             {
                 foreach (string f in Directory.EnumerateFiles(folder, "*.*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
-                {
-                    string ext = Path.GetExtension(f).ToLowerInvariant();
-                    if (ext != ".lnk") continue;
-                    AppInfo app = ResolveShortcut(f, source);
-                    if (app == null) continue;
-                    // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
-                    if (!IsAliveTarget(app.TargetPath, app.IsUwp)) continue;
-                    if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
-                    MergeByName(dict, app);
-                }
+                    AddShortcut(dict, f, source);
             }
             catch { }
+        }
+
+        private void AddShortcut(Dictionary<string, AppInfo> dict, string file, string source)
+        {
+            if (!string.Equals(Path.GetExtension(file), ".lnk", StringComparison.OrdinalIgnoreCase)) return;
+            AppInfo app = ResolveShortcut(file, source);
+            if (app == null) return;
+            // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
+            if (!IsAliveTarget(app.TargetPath, app.IsUwp)) return;
+            if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
+            MergeByName(dict, app);
         }
 
         private AppInfo ResolveShortcut(string path, string source)
@@ -639,16 +709,34 @@ namespace AppManager
         private void ScanDesktopBackup(Dictionary<string, AppInfo> dict)
         {
             // 新版收纳目录 + 旧版 DesktopStash（升级后旧收纳的快捷方式也要能在快捷中心看到）
+            // 收纳的快捷方式都平铺在收纳目录根下；Files/Folders 子目录里是整理时搬入的用户文件和文件夹。
+            // 只扫根目录：递归会在每次扫描时遍历整棵用户目录（如 node_modules），还会把其中的 .lnk 误当成快捷中心条目，
+            // 遇到无权限子目录时整个枚举中断，所有已收纳快捷方式一起从列表消失。
             if (Directory.Exists(Paths.DesktopBackupDir))
-                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop", true);
+                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop", false);
             if (Directory.Exists(Paths.LegacyStashDir))
-                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop", true);
+            {
+                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop", false);
+                // 旧版 DesktopStash 可能保留了子目录结构：按收纳清单逐条解析快捷方式，不递归整个目录
+                List<DesktopBackupEntry> entries;
+                try { entries = new List<DesktopBackupEntry>(config.DesktopBackup); }
+                catch (InvalidOperationException) { entries = new List<DesktopBackupEntry>(); }   // 界面线程正在修改清单
+                string prefix = Path.GetFullPath(Paths.LegacyStashDir).TrimEnd('\\') + "\\";
+                foreach (DesktopBackupEntry e in entries)
+                {
+                    if (e == null || e.IsDir || string.IsNullOrEmpty(e.CurrentPath)) continue;
+                    if (!e.CurrentPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { if (File.Exists(e.CurrentPath)) AddShortcut(dict, e.CurrentPath, "Desktop"); }
+                    catch (Exception ex) { Paths.LogError(ex); }
+                }
+            }
         }
 
         // ===== 去重与配置 =====
 
         private void Merge(Dictionary<string, AppInfo> dict, AppInfo app)
         {
+            if (IsSelfTarget(app.TargetPath)) return;
             string k = app.DisplayKey();
             AppInfo exist;
             if (dict.TryGetValue(k, out exist))
@@ -659,6 +747,7 @@ namespace AppManager
                     exist.InstallLocation = app.InstallLocation;
                 if (string.IsNullOrEmpty(exist.DisplayIcon) && !string.IsNullOrEmpty(app.DisplayIcon))
                     exist.DisplayIcon = app.DisplayIcon;
+                if (app.IsDesktop) exist.IsDesktop = true;
             }
             else
             {
@@ -673,8 +762,10 @@ namespace AppManager
         /// </summary>
         private void MergeByName(Dictionary<string, AppInfo> dict, AppInfo app)
         {
+            if (IsSelfTarget(app.TargetPath)) return;
             string name = NormalizeEntryName(app.Name);
-            if (name.Length > 0)
+            // 只在软件/快捷方式之间按名称去重：文件、文件夹（含指向文档的快捷方式）同名不代表同一个程序
+            if (name.Length > 0 && !app.IsFile)
             {
                 AppInfo exist;
                 if (nameIndex != null && nameIndex.TryGetValue(name, out exist))
@@ -690,14 +781,15 @@ namespace AppManager
                     return;
                 }
             }
-            dict[app.DisplayKey()] = app;
-            RegisterNameIndex(app);
+            // 同键已存在时按 Merge 合并字段，不能直接覆盖：被覆盖的旧对象会留在名称索引里继续吞掉同名条目
+            Merge(dict, app);
         }
 
         /// <summary>把条目登记到名称去重索引（首个同名条目优先，与 MergeByName 的顺序语义一致）。</summary>
         private void RegisterNameIndex(AppInfo app)
         {
-            if (nameIndex == null || app == null) return;
+            // 文件/文件夹条目不进名称索引：收纳目录里叫“Python”的文件夹不能吞掉 Python 这个软件
+            if (nameIndex == null || app == null || app.IsFile) return;
             string name = NormalizeEntryName(app.Name);
             if (name.Length > 0 && !nameIndex.ContainsKey(name)) nameIndex[name] = app;
         }
@@ -858,15 +950,15 @@ namespace AppManager
                     {
                         if (a == null || string.IsNullOrEmpty(a.Name)) continue;
                         w.WriteStartElement("app");
-                        w.WriteAttributeString("name", a.Name);
-                        if (!string.IsNullOrEmpty(a.TargetPath)) w.WriteAttributeString("target", a.TargetPath);
-                        if (!string.IsNullOrEmpty(a.ShortcutPath)) w.WriteAttributeString("shortcut", a.ShortcutPath);
-                        if (!string.IsNullOrEmpty(a.InstallLocation)) w.WriteAttributeString("install", a.InstallLocation);
-                        if (!string.IsNullOrEmpty(a.UninstallString)) w.WriteAttributeString("uninstall", a.UninstallString);
-                        if (!string.IsNullOrEmpty(a.DisplayIcon)) w.WriteAttributeString("icon", a.DisplayIcon);
-                        if (!string.IsNullOrEmpty(a.Category)) w.WriteAttributeString("category", a.Category);
-                        if (!string.IsNullOrEmpty(a.Source)) w.WriteAttributeString("source", a.Source);
-                        if (!string.IsNullOrEmpty(a.Key)) w.WriteAttributeString("key", a.Key);
+                        WriteSafeAttribute(w, "name", a.Name);
+                        if (!string.IsNullOrEmpty(a.TargetPath)) WriteSafeAttribute(w, "target", a.TargetPath);
+                        if (!string.IsNullOrEmpty(a.ShortcutPath)) WriteSafeAttribute(w, "shortcut", a.ShortcutPath);
+                        if (!string.IsNullOrEmpty(a.InstallLocation)) WriteSafeAttribute(w, "install", a.InstallLocation);
+                        if (!string.IsNullOrEmpty(a.UninstallString)) WriteSafeAttribute(w, "uninstall", a.UninstallString);
+                        if (!string.IsNullOrEmpty(a.DisplayIcon)) WriteSafeAttribute(w, "icon", a.DisplayIcon);
+                        if (!string.IsNullOrEmpty(a.Category)) WriteSafeAttribute(w, "category", a.Category);
+                        if (!string.IsNullOrEmpty(a.Source)) WriteSafeAttribute(w, "source", a.Source);
+                        if (!string.IsNullOrEmpty(a.Key)) WriteSafeAttribute(w, "key", a.Key);
                         if (a.IsUwp) w.WriteAttributeString("uwp", "1");
                         if (a.IsDesktop) w.WriteAttributeString("desktop", "1");
                         if (a.IsFile) w.WriteAttributeString("file", "1");
@@ -880,6 +972,41 @@ namespace AppManager
                 else File.Move(tmp, path);
             }
             catch (Exception ex) { Paths.LogError(ex); }
+        }
+
+        private static void WriteSafeAttribute(XmlWriter writer, string name, string value)
+        {
+            writer.WriteAttributeString(name, XmlSafe(value));
+        }
+
+        /// <summary>移除 XML 1.0 不允许的控制字符，避免一个非法字符让整份扫描缓存写入失败。</summary>
+        private static string XmlSafe(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value ?? string.Empty;
+            StringBuilder safe = null;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (XmlConvert.IsXmlChar(c))
+                {
+                    if (safe != null) safe.Append(c);
+                    continue;
+                }
+                if (char.IsHighSurrogate(c) && i + 1 < value.Length
+                    && XmlConvert.IsXmlSurrogatePair(c, value[i + 1]))
+                {
+                    if (safe != null) { safe.Append(c); safe.Append(value[i + 1]); }
+                    i++;
+                    continue;
+                }
+                if (safe == null)
+                {
+                    safe = new StringBuilder(value.Length);
+                    safe.Append(value, 0, i);
+                }
+                safe.Append(' ');
+            }
+            return safe == null ? value : safe.ToString();
         }
     }
 }

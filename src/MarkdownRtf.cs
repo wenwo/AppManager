@@ -36,24 +36,41 @@ namespace AppManager
         /// <summary>把 Markdown 文本转换为 RTF；widthTwips 为正文可用宽度，用于表格与代码块的列宽。</summary>
         public static string Render(string markdown, int widthTwips)
         {
+            return Render(markdown, widthTwips, System.Threading.CancellationToken.None);
+        }
+
+        /// <summary>同上；后台渲染时传入取消令牌，切换文件后不必等旧文件渲染完。</summary>
+        public static string Render(string markdown, int widthTwips, System.Threading.CancellationToken cancellation)
+        {
             string text = (markdown ?? string.Empty).Replace("\r\n", "\n").Replace('\r', '\n');
             if (text.IndexOf("<!--", StringComparison.Ordinal) >= 0) text = HtmlComment.Replace(text, string.Empty);
-            Renderer renderer = new Renderer(Math.Max(widthTwips, 2400), text.Length);
+            Renderer renderer = new Renderer(Math.Max(widthTwips, 2400), text.Length, cancellation);
             renderer.Blocks(new List<string>(text.Split('\n')), 0);
             return renderer.Finish();
         }
+
+        // 嵌套与长度上限：引用 “>>>…” 或链接 “[[[…](u)](u)…” 每层都会递归，构造文件能把调用栈压到上万层，
+        // StackOverflowException 无法捕获会直接结束进程。超出上限的部分按纯文本输出。
+        internal const int MaxBlockDepth = 32;
+        internal const int MaxInlineDepth = 32;
+        // 未闭合的 “[”“*” 会让每个起始符都扫描到行尾（O(n²)）；超长段落只转义不解析行内格式。
+        internal const int MaxInlineLength = 8192;
 
         private sealed class Renderer
         {
             private readonly StringBuilder rtf;
             private readonly int width;
+            private readonly System.Threading.CancellationToken cancellation;
+            private int blockDepth;
+            private int inlineDepth;
             // RichEdit 不绘制段落边框：引用块的竖线用单元格左边框实现，段落逐行放入同一列
             private bool inQuote;
             private int quoteLeft;
 
-            public Renderer(int width, int length)
+            public Renderer(int width, int length, System.Threading.CancellationToken cancellation)
             {
                 this.width = width;
+                this.cancellation = cancellation;
                 rtf = new StringBuilder(length * 2 + 1024);
                 rtf.Append(@"{\rtf1\ansi\ansicpg936\deff0\uc1");
                 rtf.Append(@"{\fonttbl{\f0\fswiss\fcharset134 ").Append(Theme.FontName)
@@ -85,6 +102,7 @@ namespace AppManager
                 int i = 0;
                 while (i < lines.Count)
                 {
+                    cancellation.ThrowIfCancellationRequested();
                     string line = lines[i];
                     if (line.Trim().Length == 0)
                     {
@@ -137,9 +155,17 @@ namespace AppManager
                         List<string> inner = new List<string>();
                         while (i < lines.Count && Quote.IsMatch(lines[i]))
                             inner.Add(Quote.Replace(lines[i++], string.Empty, 1));
+                        if (blockDepth >= MaxBlockDepth)
+                        {
+                            // 嵌套过深：剩余内容（含其中的 “>”）按普通段落原样显示，不再递归
+                            Paragraph(inner, indent);
+                            continue;
+                        }
                         bool outer = !inQuote;
                         if (outer) { inQuote = true; quoteLeft = indent; }
-                        Blocks(inner, outer ? indent : indent + 300);
+                        blockDepth++;
+                        try { Blocks(inner, outer ? indent : indent + 300); }
+                        finally { blockDepth--; }
                         if (outer) inQuote = false;
                         continue;
                     }
@@ -434,6 +460,18 @@ namespace AppManager
             // ===== 行内 =====
 
             private void Inline(string s)
+            {
+                if (inlineDepth >= MaxInlineDepth || s.Length > MaxInlineLength)
+                {
+                    Escape(s);
+                    return;
+                }
+                inlineDepth++;
+                try { InlineCore(s); }
+                finally { inlineDepth--; }
+            }
+
+            private void InlineCore(string s)
             {
                 int i = 0;
                 while (i < s.Length)

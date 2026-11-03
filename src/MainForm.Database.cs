@@ -22,6 +22,13 @@ namespace AppManager
         private readonly List<AppInfo> databaseSummaryOwned = new List<AppInfo>();
         // 非安全时机（未换代的图标加载可能仍在回写）失效的摘要条目：推迟到下次 RefreshGrid 换代后再释放。
         private readonly List<AppInfo> databaseDeferredDisposals = new List<AppInfo>();
+        // 集合侧边栏封面的批量查询缓存：与摘要同一失效口径（Revision|ShowHidden|分类），
+        // 保存后一次 GROUP BY 重建，不再逐集合分页查询。条目走保留池，失效时只清空映射。
+        private readonly Dictionary<string, AppInfo> collectionCoverImages = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+        private readonly Dictionary<string, AppInfo> collectionCoverFirst = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+        private readonly List<string> collectionCoverKeys = new List<string>();
+        private string collectionCoverStamp;
+        private bool collectionCoverFirstLoaded;
         // 跨分类/分页保留的条目对象（持有已加载图标），按 Key 复用；超过上限时只留当前页。
         private readonly Dictionary<string, AppInfo> databaseRetained = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
         private const int DatabaseRetainedLimit = 1000;
@@ -34,9 +41,29 @@ namespace AppManager
             {
                 RunOnUi(delegate
                 {
-                    MessageBox.Show(this, "变更未保存，数据库中的原数据已保留。\n" + error, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    ReloadUiAfterSaveFailure();
+                    MessageBox.Show(this, "变更未保存，已恢复为数据库中的原数据。\n" + error, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 });
             };
+        }
+
+        /// <summary>保存失败后配置已回滚到数据库状态：重建依赖配置的运行时对象并刷新列表。</summary>
+        private void ReloadUiAfterSaveFailure()
+        {
+            if (!_ready || IsDisposed || Disposing) return;
+            InvalidateAddedIndex();
+            scanner = new Scanner(config);
+            organizer = new DesktopOrganizer(config);
+            if (currentCollection != null && FindCollectionByKey(currentCollection) == null) currentCollection = null;
+            grid.GridMode = GetCategoryGridMode(currentCategory);
+            SyncHeaderStrip();
+            if (settingsPage != null)
+                settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
+                    config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
+            StartAutoScan();
+            RebuildSidebar();
+            StartScan();
+            Invalidate();
         }
 
         private void ScheduleDatabaseMetadata()
@@ -160,6 +187,54 @@ namespace AppManager
                 databaseSummaries[key] = value;
             }
             return value;
+        }
+
+        /// <summary>
+        /// 集合侧边栏封面候选的批量缓存：一次 GROUP BY 取当前分类每个集合的首个图片成员；
+        /// 无图片成员的集合在首次需要时再批量取首个成员（图标版式化兜底）。
+        /// 首个图片成员封面解码失败时回退首个成员，不再逐个尝试后续图片成员。
+        /// </summary>
+        private void EnsureCollectionCovers(string category)
+        {
+            string stamp = config.Database.Revision + "|" + config.ShowHidden + "|" + category;
+            if (stamp == collectionCoverStamp) return;
+            collectionCoverStamp = stamp;
+            collectionCoverImages.Clear();
+            collectionCoverFirst.Clear();
+            collectionCoverFirstLoaded = false;
+            collectionCoverKeys.Clear();
+            for (int i = 0; i < config.Collections.Count; i++)
+                if (config.Collections[i].Parent == category)
+                    collectionCoverKeys.Add(CollectionKeys.Make(category, config.Collections[i].Name));
+            RetainCoverMembers(config.Database.CollectionFirstMembers(collectionCoverKeys, config.ShowHidden, true), collectionCoverImages);
+        }
+
+        private AppInfo CollectionCoverFallback(string key)
+        {
+            if (!collectionCoverFirstLoaded)
+            {
+                collectionCoverFirstLoaded = true;
+                List<string> missing = new List<string>();
+                foreach (string k in collectionCoverKeys)
+                {
+                    AppInfo image;
+                    // 没有图片成员、或首个图片成员封面解码失败的集合，都回退到首个成员的图标版式化
+                    if (collectionCoverImages.TryGetValue(k, out image)
+                        && !IsCoverFailed(image.TargetPath, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize)) continue;
+                    missing.Add(k);
+                }
+                RetainCoverMembers(config.Database.CollectionFirstMembers(missing, config.ShowHidden, false), collectionCoverFirst);
+            }
+            AppInfo value;
+            return collectionCoverFirst.TryGetValue(key, out value) ? value : null;
+        }
+
+        /// <summary>与 DatabaseSummary 同口径：先套用扫描配置再进保留池，图标随保留池统一释放。</summary>
+        private void RetainCoverMembers(Dictionary<string, AppInfo> found, Dictionary<string, AppInfo> target)
+        {
+            List<AppInfo> items = new List<AppInfo>(found.Values);
+            scanner.ApplyConfig(items);
+            foreach (KeyValuePair<string, AppInfo> kv in found) target[kv.Key] = RetainDatabaseItem(kv.Value, false);
         }
 
         /// <summary>

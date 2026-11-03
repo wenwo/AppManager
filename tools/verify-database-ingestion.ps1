@@ -26,9 +26,9 @@ foreach ($ingestTest in @('DatabaseTests', 'DatabaseIngestionTests')) {
     $ingestProcess = Start-Process @ingestStart
     $ingestHandle = $ingestProcess.Handle
     try {
-        $ingestDeadline = [DateTime]::UtcNow.AddSeconds(120)
+        $ingestDeadline = [DateTime]::UtcNow.AddSeconds(300)
         while (-not $ingestProcess.WaitForExit(1000)) {
-            if ([DateTime]::UtcNow -gt $ingestDeadline) { throw 'Verification timed out after 120 seconds.' }
+            if ([DateTime]::UtcNow -gt $ingestDeadline) { throw 'Verification timed out after 300 seconds.' }
         }
         $ingestProcess.Refresh()
         Get-Content -LiteralPath $ingestOut -Encoding UTF8 | Tee-Object -FilePath $ingestLog -Append

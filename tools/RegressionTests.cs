@@ -1,8 +1,10 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Threading;
@@ -16,6 +18,7 @@ namespace AppManager
         private static int passed, failed;
         private static string root;
         private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
+        private const BindingFlags StaticPrivate = BindingFlags.Static | BindingFlags.NonPublic;
 
         [STAThread]
         public static int Main()
@@ -30,6 +33,10 @@ namespace AppManager
             {
                 Run("restore targets: missing desktop path / traversal / ADS / relative", Targets);
                 Run("unsafe restore keeps source and creates no destination", RejectRestore);
+                Run("copy restore checks the original and suppresses auto stash", RestoreCopySafety);
+                Run("auto stash quiet period starts when the whole restore batch ends", RestoreSuppressionStartsAtEnd);
+                Run("collection thumbnails do not stay loading when the completion post is lost", CollectionThumbsLostPost);
+                Run("desktop copy mode keeps same-name files and rolls back failed save", DesktopCopySafety);
                 Run("copy: complete tree and file contents", CopyComplete);
                 Run("copy limits: entries / bytes / timeout / depth", CopyLimits);
                 Run("organizer copy failure leaves no partial target; retry succeeds", CopyRetry);
@@ -45,6 +52,13 @@ namespace AppManager
                 Run("auto scan: existing shortcut rewrite, periodic fallback and disposal", AutoScanChanges);
                 Run("category removal: hidden toggle, single/batch, reload and rejoin", CategoryRemoval);
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
+                Run("category icon-only edit keeps item order; rename migrates it", CategoryIconOnlyEdit);
+                Run("deleting a resource category removes covers, view mode and the add button", CategoryDeleteCleansState);
+                Run("main form disposed without Close leaves no message filter behind", DisposedFormMessageFilter);
+                Run("storage dialog writes back only the edited fields", StoreDialogSavesOnlyEdits);
+                Run("custom category add/remove uses the same memberships and keeps an existing icon", CustomCategoryAddRemove);
+                Run("classification keeps uninstaller apps and prefers specific keywords", ClassificationRules);
+                Run("move to category removes only the source membership and keeps collections", MoveKeepsOtherMemberships);
                 Run("resource defaults: remove, preserve library, reload and menu rejoin", ResourceCategoryRemoval);
                 Run("category removal: failed save rolls back membership and permits retry", CategoryRemovalSaveFailure);
                 Run("default category addition: single/batch, multiple memberships, removal and reload", DefaultCategoryAddition);
@@ -56,6 +70,27 @@ namespace AppManager
                 Run("rename: invalid names, conflicts, extension rule/confirm, case-only, locked file, save-failure rollback", RenameValidation);
                 Run("rename: folders rebase covers and refuse nested entries; software/referenced items keep display-name rename", RenameFoldersAndSoftware);
                 Run("move into folder keeps favorite, hidden, order, membership and cover", MoveIntoFolderKeepsRecords);
+                Run("resource page creates entries in the resource store", ResourceCreateEntries);
+                Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
+                Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
+                Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
+                Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
+                Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
+                Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
+                Run("grid measures only visible rows; column width grows while scrolling to wider rows", GridVisibleMeasurement);
+                Run("stash scan reads root shortcuts and legacy records only, never stashed folder trees", StashScanTopLevel);
+                Run("background scan uses the UI snapshot and leaves UI-owned settings to the UI thread", ScanUsesUiSnapshot);
+                Run("apps folder known-folder ids resolve to real paths; app ids stay unchanged", KnownFolderIds);
+                Run("grid caches category text and falls back when the provider fails", GridCategoryTextCache);
+                Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
+                Run("grid delete handles every selected item; arrow starts at the first item", GridBatchDeleteAndArrow);
+                Run("icon cache evicts by bytes and LRU instead of clearing everything", IconCacheLru);
+                Run("auto scan pause keeps pending and paused changes, resume fires once", AutoScanPauseResume);
+                Run("confirm dialog follows escape/enter and round buttons respond to space", DialogKeyboard);
+                Run("scan cache drops XML-invalid control characters", ScanCacheInvalidXml);
+                Run("backup list ignores update leftovers", BackupListSkipsOld);
+                Run("backup create removes stale temporary snapshots", BackupCleansStaleTemp);
+                Run("music player caches the scaled cover per size", MusicPlayerCoverCache);
             }
             finally
             {
@@ -135,6 +170,19 @@ namespace AppManager
         {
             Type[] types = Array.ConvertAll(args, delegate(object arg) { return arg.GetType(); });
             return typeof(MainForm).GetMethod(method, Private, null, types, null).Invoke(form, args);
+        }
+
+        private static void PumpUntil(Func<bool> done)
+        {
+            Stopwatch timer = Stopwatch.StartNew();
+            while (!done())
+            {
+                Application.DoEvents();
+                Thread.Sleep(10);
+                if (timer.ElapsedMilliseconds > 10000) throw new Exception("background operation timeout");
+            }
+            Stopwatch drain = Stopwatch.StartNew();
+            while (drain.ElapsedMilliseconds < 1000) { Application.DoEvents(); Thread.Sleep(10); }
         }
 
         private static MainForm CategoryForm(AppConfig config, params AppInfo[] apps)
@@ -457,6 +505,10 @@ namespace AppManager
 
                 string renamed = Path.Combine(photos, "Trip 2024");
                 Check(TryRename(form, album, true, "Trip 2024") == null && Directory.Exists(renamed) && File.Exists(Path.Combine(renamed, "封面.png")), "folder rename");
+                // 意图日志：磁盘改名前记「改名」、资源库保存后记「已保存」
+                string[] intentLog = File.ReadAllLines(Paths.RenameLogFile);
+                Check(intentLog.Any(l => l.Contains("改名：") && l.Contains(Path.Combine(photos, "Trip") + " => ") && l.Contains("Trip 2024"))
+                    && intentLog.Any(l => l.Contains("已保存") && l.Contains("Trip 2024")), "rename intent log incomplete");
                 Check(config.Collections[0].Cover == Path.Combine(renamed, "封面.png"), "cover not rebased: " + config.Collections[0].Cover);
                 Check(album.Name == "Trip 2024" && album.DisplayName() == "Trip 2024", "folder display name");
                 Check(TryRename(form, album, true, "TRIP 2024") == null
@@ -492,7 +544,10 @@ namespace AppManager
             string dest = Path.Combine(target.TargetPath, "a.png"), newKey = "add:" + dest;
             using (MainForm form = ResourceForm(config, "照片", image, target))
             {
+                IntPtr handle = form.Handle;
+                Check(handle != IntPtr.Zero, "resource form handle not created");
                 Invoke(form, "OnGridMoveIntoFolder", image, target);
+                PumpUntil(() => File.Exists(dest) && config.Favorites.Contains(newKey));
                 Check(File.Exists(dest) && !File.Exists(Path.Combine(photos, "a.png")), "file not moved");
                 // 本次运行内的状态（重启前常用星标、隐藏与排序都以内存为准）
                 Check(config.Favorites.Contains(newKey) && !config.Favorites.Contains(key), "favorite stale in session");
@@ -798,6 +853,189 @@ namespace AppManager
             }
         }
 
+        private static void MoveKeepsOtherMemberships()
+        {
+            AppConfig config = new AppConfig();
+            config.ResourceCategories.Add("回归资源");
+            AppInfo pic = new AppInfo { Key = "add:C:\\regression\\move.jpg", Name = "move", TargetPath = "C:\\regression\\move.jpg",
+                Category = "照片", IsFile = true };
+            config.ItemCategories[pic.Key] = new List<string> { "照片", "回归资源", CollectionKeys.Make("照片", "旅行") };
+            using (MainForm form = CategoryForm(config, pic))
+            {
+                Invoke(form, "SetHardCategory", pic, "文档");
+                List<string> extra;
+                Check(config.CategoryOverride[pic.Key] == "文档" && pic.Category == "文档", "move did not set the category");
+                Check(config.ItemCategories.TryGetValue(pic.Key, out extra), "move dropped every extra membership");
+                Check(!extra.Contains("照片"), "item stayed in its source category");
+                Check(extra.Contains("回归资源") && extra.Contains(CollectionKeys.Make("照片", "旅行")),
+                    "move dropped unrelated memberships: " + string.Join(",", extra.ToArray()));
+            }
+        }
+
+        private static void CategoryIconOnlyEdit()
+        {
+            AppConfig config = new AppConfig();
+            config.CustomCategories.Add("回归排序");
+            config.ItemOrder["回归排序"] = new List<string> { "af:regression-order-b", "af:regression-order-a" };
+            config.CategoryViewMode["回归排序"] = false;
+            AppInfo a = new AppInfo { Key = "af:regression-order-a", Name = "Order A", Category = "回归排序" };
+            AppInfo b = new AppInfo { Key = "af:regression-order-b", Name = "Order B", Category = "回归排序" };
+            using (MainForm form = CategoryForm(config, a, b))
+            {
+                CategoryIconKind current = (CategoryIconKind)Invoke(form, "GetCategoryIcon", "回归排序");
+                CategoryIconKind other = current == CategoryIconKind.Star ? CategoryIconKind.Code : CategoryIconKind.Star;
+                Check((bool)Invoke(form, "ApplyCategoryRename", "回归排序", "回归排序", other), "icon-only edit was not applied");
+                Check((CategoryIconKind)Invoke(form, "GetCategoryIcon", "回归排序") == other, "icon was not changed");
+                List<string> order;
+                Check(config.ItemOrder.TryGetValue("回归排序", out order) && order.Count == 2 && order[0] == b.Key,
+                    "icon-only edit dropped the category order");
+                Check((bool)Invoke(form, "ApplyCategoryRename", "回归排序", "回归排序新", other), "rename was not applied");
+                Check(!config.ItemOrder.ContainsKey("回归排序") && config.ItemOrder.TryGetValue("回归排序新", out order) && order[0] == b.Key,
+                    "rename did not migrate the category order");
+                bool viewMode;
+                Check(!config.CategoryViewMode.ContainsKey("回归排序") && config.CategoryViewMode.TryGetValue("回归排序新", out viewMode) && !viewMode,
+                    "rename did not migrate the category view mode");
+            }
+            AppConfig loaded = AppConfig.Load();
+            List<string> saved;
+            Check(!loaded.LoadFailed && loaded.ItemOrder.TryGetValue("回归排序新", out saved) && saved.Count == 2, "renamed order was not persisted");
+            bool savedViewMode;
+            Check(loaded.CategoryViewMode.TryGetValue("回归排序新", out savedViewMode) && !savedViewMode, "renamed view mode was not persisted");
+        }
+
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private static void StoreDialogSavesOnlyEdits()
+        {
+            MethodInfo apply = typeof(MainForm).GetMethod("ApplyStoreEdits", BindingFlags.Static | BindingFlags.NonPublic);
+            AppConfig cfg = new AppConfig { FolderStorePath = "", FileStorePath = "D:\\Custom\\Files\\", ResourceStorePath = "" };
+            // 打开后什么都不改：不能把默认路径写进配置，也不能重写已有值的格式
+            object[] args = { cfg, "", "D:\\Custom\\Files", "", null };
+            Check(!(bool)apply.Invoke(null, args) && args[4] == null, "untouched dialog reported a change");
+            Check(cfg.FolderStorePath == "" && cfg.FileStorePath == "D:\\Custom\\Files\\" && cfg.ResourceStorePath == "", "untouched dialog rewrote storage paths");
+            // 只改一个字段
+            args = new object[] { cfg, "  ", "D:\\Custom\\Files", "E:\\Res\\", null };
+            Check((bool)apply.Invoke(null, args) && cfg.ResourceStorePath == "E:\\Res", "edited field was not saved");
+            Check(cfg.FolderStorePath == "" && cfg.FileStorePath == "D:\\Custom\\Files\\", "untouched fields changed");
+            // 相对路径被拒绝，配置不变
+            args = new object[] { cfg, "relative\\dir", "D:\\Custom\\Files", "E:\\Res", null };
+            Check(!(bool)apply.Invoke(null, args) && args[4] != null && cfg.FolderStorePath == "", "relative path was accepted");
+            // 清空字段 = 恢复默认
+            args = new object[] { cfg, "", "", "", null };
+            Check((bool)apply.Invoke(null, args) && cfg.FileStorePath == "" && cfg.ResourceStorePath == "", "clearing a field did not restore the default");
+        }
+
+        private static void DisposedFormMessageFilter()
+        {
+            // 显示后不经 Close 直接释放：OnFormClosed 不会执行，过滤器必须在释放时注销，
+            // 否则之后任何消息循环都会访问已释放窗体的 Handle 并抛 ObjectDisposedException。
+            using (MainForm form = new MainForm(new AppConfig()))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Size = new Size(900, 600);
+                form.Show();
+                Application.DoEvents();
+            }
+            // 泄漏只在过滤器处理鼠标移动等消息时暴露：主动投递一条 WM_MOUSEMOVE，不依赖测试期间真实鼠标是否在动
+            using (Form probe = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual,
+                Location = new Point(-3000, -3000), Size = new Size(200, 120) })
+            {
+                probe.Show();
+                PostMessage(probe.Handle, 0x0200, IntPtr.Zero, IntPtr.Zero);
+                Application.DoEvents();
+                probe.Hide();
+            }
+            ClickConfirmation(delegate { ConfirmDialog.Show("回归", "释放后的消息循环"); }, true);
+        }
+
+        private static void CategoryDeleteCleansState()
+        {
+            AppConfig config = new AppConfig();
+            config.ResourceCategories.Add("回归资源");
+            string coverDir = Path.Combine(Paths.DataDir, "CollectionCovers");
+            Directory.CreateDirectory(coverDir);
+            string cover = Path.Combine(coverDir, "regression-cover.png");
+            File.WriteAllBytes(cover, new byte[] { 0x89, 0x50, 0x4E, 0x47 });
+            config.Collections.Add(new ResourceCollection { Parent = "回归资源", Name = "旅行", Cover = cover });
+            config.CategoryViewMode["回归资源"] = true;
+            using (MainForm form = new MainForm(config))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Size = new Size(1000, 640);
+                form.Show();
+                Application.DoEvents();
+                typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+                Invoke(form, "OnSidebarSelect", "回归资源");
+                Control addButton = (Control)typeof(MainForm).GetField("addBtn", Private).GetValue(form);
+                Check(addButton.Visible, "add button hidden for an editable resource category");
+                ClickConfirmation(delegate { Invoke(form, "DeleteCategory", "回归资源"); }, true);
+                Check(!config.ResourceCategories.Contains("回归资源"), "resource category was not removed");
+                Check(config.Collections.Count == 0, "collection definition survived category deletion");
+                Check(!File.Exists(cover), "managed collection cover was left behind");
+                Check(!config.CategoryViewMode.ContainsKey("回归资源"), "view mode survived category deletion");
+                Check(!addButton.Visible, "add button stayed visible after the current category was deleted");
+                Check((string)typeof(MainForm).GetField("currentCategory", Private).GetValue(form) == "全部资源", "did not return to all resources");
+            }
+        }
+
+        private static void CustomCategoryAddRemove()
+        {
+            AppConfig config = new AppConfig();
+            config.CustomCategories.Add("我的工具");
+            AppInfo app = new AppInfo { Key = "af:custom-member", Name = "Custom Member", Category = "其他" };
+            using (MainForm form = CategoryForm(config, app))
+            {
+                string iconKey = (string)Invoke(form, "CategoryIconKey", "我的工具");
+                config.CategoryIconNames[iconKey] = CategoryIconKind.Code.ToString();
+                Invoke(form, "EnsureCustomCategory", "我的工具", CategoryIconKind.Star);
+                Check(config.CategoryIconNames[iconKey] == CategoryIconKind.Code.ToString(), "existing custom category icon was overwritten");
+                Invoke(form, "EnsureCustomCategory", "新分类", CategoryIconKind.Star);
+                Check(config.CategoryIconNames[(string)Invoke(form, "CategoryIconKey", "新分类")] == CategoryIconKind.Star.ToString(),
+                    "new custom category icon was not saved");
+                Check((string)Invoke(form, "CategoryNameError", "全部文件", false, string.Empty) != null,
+                    "software reserved name 全部文件 was accepted");
+                Check((string)Invoke(form, "CategoryNameError", "全部文件", true, string.Empty) != null,
+                    "resource mode accepted the software reserved name 全部文件");
+
+                CollectionOps.AddMember(config, app.Key, "我的工具");
+                CollectionOps.AddMember(config, app.Key, "照片");
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "我的工具");
+                Check((bool)Invoke(form, "InCustom", app), "custom membership was not recognised");
+                ClickConfirmation(delegate { Invoke(form, "RemoveFromCustom", app); }, true);
+                Check(!(bool)Invoke(form, "InCustom", app), "custom membership survived removal");
+                Check(config.ItemCategories[app.Key].Contains("照片") && !config.ItemCategories[app.Key].Contains("我的工具"),
+                    "scoped removal touched another category");
+
+                CollectionOps.AddMember(config, app.Key, "我的工具");
+                CollectionOps.AddMember(config, app.Key, "新分类");
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "全部软件");
+                Check((bool)Invoke(form, "InCustom", app), "aggregate view did not recognise custom memberships");
+                ClickConfirmation(delegate { Invoke(form, "RemoveFromCustom", app); }, true);
+                Check(!config.ItemCategories[app.Key].Contains("我的工具") && !config.ItemCategories[app.Key].Contains("新分类"),
+                    "aggregate removal left a custom membership");
+                Check(config.ItemCategories[app.Key].Contains("照片"), "aggregate removal touched a non-custom membership");
+            }
+        }
+
+        private static void ClassificationRules()
+        {
+            Check(!Scanner.IsNonAppEntry("Revo Uninstaller", ""), "uninstaller application was filtered out");
+            Check(Scanner.IsNonAppEntry("卸载 Revo Uninstaller", ""), "uninstall shortcut was kept");
+            Check(CategoryRules.Classify("QQ") == "通讯社交", "QQ was not classified as chat");
+            Check(CategoryRules.Classify("QQ音乐") == "媒体娱乐", "QQ Music was classified as chat");
+            Check(CategoryRules.Classify("搜狗输入法") == "办公软件", "Sogou input method was classified as a browser");
+            Check(CategoryRules.Classify("搜狗浏览器") == "浏览器", "Sogou browser was not classified as a browser");
+            Check(CategoryRules.Classify("Google Chrome") == "浏览器", "Chrome regression");
+            Check(CategoryRules.Classify("微信") == "通讯社交", "WeChat regression");
+        }
+
         private static void CategoryRemovalSources()
         {
             AppConfig config = new AppConfig { ShowHidden = true };
@@ -939,6 +1177,229 @@ namespace AppManager
             Check(File.ReadAllText(source) == "keep" && !Directory.Exists(Path.GetDirectoryName(target)), "restore changed files");
         }
 
+        private static string SafeDesktopTarget(string name)
+        {
+            string path = Path.Combine(DesktopOrganizer.UserDesktop, name);
+            if (DesktopOrganizer.IsSafeRestoreTarget(path)) return path;
+            path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), name);
+            Check(DesktopOrganizer.IsSafeRestoreTarget(path), "no safe desktop fixture path");
+            return path;
+        }
+
+        // 集合信息页：控件没有句柄时，加载结束通知回不到界面线程；不能因此一直“加载中”并挡住之后的加载。
+        private static void CollectionThumbsLostPost()
+        {
+            string image = Path.Combine(root, "thumb-" + Guid.NewGuid().ToString("N") + ".png");
+            using (System.Drawing.Bitmap bitmap = new System.Drawing.Bitmap(32, 24)) bitmap.Save(image, System.Drawing.Imaging.ImageFormat.Png);
+            using (Controls.CollectionInfoPanel panel = new Controls.CollectionInfoPanel())
+            {
+                Check(!panel.IsHandleCreated, "fixture: panel already has a handle");
+                panel.SetInfo("照片", "旅行", "", 1, "", .5F, .5F, null, new List<string> { image });
+                Type type = typeof(Controls.CollectionInfoPanel);
+                PropertyInfo loading = type.GetProperty("ThumbsLoading", Private);
+                FieldInfo generation = type.GetField("thumbGen", Private);
+                type.GetMethod("StartThumbLoad", Private).Invoke(panel, null);
+                int first = (int)generation.GetValue(panel);
+                Stopwatch wait = Stopwatch.StartNew();
+                while ((bool)loading.GetValue(panel, null) && wait.ElapsedMilliseconds < 5000) Thread.Sleep(10);
+                Check(!(bool)loading.GetValue(panel, null), "thumbnails stayed loading after every worker finished");
+                type.GetMethod("StartThumbLoad", Private).Invoke(panel, null);
+                Check((int)generation.GetValue(panel) == first + 1, "a lost completion post blocked the next thumbnail load");
+            }
+        }
+
+        // 还原期间登记的自动收纳抑制项先挂起，最外层还原结束才开始计时（“还原全部”超过抑制时长也不会过期）。
+        private static void RestoreSuppressionStartsAtEnd()
+        {
+            Type type = typeof(DesktopOrganizer);
+            BindingFlags hidden = BindingFlags.Static | BindingFlags.NonPublic;
+            FieldInfo depth = type.GetField("restoreDepth", hidden);
+            Dictionary<string, DateTime> map = (Dictionary<string, DateTime>)type.GetField("AutoStashIgnore", hidden).GetValue(null);
+            MethodInfo suppress = type.GetMethod("SuppressAutoStash", hidden), end = type.GetMethod("EndRestore", hidden);
+            MethodInfo suppressed = type.GetMethod("IsAutoStashSuppressed", hidden);
+            string early = Path.Combine(root, "early-restore.lnk"), late = Path.Combine(root, "late-restore.lnk");
+            try
+            {
+                lock (DesktopOrganizer.OperationSync)
+                {
+                    depth.SetValue(null, 2);   // 外层 RestoreAll + 第一项 RestoreOne
+                    suppress.Invoke(null, new object[] { new string[] { early } });
+                    end.Invoke(null, null);
+                    lock (map) Check(map[early] == DateTime.MaxValue, "early restore started its quiet period mid-batch");
+                    depth.SetValue(null, 2);   // 后面的某一项
+                    suppress.Invoke(null, new object[] { new string[] { late } });
+                    end.Invoke(null, null);
+                    DateTime finished = DateTime.UtcNow;
+                    end.Invoke(null, null);    // 整批结束
+                    Check((int)depth.GetValue(null) == 0, "restore depth leaked");
+                    lock (map) Check(map[early] == map[late] && map[early] != DateTime.MaxValue && map[early] >= finished + DesktopOrganizer.AutoStashQuiet,
+                        "quiet period did not start at the end of the batch");
+                    Check((bool)suppressed.Invoke(null, new object[] { early }), "early restore was not suppressed after the batch");
+                }
+                suppress.Invoke(null, new object[] { new string[] { late } });   // 不在还原操作中：立即计时
+                lock (map) Check(map[late] != DateTime.MaxValue && map[late] <= DateTime.UtcNow + DesktopOrganizer.AutoStashQuiet, "standalone suppression never expires");
+            }
+            finally { depth.SetValue(null, 0); lock (map) { map.Remove(early); map.Remove(late); } }
+        }
+
+        private static void RestoreCopySafety()
+        {
+            Directory.CreateDirectory(Paths.DesktopBackupDir);
+            string name = "AppManagerCopyRestore_" + Guid.NewGuid().ToString("N") + ".lnk";
+            string original = SafeDesktopTarget(name);
+            string backup = Path.Combine(Paths.DesktopBackupDir, name);
+            File.WriteAllText(backup, "payload");
+            AppConfig config = new AppConfig();
+            DesktopOrganizer organizer = new DesktopOrganizer(config);
+            try
+            {
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = backup, OriginalPath = original, IsCopy = true };
+                Check(organizer.RestoreOne(entry), "copy restore failed: " + organizer.LastRestoreError);
+                Check(File.Exists(original) && File.ReadAllText(original) == "payload" && !File.Exists(backup),
+                    "copy restore deleted the only copy");
+                int failed;
+                Check(DesktopOrganizer.AutoStashShortcuts(config, new List<string> { original }, out failed) == 0
+                    && File.Exists(original), "restored shortcut was stashed again");
+            }
+            finally { try { if (File.Exists(original)) File.Delete(original); } catch { } }
+
+            string sameName = "AppManagerCopySame_" + Guid.NewGuid().ToString("N") + ".lnk";
+            string sameOriginal = SafeDesktopTarget(sameName);
+            string sameBackup = Path.Combine(Paths.DesktopBackupDir, sameName);
+            try
+            {
+                File.WriteAllText(sameOriginal, "same");
+                File.WriteAllText(sameBackup, "same");
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = sameBackup, OriginalPath = sameOriginal, IsCopy = true };
+                Check(organizer.RestoreOne(entry), "matching copy restore failed: " + organizer.LastRestoreError);
+                Check(File.Exists(sameOriginal) && !File.Exists(sameBackup), "matching copy backup was not cleaned");
+            }
+            finally
+            {
+                try { if (File.Exists(sameOriginal)) File.Delete(sameOriginal); } catch { }
+                try { if (File.Exists(sameBackup)) File.Delete(sameBackup); } catch { }
+            }
+
+            string differentName = "AppManagerCopyDifferent_" + Guid.NewGuid().ToString("N") + ".lnk";
+            string differentOriginal = SafeDesktopTarget(differentName);
+            string differentBackup = Path.Combine(Paths.DesktopBackupDir, differentName);
+            try
+            {
+                File.WriteAllText(differentOriginal, "original");
+                File.WriteAllText(differentBackup, "backup");
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = differentBackup, OriginalPath = differentOriginal, IsCopy = true };
+                Check(!organizer.RestoreOne(entry) && File.Exists(differentBackup) && File.ReadAllText(differentOriginal) == "original"
+                    && !string.IsNullOrEmpty(organizer.LastRestoreError), "different copy content was not preserved");
+            }
+            finally
+            {
+                try { if (File.Exists(differentOriginal)) File.Delete(differentOriginal); } catch { }
+                try { if (File.Exists(differentBackup)) File.Delete(differentBackup); } catch { }
+            }
+
+            string directoryName = "AppManagerCopyDir_" + Guid.NewGuid().ToString("N");
+            string directoryOriginal = SafeDesktopTarget(directoryName);
+            string directoryBackup = Path.Combine(Paths.DesktopBackupDir, directoryName);
+            try
+            {
+                Directory.CreateDirectory(Path.Combine(directoryOriginal, "empty"));
+                Directory.CreateDirectory(Path.Combine(directoryBackup, "empty"));
+                File.WriteAllText(Path.Combine(directoryOriginal, "same.txt"), "same");
+                File.WriteAllText(Path.Combine(directoryBackup, "same.txt"), "same");
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = directoryBackup, OriginalPath = directoryOriginal, IsCopy = true, IsDir = true };
+                MethodInfo sameCopy = typeof(DesktopOrganizer).GetMethod("SameCopyContent", StaticPrivate);
+                Check((bool)sameCopy.Invoke(null, new object[] { entry }), "matching directory content was not recognised");
+
+                File.WriteAllText(Path.Combine(directoryOriginal, "same.txt"), "original");
+                File.WriteAllText(Path.Combine(directoryBackup, "same.txt"), "backup");
+                Check(!organizer.RestoreOne(entry) && Directory.Exists(directoryBackup) && Directory.Exists(directoryOriginal)
+                    && File.ReadAllText(Path.Combine(directoryOriginal, "same.txt")) == "original"
+                    && !string.IsNullOrEmpty(organizer.LastRestoreError), "different directory content was not preserved");
+            }
+            finally
+            {
+                try { if (Directory.Exists(directoryOriginal)) Directory.Delete(directoryOriginal, true); } catch { }
+                try { if (Directory.Exists(directoryBackup)) Directory.Delete(directoryBackup, true); } catch { }
+            }
+
+            string unsafeBackup = Path.Combine(Paths.DesktopBackupDir, "unsafe-" + Guid.NewGuid().ToString("N") + ".txt");
+            string unsafeOriginal = Path.Combine(root, "outside-copy-original.txt");
+            File.WriteAllText(unsafeBackup, "keep");
+            try
+            {
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = unsafeBackup, OriginalPath = unsafeOriginal, IsCopy = true };
+                Check(!organizer.RestoreOne(entry) && File.Exists(unsafeBackup), "unsafe copy restore deleted the backup");
+            }
+            finally { try { if (File.Exists(unsafeBackup)) File.Delete(unsafeBackup); } catch { } }
+        }
+
+        private static void DesktopCopySafety()
+        {
+            AppConfig config = RenameConfig("desktop-copy");
+            config.OrganizeCopy = true;
+            Check(config.Save(), config.DatabaseError);
+            DesktopOrganizer organizer = new DesktopOrganizer(config);
+            MethodInfo backup = typeof(DesktopOrganizer).GetMethod("BackupItem", Private);
+            string sourceDir = Path.Combine(root, "desktop-copy", "source"), destDir = Path.Combine(root, "desktop-copy", "backup");
+            Directory.CreateDirectory(sourceDir); Directory.CreateDirectory(destDir);
+            string source = Path.Combine(sourceDir, "same.txt");
+            File.WriteAllText(source, "new");
+            File.WriteAllText(Path.Combine(destDir, "same.txt"), "old");
+            int moved = (int)backup.Invoke(organizer, new object[] { source, destDir, "same.txt", false, false });
+            Check(moved == 1 && File.Exists(source) && File.ReadAllText(source) == "new", "copy mode removed the source");
+            Check(File.ReadAllText(Path.Combine(destDir, "same.txt")) == "old", "copy mode overwrote an existing file");
+            Check(config.DesktopBackup.Count == 1 && config.DesktopBackup[0].IsCopy
+                && string.Equals(config.DesktopBackup[0].CurrentPath, Path.Combine(destDir, "same_1.txt"), StringComparison.OrdinalIgnoreCase),
+                "same-name copy was not preserved under a unique name");
+
+            string source2 = Path.Combine(sourceDir, "rollback.txt");
+            File.WriteAllText(source2, "rollback");
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                db.Execute("CREATE TRIGGER fail_desktop_backup BEFORE INSERT ON records WHEN NEW.section='DesktopBackup' BEGIN SELECT RAISE(ABORT,'test failure'); END");
+            try
+            {
+                int failed = (int)backup.Invoke(organizer, new object[] { source2, destDir, "rollback.txt", false, false });
+                Check(failed == 0, "save failure was reported as success");
+            }
+            finally
+            {
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false)) db.Execute("DROP TRIGGER IF EXISTS fail_desktop_backup");
+            }
+            Check(File.Exists(source2) && !File.Exists(Path.Combine(destDir, "rollback.txt")), "failed save left an orphan copy");
+        }
+
+        private static void ResourceCreateEntries()
+        {
+            AppConfig config = RenameConfig("resource-create");
+            config.ResourceCategories.Add("资料");
+            using (MainForm form = ResourceForm(config, "资料"))
+            {
+                IntPtr handle = form.Handle;
+                Check(handle != IntPtr.Zero, "resource form handle not created");
+                Invoke(form, "CreateManagedEntry", false);
+                Invoke(form, "CreateManagedEntry", true);
+            }
+            string dir = Path.Combine(config.ResourceStorePath, "资料");
+            List<AddedEntry> created = config.AddedItems.Where(e => string.Equals(Path.GetDirectoryName(e.Path), dir, StringComparison.OrdinalIgnoreCase)).ToList();
+            Check(created.Count == 2 && created.All(e => e.IsResource), "resource page created entries outside the resource store");
+            Check(created.Any(e => !e.IsFolder) && created.Any(e => e.IsFolder), "resource page did not create both file and folder");
+        }
+
+        private static void PrerestoreListing()
+        {
+            string id = "_prerestore_" + Guid.NewGuid().ToString("N");
+            string dir = Path.Combine(Paths.BackupsDir, id);
+            Directory.CreateDirectory(dir);
+            try
+            {
+                new AppConfig().SaveTo(Path.Combine(dir, "config.xml"));
+                File.WriteAllText(Path.Combine(dir, "incomplete"), "");
+                LayoutBackupInfo info = LayoutBackup.List().FirstOrDefault(i => i.Id == id);
+                Check(info != null && info.IsPreRestore && info.Incomplete, "pre-restore leftover not exposed as incomplete");
+            }
+            finally { try { Directory.Delete(dir, true); } catch { } }
+        }
+
         private static void CopyComplete()
         {
             string source = Path.Combine(root, "copy-source");
@@ -1018,6 +1479,609 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void ShellWheelAndHeader()
+        {
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000), Size = new Size(600, 400) })
+            using (Controls.SidebarControl sidebar = new Controls.SidebarControl { Location = Point.Empty, Size = new Size(220, 200) })
+            {
+                host.Controls.Add(sidebar);
+                host.Show();
+                List<Controls.SidebarControl.SidebarItem> items = new List<Controls.SidebarControl.SidebarItem>();
+                // 只有中间可排序区块会滚动
+                for (int i = 0; i < 40; i++) items.Add(new Controls.SidebarControl.SidebarItem { Text = "分类 " + i, Key = "c" + i, Orderable = true });
+                sidebar.SetItems(items);
+                FieldInfo offset = typeof(Controls.SidebarControl).GetField("scrollOffset", Private);
+                // 精确式触控板：每次只上报很小的增量，累计后也必须能滚动
+                for (int i = 0; i < 12; i++) sidebar.ScrollByWheel(-10);
+                Check((int)offset.GetValue(sidebar) > 0, "small wheel deltas never scrolled the sidebar");
+                host.Hide();
+            }
+            AppConfig config = new AppConfig();
+            List<AppInfo> apps = new List<AppInfo>();
+            for (int i = 0; i < 120; i++) apps.Add(new AppInfo { Key = "af:header-" + i, Name = "Header " + i, Category = "开发工具" });
+            if (config.Database == null) Check(config.Save(), "database fixture save failed");
+            config.Database.PublishCatalog(config, new List<AppInfo>(apps));
+            using (MainForm form = new MainForm(config))
+            {
+                // 扫描标志先置位，避免 OnLoad 启动真实扫描；窗口必须真正显示，滚动条才会创建。
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Size = new Size(1200, 520);
+                form.Show();
+                Application.DoEvents();
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "开发工具");
+                typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo>(apps));
+                Invoke(form, "RefreshGrid");
+                Application.DoEvents();
+                Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                Control strip = (Control)typeof(MainForm).GetField("headerStrip", Private).GetValue(form);
+                Check(grid.ClientSize.Width < grid.Width, "fixture did not show a vertical scrollbar");
+                Check(strip.Width == grid.ClientSize.Width, "header strip width " + strip.Width + " differs from grid client width " + grid.ClientSize.Width);
+            }
+        }
+
+        private static void GridBatchDeleteAndArrow()
+        {
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Size = new Size(640, 420) })
+            {
+                grid.GridMode = true;
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int i = 0; i < 6; i++) apps.Add(new AppInfo { Key = "af:batch-" + i, Name = "Batch " + i, Category = "开发工具" });
+                grid.SetApps(apps);
+                MethodInfo selectSingle = typeof(Controls.AppGridControl).GetMethod("SelectSingle", Private);
+                MethodInfo toggleSelected = typeof(Controls.AppGridControl).GetMethod("ToggleSelected", Private);
+                MethodInfo processKey = typeof(Controls.AppGridControl).GetMethod("ProcessCmdKey", Private);
+                selectSingle.Invoke(grid, new object[] { 0 });
+                toggleSelected.Invoke(grid, new object[] { 1 });
+                List<AppInfo> deleted = null;
+                grid.DeleteSelectionRequested += delegate(List<AppInfo> list) { deleted = list; };
+                object[] args = new object[] { Message.Create(IntPtr.Zero, 0x0100, (IntPtr)(int)Keys.Delete, IntPtr.Zero), Keys.Delete };
+                Check((bool)processKey.Invoke(grid, args), "delete key was not consumed");
+                Check(deleted != null && deleted.Count == 2, "delete did not receive every selected item");
+                Check(deleted[0].Key == "af:batch-0" && deleted[1].Key == "af:batch-1", "delete received the wrong items");
+
+                grid.ClearSelection();
+                args = new object[] { Message.Create(IntPtr.Zero, 0x0100, (IntPtr)(int)Keys.Down, IntPtr.Zero), Keys.Down };
+                Check((bool)processKey.Invoke(grid, args), "down key was not consumed");
+                List<int> selected = (List<int>)typeof(Controls.AppGridControl).GetField("selected", Private).GetValue(grid);
+                Check(selected.Count == 1 && selected[0] == 0, "down key without a selection did not start at item 0");
+            }
+        }
+
+        private static void IconCacheLru()
+        {
+            Type type = typeof(Icons);
+            IDictionary cache = (IDictionary)type.GetField("Cache", StaticPrivate).GetValue(null);
+            IDictionary covers = (IDictionary)type.GetField("CoverCacheKeys", StaticPrivate).GetValue(null);
+            MethodInfo store = type.GetMethod("CacheStore", StaticPrivate);
+            MethodInfo take = type.GetMethod("CacheTakeClone", StaticPrivate);
+            MethodInfo evict = type.GetMethod("EvictOldestCacheEntry", StaticPrivate);
+            Action clear = delegate
+            {
+                while (cache.Count > 0) evict.Invoke(null, null);
+                covers.Clear();
+            };
+            clear();
+            try
+            {
+                covers["base-0"] = "icon-0";
+                for (int i = 0; i <= 2000; i++)
+                {
+                    using (Bitmap source = new Bitmap(1, 1))
+                    using (Bitmap copy = (Bitmap)store.Invoke(null, new object[] { "icon-" + i, source })) { }
+                }
+                Check(cache.Count == 2000, "entry cap was not enforced");
+                Check(!cache.Contains("icon-0"), "oldest entry survived the entry cap");
+                Check(cache.Contains("icon-2000"), "newest entry was dropped by the entry cap");
+                Check(!covers.Contains("base-0"), "cover mapping survived eviction");
+
+                clear();
+                for (int i = 0; i < 64; i++)
+                {
+                    using (Bitmap source = new Bitmap(512, 512))
+                    using (Bitmap copy = (Bitmap)store.Invoke(null, new object[] { "byte-" + i, source })) { }
+                }
+                using (Bitmap touched = (Bitmap)take.Invoke(null, new object[] { "byte-0" })) { }
+                using (Bitmap source = new Bitmap(512, 512))
+                using (Bitmap copy = (Bitmap)store.Invoke(null, new object[] { "byte-64", source })) { }
+                Check(!cache.Contains("byte-1"), "byte cap did not evict the least recently used entry");
+                Check(cache.Contains("byte-0"), "recently used entry was evicted first");
+                Check(cache.Contains("byte-64"), "new entry was not cached");
+                Check(cache.Count == 64, "byte cap left the wrong number of entries");
+            }
+            finally
+            {
+                clear();
+            }
+        }
+
+        private static void AutoScanPauseResume()
+        {
+            using (Form host = new Form())
+            {
+                host.ShowInTaskbar = false;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-3000, -3000);
+                host.Size = new Size(240, 160);
+                host.Show();
+                Application.DoEvents();
+                using (AutoScanWatcher watcher = new AutoScanWatcher(host))
+                {
+                    System.Windows.Forms.Timer timer = (System.Windows.Forms.Timer)typeof(AutoScanWatcher).GetField("_debounce", Private).GetValue(watcher);
+                    timer.Interval = 40;
+                    MethodInfo enqueue = typeof(AutoScanWatcher).GetMethod("Enqueue", Private);
+                    int fired = 0;
+                    watcher.ChangesDetected += delegate { fired++; };
+
+                    watcher.Pause();
+                    enqueue.Invoke(watcher, new object[] { string.Empty, false });
+                    Thread.Sleep(150);
+                    Application.DoEvents();
+                    Check(fired == 0, "paused watcher fired a scan");
+                    watcher.Resume();
+                    PumpUntil(delegate { return fired >= 1; });
+                    Check(fired == 1, "resume did not fire the paused change exactly once");
+
+                    enqueue.Invoke(watcher, new object[] { string.Empty, false });
+                    Check(timer.Enabled, "fixture did not leave a pending debounce timer");
+                    watcher.Pause();
+                    Thread.Sleep(150);
+                    Application.DoEvents();
+                    Check(fired == 1, "pause did not stop the pending timer");
+                    watcher.Resume();
+                    PumpUntil(delegate { return fired >= 2; });
+                    Check(fired == 2, "pending change was lost across pause/resume");
+
+                    watcher.Pause();
+                    watcher.Resume();
+                    Thread.Sleep(150);
+                    Application.DoEvents();
+                    Check(fired == 2, "idle pause/resume fired an extra scan");
+                }
+            }
+        }
+
+        private static void DialogKeyboard()
+        {
+            bool escapeResult = true, enterResult = false;
+            PressModalKey(Keys.Escape, delegate { escapeResult = ConfirmDialog.Show("回归", "按 Esc"); });
+            PressModalKey(Keys.Enter, delegate { enterResult = ConfirmDialog.Show("回归", "按 Enter"); });
+            Check(!escapeResult, "escape did not cancel the confirmation dialog");
+            Check(enterResult, "enter did not accept the confirmation dialog");
+            // 文本保存失败时的对话框：右侧按钮写明“放弃修改”，Esc 与点它等价。
+            bool retryResult = true; string[] labels = null;
+            using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                probe.Tick += delegate
+                {
+                    Form dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(open => open.Modal);
+                    if (dialog == null) return;
+                    probe.Stop();
+                    dialog.Opacity = 0;
+                    labels = dialog.Controls.OfType<Controls.RoundButton>().Select(b => b.Text).ToArray();
+                    typeof(Control).GetMethod("OnKeyDown", Private).Invoke(dialog, new object[] { new KeyEventArgs(Keys.Escape) });
+                };
+                probe.Start();
+                retryResult = ConfirmDialog.Show("修改没有保存", "回归", "重试", "放弃修改");
+            }
+            Check(labels != null && labels[0] == "重试" && labels[1] == "放弃修改", "custom confirmation labels not shown: "
+                + (labels == null ? "(none)" : string.Join("|", labels)));
+            Check(!retryResult, "escape on the save-failure dialog did not choose discard");
+
+            bool clicked = false;
+            using (Controls.RoundButton button = new Controls.RoundButton { Text = "确定" })
+            {
+                button.Click += delegate { clicked = true; };
+                MethodInfo down = typeof(Control).GetMethod("OnKeyDown", Private);
+                MethodInfo up = typeof(Control).GetMethod("OnKeyUp", Private);
+                down.Invoke(button, new object[] { new KeyEventArgs(Keys.Space) });
+                Check(!clicked, "space clicked before key up");
+                up.Invoke(button, new object[] { new KeyEventArgs(Keys.Space) });
+                Check(clicked, "space did not click the round button");
+            }
+        }
+
+        private static void PressModalKey(Keys key, Action show)
+        {
+            bool pressed = false;
+            Stopwatch elapsed = Stopwatch.StartNew();
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    Form dialog = null;
+                    foreach (Form form in Application.OpenForms) if (form.Modal) { dialog = form; break; }
+                    if (dialog == null) return;
+                    if (elapsed.ElapsedMilliseconds > 3000)
+                    {
+                        timer.Stop();
+                        dialog.Close();
+                        return;
+                    }
+                    timer.Stop();
+                    dialog.Opacity = 0;
+                    pressed = true;
+                    typeof(Control).GetMethod("OnKeyDown", Private).Invoke(dialog,
+                        new object[] { new KeyEventArgs(key) });
+                };
+                timer.Start();
+                show();
+            }
+            Check(pressed, "modal dialog did not receive " + key);
+        }
+
+        private static void ScanCacheInvalidXml()
+        {
+            string path = Path.Combine(Paths.DataDir, "scan.cache.xml");
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                ScanCache.Save(new List<AppInfo>
+                {
+                    new AppInfo { Name = "Bad" + (char)1 + "Name", TargetPath = "C:\\x" + (char)2 + "y", Key = "bad" + (char)3 + "key" }
+                });
+                List<AppInfo> loaded = ScanCache.Load();
+                Check(loaded.Count == 1, "scan cache was not written");
+                Check(loaded[0].Name == "Bad Name", "invalid name character was not sanitized");
+                Check(loaded[0].TargetPath.IndexOf((char)2) < 0, "invalid path character survived");
+                Check(loaded[0].Key.IndexOf((char)3) < 0, "invalid key character survived");
+            }
+            finally
+            {
+                try { if (File.Exists(path)) File.Delete(path); } catch { }
+            }
+        }
+
+        private static void BackupListSkipsOld()
+        {
+            string normal = Path.Combine(Paths.BackupsDir, "20260101-000000");
+            string old = normal + ".old";
+            try
+            {
+                foreach (string dir in new string[] { normal, old })
+                {
+                    Directory.CreateDirectory(dir);
+                    File.WriteAllText(Path.Combine(dir, "config.xml"), "<config/>");
+                    File.WriteAllText(Path.Combine(dir, "meta.xml"),
+                        "<backup name='回归' created='2026-01-01 00:00:00' stash='0' custom='0' categories='0'/>");
+                }
+                List<LayoutBackupInfo> list = LayoutBackup.List();
+                Check(list.Exists(delegate(LayoutBackupInfo i) { return i.Id == "20260101-000000"; }),
+                    "normal backup missing from the list");
+                Check(!list.Exists(delegate(LayoutBackupInfo i) { return i.Id.EndsWith(".old"); }),
+                    "update leftover was listed as a backup");
+            }
+            finally
+            {
+                try { if (Directory.Exists(old)) Directory.Delete(old, true); } catch { }
+                try { if (Directory.Exists(normal)) Directory.Delete(normal, true); } catch { }
+            }
+        }
+
+        private static void BackupCleansStaleTemp()
+        {
+            string stale = Path.Combine(Paths.BackupsDir, "stale.tmp");
+            string id = null;
+            string error = null;
+            try
+            {
+                Directory.CreateDirectory(stale);
+                File.WriteAllText(Path.Combine(stale, "partial.xml"), "<partial/>");
+                Check(LayoutBackup.Create("回归临时清理", out id, out error), "backup create failed: " + error);
+                Check(!Directory.Exists(stale), "stale temporary snapshot was not removed");
+                Check(Directory.Exists(Path.Combine(Paths.BackupsDir, id)), "new backup missing");
+            }
+            finally
+            {
+                try { if (Directory.Exists(stale)) Directory.Delete(stale, true); } catch { }
+                try { if (!string.IsNullOrEmpty(id) && Directory.Exists(Path.Combine(Paths.BackupsDir, id))) Directory.Delete(Path.Combine(Paths.BackupsDir, id), true); } catch { }
+            }
+        }
+
+        private static void MusicPlayerCoverCache()
+        {
+            using (Controls.MusicPlayerControl player = new Controls.MusicPlayerControl())
+            {
+                MusicTrackInfo track = new MusicTrackInfo { Title = "封面", Artist = "测试", Album = "测试", Cover = new Bitmap(100, 100) };
+                typeof(Controls.MusicPlayerControl).GetField("track", Private).SetValue(player, track);
+                typeof(Controls.MusicPlayerControl).GetField("coverRect", Private).SetValue(player, new Rectangle(0, 0, 50, 50));
+                MethodInfo ensure = typeof(Controls.MusicPlayerControl).GetMethod("EnsureScaledCover", Private);
+                FieldInfo scaled = typeof(Controls.MusicPlayerControl).GetField("scaledCover", Private);
+                ensure.Invoke(player, null);
+                Bitmap first = (Bitmap)scaled.GetValue(player);
+                Check(first != null && first.Width == 50 && first.Height == 50, "cover was not scaled to the target size");
+                ensure.Invoke(player, null);
+                Check(ReferenceEquals(first, scaled.GetValue(player)), "cover was rescaled on every paint");
+                typeof(Controls.MusicPlayerControl).GetField("coverRect", Private).SetValue(player, new Rectangle(0, 0, 20, 20));
+                ensure.Invoke(player, null);
+                Bitmap second = (Bitmap)scaled.GetValue(player);
+                Check(second != null && second.Width == 20 && !ReferenceEquals(first, second),
+                    "cover cache did not follow a size change");
+            }
+        }
+
+        private static void GridCategoryTextCache()
+        {
+            MethodInfo categoryList = typeof(Controls.AppGridControl).GetMethod("CategoryList", Private);
+            int calls = 0;
+            using (Controls.AppGridControl grid = new Controls.AppGridControl())
+            {
+                grid.CategoryTextProvider = delegate(AppInfo a)
+                {
+                    calls++;
+                    throw new InvalidOperationException("database unavailable");
+                };
+                List<AppInfo> apps = new List<AppInfo> { new AppInfo { Key = "af:cache", Name = "Cache", Category = "原分类" } };
+                grid.SetApps(apps);
+                List<string> first = (List<string>)categoryList.Invoke(grid, new object[] { apps[0] });
+                List<string> second = (List<string>)categoryList.Invoke(grid, new object[] { apps[0] });
+                Check(first.Count == 1 && first[0] == "原分类", "provider failure did not fall back to the item category");
+                Check(second.Count == 1 && second[0] == "原分类", "cached fallback text changed");
+                Check(calls == 1, "category provider ran on every paint");
+            }
+            calls = 0;
+            using (Controls.AppGridControl grid = new Controls.AppGridControl())
+            {
+                grid.CategoryTextProvider = delegate(AppInfo a) { calls++; return "甲, 乙"; };
+                List<AppInfo> apps = new List<AppInfo> { new AppInfo { Key = "af:cache2", Name = "Cache 2", Category = "原分类" } };
+                grid.SetApps(apps);
+                List<string> first = (List<string>)categoryList.Invoke(grid, new object[] { apps[0] });
+                List<string> second = (List<string>)categoryList.Invoke(grid, new object[] { apps[0] });
+                Check(first.Count == 2 && first[0] == "甲" && first[1] == "乙", "provider text was not split");
+                Check(second.Count == 2, "cached provider text was lost");
+                Check(calls == 1, "category provider ran again after SetApps");
+            }
+        }
+
+        private static void KnownFolderIds()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            // FOLDERID_Windows / FOLDERID_System
+            Check(string.Equals(Scanner.ResolveKnownFolderPath("{F38BF404-1D43-42F2-9305-67DE0B28FC23}\\notepad.exe"),
+                Path.Combine(windows, "notepad.exe"), StringComparison.OrdinalIgnoreCase), "Windows known folder not resolved");
+            Check(string.Equals(Scanner.ResolveKnownFolderPath("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\cmd.exe"),
+                Path.Combine(Environment.SystemDirectory, "cmd.exe"), StringComparison.OrdinalIgnoreCase), "System known folder not resolved");
+            // 解析后不存在的路径、普通 UWP 应用 ID、非法 GUID 都保持原样
+            string missing = "{F38BF404-1D43-42F2-9305-67DE0B28FC23}\\no-such-app-regression.exe";
+            Check(Scanner.ResolveKnownFolderPath(missing) == missing, "missing resolved path replaced the id");
+            Check(Scanner.ResolveKnownFolderPath("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App") == "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "app id changed");
+            string bad = "{ZZZZZZZZ-1D43-42F2-9305-67DE0B28FC23}\\x.exe";
+            Check(Scanner.ResolveKnownFolderPath(bad) == bad && Scanner.ResolveKnownFolderPath(null) == null, "invalid id handling");
+        }
+
+        // 后台扫描只用界面线程拷贝的收录快照；收藏/隐藏/分类覆盖不在后台读，回到界面线程再 ApplyConfig。
+        private static void ScanUsesUiSnapshot()
+        {
+            string live = Path.Combine(root, "scan-live.txt"), snap = Path.Combine(root, "scan-snapshot.txt");
+            File.WriteAllText(live, "live"); File.WriteAllText(snap, "snapshot");
+            AppConfig config = new AppConfig();
+            config.AddedItems.Add(new AddedEntry { Path = live, Category = "工具" });
+            config.Favorites.Add("add:" + snap); config.CategoryOverride["add:" + snap] = "办公软件";
+            Scanner scanner = new Scanner(config);
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            typeof(Scanner).GetField("addedSnapshot", Private).SetValue(scanner, new List<AddedEntry> { new AddedEntry { Path = snap, Category = "工具" } });
+            Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            typeof(Scanner).GetMethod("ScanAdded", Private).Invoke(scanner, new object[] { dict });
+            Check(dict.Count == 1 && string.Equals(dict.Values.First().TargetPath, snap, StringComparison.OrdinalIgnoreCase),
+                "background scan enumerated the live added list instead of the UI snapshot");
+            AppInfo found = dict.Values.First();
+            Check(!found.IsFavorite && found.Category != "办公软件", "scan applied UI-owned settings on the worker");
+            scanner.ApplyConfig(new List<AppInfo> { found });
+            Check(found.IsFavorite && found.Category == "办公软件", "settings not applied on the UI thread");
+        }
+
+        private static void StashScanTopLevel()
+        {
+            MethodInfo create = typeof(DesktopOrganizer).GetMethod("CreateShortcut", BindingFlags.Static | BindingFlags.NonPublic);
+            string target = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe");
+            string rootLink = Path.Combine(Paths.DesktopBackupDir, "Stash Root Regression.lnk");
+            string nested = Path.Combine(Paths.DesktopBackupDir, "Folders", "Project", "sub");
+            string nestedLink = Path.Combine(nested, "Stash Nested Regression.lnk");
+            string legacyDir = Path.Combine(Paths.LegacyStashDir, "old", "group");
+            string legacyLink = Path.Combine(legacyDir, "Stash Legacy Regression.lnk");
+            string legacyOrphan = Path.Combine(legacyDir, "Stash Legacy Orphan.lnk");
+            Directory.CreateDirectory(nested);
+            Directory.CreateDirectory(legacyDir);
+            foreach (string link in new string[] { rootLink, nestedLink, legacyLink, legacyOrphan })
+                create.Invoke(null, new object[] { link, target, "regression" });
+            try
+            {
+                AppConfig config = new AppConfig();
+                config.DesktopBackup.Add(new DesktopBackupEntry { OriginalPath = "C:\\Desk\\legacy.lnk", CurrentPath = legacyLink, IsShortcut = true });
+                Scanner scanner = new Scanner(config);
+                typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+                Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+                typeof(Scanner).GetMethod("ScanDesktopBackup", Private).Invoke(scanner, new object[] { dict });
+                Func<string, bool> found = delegate(string name) { return dict.Values.Any(a => a.Name == name); };
+                Check(found("Stash Root Regression"), "root stash shortcut missing");
+                Check(found("Stash Legacy Regression"), "legacy recorded shortcut missing");
+                Check(!found("Stash Nested Regression"), "shortcut inside a stashed folder became a quick-center item");
+                Check(!found("Stash Legacy Orphan"), "legacy stash was scanned recursively");
+            }
+            finally
+            {
+                foreach (string link in new string[] { rootLink, nestedLink, legacyLink, legacyOrphan })
+                    try { File.Delete(link); } catch { }
+            }
+        }
+
+        private static void GridScrollFollowsWidth()
+        {
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000), Size = new Size(1400, 700) })
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Location = Point.Empty, Size = new Size(1300, 600) })
+            {
+                host.Controls.Add(grid);
+                host.Show();
+                grid.GridMode = true;
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int i = 0; i < 60; i++) apps.Add(new AppInfo { Key = "af:grid-" + i, Name = "Grid " + i });
+                grid.SetApps(apps);
+                MethodInfo rows = typeof(Controls.AppGridControl).GetMethod("GridRows", Private);
+                int wideRows = (int)rows.Invoke(grid, null), wideHeight = grid.AutoScrollMinSize.Height;
+                grid.Size = new Size(420, 600);   // 窗口变窄：每行放得下的卡片变少，总行数增加
+                int narrowRows = (int)rows.Invoke(grid, null), narrowHeight = grid.AutoScrollMinSize.Height;
+                Check(narrowRows > wideRows, "fixture did not change the column count");
+                // 高度 = 行数 × 行高 + 固定边距：两种宽度下的高度差必须正好是行数差的整数倍
+                Check(narrowHeight > wideHeight && (narrowHeight - wideHeight) % (narrowRows - wideRows) == 0,
+                    "scroll range kept the wide layout: wide=" + wideHeight + "/" + wideRows + " narrow=" + narrowHeight + "/" + narrowRows);
+                grid.Size = new Size(1300, 600);
+                Check(grid.AutoScrollMinSize.Height == wideHeight, "scroll range did not shrink back after widening");
+                host.Hide();
+            }
+        }
+
+        /// <summary>4-6：列表首绘只测量可见行的文字；滚动到更宽的行时列宽只增不减地扩展。</summary>
+        private static void GridVisibleMeasurement()
+        {
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000), Size = new Size(1400, 700) })
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Location = Point.Empty, Size = new Size(1300, 600) })
+            {
+                host.Controls.Add(grid);
+                host.Show();
+                grid.GridMode = false;
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int i = 0; i < 5000; i++) apps.Add(new AppInfo { Key = "af:vm-" + i, Name = "App " + i, TargetPath = "C:\\x\\f" + i + ".lnk" });
+                apps.Add(new AppInfo { Key = "af:vm-wide", Name = "Wide", TargetPath = "D:\\" + new string('宽', 60) + "\\f.lnk" });
+                grid.SetApps(apps);
+                Type t = typeof(Controls.AppGridControl);
+                FieldInfo locMax = t.GetField("locTextMaxW", Private);
+                FieldInfo measuredHiF = t.GetField("measuredHi", Private);
+                using (Bitmap bmp = new Bitmap(grid.Width, grid.Height))
+                {
+                    grid.DrawToBitmap(bmp, new Rectangle(Point.Empty, grid.Size));   // 首屏只量可见行
+                    int firstW = (int)locMax.GetValue(grid);
+                    int firstHi = (int)measuredHiF.GetValue(grid);
+                    Check(firstHi >= 0 && firstHi < apps.Count - 1, "first paint measured the whole list: " + firstHi);
+                    // 滚动到底部：末行的超长位置文本被量到，列宽只增不减
+                    grid.AutoScrollPosition = new Point(0, grid.AutoScrollMinSize.Height);
+                    grid.DrawToBitmap(bmp, new Rectangle(Point.Empty, grid.Size));
+                    int grownW = (int)locMax.GetValue(grid);
+                    int grownHi = (int)measuredHiF.GetValue(grid);
+                    Check(grownHi == apps.Count - 1, "scrolling did not extend measurement to the last row: " + grownHi);
+                    Check(grownW > firstW, "column width did not grow for the wider row: " + firstW + " -> " + grownW);
+                }
+                host.Hide();
+            }
+        }
+
+        private static void MultiMembershipCategories()
+        {
+            AppConfig config = new AppConfig();
+            config.ResourceCategories.Add("回归相册");
+            string path = Path.Combine(root, "multi-member.jpg");
+            File.WriteAllText(path, "jpg");
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "multi-member", Category = "照片", IsResource = true });
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "multi-member", Category = "回归相册", IsResource = true });
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "multi-member", Category = "开发工具", IsResource = false });
+            AppInfo pic = new AppInfo { Key = "add:" + path, Name = "multi-member", TargetPath = path, Category = "照片", IsFile = true };
+            using (MainForm form = CategoryForm(config, pic))
+            {
+                Check((bool)Invoke(form, "InCategory", pic, "照片"), "primary category lost");
+                Check((bool)Invoke(form, "InCategory", pic, "回归相册"), "second added category not recognised");
+                Check(!(bool)Invoke(form, "InCategory", pic, "文档"), "unrelated category matched");
+                config.CategoryOverride[pic.Key] = "文档";   // 在资源模式里移动到“文档”
+                Check((bool)Invoke(form, "InCategory", pic, "文档"), "moved category not recognised");
+                Check(!(bool)Invoke(form, "InCategory", pic, "回归相册"), "same-mode membership survived a move");
+                Check((bool)Invoke(form, "InCategory", pic, "开发工具"), "other-mode membership lost after a move");
+            }
+        }
+
+        private static void ScannerNameMerge()
+        {
+            Scanner scanner = new Scanner(new AppConfig());
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            MethodInfo merge = typeof(Scanner).GetMethod("Merge", Private);
+            MethodInfo byName = typeof(Scanner).GetMethod("MergeByName", Private);
+            // 收纳目录里的同名文件夹先扫到
+            merge.Invoke(scanner, new object[] { dict, new AppInfo { Key = "add:D:\\Manage\\Python", Name = "Python",
+                TargetPath = "D:\\Manage\\Python", IsFile = true, IsFolder = true } });
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "af:python", Name = "Python",
+                TargetPath = "shell:AppsFolder\\Python.Regression" } });
+            Check(dict.Values.Count(a => a.Name == "Python") == 2, "same-name folder swallowed the software");
+            // 软件先出现，再来一个同名的文档快捷方式
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "af:chrome", Name = "Chrome",
+                TargetPath = "shell:AppsFolder\\Chrome.Regression" } });
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "lnk:chrome-doc", Name = "Chrome", ShortcutPath = "C:\\Desk\\Chrome.lnk",
+                TargetPath = "C:\\Docs\\Chrome.pdf", IsFile = true, IsDesktop = true } });
+            Check(dict.Values.Count(a => a.Name == "Chrome") == 2, "document shortcut merged into the software");
+            // 软件之间仍按名称去重
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "lnk:chrome", Name = "Chrome", ShortcutPath = "C:\\Desk\\Chrome (2).lnk",
+                TargetPath = "C:\\Program Files\\Chrome\\chrome.exe", IsDesktop = true } });
+            Check(dict.Values.Count(a => a.Name == "Chrome") == 2 && dict.Values.Any(a => a.Key == "af:chrome" && a.IsDesktop),
+                "software shortcuts are no longer deduplicated by name");
+        }
+
+        private static void SearchContextRemoval()
+        {
+            AppConfig config = new AppConfig();
+            string path = Path.Combine(root, "regression-search-tool.exe");
+            File.WriteAllText(path, "tool");
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "Search Tool", Category = "开发工具" });
+            config.Favorites.Add("add:" + path);
+            config.Hidden.Add("add:" + path);
+            AppInfo inside = new AppInfo { Key = "add:" + path, Name = "Search Tool", TargetPath = path, Category = "开发工具", IsFile = true };
+            AppInfo outside = new AppInfo { Key = "af:regression-search-out", Name = "Search Browser", Category = "浏览器" };
+            using (MainForm form = CategoryForm(config, inside, outside))
+            {
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "开发工具");
+                AppManager.Controls.SearchField search = (AppManager.Controls.SearchField)typeof(MainForm).GetField("search", Private).GetValue(form);
+                List<AppInfo> both = new List<AppInfo> { inside, outside };
+                search.Text = "Search";
+                List<AppInfo> removable = (List<AppInfo>)Invoke(form, "RemovableFromCurrent", both);
+                Check(removable.Count == 1 && removable[0] == inside, "search offered removal for an item outside the category");
+                search.Text = string.Empty;
+                removable = (List<AppInfo>)Invoke(form, "RemovableFromCurrent", both);
+                Check(removable.Count == 2, "non-search removal targets changed");
+                ClickConfirmation(delegate { Invoke(form, "DeleteAddedEntry", inside); }, true);
+                Check(!config.Favorites.Contains(inside.Key) && !config.Hidden.Contains(inside.Key), "record delete left favorite/hidden behind");
+                Check(File.Exists(path), "record delete touched the disk file");
+            }
+        }
+
+        private static void RestoreKeepsNewerStash()
+        {
+            // 前面的配额用例留下了 3 份留底：先挪到备份目录外，结束后放回，避免触发留底上限
+            string parked = Path.Combine(Paths.DataDir, "parked-prerestore");
+            Directory.CreateDirectory(parked);
+            foreach (string dir in Directory.GetDirectories(Paths.BackupsDir, "_prerestore_*"))
+                Directory.Move(dir, Path.Combine(parked, Path.GetFileName(dir)));
+            Snapshot();   // 快照：收纳目录里只有 saved.txt，清单为空
+            try
+            {
+                Directory.CreateDirectory(Paths.DesktopBackupDir);
+                string desktop = DesktopOrganizer.UserDesktop;
+                string newer = Path.Combine(Paths.DesktopBackupDir, "newer.txt");
+                string sameName = Path.Combine(Paths.DesktopBackupDir, "saved.txt");
+                File.WriteAllText(newer, "newer");
+                File.WriteAllText(sameName, "live-version");
+                AppConfig live = AppConfig.Load();
+                live.DesktopBackup.Clear();
+                live.DesktopBackup.Add(new DesktopBackupEntry { OriginalPath = Path.Combine(desktop, "newer.txt"), CurrentPath = newer, IsShortcut = false });
+                live.DesktopBackup.Add(new DesktopBackupEntry { OriginalPath = Path.Combine(desktop, "saved.txt"), CurrentPath = sameName, IsShortcut = false });
+                Check(live.Save(), "fixture save failed: " + live.DatabaseError);
+                string error;
+                Check(LayoutBackup.Restore("fixture", out error), "restore failed: " + error);
+                AppConfig loaded = AppConfig.Load();
+                string renamed = Path.Combine(Paths.DesktopBackupDir, "saved (2).txt");
+                Check(File.Exists(newer) && File.ReadAllText(newer) == "newer", "newer stash file was not carried back");
+                Check(loaded.DesktopBackup.Exists(e => string.Equals(e.CurrentPath, newer, StringComparison.OrdinalIgnoreCase)), "newer stash record dropped");
+                Check(File.ReadAllText(sameName) == "saved", "snapshot file was not restored");
+                Check(File.Exists(renamed) && File.ReadAllText(renamed) == "live-version"
+                    && loaded.DesktopBackup.Exists(e => string.Equals(e.CurrentPath, renamed, StringComparison.OrdinalIgnoreCase)),
+                    "same-name newer stash was lost");
+            }
+            finally
+            {
+                foreach (string dir in Directory.GetDirectories(Paths.BackupsDir, "_prerestore_*"))
+                    try { Directory.Delete(dir, true); } catch { }
+                foreach (string dir in Directory.GetDirectories(parked))
+                    try { Directory.Move(dir, Path.Combine(Paths.BackupsDir, Path.GetFileName(dir))); } catch { }
+            }
         }
 
         private static string Snapshot()

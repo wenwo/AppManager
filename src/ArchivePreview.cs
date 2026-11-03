@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -36,6 +37,8 @@ namespace AppManager
     {
         /// <summary>最多列出的条目数；超出部分不再读取，避免超大压缩包耗尽内存。</summary>
         internal const int MaxEntries = 200000;
+        /// <summary>列出条目的总耗时预算：压缩流格式要顺序解压才能找到下一个表头，超时后截断并保留已读部分。</summary>
+        internal static TimeSpan ReadBudget = TimeSpan.FromSeconds(30);
         /// <summary>路径层级与文件夹总数上限：恶意构造的超深路径会生成大量文件夹节点。</summary>
         internal const int MaxDepth = 256, MaxFolders = 50000;
 
@@ -62,14 +65,19 @@ namespace AppManager
             {
                 Exception zipError = null;
                 preview = null;
-                try { preview = ReadZip(path, cancellation); }
+                try { preview = ReadZip(path, cancellation, false); }
                 catch (InvalidDataException ex) { zipError = ex; }   // 分卷、非常规结构
                 catch (ArgumentException ex) { zipError = ex; }      // 条目名含 " < > | 等字符，ZipArchive 拒绝整个压缩包
                 if (preview == null)
                 {
                     // 交给 libarchive 再试；系统没有该组件时报告 zip 自身的错误
                     try { preview = LibArchive.Read(path, cancellation); }
-                    catch (NotSupportedException) { throw new InvalidDataException(zipError.Message, zipError); }
+                    catch (NotSupportedException)
+                    {
+                        if (zipError != null) throw new InvalidDataException(zipError.Message, zipError);
+                        // 条目数预检改走流式、但系统缺少 libarchive：退回 ZipArchive，由条目上限截断
+                        preview = ReadZip(path, cancellation, true);
+                    }
                 }
             }
             else preview = LibArchive.Read(path, cancellation);
@@ -84,14 +92,44 @@ namespace AppManager
         /// <summary>没有 Unicode 标记的文件名：合法 UTF-8 按 UTF-8 解，否则按系统 ANSI 代码页（GBK）解。</summary>
         internal static Encoding PickNameEncoding(byte[] bytes, int index, int count)
         {
-            try { StrictUtf8.GetCharCount(bytes, index, count); return StrictUtf8; }
-            catch (DecoderFallbackException) { return Encoding.Default; }
+            return IsValidUtf8(bytes, index, count) ? StrictUtf8 : Encoding.Default;
+        }
+
+        /// <summary>无异常地校验 UTF-8 字节序列，避免大量 GBK 文件名靠 DecoderFallbackException 分流。</summary>
+        private static bool IsValidUtf8(byte[] bytes, int index, int count)
+        {
+            int end = index + count;
+            for (int i = index; i < end; i++)
+            {
+                byte b = bytes[i];
+                if (b < 0x80) continue;
+                int need;
+                byte minSecond = 0x80, maxSecond = 0xBF;
+                if (b >= 0xC2 && b <= 0xDF) need = 1;
+                else if (b == 0xE0) { need = 2; minSecond = 0xA0; }
+                else if (b >= 0xE1 && b <= 0xEC) need = 2;
+                else if (b == 0xED) { need = 2; maxSecond = 0x9F; }
+                else if (b >= 0xEE && b <= 0xEF) need = 2;
+                else if (b == 0xF0) { need = 3; minSecond = 0x90; }
+                else if (b >= 0xF1 && b <= 0xF3) need = 3;
+                else if (b == 0xF4) { need = 3; maxSecond = 0x8F; }
+                else return false;
+                if (i + need >= end) return false;
+                if (bytes[i + 1] < minSecond || bytes[i + 1] > maxSecond) return false;
+                for (int k = 1; k < need; k++)
+                    if (bytes[i + 1 + k] < 0x80 || bytes[i + 1 + k] > 0xBF) return false;
+                i += need;
+            }
+            return true;
         }
 
         // ===== zip =====
 
-        private static ArchivePreview ReadZip(string path, CancellationToken cancellation)
+        private static ArchivePreview ReadZip(string path, CancellationToken cancellation, bool ignoreDeclaredCount)
         {
+            // ZipArchive 打开时会一次性读入并实例化整个中央目录，期间取消也不生效；
+            // 声明条目数超过上限的 zip 改走 libarchive 流式读取（在 MaxEntries 处截断）
+            if (!ignoreDeclaredCount && ZipDeclaredEntries(path) > MaxEntries) return null;
             Builder builder = new Builder(cancellation);
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (ZipArchive zip = new ZipArchive(stream, ZipArchiveMode.Read, false, new ZipNameEncoding()))
@@ -107,6 +145,70 @@ namespace AppManager
                 }
             }
             return builder.Finish();
+        }
+
+        // ===== zip 条目数预读 =====
+
+        private const int EocdSize = 22;   // EOCD 定长部分；后面可跟最长 65535 字节的注释
+        private const uint EocdSignature = 0x06054b50, Zip64LocatorSignature = 0x07064b50, Zip64EocdSignature = 0x06064b50;
+
+        /// <summary>
+        /// 从 zip 末尾的 EOCD 记录读取声明的条目总数（必要时跟随 ZIP64 定位记录）；
+        /// 找不到记录、分卷或记录损坏时返回 -1，表示无法廉价确认条目数（按普通流程读取）。
+        /// </summary>
+        private static long ZipDeclaredEntries(string path)
+        {
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+            {
+                long length = stream.Length;
+                if (length < EocdSize) return -1;
+                int window = (int)Math.Min(length, EocdSize + 65535);
+                byte[] tail = new byte[window];
+                stream.Position = length - window;
+                if (ReadFully(stream, tail, 0, window) < window) return -1;
+                for (int i = window - EocdSize; i >= 0; i--)
+                {
+                    if (BitConverter.ToUInt32(tail, i) != EocdSignature) continue;
+                    int comment = BitConverter.ToUInt16(tail, i + 20);
+                    if (i + EocdSize + comment != window) continue;   // 记录必须正好结束于文件末尾，否则是注释里的假签名
+                    if (BitConverter.ToUInt32(tail, i + 4) != 0) return -1;   // 分卷：磁盘编号必须为 0
+                    int entries = BitConverter.ToUInt16(tail, i + 10);
+                    if (entries != 0xFFFF) return entries;
+                    return Zip64DeclaredEntries(stream, length - window + i);
+                }
+                return -1;
+            }
+        }
+
+        /// <summary>EOCD 条目数为 0xFFFF 时，按 ZIP64 定位记录（紧邻 EOCD 之前）找到 ZIP64 EOCD，读取 8 字节条目总数。</summary>
+        private static long Zip64DeclaredEntries(FileStream stream, long eocdOffset)
+        {
+            if (eocdOffset < 20) return -1;
+            byte[] locator = new byte[20];
+            stream.Position = eocdOffset - 20;
+            if (ReadFully(stream, locator, 0, locator.Length) < locator.Length
+                || BitConverter.ToUInt32(locator, 0) != Zip64LocatorSignature
+                || BitConverter.ToUInt32(locator, 4) != 0 || BitConverter.ToUInt32(locator, 16) > 1) return -1;   // 分卷
+            long recordOffset = BitConverter.ToInt64(locator, 8);
+            if (recordOffset < 0 || recordOffset > stream.Length - 56) return -1;
+            byte[] record = new byte[56];
+            stream.Position = recordOffset;
+            if (ReadFully(stream, record, 0, record.Length) < record.Length
+                || BitConverter.ToUInt32(record, 0) != Zip64EocdSignature
+                || BitConverter.ToUInt32(record, 16) != 0 || BitConverter.ToUInt32(record, 20) != 0) return -1;   // 分卷
+            return BitConverter.ToInt64(record, 32);
+        }
+
+        private static int ReadFully(Stream stream, byte[] buffer, int offset, int count)
+        {
+            int read = 0;
+            while (read < count)
+            {
+                int n = stream.Read(buffer, offset + read, count - read);
+                if (n <= 0) break;
+                read += n;
+            }
+            return read;
         }
 
         /// <summary>
@@ -139,6 +241,7 @@ namespace AppManager
             private readonly ArchivePreview preview = new ArchivePreview();
             private readonly ArchiveEntryInfo root = NewFolder("", null);
             private readonly CancellationToken cancellation;
+            private readonly Stopwatch clock = Stopwatch.StartNew();
             private int entries, folders;
             private bool tooDeep;
 
@@ -153,6 +256,16 @@ namespace AppManager
             }
 
             public int Count { get { return entries; } }
+
+            /// <summary>读取耗时是否已超过预算。</summary>
+            public bool OverBudget { get { return clock.Elapsed > ReadBudget; } }
+
+            /// <summary>达到耗时预算：标记截断并记录说明，调用方应停止读取。</summary>
+            public void Cut()
+            {
+                preview.Truncated = true;
+                Fail("读取耗时过长，只列出了前面的一部分");
+            }
 
             private static ArchiveEntryInfo Find(ArchiveEntryInfo folder, string key)
             {
@@ -170,7 +283,11 @@ namespace AppManager
             /// <summary>加入一个条目；达到上限时返回 false，调用方应停止读取。</summary>
             public bool Add(string path, bool folder, long size, DateTime modified, bool encrypted)
             {
-                if ((entries & 255) == 0) cancellation.ThrowIfCancellationRequested();
+                if ((entries & 255) == 0)
+                {
+                    cancellation.ThrowIfCancellationRequested();
+                    if (OverBudget) { Cut(); return false; }
+                }
                 if (entries >= MaxEntries) { preview.Truncated = true; return false; }
                 entries++;
                 List<string> parts = Split(path);
@@ -329,7 +446,39 @@ namespace AppManager
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_lzip(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_zstd(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_compress(IntPtr a);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_all(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_7zip(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_ar(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_cab(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_cpio(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_empty(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_iso9660(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_lha(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_rar(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_rar5(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_tar(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_zip(IntPtr a);
+
+            /// <summary>
+            /// 逐个注册需要的格式，不用 format_all：其中的 mtree 读取器在列目录时会按清单里的路径
+            /// （contents=\\server\share\x 或本机任意路径）打开/查询外部文件，一个伪装成 .tar 的文本文件
+            /// 就能让程序访问任意路径（可能泄露 NTLM 凭据）。warc/xar 与查看器无关，一并不注册。
+            /// 旧系统缺少某个导出时跳过该格式。
+            /// </summary>
+            private static void SupportArchiveFormats(IntPtr a)
+            {
+                Func<IntPtr, int>[] formats =
+                {
+                    archive_read_support_format_7zip, archive_read_support_format_ar, archive_read_support_format_cab,
+                    archive_read_support_format_cpio, archive_read_support_format_empty, archive_read_support_format_iso9660,
+                    archive_read_support_format_lha, archive_read_support_format_rar, archive_read_support_format_rar5,
+                    archive_read_support_format_tar, archive_read_support_format_zip
+                };
+                foreach (Func<IntPtr, int> register in formats)
+                {
+                    try { register(a); }
+                    catch (EntryPointNotFoundException) { }
+                }
+            }
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_raw(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_set_read_callback(IntPtr a, ReadCallback callback);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_set_skip_callback(IntPtr a, SkipCallback callback);
@@ -399,7 +548,7 @@ namespace AppManager
                         archive_read_support_filter_zstd(a);
                         archive_read_support_filter_compress(a);
                         if (raw) archive_read_support_format_raw(a);
-                        else archive_read_support_format_all(a);
+                        else SupportArchiveFormats(a);
                         archive_read_set_read_callback(a, source.ReadDelegate);
                         archive_read_set_skip_callback(a, source.SkipDelegate);
                         archive_read_set_seek_callback(a, source.SeekDelegate);
@@ -412,6 +561,7 @@ namespace AppManager
                         while (true)
                         {
                             cancellation.ThrowIfCancellationRequested();
+                            if (source.BudgetExceeded || builder.OverBudget) { builder.Cut(); break; }
                             IntPtr entry;
                             r = archive_read_next_header(a, out entry);
                             if (r == EOF) break;
@@ -419,6 +569,7 @@ namespace AppManager
                             if (r == FAILED && entry != IntPtr.Zero && ++failures < 100) continue;   // 单个条目损坏，跳过
                             if (r < WARN || entry == IntPtr.Zero)
                             {
+                                if (source.BudgetExceeded) { builder.Cut(); break; }
                                 Exception error = Failure(a, source, cancellation);
                                 // 已读到部分内容（下载不完整等）时列出可读部分，否则视为无法读取
                                 if (builder.Count == 0) throw error;
@@ -517,12 +668,15 @@ namespace AppManager
             {
                 private readonly FileStream stream;
                 private readonly CancellationToken cancellation;
+                private readonly Stopwatch clock = Stopwatch.StartNew();
                 private readonly byte[] buffer = new byte[64 * 1024];
                 private GCHandle pin;
                 public readonly ReadCallback ReadDelegate;
                 public readonly SkipCallback SkipDelegate;
                 public readonly SeekCallback SeekDelegate;
                 public Exception Error;
+                /// <summary>读取耗时超过预算：回调返回错误码，由读取循环转成截断说明。</summary>
+                public bool BudgetExceeded;
 
                 public Source(FileStream stream, CancellationToken cancellation)
                 {
@@ -541,6 +695,7 @@ namespace AppManager
                     try
                     {
                         if (cancellation.IsCancellationRequested) return (IntPtr)(-1);
+                        if (clock.Elapsed > ReadBudget) { BudgetExceeded = true; return (IntPtr)(-1); }
                         return (IntPtr)stream.Read(buffer, 0, buffer.Length);
                     }
                     catch (Exception ex) { if (Error == null) Error = ex; return (IntPtr)(-1); }
@@ -555,6 +710,7 @@ namespace AppManager
                     try
                     {
                         if (cancellation.IsCancellationRequested || request <= 0) return 0;
+                        if (clock.Elapsed > ReadBudget) { BudgetExceeded = true; return 0; }
                         long step = Math.Min(request, stream.Length - stream.Position);
                         if (step <= 0) return 0;
                         stream.Seek(step, SeekOrigin.Current);
@@ -568,6 +724,7 @@ namespace AppManager
                     try
                     {
                         if (cancellation.IsCancellationRequested) return -30;
+                        if (clock.Elapsed > ReadBudget) { BudgetExceeded = true; return -30; }
                         SeekOrigin origin = whence == 1 ? SeekOrigin.Current : whence == 2 ? SeekOrigin.End : SeekOrigin.Begin;
                         return stream.Seek(offset, origin);
                     }
