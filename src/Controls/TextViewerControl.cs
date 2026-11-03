@@ -35,6 +35,7 @@ namespace AppManager.Controls
         private bool loading;
         private string failureText = "无法读取此文本";
         private bool truncated;
+        private string readOnlyReason;   // 非空则只读（截断、编码无法无损写回），并在信息栏提示原因
         private TextPreview current;       // 当前文件的读取结果：编码与修改时间用于保存
         private string savedText;          // 最近一次读取/保存的内容（换行统一为 \n）
         private string newline = "\r\n";   // 文件原有换行风格，保存时还原
@@ -81,7 +82,7 @@ namespace AppManager.Controls
             externalButton = new RoundButton { Text = "外部打开", Accent = false };
             externalButton.Click += delegate
             {
-                if (paths.Count == 0 || !ConfirmLeave("打开外部程序前，是否保存对“{0}”的修改？")) return;
+                if (paths.Count == 0 || !ConfirmLeave("打开外部程序前，是否保存对“{0}”的修改？", false)) return;
                 if (!Launcher.OpenWith(paths[index]))
                     MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
@@ -147,6 +148,7 @@ namespace AppManager.Controls
             loadFailed = false;
             loading = true;
             truncated = false;
+            readOnlyReason = null;
             current = null;
             failureText = "无法读取此文本";
             textBox.Visible = false;
@@ -183,6 +185,7 @@ namespace AppManager.Controls
                 {
                     current = preview;
                     truncated = preview.Truncated;
+                    readOnlyReason = preview.ReadOnlyReason;
                     newline = DetectNewline(preview.Content);
                     savedText = NormalizeNewlines(preview.Content);
                     if (preview.RenderedRtf != null && MarkdownVisible)
@@ -233,8 +236,8 @@ namespace AppManager.Controls
             else if (!editorLoaded)
             {
                 SetEditorText(savedText);
-                // 截断内容保存会丢失后半部分，仅允许只读查看
-                textBox.ReadOnly = truncated;
+                // 截断内容保存会丢失后半部分；编码无法无损写回的内容保存会改坏原字节：都只读
+                textBox.ReadOnly = truncated || readOnlyReason != null;
                 editorLoaded = true;
             }
             textBox.Visible = !MarkdownVisible;
@@ -327,6 +330,10 @@ namespace AppManager.Controls
                     && MessageBox.Show(this, "“" + Path.GetFileName(path) + "”已在外部被修改，保存将覆盖这些修改。是否继续？",
                         "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return false;
+                if (current.MixedNewlines && MessageBox.Show(this, "“" + Path.GetFileName(path) + "”混用了多种换行符，保存后会统一为 "
+                        + (newline == "\r\n" ? "CRLF" : newline == "\n" ? "LF" : "CR") + "。是否继续？",
+                        "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                    return false;
                 Encoding encoding = current.Encoding ?? new UTF8Encoding(false);
                 string content = text.Replace("\n", newline);
                 try { TextPreview.Write(path, content, encoding); }
@@ -339,6 +346,7 @@ namespace AppManager.Controls
                     TextPreview.Write(path, content, encoding);
                 }
                 current.Encoding = encoding;
+                current.MixedNewlines = false;
                 current.LastWriteUtc = File.GetLastWriteTimeUtc(path);
                 savedText = text;
                 MarkClean();
@@ -364,25 +372,41 @@ namespace AppManager.Controls
         /// <summary>离开当前文件前处理未保存的修改；返回 false 表示用户选择取消。</summary>
         public bool ConfirmLeave()
         {
-            return ConfirmLeave("是否保存对“{0}”的修改？");
+            return ConfirmLeave("是否保存对“{0}”的修改？", true);
         }
 
-        private bool ConfirmLeave(string format)
+        /// <summary>
+        /// discardOnNo：真正离开当前文件时，选“否”即放弃修改（清除已修改标记），之后的关闭流程不再重复询问；
+        /// 仅打开外部程序等不离开的场景传 false，保留编辑内容。
+        /// </summary>
+        private bool ConfirmLeave(string format, bool discardOnNo)
         {
             if (!HasUnsavedChanges()) return true;
             DialogResult result = MessageBox.Show(this, string.Format(format, Path.GetFileName(paths[index])), "文本",
                 MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
             if (result == DialogResult.Yes) return Save();
-            return result == DialogResult.No;
+            if (result != DialogResult.No) return false;
+            if (discardOnNo) MarkClean();
+            return true;
         }
 
-        /// <summary>外部强制关闭（切换分类、进入设置等）无法取消，只询问是否保存，避免修改被静默丢弃。</summary>
+        /// <summary>
+        /// 外部强制关闭（切换分类、进入设置等）无法取消：先问是否保存；保存失败时让用户选择重试或明确放弃，
+        /// 绝不在保存失败后静默丢弃修改。
+        /// </summary>
         private void ResolvePendingEdits()
         {
             if (!HasUnsavedChanges()) return;
             if (MessageBox.Show(this, "是否保存对“" + Path.GetFileName(paths[index]) + "”的修改？", "文本",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
-                Save();
+            {
+                while (!Save())
+                {
+                    if (MessageBox.Show(this, "修改没有保存。点“重试”再次保存，点“取消”放弃这些修改。", "文本",
+                            MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning) != DialogResult.Retry)
+                        break;
+                }
+            }
             dirty = false;
         }
 
@@ -554,7 +578,8 @@ namespace AppManager.Controls
                 Math.Max(0, countR.Left - Dpi(12) - (infoBarRect.X + pad)), infoBarRect.Height);
             string name = paths.Count > 0 && index < paths.Count ? Path.GetFileName(paths[index]) : string.Empty;
             if (dirty) name += " · 已修改（Ctrl+S 保存）";
-            if (truncated) name += " · 仅预览前 256K 字符，完整内容请外部打开";
+            if (readOnlyReason != null) name += " · " + readOnlyReason;
+            else if (truncated) name += " · 仅预览前 256K 字符，完整内容请外部打开";
             TextRenderer.DrawText(g, name, Theme.BodyFont, nameR, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine);
             TextRenderer.DrawText(g, (index + 1) + " / " + paths.Count, Theme.CaptionFont, countR, Theme.TextSecondary,

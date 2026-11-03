@@ -58,6 +58,7 @@ namespace AppManager
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
                 Run("text edits save with original encoding, BOM and newlines", TextSaving);
+                Run("lossy decoding opens read-only; mixed newlines detected; failed save keeps original", TextSafety);
                 Run("PDF page navigation and image pan in both directions", ViewerNavigation);
                 Run("resource routing preserves software scripts; credentials accept text", Routing);
                 Run("archive zip names (UTF-8 flag, unflagged UTF-8, GBK), tree, sizes and path normalization", ArchiveZip);
@@ -191,6 +192,49 @@ namespace AppManager
                 Check(TextPreview.Read(legacy, CancellationToken.None).Content == Encoding.Default.GetString(File.ReadAllBytes(legacy)), "BOM prefix false positive");
             }
         }
+        private static void TextSafety()
+        {
+            // 合法 UTF-8、带 BOM 的 UTF-8、UTF-16 与合法的系统编码文本都能无损往返，可以编辑。
+            foreach (Encoding encoding in new Encoding[] { new UTF8Encoding(false), new UTF8Encoding(true), Encoding.Unicode })
+            {
+                string ok = WriteText("roundtrip.txt", "中文 abc\r\n第二行", encoding);
+                Check(TextPreview.Read(ok, CancellationToken.None).ReadOnlyReason == null, "lossless " + encoding.WebName + " opened read-only");
+            }
+            string ansi = WriteText("roundtrip-ansi.txt", Encoding.Default.GetString(Encoding.Default.GetBytes("中文ABC")), Encoding.Default);
+            Check(TextPreview.Read(ansi, CancellationToken.None).ReadOnlyReason == null, "lossless code page text opened read-only");
+            // 带 UTF-8 BOM 但内容含非法字节：解码会替换字符，必须只读。
+            string bomBroken = Path.Combine(root, "bom-broken.txt");
+            File.WriteAllBytes(bomBroken, new byte[] { 0xEF, 0xBB, 0xBF, 0x61, 0xFF, 0xFE, 0x62 });
+            Check(TextPreview.Read(bomBroken, CancellationToken.None).ReadOnlyReason != null, "lossy BOM text is editable");
+            // 不是 UTF-8、系统编码也无法表示的字节序列（如 GBK 下的 0x80/0xFF）：必须只读。
+            string legacyBroken = Path.Combine(root, "legacy-broken.txt");
+            File.WriteAllBytes(legacyBroken, new byte[] { 0x41, 0xFF, 0x80, 0x42, 0x81 });
+            TextPreview broken = TextPreview.Read(legacyBroken, CancellationToken.None);
+            bool exact = TextPreview.RoundTrips(File.ReadAllBytes(legacyBroken), broken.Content, broken.Encoding);
+            Check(exact == (broken.ReadOnlyReason == null), "read-only flag disagrees with round trip");
+            if (Encoding.Default.CodePage == 936) Check(broken.ReadOnlyReason != null, "lossy GBK text is editable");
+            // 换行：混用才提示。
+            Check(TextPreview.HasMixedNewlines("a\r\nb\nc") && TextPreview.HasMixedNewlines("a\rb\nc")
+                && !TextPreview.HasMixedNewlines("a\r\nb\r\nc") && !TextPreview.HasMixedNewlines("a\nb\n"), "mixed newline detection");
+            string mixed = WriteText("mixed.csv", "h1,h2\r\n\"x\ny\",z\r\n", new UTF8Encoding(false));
+            Check(TextPreview.Read(mixed, CancellationToken.None).MixedNewlines, "mixed newline file not flagged");
+            // 写入失败（只读目标）：原文件内容不变，不留临时文件或备份。
+            string locked = WriteText("locked.txt", "original", new UTF8Encoding(false));
+            File.SetAttributes(locked, FileAttributes.ReadOnly);
+            try
+            {
+                bool failed = false;
+                try { TextPreview.Write(locked, "changed", new UTF8Encoding(false)); }
+                catch (UnauthorizedAccessException) { failed = true; }
+                catch (IOException) { failed = true; }
+                Check(failed && File.ReadAllText(locked) == "original", "read-only target was modified");
+            }
+            finally { File.SetAttributes(locked, FileAttributes.Normal); }
+            TextPreview.Write(locked, "saved", new UTF8Encoding(false));
+            Check(File.ReadAllText(locked) == "saved", "save after unlock failed");
+            Check(Directory.GetFiles(root, ".locked.txt.*").Length == 0, "temporary or backup file left behind");
+        }
+
         private static void TextBounds()
         {
             string path = WriteText("large.txt", new string('x', TextPreview.MaxCharacters + 1), new UTF8Encoding(false));

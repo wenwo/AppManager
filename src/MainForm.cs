@@ -437,8 +437,10 @@ namespace AppManager
                 HideToTray();   // 导入在后台继续
                 return;
             }
-            // 任务栏「关闭窗口」等未经 ExitApp 的关闭：文本查看器有未保存修改时先询问
-            if (!exiting && e.CloseReason == CloseReason.UserClosing && textViewer != null && !textViewer.ConfirmLeave())
+            // 任务栏「关闭窗口」、关机/注销等未经 ExitApp 的关闭：文本查看器有未保存修改时先询问；
+            // 关机时选“取消”会阻止关机（系统会列出本程序），不再静默丢弃编辑内容。
+            if (!exiting && (e.CloseReason == CloseReason.UserClosing || e.CloseReason == CloseReason.WindowsShutDown)
+                && textViewer != null && !textViewer.ConfirmLeave())
             {
                 e.Cancel = true;
                 return;
