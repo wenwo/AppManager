@@ -47,6 +47,7 @@ namespace AppManager
                 Run("background status: queued update, disposal race, no handle", StatusRace);
                 Run("category removal: hidden toggle, single/batch, reload and rejoin", CategoryRemoval);
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
+                Run("category icon-only edit keeps item order; rename migrates it", CategoryIconOnlyEdit);
                 Run("resource defaults: remove, preserve library, reload and menu rejoin", ResourceCategoryRemoval);
                 Run("category removal: failed save rolls back membership and permits retry", CategoryRemovalSaveFailure);
                 Run("default category addition: single/batch, multiple memberships, removal and reload", DefaultCategoryAddition);
@@ -763,6 +764,31 @@ namespace AppManager
                     Check((bool)Invoke(form, "InCategory", fresh, "开发工具"), "move back failed");
                 }
             }
+        }
+
+        private static void CategoryIconOnlyEdit()
+        {
+            AppConfig config = new AppConfig();
+            config.CustomCategories.Add("回归排序");
+            config.ItemOrder["回归排序"] = new List<string> { "af:regression-order-b", "af:regression-order-a" };
+            AppInfo a = new AppInfo { Key = "af:regression-order-a", Name = "Order A", Category = "回归排序" };
+            AppInfo b = new AppInfo { Key = "af:regression-order-b", Name = "Order B", Category = "回归排序" };
+            using (MainForm form = CategoryForm(config, a, b))
+            {
+                CategoryIconKind current = (CategoryIconKind)Invoke(form, "GetCategoryIcon", "回归排序");
+                CategoryIconKind other = current == CategoryIconKind.Star ? CategoryIconKind.Code : CategoryIconKind.Star;
+                Check((bool)Invoke(form, "ApplyCategoryRename", "回归排序", "回归排序", other), "icon-only edit was not applied");
+                Check((CategoryIconKind)Invoke(form, "GetCategoryIcon", "回归排序") == other, "icon was not changed");
+                List<string> order;
+                Check(config.ItemOrder.TryGetValue("回归排序", out order) && order.Count == 2 && order[0] == b.Key,
+                    "icon-only edit dropped the category order");
+                Check((bool)Invoke(form, "ApplyCategoryRename", "回归排序", "回归排序新", other), "rename was not applied");
+                Check(!config.ItemOrder.ContainsKey("回归排序") && config.ItemOrder.TryGetValue("回归排序新", out order) && order[0] == b.Key,
+                    "rename did not migrate the category order");
+            }
+            AppConfig loaded = AppConfig.Load();
+            List<string> saved;
+            Check(!loaded.LoadFailed && loaded.ItemOrder.TryGetValue("回归排序新", out saved) && saved.Count == 2, "renamed order was not persisted");
         }
 
         private static void CategoryRemovalSources()

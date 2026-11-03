@@ -3350,22 +3350,36 @@ namespace AppManager
             CategoryEditDialog.Result edit = CategoryEditDialog.Show(
                 "重命名分类", "分类名称", oldName, oldIcon);
             if (edit == null) return;
-            string name = (edit.Name ?? string.Empty).Trim();
-            if (name == oldName && edit.Icon == oldIcon) return;
+            ApplyCategoryRename(oldName, (edit.Name ?? string.Empty).Trim(), edit.Icon);
+        }
+
+        /// <summary>应用分类改名/改图标；返回是否有改动被应用（校验失败或无变化返回 false）。</summary>
+        private bool ApplyCategoryRename(string oldName, string name, CategoryIconKind icon)
+        {
+            CategoryIconKind oldIcon = GetCategoryIcon(oldName);
+            if (name == oldName && icon == oldIcon) return false;
             bool resource = contentMode == SidebarControl.ContentMode.Website;
             List<string> cats = resource ? config.ResourceCategories : config.CustomCategories;
             string error = CategoryNameError(name, resource, oldName);
             if (error != null)
             {
                 MessageBox.Show(error, "重命名分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                return false;
+            }
+            if (name == oldName)
+            {
+                // 只改图标：不能走下面的改名迁移，否则排序等按分类名存的记录会被“先赋给自己再删除”而丢失。
+                config.CategoryIconNames[CategoryIconKey(name)] = icon.ToString();
+                config.Save();
+                RebuildSidebar();
+                return true;
             }
             // 旧名称已同时被另一模式使用：数据库里两边是同一行，改名会连带搬走另一边的成员。
-            if (name != oldName && CategoryNameInUse(oldName, !resource))
+            if (CategoryNameInUse(oldName, !resource))
             {
                 MessageBox.Show("「" + oldName + "」同时在软件和资源模式中使用，无法安全改名。\n请先删除另一模式的同名分类。",
                     "重命名分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                return false;
             }
             int idx = cats.IndexOf(oldName);
             config.QueueCategoryRename(oldName, name);
@@ -3380,7 +3394,7 @@ namespace AppManager
             }
             else if (config.CategoryIconNames.TryGetValue(oldName, out savedIconName))
                 config.CategoryIconNames[newIconKey] = savedIconName;
-            config.CategoryIconNames[newIconKey] = edit.Icon.ToString();
+            config.CategoryIconNames[newIconKey] = icon.ToString();
             RemoveLegacyCategoryIconIfUnused(oldName);
             // 同步所有指向旧分类的 override 与 added items
             List<string> keys = new List<string>(config.CategoryOverride.Keys);
@@ -3417,6 +3431,7 @@ namespace AppManager
             config.Save();
             RebuildSidebar();
             RefreshGrid();
+            return true;
         }
 
         /// <summary>删除自定义分类（软件/资源按当前内容模式）；分类下条目回归默认归属。</summary>
