@@ -120,6 +120,7 @@ namespace AppManager
             Case61_RestorePathBoundary();
             Case62_XmlDtdRejected();
             Case63_DpiScaling();
+            Case64_SelfTargetExclusion();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1514,6 +1515,23 @@ namespace AppManager
                 && DpiHelper.Scale(240, 168) == 420
                 && DpiHelper.Scale(34, 144) == 51;
             Assert(ok, "100%=240 125%=300 150%=360 175%=420");
+        }
+
+        private static void Case64_SelfTargetExclusion()
+        {
+            Begin("64 扫描排除当前程序自身");
+            try
+            {
+                string self = System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName;
+                bool direct = Scanner.IsSelfTarget(self);
+                bool caseInsensitive = Scanner.IsSelfTarget(self.ToUpperInvariant());
+                bool other = !Scanner.IsSelfTarget(Path.Combine(Environment.SystemDirectory, "notepad.exe"));
+                bool empty = !Scanner.IsSelfTarget(string.Empty);
+                Assert(direct && caseInsensitive && other && empty,
+                    "direct=" + direct + " case=" + caseInsensitive
+                    + " other=" + other + " empty=" + empty);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
         }
 
         private static void WriteBox(Stream s, string type, byte[] payload)

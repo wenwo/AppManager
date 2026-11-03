@@ -21,6 +21,25 @@ namespace AppManager
     {
         private readonly AppConfig config;
         private const int ShortcutTextCapacity = 32768;
+        private static readonly string SelfExecutablePath = ResolveSelfExecutablePath();
+
+        private static string ResolveSelfExecutablePath()
+        {
+            try { return Path.GetFullPath(Process.GetCurrentProcess().MainModule.FileName); }
+            catch { return string.Empty; }
+        }
+
+        /// <summary>判断启动目标是否为当前程序自身（扫描时跳过自己的快捷方式）。</summary>
+        internal static bool IsSelfTarget(string target)
+        {
+            if (string.IsNullOrEmpty(target) || string.IsNullOrEmpty(SelfExecutablePath)) return false;
+            try
+            {
+                string path = Path.GetFullPath(target.Trim());
+                return string.Equals(path, SelfExecutablePath, StringComparison.OrdinalIgnoreCase);
+            }
+            catch { return false; }
+        }
 
         // COM 快捷方式解析：IShellLinkW 接口。
         // 注意：COM 接口按 vtable 槽位顺序调用，方法声明顺序必须与 shobjidl_core.h 中
@@ -649,6 +668,7 @@ namespace AppManager
 
         private void Merge(Dictionary<string, AppInfo> dict, AppInfo app)
         {
+            if (IsSelfTarget(app.TargetPath)) return;
             string k = app.DisplayKey();
             AppInfo exist;
             if (dict.TryGetValue(k, out exist))
@@ -673,6 +693,7 @@ namespace AppManager
         /// </summary>
         private void MergeByName(Dictionary<string, AppInfo> dict, AppInfo app)
         {
+            if (IsSelfTarget(app.TargetPath)) return;
             string name = NormalizeEntryName(app.Name);
             if (name.Length > 0)
             {
