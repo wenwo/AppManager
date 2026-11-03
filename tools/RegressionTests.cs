@@ -63,6 +63,7 @@ namespace AppManager
                 Run("resource page creates entries in the resource store", ResourceCreateEntries);
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
+                Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
             }
             finally
             {
@@ -1140,6 +1141,33 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void SearchContextRemoval()
+        {
+            AppConfig config = new AppConfig();
+            string path = Path.Combine(root, "regression-search-tool.exe");
+            File.WriteAllText(path, "tool");
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "Search Tool", Category = "开发工具" });
+            config.Favorites.Add("add:" + path);
+            config.Hidden.Add("add:" + path);
+            AppInfo inside = new AppInfo { Key = "add:" + path, Name = "Search Tool", TargetPath = path, Category = "开发工具", IsFile = true };
+            AppInfo outside = new AppInfo { Key = "af:regression-search-out", Name = "Search Browser", Category = "浏览器" };
+            using (MainForm form = CategoryForm(config, inside, outside))
+            {
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "开发工具");
+                AppManager.Controls.SearchField search = (AppManager.Controls.SearchField)typeof(MainForm).GetField("search", Private).GetValue(form);
+                List<AppInfo> both = new List<AppInfo> { inside, outside };
+                search.Text = "Search";
+                List<AppInfo> removable = (List<AppInfo>)Invoke(form, "RemovableFromCurrent", both);
+                Check(removable.Count == 1 && removable[0] == inside, "search offered removal for an item outside the category");
+                search.Text = string.Empty;
+                removable = (List<AppInfo>)Invoke(form, "RemovableFromCurrent", both);
+                Check(removable.Count == 2, "non-search removal targets changed");
+                ClickConfirmation(delegate { Invoke(form, "DeleteAddedEntry", inside); }, true);
+                Check(!config.Favorites.Contains(inside.Key) && !config.Hidden.Contains(inside.Key), "record delete left favorite/hidden behind");
+                Check(File.Exists(path), "record delete touched the disk file");
+            }
         }
 
         private static void RestoreKeepsNewerStash()

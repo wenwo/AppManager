@@ -3949,10 +3949,10 @@ namespace AppManager
                         items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(app); }));
                     items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(app)));
                 }
-                if (CanEditCategory(currentCategory))
+                if (RemovableFromCurrent(new List<AppInfo> { app }).Count > 0)
                     items.Add(MkMenu("从「" + currentCategory + "」移除", delegate { RemoveFromCategory(app); }));
-                // 集合视图内：移出仅解除集合归属，文件保留在父分类（多选时整批移出）
-                if (currentCollection != null)
+                // 集合视图内：移出仅解除集合归属，文件保留在父分类（多选时整批移出）；搜索结果是全局的，不提供
+                if (currentCollection != null && !SearchActive)
                 {
                     List<AppInfo> removeTargets = MenuTargets(app);
                     items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(removeTargets, currentCollection); }));
@@ -4017,10 +4017,11 @@ namespace AppManager
             items.Add(MkSubMenu("移动到分类…", BuildMoveResourceItems(targets)));
             if (CanEditCategory(currentCategory))
                 items.Add(MkSubMenu("加入集合…", BuildJoinCollectionItems(targets)));
-            if (CanEditCategory(currentCategory))
+            List<AppInfo> removable = RemovableFromCurrent(targets);
+            if (removable.Count > 0)
                 items.Add(MkMenu("从「" + currentCategory + "」移出",
-                    delegate { RemoveTargetsFromCategory(targets, currentCategory); }));
-            if (currentCollection != null)
+                    delegate { RemoveTargetsFromCategory(removable, currentCategory); }));
+            if (currentCollection != null && !SearchActive)
                 items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(targets, currentCollection); }));
 
             items.Add(MkSep());
@@ -4064,9 +4065,10 @@ namespace AppManager
             if (AnyInCustom(targets))
                 items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(targets); }));
             items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(targets)));
-            if (CanEditCategory(currentCategory))
+            List<AppInfo> removable = RemovableFromCurrent(targets);
+            if (removable.Count > 0)
                 items.Add(MkMenu("从“" + currentCategory + "”移除",
-                    delegate { RemoveTargetsFromCategory(targets, currentCategory); }));
+                    delegate { RemoveTargetsFromCategory(removable, currentCategory); }));
 
             items.Add(MkSep());
             items.Add(MkMenu(AllHidden(targets) ? "取消隐藏" : "隐藏",
@@ -5193,15 +5195,29 @@ namespace AppManager
         private void OnGridRowRemove(AppInfo app)
         {
             if (app == null) return;
-            if (contentMode == SidebarControl.ContentMode.Website && !SearchActive)
+            if (contentMode == SidebarControl.ContentMode.Website)
             {
-                if (currentCollection != null) { RemoveItemFromCategory(app, currentCollection); return; }
-                // 资源分类/全部资源：行按钮「删除」与右键菜单「删除」对齐（磁盘文件进回收站）
+                // 集合视图（非搜索）：行按钮是「移除」，只解除集合归属
+                if (currentCollection != null && !SearchActive) { RemoveItemFromCategory(app, currentCollection); return; }
+                // 资源分类/全部资源/资源搜索：行按钮「删除」与右键菜单「删除」同语义（磁盘文件进回收站）
                 if (CanDeleteEntryDisk(app)) { ConfirmDeleteEntryDisk(app); return; }
                 DeleteAddedEntry(app);
                 return;
             }
             DeleteAddedEntry(app);
+        }
+
+        /// <summary>
+        /// 可“从当前分类移除”的目标：当前分类可编辑，且（搜索态下）条目确实属于当前分类。
+        /// 搜索结果是全局的，对不在该分类的条目写排除记录会让它以后被悄悄隐藏。
+        /// </summary>
+        private List<AppInfo> RemovableFromCurrent(List<AppInfo> targets)
+        {
+            List<AppInfo> result = new List<AppInfo>();
+            if (targets == null || !CanEditCategory(currentCategory)) return result;
+            foreach (AppInfo a in targets)
+                if (a != null && (!SearchActive || InCategory(a, currentCategory))) result.Add(a);
+            return result;
         }
 
         /// <summary>删除：移除用户添加的条目记录（不动磁盘文件）。</summary>
@@ -5219,6 +5235,8 @@ namespace AppManager
                 }
             }
             if (!removed) return;
+            // 该路径的收录记录已全部移除：以 add:路径 为键的收藏、隐藏、分类覆盖、额外归属、排序一并清理，不留残留
+            PurgeEntryKeys(app.TargetPath, "add:" + app.TargetPath);
             InvalidateAddedIndex();
             config.Save();
             StartScan(false);
