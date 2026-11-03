@@ -6,7 +6,7 @@ using System.Windows.Forms;
 namespace AppManager
 {
     /// <summary>
-    /// 自动扫描：监听开始菜单与桌面目录的新增 / 改名 / 删除，
+    /// 自动扫描：监听开始菜单与桌面目录的新增 / 修改 / 改名 / 删除，
     /// 静默片刻后合并成一次通知，由主窗口触发静默重扫。
     /// 安装程序通常连续创建多个快捷方式，防抖可以避免扫描被打断多次。
     /// </summary>
@@ -15,9 +15,13 @@ namespace AppManager
         /// <summary>最后一条变更之后等待的静默时长。</summary>
         private const int DebounceMs = 1200;
 
+        /// <summary>补偿未产生快捷方式事件的安装 / 更新和漏报。</summary>
+        private const int PollMs = 15000;
+
         private readonly Control _ui;
         private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
         private readonly Timer _debounce;
+        private readonly Timer _poll;
         private readonly List<string> _newDesktopFiles = new List<string>();
         private readonly Dictionary<string, DateTime> _ignoredDeletions =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
@@ -39,6 +43,10 @@ namespace AppManager
             _debounce.Interval = DebounceMs;
             _debounce.Tick += OnDebounceTick;
 
+            _poll = new Timer();
+            _poll.Interval = PollMs;
+            _poll.Tick += OnPollTick;
+
             // 桌面只盯顶层：子目录（工程目录等）的增删不触发重扫，也不参与自动搬运
             Watch(DesktopOrganizer.UserDesktop, false);
             Watch(DesktopOrganizer.PublicDesktop, false);
@@ -46,6 +54,7 @@ namespace AppManager
             Watch(StartMenuPrograms(false), true);
             SnapshotDesktop(DesktopOrganizer.UserDesktop);
             SnapshotDesktop(DesktopOrganizer.PublicDesktop);
+            _poll.Start();
         }
 
         private static string StartMenuPrograms(bool common)
@@ -64,10 +73,12 @@ namespace AppManager
             {
                 FileSystemWatcher w = new FileSystemWatcher(dir);
                 w.IncludeSubdirectories = includeSubdirectories;
-                w.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName;
+                w.NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
+                    | NotifyFilters.LastWrite | NotifyFilters.Size;
                 // 默认 4KB 缓冲在批量安装时容易溢出（丢事件），适当放大
                 w.InternalBufferSize = 16 * 1024;
                 w.Created += OnCreated;
+                w.Changed += OnChanged;
                 w.Renamed += OnRenamed;
                 w.Deleted += OnDeleted;
                 w.Error += OnWatcherError;
@@ -138,6 +149,12 @@ namespace AppManager
             if (IsDesktopShortcut(e.FullPath))
                 lock (_knownLock) { _knownDesktopShortcuts.Add(e.FullPath); }
             Post(e.FullPath, true);
+        }
+
+        private void OnChanged(object sender, FileSystemEventArgs e)
+        {
+            // 已有快捷方式被更新时只刷新目录，不作为新桌面入口自动搬运。
+            Post(e.FullPath, false);
         }
 
         private void OnRenamed(object sender, RenamedEventArgs e)
@@ -225,14 +242,24 @@ namespace AppManager
             if (handler != null) { handler(this, EventArgs.Empty); }
         }
 
+        private void OnPollTick(object sender, EventArgs e)
+        {
+            if (_disposed) { return; }
+            _debounce.Stop();
+            _debounce.Start();
+        }
+
         public void Dispose()
         {
             if (_disposed) { return; }
             _disposed = true;
 
             _debounce.Stop();
+            _poll.Stop();
             _debounce.Tick -= OnDebounceTick;
+            _poll.Tick -= OnPollTick;
             _debounce.Dispose();
+            _poll.Dispose();
 
             foreach (FileSystemWatcher w in _watchers)
             {

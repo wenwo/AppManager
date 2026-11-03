@@ -42,6 +42,7 @@ namespace AppManager
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
                 Run("backup list row height at 100/125/150/175 percent", BackupDpi);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
+                Run("auto scan: existing shortcut rewrite, periodic fallback and disposal", AutoScanChanges);
                 Run("category removal: hidden toggle, single/batch, reload and rejoin", CategoryRemoval);
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
                 Run("resource defaults: remove, preserve library, reload and menu rejoin", ResourceCategoryRemoval);
@@ -75,6 +76,59 @@ namespace AppManager
         private static void Check(bool condition, string message)
         {
             if (!condition) throw new Exception(message);
+        }
+
+        private static void AutoScanChanges()
+        {
+            string folder = Path.Combine(root, "auto-scan");
+            Directory.CreateDirectory(folder);
+            string shortcut = Path.Combine(folder, "existing.lnk");
+            File.WriteAllText(shortcut, "before update");
+            using (Control ui = new Control())
+            {
+                IntPtr handle = ui.Handle;
+                using (AutoScanWatcher watcher = new AutoScanWatcher(ui))
+                {
+                    // 只监听隔离目录，确保真实桌面变化不会令用例误通过。
+                    List<FileSystemWatcher> systemWatchers = (List<FileSystemWatcher>)
+                        typeof(AutoScanWatcher).GetField("_watchers", Private).GetValue(watcher);
+                    foreach (FileSystemWatcher systemWatcher in systemWatchers) systemWatcher.Dispose();
+                    systemWatchers.Clear();
+                    System.Windows.Forms.Timer poll = (System.Windows.Forms.Timer)
+                        typeof(AutoScanWatcher).GetField("_poll", Private).GetValue(watcher);
+                    poll.Stop();
+                    typeof(AutoScanWatcher).GetMethod("Watch", Private).Invoke(watcher, new object[] { folder, false });
+                    int notifications = 0;
+                    watcher.ChangesDetected += delegate { notifications++; };
+                    File.WriteAllText(shortcut, "after an installer rewrote the existing shortcut");
+                    PumpUntil(delegate { return notifications > 0; }, 5000);
+                    Check(notifications > 0, "rewriting an existing shortcut did not trigger a scan");
+                    Check(watcher.TakeNewDesktopFiles().Count == 0, "rewritten shortcut was queued for desktop moving");
+
+                    foreach (FileSystemWatcher systemWatcher in systemWatchers) systemWatcher.EnableRaisingEvents = false;
+                    PumpUntil(delegate { return false; }, 1500);
+                    int beforePoll = notifications;
+                    poll.Start();
+                    PumpUntil(delegate { return notifications > beforePoll; }, 20000);
+                    Check(notifications > beforePoll, "periodic fallback did not scan without filesystem events");
+                    Check(watcher.TakeNewDesktopFiles().Count == 0, "periodic fallback queued desktop moving");
+
+                    watcher.Dispose();
+                    int afterDispose = notifications;
+                    PumpUntil(delegate { return false; }, 1500);
+                    Check(notifications == afterDispose && !poll.Enabled, "disposed watcher kept scheduling scans");
+                }
+            }
+        }
+
+        private static void PumpUntil(Func<bool> condition, int timeoutMs)
+        {
+            Stopwatch elapsed = Stopwatch.StartNew();
+            while (!condition() && elapsed.ElapsedMilliseconds < timeoutMs)
+            {
+                Application.DoEvents();
+                Thread.Sleep(10);
+            }
         }
 
         private static object Invoke(MainForm form, string method, params object[] args)
