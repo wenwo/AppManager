@@ -1052,7 +1052,9 @@ namespace AppManager
             int miniWidth = Math.Min(Dpi(640), Math.Min((int)(contentWidth * 0.40), miniAvailable));
             miniMusic.Location = new Point(miniLeft, row1 + (row2 - Dpi(34)) / 2);
             miniMusic.Size = new Size(miniWidth, Dpi(34));
-            miniMusic.Visible = !settingsOpen && miniWidth >= Dpi(190);
+            bool miniFits = miniWidth >= Dpi(190);
+            if (!miniFits) miniMusic.PauseOwnPlayback();   // 窄到放不下迷你播放器：暂停，避免声音继续却无处可暂停
+            miniMusic.Visible = !settingsOpen && miniFits;
             int countLeft = miniMusic.Visible ? miniMusic.Right + Dpi(8) : miniLeft;
             countLabel.Location = new Point(countLeft, row1);
             countLabel.Size = new Size(Math.Max(0, countRight - countLeft), row2);
@@ -5812,7 +5814,9 @@ namespace AppManager
             sidebar.Visible = show;
             grid.Visible = show;
             search.Visible = show;
-            miniMusic.Visible = show && miniMusic.Width >= Dpi(190);
+            bool miniFits = miniMusic.Width >= Dpi(190);
+            if (show && !miniFits) miniMusic.PauseOwnPlayback();
+            miniMusic.Visible = show && miniFits;
             countLabel.Visible = show;
             organizeBtn.Visible = show;
             viewToggle.Visible = show;

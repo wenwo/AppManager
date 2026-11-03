@@ -161,6 +161,18 @@ namespace AppManager.Controls
             Invalidate();
         }
 
+        /// <summary>
+        /// 迷你播放器因窗口过窄被隐藏时调用：暂停自己的播放，避免声音继续却无处可暂停。
+        /// 完整播放器在播放（外部状态）时不受影响；可重复调用。
+        /// </summary>
+        public void PauseOwnPlayback()
+        {
+            if (engine == null || !playing || externalPlayerActive) return;
+            try { engine.SetPause(true); } catch { }
+            playing = false;
+            Invalidate();
+        }
+
         private void TogglePlay()
         {
             if (externalPlayerActive)

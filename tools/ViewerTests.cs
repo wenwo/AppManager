@@ -56,6 +56,7 @@ namespace AppManager
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
                 Run("music players advance to the next track when a song ends", MusicAutoAdvance);
+                Run("music stops on a missing track and the hidden mini player pauses", MusicSilencedWhenUnreachable);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
@@ -238,6 +239,43 @@ namespace AppManager
                 player.Visible = false;
                 mini.LoadPlaylist(new List<string> { first, second }, "回归", "regression", 0);
                 Check(PumpUntil(delegate { return mini.CurrentIndex == 1; }, 15000), "mini player did not advance after the song ended");
+                mini.Stop();
+                host.Hide();
+            }
+        }
+
+        private static bool EngineFlag(object control, string property)
+        {
+            object engine = control.GetType().GetField("engine", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(control);
+            if (engine == null) return false;
+            object[] args = { property, false };
+            bool ok = (bool)engine.GetType().GetMethod("TryGetFlag").Invoke(engine, args);
+            return ok && (bool)args[1];
+        }
+
+        private static void MusicSilencedWhenUnreachable()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string song = WriteSilence("long-song.wav", 8);
+            string missing = Path.Combine(root, "deleted-song.wav");
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+            {
+                host.Controls.Add(mini);
+                host.Controls.Add(player);
+                host.Show();
+                player.Open(new List<string> { song, missing }, 0);
+                Check(PumpUntil(delegate { return !EngineFlag(player, "idle-active") && !EngineFlag(player, "pause"); }, 10000), "full player never started");
+                player.StepFromMiniPlayer(1);   // 下一首已被删除
+                Check(PumpUntil(delegate { return EngineFlag(player, "idle-active"); }, 5000), "previous song kept playing after switching to a missing file");
+                player.Visible = false;
+                mini.LoadPlaylist(new List<string> { song }, "回归", "regression", 0);
+                Check(PumpUntil(delegate { return !EngineFlag(mini, "pause") && !EngineFlag(mini, "idle-active"); }, 10000), "mini player never started");
+                mini.PauseOwnPlayback();
+                Check(PumpUntil(delegate { return EngineFlag(mini, "pause"); }, 5000), "hidden mini player kept playing");
                 mini.Stop();
                 host.Hide();
             }

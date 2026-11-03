@@ -125,6 +125,8 @@ namespace AppManager.Controls
             if (!File.Exists(paths[index]))
             {
                 failure = "文件不存在";
+                // 切到已删除的曲目：上一首必须停下，否则界面显示“文件不存在”而声音还在继续
+                if (engine != null) engine.Stop();
                 NotifyPlaybackState();
                 Invalidate();
                 return;
@@ -152,6 +154,8 @@ namespace AppManager.Controls
             {
                 Debug.WriteLine("加载音乐失败: " + ex.Message);
                 failure = "无法播放此音乐";
+                playing = false;
+                try { engine.Stop(); } catch { }
                 NotifyPlaybackState();
             }
             Invalidate();
