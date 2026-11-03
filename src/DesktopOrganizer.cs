@@ -46,6 +46,20 @@ namespace AppManager
 
         internal static object OperationSync { get { return OperationLock; } }
 
+        /// <summary>
+        /// 是否有整理/还原/自动收纳/布局恢复正在搬动文件（另一线程持有操作锁）。
+        /// 退出前检查：搬到一半被结束会留下已移动但未登记的文件。
+        /// </summary>
+        internal static bool IsOperationRunning
+        {
+            get
+            {
+                if (!System.Threading.Monitor.TryEnter(OperationLock)) return true;
+                System.Threading.Monitor.Exit(OperationLock);
+                return false;
+            }
+        }
+
         /// <summary>快捷中心收纳主目录：文件夹收进此目录，文件收进其 Files 子目录。</summary>
         public static string QuickCenterDir { get { return QuickCenterDirPath; } }
 

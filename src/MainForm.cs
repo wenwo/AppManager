@@ -437,6 +437,15 @@ namespace AppManager
                 HideToTray();   // 导入在后台继续
                 return;
             }
+            // 用户关闭时桌面整理/还原仍在搬文件：拦下，等完成后再退出（关机无法等待，逐项保存已限制影响范围）。
+            if (e.CloseReason == CloseReason.UserClosing && DesktopWorkRunning())
+            {
+                e.Cancel = true;
+                exiting = false;
+                MessageBox.Show(this, "桌面整理或还原正在进行，完成后再退出，避免文件已移动却没有登记。", "退出",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             // 任务栏「关闭窗口」、关机/注销等未经 ExitApp 的关闭：文本查看器有未保存修改时先询问；
             // 关机时选“取消”会阻止关机（系统会列出本程序），不再静默丢弃编辑内容。
             if (!exiting && (e.CloseReason == CloseReason.UserClosing || e.CloseReason == CloseReason.WindowsShutDown)
@@ -663,6 +672,12 @@ namespace AppManager
             if (importRunning)
             {
                 RequestImportExit();
+                return;
+            }
+            if (DesktopWorkRunning())
+            {
+                MessageBox.Show(this, "桌面整理或还原正在进行，完成后再退出，避免文件已移动却没有登记。", "退出",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             if (textViewer != null && !textViewer.ConfirmLeave()) return;
@@ -5278,6 +5293,12 @@ namespace AppManager
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 });
             });
+        }
+
+        /// <summary>整理/还原/自动收纳/布局恢复是否仍在后台搬动文件。</summary>
+        private bool DesktopWorkRunning()
+        {
+            return desktopOperationRunning || DesktopOrganizer.IsOperationRunning;
         }
 
         /// <summary>

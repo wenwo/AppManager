@@ -54,6 +54,7 @@ namespace AppManager
                 Run("case-insensitive entry lookup uses an index, also after online restore", NocaseIndex);
                 Run("batched save failures are deferred on the worker and reported once", BatchSaveFailure);
                 Run("recycle bin detection never treats network paths as recyclable", RecycleDetection);
+                Run("desktop operation detection follows the operation lock held by another thread", DesktopOperationDetection);
                 Run("terminated writer recovers without exposing uncommitted rows", CrashRecovery);
                 Run("metadata sorting covers whole category, both directions and keyset pages", MetadataSorting);
                 Run("offline recovery keeps damaged original and restores validated snapshot", OfflineRecovery);
@@ -392,6 +393,26 @@ namespace AppManager
             DriveInfo drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(local)));
             Check(Launcher.CanUseRecycleBin(local) == (drive.IsReady && drive.DriveType == DriveType.Fixed),
                 "fixed local drive detection depends on per-user recycle folder");
+        }
+
+        private static void DesktopOperationDetection()
+        {
+            Check(!DesktopOrganizer.IsOperationRunning, "idle lock reported busy");
+            using (System.Threading.ManualResetEvent held = new System.Threading.ManualResetEvent(false))
+            using (System.Threading.ManualResetEvent release = new System.Threading.ManualResetEvent(false))
+            {
+                System.Threading.Thread worker = new System.Threading.Thread(delegate()
+                {
+                    DesktopOrganizer.RunExclusive(delegate { held.Set(); release.WaitOne(10000); });
+                });
+                worker.Start();
+                Check(held.WaitOne(10000), "worker did not take the lock");
+                bool busy = DesktopOrganizer.IsOperationRunning;
+                release.Set();
+                worker.Join(10000);
+                Check(busy, "running operation not detected");
+            }
+            Check(!DesktopOrganizer.IsOperationRunning, "lock still reported busy after the operation");
         }
 
         private static void PhysicalUndo()
