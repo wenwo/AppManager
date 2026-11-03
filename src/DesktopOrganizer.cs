@@ -24,6 +24,7 @@ namespace AppManager
         private static readonly object OperationLock = new object();
         private static readonly Dictionary<string, DateTime> AutoStashIgnore =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static int restoreDepth;   // 进行中的还原层数（RestoreAll 内嵌 RestoreOne），只在持有 OperationLock 时读写
 
         public DesktopOrganizer(AppConfig cfg) { config = cfg; }
 
@@ -139,14 +140,33 @@ namespace AppManager
             }
         }
 
-        /// <summary>还原后短暂抑制自动收纳，避免刚回到桌面的快捷方式又被监听器收走。</summary>
+        /// <summary>还原后抑制自动收纳的时长，从整个还原操作结束时起算。</summary>
+        internal static readonly TimeSpan AutoStashQuiet = TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        /// 还原后短暂抑制自动收纳，避免刚回到桌面的快捷方式又被监听器收走。
+        /// 还原操作进行中先登记为“挂起”（不过期），整个操作结束时再统一开始计时：
+        /// “还原全部”耗时超过抑制时长时，早先还原的项不会在补扫时已经过期。
+        /// </summary>
         private static void SuppressAutoStash(params string[] paths)
         {
             lock (AutoStashIgnore)
             {
-                DateTime until = DateTime.UtcNow.AddSeconds(30);
+                DateTime until = restoreDepth > 0 ? DateTime.MaxValue : DateTime.UtcNow + AutoStashQuiet;
                 foreach (string path in paths)
                     if (!string.IsNullOrEmpty(path)) AutoStashIgnore[path] = until;
+            }
+        }
+
+        /// <summary>结束一层还原操作（持有 OperationLock 时调用）；最外层结束时挂起的抑制项开始计时。</summary>
+        private static void EndRestore()
+        {
+            if (--restoreDepth > 0) return;
+            lock (AutoStashIgnore)
+            {
+                DateTime until = DateTime.UtcNow + AutoStashQuiet;
+                foreach (string path in new List<string>(AutoStashIgnore.Keys))
+                    if (AutoStashIgnore[path] == DateTime.MaxValue) AutoStashIgnore[path] = until;
             }
         }
 
@@ -554,21 +574,26 @@ namespace AppManager
             lock (OperationLock)
             {
                 int count = 0;
-                List<DesktopBackupEntry> snapshot = new List<DesktopBackupEntry>(config.DesktopBackup);
-                foreach (DesktopBackupEntry e in snapshot)
+                restoreDepth++;   // 整批结束后才开始计抑制时间，早还原的项不会在批量还原途中过期
+                try
                 {
-                    if (!RestoreOne(e)) continue;   // 失败项保留，避免丢失还原线索
-                    count++;
-                    config.DesktopBackup.Remove(e);
-                    if (!config.Save("physical.desktop.restore"))
+                    List<DesktopBackupEntry> snapshot = new List<DesktopBackupEntry>(config.DesktopBackup);
+                    foreach (DesktopBackupEntry e in snapshot)
                     {
-                        // Save 失败会从数据库重载配置；仅在重载也失败、记录确实缺失时补回线索。
-                        bool present = config.DesktopBackup.Exists(delegate(DesktopBackupEntry value)
-                        { return value != null && string.Equals(value.CurrentPath, e.CurrentPath, StringComparison.OrdinalIgnoreCase); });
-                        if (!present) config.DesktopBackup.Add(e);
-                        break;
+                        if (!RestoreOne(e)) continue;   // 失败项保留，避免丢失还原线索
+                        count++;
+                        config.DesktopBackup.Remove(e);
+                        if (!config.Save("physical.desktop.restore"))
+                        {
+                            // Save 失败会从数据库重载配置；仅在重载也失败、记录确实缺失时补回线索。
+                            bool present = config.DesktopBackup.Exists(delegate(DesktopBackupEntry value)
+                            { return value != null && string.Equals(value.CurrentPath, e.CurrentPath, StringComparison.OrdinalIgnoreCase); });
+                            if (!present) config.DesktopBackup.Add(e);
+                            break;
+                        }
                     }
                 }
+                finally { EndRestore(); }
                 return count;
             }
         }
@@ -584,6 +609,7 @@ namespace AppManager
             if (e == null) { LastRestoreError = "还原记录为空。"; return false; }
             lock (OperationLock)
             {
+                restoreDepth++;
                 try
                 {
                     if (!IsManagedBackupPath(e.CurrentPath))
@@ -646,6 +672,7 @@ namespace AppManager
                     Paths.LogError(ex);
                     return false;
                 }
+                finally { EndRestore(); }
             }
         }
 

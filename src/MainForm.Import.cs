@@ -424,7 +424,64 @@ namespace AppManager
         private void QueueImportWithCancellation(string[] paths, ImportOperation operation, string category, string collection, bool resource,
             uint sequence, Action<ImportBatch> completed, CancellationToken cancel)
         {
-            // 目标与动作均在投放/粘贴时冻结；队列执行时只重新检查文件和分类是否仍存在。
+            // 目标与动作均在投放/粘贴时冻结；存储目录也在此算好（只读配置、不建目录）。
+            // 路径归属、文件夹内收录检查等预处理放进导入队列在后台执行，批量拖入几千个文件时不卡界面；
+            // 后台直接读库（AddedEntryList 实例不是线程安全的）。没有数据库的会话（读取失败/测试）仍在界面线程预处理。
+            string folderDir = StoreDirectory(category, resource, true), fileDir = StoreDirectory(category, resource, false);
+            string databaseFile = config.Database != null ? config.Database.FilePath : null;
+            if (databaseFile == null)
+            {
+                ImportBatch prepared = PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                    RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
+                if (prepared.Items.Count == 0) { if (completed != null) completed(prepared); return; }
+                EnqueueImport(delegate { RunPreparedImport(prepared, completed, cancel); });
+                return;
+            }
+            EnqueueImport(delegate
+            {
+                ImportBatch prepared;
+                try
+                {
+                    prepared = PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                        delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list); },
+                        delegate(string folder) { return AddedEntryList.HasEntriesUnder(databaseFile, folder); });
+                }
+                catch (Exception ex)
+                {
+                    // 读库失败时整批不动任何文件：源全部保留，回调照常送达（异步拖放来源需要收到结束通知）。
+                    Paths.LogError(new IOException("导入预处理失败（" + paths.Length + " 项）", ex));
+                    ImportBatch failed = new ImportBatch { Category = category, Collection = collection, Resource = resource,
+                        Operation = operation, ClipboardSequence = sequence, JournalDirectory = ImportJournal, Error = "导入预处理失败：" + ex.Message };
+                    foreach (string path in paths) failed.Items.Add(new ImportItem { Source = path, State = FileImport.Failed, Error = failed.Error });
+                    RunOnUi(delegate
+                    {
+                        if (completed != null) completed(failed);
+                        MessageBox.Show(this, "读取收录记录失败，本次导入未处理任何文件，源文件均已保留。\n" + ex.Message, "导入文件",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    });
+                    return;
+                }
+                if (prepared.Items.Count == 0) { RunOnUi(delegate { if (completed != null) completed(prepared); }); return; }
+                RunPreparedImport(prepared, completed, cancel);
+            });
+        }
+
+        /// <summary>无数据库会话：用内存索引查已登记路径（只能在界面线程调用）。</summary>
+        private Dictionary<string, string> RegisteredPathsInMemory(List<string> paths)
+        {
+            Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (KeyValuePair<string, List<AddedEntry>> kv in AddedIndexLookups(paths))
+                if (kv.Value != null && kv.Value.Count > 0) result[kv.Key] = kv.Value[0].Path;
+            return result;
+        }
+
+        /// <summary>
+        /// 生成导入批次：规范化路径、识别已登记的引用项、检查文件夹自身嵌套与内部已收录项、资源类型过滤，
+        /// 并去掉被同批外层目录包含的条目。不访问界面控件与 AddedEntryList 实例，查库方式由调用方注入。
+        /// </summary>
+        private ImportBatch PrepareImportBatch(string[] paths, ImportOperation operation, string category, string collection, bool resource,
+            uint sequence, string folderDir, string fileDir, Func<List<string>, Dictionary<string, string>> registeredPaths, Func<string, bool> hasEntriesUnder)
+        {
             ImportBatch batch = new ImportBatch { Category = category, Collection = collection, Resource = resource,
                 Operation = operation, ClipboardSequence = sequence, JournalDirectory = ImportJournal };
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -439,24 +496,23 @@ namespace AppManager
                 }
                 catch { }
             }
-            Dictionary<string, List<AddedEntry>> knownPaths = AddedIndexLookups(lookupPaths);
+            Dictionary<string, string> knownPaths = registeredPaths(lookupPaths);
             foreach (string path in paths)
             {
                 try
                 {
                     string source = Path.GetFullPath(path);
                     if (!seen.Add(source)) continue;
-                    List<AddedEntry> known;
-                    knownPaths.TryGetValue(source, out known);
-                    if (known != null && known.Count == 0) known = null;
-                    if (known != null && known.Count > 0) source = known[0].Path;
+                    string registered;
+                    bool known = knownPaths.TryGetValue(source, out registered);
+                    if (known) source = registered;
                     bool folder = Directory.Exists(source);
-                    string dir = StoreDirectory(category, resource, folder);
-                    bool reference = (!resource && !folder && IsSoftwareFile(source)) || known != null || FileImport.Within(dir, source);
+                    string dir = folder ? folderDir : fileDir;
+                    bool reference = (!resource && !folder && IsSoftwareFile(source)) || known || FileImport.Within(dir, source);
                     ImportItem item = new ImportItem { Source = source, Target = dir, Folder = folder, Reference = reference };
                     if (folder && FileImport.Within(source, dir)) { item.State = FileImport.Failed; item.Error = "不能将文件夹导入自身内部。"; }
                     // 移动会让文件夹内已收录的项目全部指向旧路径而失效；复制不影响它们。
-                    else if (folder && !reference && operation == ImportOperation.Move && config.AddedItems.EntriesUnder(source).Count > 0)
+                    else if (folder && !reference && operation == ImportOperation.Move && hasEntriesUnder(source))
                     { item.State = FileImport.Failed; item.Error = "文件夹内包含已收录的项目，不能移动；请改用复制（拖放时按住 Ctrl）。"; }
                     else if (resource && !MediaRules.FitsCategory(category, source, folder))
                     { item.State = FileImport.Skipped; item.Error = "文件类型不符合目标分类。"; }
@@ -475,40 +531,42 @@ namespace AppManager
                 { if (folders.Contains(parent.TrimEnd('\\', '/'))) return false; parent = Path.GetDirectoryName(parent); }
                 return true;
             }).ToList();
-            if (batch.Items.Count == 0) { if (completed != null) completed(batch); return; }
-            EnqueueImport(delegate
+            return batch;
+        }
+
+        /// <summary>在导入队列（后台线程）中执行已生成的批次：预留目标名、复制/移动、提交入库，结束后回到界面线程收尾。</summary>
+        private void RunPreparedImport(ImportBatch batch, Action<ImportBatch> completed, CancellationToken cancel)
+        {
+            try
             {
-                try
+                // 文件名在串行任务开始时预留，避免排队任务使用过期的同名判断。
+                HashSet<string> reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (ImportItem item in batch.Items.Where(i => i.State != FileImport.Failed && i.State != FileImport.Skipped && !i.Reference))
                 {
-                    // 文件名在串行任务开始时预留，避免排队任务使用过期的同名判断。
-                    HashSet<string> reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    foreach (ImportItem item in batch.Items.Where(i => i.State != FileImport.Failed && i.State != FileImport.Skipped && !i.Reference))
-                    {
-                        string dir = item.Target, name = Path.GetFileName(item.Source.TrimEnd('\\', '/'));
-                        string target = Path.Combine(dir, name); int suffix = 1;
-                        while (reserved.Contains(target) || File.Exists(target) || Directory.Exists(target))
-                            target = Path.Combine(dir, Path.GetFileNameWithoutExtension(name) + "_" + suffix++ + Path.GetExtension(name));
-                        reserved.Add(target); item.Target = target;
-                    }
-                    RunOnUi(delegate { ShowStatusBar("正在导入「" + batch.Category + "」…", 0, batch.Items.Count); });
-                    FileImport.Run(batch, delegate(ImportBatch value)
-                    { return (bool)Invoke(new Func<bool>(delegate { return CommitImport(value); })); },
-                        delegate(int index, string name) { UpdateStatus(index, batch.Items.Count, name); }, cancel);
+                    string dir = item.Target, name = Path.GetFileName(item.Source.TrimEnd('\\', '/'));
+                    string target = Path.Combine(dir, name); int suffix = 1;
+                    while (reserved.Contains(target) || File.Exists(target) || Directory.Exists(target))
+                        target = Path.Combine(dir, Path.GetFileNameWithoutExtension(name) + "_" + suffix++ + Path.GetExtension(name));
+                    reserved.Add(target); item.Target = target;
                 }
-                catch (Exception ex)
+                RunOnUi(delegate { ShowStatusBar("正在导入「" + batch.Category + "」…", 0, batch.Items.Count); });
+                FileImport.Run(batch, delegate(ImportBatch value)
+                { return (bool)Invoke(new Func<bool>(delegate { return CommitImport(value); })); },
+                    delegate(int index, string name) { UpdateStatus(index, batch.Items.Count, name); }, cancel);
+            }
+            catch (Exception ex)
+            {
+                batch.Error = "导入中断：" + ex.Message;
+                FileImport.RecordError(batch, ex);
+            }
+            finally
+            {
+                RunOnUi(delegate
                 {
-                    batch.Error = "导入中断：" + ex.Message;
-                    FileImport.RecordError(batch, ex);
-                }
-                finally
-                {
-                    RunOnUi(delegate
-                    {
-                        if (completed != null) completed(batch);
-                        FinishImport(batch);
-                    });
-                }
-            });
+                    if (completed != null) completed(batch);
+                    FinishImport(batch);
+                });
+            }
         }
 
         private bool CommitImport(ImportBatch batch)

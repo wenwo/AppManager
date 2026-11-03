@@ -71,6 +71,7 @@ namespace AppManager
         private static int Main()
         {
             root = Path.Combine(Path.GetTempPath(), "AppManagerImportTests_" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+            Paths.DataDirOverride = root;   // 错误日志等运行时文件只写临时目录
             try
             {
                 Test("native effects and modifier precedence", delegate
@@ -296,14 +297,15 @@ namespace AppManager
                     restored.DeleteAuthorized = true; FileImport.DeleteSources(restored);
                     Check(restored.Items[0].State == FileImport.Moved && !File.Exists(restored.Items[0].Source) && File.Exists(restored.Items[0].Target), "confirmed delete");
                 });
-                Test("cancellation keeps every source and commits finished items only", delegate
+                Test("cancellation keeps every source and withdraws same-volume links instead of sharing data", delegate
                 {
                     ImportBatch batch = Batch(ImportOperation.Move, "a.txt", "b.txt");
                     using (CancellationTokenSource cancel = new CancellationTokenSource())
                         FileImport.Run(batch, delegate { return true; }, delegate(int index, string name) { if (index == 1) cancel.Cancel(); }, cancel.Token);
-                    Check(batch.Items[0].State == FileImport.Copied && batch.Items[1].State == FileImport.Failed && !batch.DeleteAuthorized, "cancel states");
-                    Check(batch.Items.All(i => File.Exists(i.Source)), "cancel deleted source");
-                    Check(batch.Items[0].Files.All(f => f.Linked), "cancelled detach still copied hard-linked data");
+                    // 同卷移动在取消时撤回已建立的硬链接：不提交、不复制，也不留下与源文件共用数据的入库副本
+                    Check(batch.Items[0].State == FileImport.RolledBack && batch.Items[1].State == FileImport.Failed && !batch.DeleteAuthorized, "cancel states: " + batch.Items[0].State);
+                    Check(batch.Items.All(i => File.Exists(i.Source)) && File.ReadAllText(batch.Items[0].Source) == "content-a.txt", "cancel lost or changed a source");
+                    Check(!File.Exists(batch.Items[0].Target), "cancelled link is still shared with the retained source");
                     string targetDir = Path.GetDirectoryName(batch.Items[0].Target);
                     Check(!Directory.Exists(targetDir) || !Directory.GetFiles(targetDir, "*.detach-*", SearchOption.AllDirectories).Any(),
                         "cancelled detach left a temporary copy");
@@ -421,8 +423,30 @@ namespace AppManager
                     Check(BitConverter.ToUInt32(stream.ToArray(), 0) == 0,
                         "wrong effect");
                 });
+                Test("staging residue is logged and reported instead of silently left behind", delegate
+                {
+                    System.Reflection.MethodInfo remove = typeof(FileImport).GetMethod("RemoveStaging",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    string staging = Path.Combine(root, "staging-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(Path.Combine(staging, "sub"));
+                    string held = Path.Combine(staging, "sub", "held.bin"); File.WriteAllText(held, "x");
+                    using (FileStream hold = new FileStream(held, FileMode.Open, FileAccess.Read, FileShare.None))
+                        Check(!(bool)remove.Invoke(null, new object[] { staging }) && File.Exists(held), "locked staging reported as cleaned");
+                    Check(File.Exists(Path.Combine(root, "error.log")) && File.ReadAllText(Path.Combine(root, "error.log")).Contains(staging),
+                        "staging residue was not logged");
+                    Check((bool)remove.Invoke(null, new object[] { staging }) && !Directory.Exists(staging), "staging not removed once released");
+                    // 目标名被占用导致失败：本批临时副本被清理，不留 .import- 残留，也不覆盖占用者
+                    ImportBatch batch = Batch(ImportOperation.Copy, "occupied.txt");
+                    Directory.CreateDirectory(Path.GetDirectoryName(batch.Items[0].Target));
+                    File.WriteAllText(batch.Items[0].Target, "someone else");
+                    Run(batch);
+                    Check(batch.Items[0].State == FileImport.Failed && File.Exists(batch.Items[0].Source), "occupied target did not fail safely");
+                    Check(!Directory.GetFileSystemEntries(Path.GetDirectoryName(batch.Items[0].Target)).Any(p => p.Contains(".import-")),
+                        "staging residue left behind");
+                    Check(File.ReadAllText(batch.Items[0].Target) == "someone else", "occupied target overwritten");
+                });
             }
-            finally { Directory.Delete(root, true); }
+            finally { Paths.DataDirOverride = null; Directory.Delete(root, true); }
             Console.WriteLine("RESULT " + passed + " passed, " + failed + " failed"); return failed == 0 ? 0 : 1;
         }
     }

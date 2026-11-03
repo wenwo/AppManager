@@ -34,6 +34,8 @@ namespace AppManager
                 Run("restore targets: missing desktop path / traversal / ADS / relative", Targets);
                 Run("unsafe restore keeps source and creates no destination", RejectRestore);
                 Run("copy restore checks the original and suppresses auto stash", RestoreCopySafety);
+                Run("auto stash quiet period starts when the whole restore batch ends", RestoreSuppressionStartsAtEnd);
+                Run("collection thumbnails do not stay loading when the completion post is lost", CollectionThumbsLostPost);
                 Run("desktop copy mode keeps same-name files and rolls back failed save", DesktopCopySafety);
                 Run("copy: complete tree and file contents", CopyComplete);
                 Run("copy limits: entries / bytes / timeout / depth", CopyLimits);
@@ -51,6 +53,8 @@ namespace AppManager
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
                 Run("category icon-only edit keeps item order; rename migrates it", CategoryIconOnlyEdit);
                 Run("deleting a resource category removes covers, view mode and the add button", CategoryDeleteCleansState);
+                Run("main form disposed without Close leaves no message filter behind", DisposedFormMessageFilter);
+                Run("storage dialog writes back only the edited fields", StoreDialogSavesOnlyEdits);
                 Run("custom category add/remove uses the same memberships and keeps an existing icon", CustomCategoryAddRemove);
                 Run("classification keeps uninstaller apps and prefers specific keywords", ClassificationRules);
                 Run("move to category removes only the source membership and keeps collections", MoveKeepsOtherMemberships);
@@ -74,6 +78,7 @@ namespace AppManager
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
                 Run("grid measures only visible rows; column width grows while scrolling to wider rows", GridVisibleMeasurement);
                 Run("stash scan reads root shortcuts and legacy records only, never stashed folder trees", StashScanTopLevel);
+                Run("background scan uses the UI snapshot and leaves UI-owned settings to the UI thread", ScanUsesUiSnapshot);
                 Run("apps folder known-folder ids resolve to real paths; app ids stay unchanged", KnownFolderIds);
                 Run("grid caches category text and falls back when the provider fails", GridCategoryTextCache);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
@@ -844,6 +849,55 @@ namespace AppManager
             Check(loaded.CategoryViewMode.TryGetValue("回归排序新", out savedViewMode) && !savedViewMode, "renamed view mode was not persisted");
         }
 
+        [DllImport("user32.dll")]
+        private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private static void StoreDialogSavesOnlyEdits()
+        {
+            MethodInfo apply = typeof(MainForm).GetMethod("ApplyStoreEdits", BindingFlags.Static | BindingFlags.NonPublic);
+            AppConfig cfg = new AppConfig { FolderStorePath = "", FileStorePath = "D:\\Custom\\Files\\", ResourceStorePath = "" };
+            // 打开后什么都不改：不能把默认路径写进配置，也不能重写已有值的格式
+            object[] args = { cfg, "", "D:\\Custom\\Files", "", null };
+            Check(!(bool)apply.Invoke(null, args) && args[4] == null, "untouched dialog reported a change");
+            Check(cfg.FolderStorePath == "" && cfg.FileStorePath == "D:\\Custom\\Files\\" && cfg.ResourceStorePath == "", "untouched dialog rewrote storage paths");
+            // 只改一个字段
+            args = new object[] { cfg, "  ", "D:\\Custom\\Files", "E:\\Res\\", null };
+            Check((bool)apply.Invoke(null, args) && cfg.ResourceStorePath == "E:\\Res", "edited field was not saved");
+            Check(cfg.FolderStorePath == "" && cfg.FileStorePath == "D:\\Custom\\Files\\", "untouched fields changed");
+            // 相对路径被拒绝，配置不变
+            args = new object[] { cfg, "relative\\dir", "D:\\Custom\\Files", "E:\\Res", null };
+            Check(!(bool)apply.Invoke(null, args) && args[4] != null && cfg.FolderStorePath == "", "relative path was accepted");
+            // 清空字段 = 恢复默认
+            args = new object[] { cfg, "", "", "", null };
+            Check((bool)apply.Invoke(null, args) && cfg.FileStorePath == "" && cfg.ResourceStorePath == "", "clearing a field did not restore the default");
+        }
+
+        private static void DisposedFormMessageFilter()
+        {
+            // 显示后不经 Close 直接释放：OnFormClosed 不会执行，过滤器必须在释放时注销，
+            // 否则之后任何消息循环都会访问已释放窗体的 Handle 并抛 ObjectDisposedException。
+            using (MainForm form = new MainForm(new AppConfig()))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Size = new Size(900, 600);
+                form.Show();
+                Application.DoEvents();
+            }
+            // 泄漏只在过滤器处理鼠标移动等消息时暴露：主动投递一条 WM_MOUSEMOVE，不依赖测试期间真实鼠标是否在动
+            using (Form probe = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual,
+                Location = new Point(-3000, -3000), Size = new Size(200, 120) })
+            {
+                probe.Show();
+                PostMessage(probe.Handle, 0x0200, IntPtr.Zero, IntPtr.Zero);
+                Application.DoEvents();
+                probe.Hide();
+            }
+            ClickConfirmation(delegate { ConfirmDialog.Show("回归", "释放后的消息循环"); }, true);
+        }
+
         private static void CategoryDeleteCleansState()
         {
             AppConfig config = new AppConfig();
@@ -1076,6 +1130,62 @@ namespace AppManager
             path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), name);
             Check(DesktopOrganizer.IsSafeRestoreTarget(path), "no safe desktop fixture path");
             return path;
+        }
+
+        // 集合信息页：控件没有句柄时，加载结束通知回不到界面线程；不能因此一直“加载中”并挡住之后的加载。
+        private static void CollectionThumbsLostPost()
+        {
+            string image = Path.Combine(root, "thumb-" + Guid.NewGuid().ToString("N") + ".png");
+            using (System.Drawing.Bitmap bitmap = new System.Drawing.Bitmap(32, 24)) bitmap.Save(image, System.Drawing.Imaging.ImageFormat.Png);
+            using (Controls.CollectionInfoPanel panel = new Controls.CollectionInfoPanel())
+            {
+                Check(!panel.IsHandleCreated, "fixture: panel already has a handle");
+                panel.SetInfo("照片", "旅行", "", 1, "", .5F, .5F, null, new List<string> { image });
+                Type type = typeof(Controls.CollectionInfoPanel);
+                PropertyInfo loading = type.GetProperty("ThumbsLoading", Private);
+                FieldInfo generation = type.GetField("thumbGen", Private);
+                type.GetMethod("StartThumbLoad", Private).Invoke(panel, null);
+                int first = (int)generation.GetValue(panel);
+                Stopwatch wait = Stopwatch.StartNew();
+                while ((bool)loading.GetValue(panel, null) && wait.ElapsedMilliseconds < 5000) Thread.Sleep(10);
+                Check(!(bool)loading.GetValue(panel, null), "thumbnails stayed loading after every worker finished");
+                type.GetMethod("StartThumbLoad", Private).Invoke(panel, null);
+                Check((int)generation.GetValue(panel) == first + 1, "a lost completion post blocked the next thumbnail load");
+            }
+        }
+
+        // 还原期间登记的自动收纳抑制项先挂起，最外层还原结束才开始计时（“还原全部”超过抑制时长也不会过期）。
+        private static void RestoreSuppressionStartsAtEnd()
+        {
+            Type type = typeof(DesktopOrganizer);
+            BindingFlags hidden = BindingFlags.Static | BindingFlags.NonPublic;
+            FieldInfo depth = type.GetField("restoreDepth", hidden);
+            Dictionary<string, DateTime> map = (Dictionary<string, DateTime>)type.GetField("AutoStashIgnore", hidden).GetValue(null);
+            MethodInfo suppress = type.GetMethod("SuppressAutoStash", hidden), end = type.GetMethod("EndRestore", hidden);
+            MethodInfo suppressed = type.GetMethod("IsAutoStashSuppressed", hidden);
+            string early = Path.Combine(root, "early-restore.lnk"), late = Path.Combine(root, "late-restore.lnk");
+            try
+            {
+                lock (DesktopOrganizer.OperationSync)
+                {
+                    depth.SetValue(null, 2);   // 外层 RestoreAll + 第一项 RestoreOne
+                    suppress.Invoke(null, new object[] { new string[] { early } });
+                    end.Invoke(null, null);
+                    lock (map) Check(map[early] == DateTime.MaxValue, "early restore started its quiet period mid-batch");
+                    depth.SetValue(null, 2);   // 后面的某一项
+                    suppress.Invoke(null, new object[] { new string[] { late } });
+                    end.Invoke(null, null);
+                    DateTime finished = DateTime.UtcNow;
+                    end.Invoke(null, null);    // 整批结束
+                    Check((int)depth.GetValue(null) == 0, "restore depth leaked");
+                    lock (map) Check(map[early] == map[late] && map[early] != DateTime.MaxValue && map[early] >= finished + DesktopOrganizer.AutoStashQuiet,
+                        "quiet period did not start at the end of the batch");
+                    Check((bool)suppressed.Invoke(null, new object[] { early }), "early restore was not suppressed after the batch");
+                }
+                suppress.Invoke(null, new object[] { new string[] { late } });   // 不在还原操作中：立即计时
+                lock (map) Check(map[late] != DateTime.MaxValue && map[late] <= DateTime.UtcNow + DesktopOrganizer.AutoStashQuiet, "standalone suppression never expires");
+            }
+            finally { depth.SetValue(null, 0); lock (map) { map.Remove(early); map.Remove(late); } }
         }
 
         private static void RestoreCopySafety()
@@ -1488,6 +1598,25 @@ namespace AppManager
             PressModalKey(Keys.Enter, delegate { enterResult = ConfirmDialog.Show("回归", "按 Enter"); });
             Check(!escapeResult, "escape did not cancel the confirmation dialog");
             Check(enterResult, "enter did not accept the confirmation dialog");
+            // 文本保存失败时的对话框：右侧按钮写明“放弃修改”，Esc 与点它等价。
+            bool retryResult = true; string[] labels = null;
+            using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                probe.Tick += delegate
+                {
+                    Form dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(open => open.Modal);
+                    if (dialog == null) return;
+                    probe.Stop();
+                    dialog.Opacity = 0;
+                    labels = dialog.Controls.OfType<Controls.RoundButton>().Select(b => b.Text).ToArray();
+                    typeof(Control).GetMethod("OnKeyDown", Private).Invoke(dialog, new object[] { new KeyEventArgs(Keys.Escape) });
+                };
+                probe.Start();
+                retryResult = ConfirmDialog.Show("修改没有保存", "回归", "重试", "放弃修改");
+            }
+            Check(labels != null && labels[0] == "重试" && labels[1] == "放弃修改", "custom confirmation labels not shown: "
+                + (labels == null ? "(none)" : string.Join("|", labels)));
+            Check(!retryResult, "escape on the save-failure dialog did not choose discard");
 
             bool clicked = false;
             using (Controls.RoundButton button = new Controls.RoundButton { Text = "确定" })
@@ -1668,6 +1797,27 @@ namespace AppManager
             Check(Scanner.ResolveKnownFolderPath("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App") == "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "app id changed");
             string bad = "{ZZZZZZZZ-1D43-42F2-9305-67DE0B28FC23}\\x.exe";
             Check(Scanner.ResolveKnownFolderPath(bad) == bad && Scanner.ResolveKnownFolderPath(null) == null, "invalid id handling");
+        }
+
+        // 后台扫描只用界面线程拷贝的收录快照；收藏/隐藏/分类覆盖不在后台读，回到界面线程再 ApplyConfig。
+        private static void ScanUsesUiSnapshot()
+        {
+            string live = Path.Combine(root, "scan-live.txt"), snap = Path.Combine(root, "scan-snapshot.txt");
+            File.WriteAllText(live, "live"); File.WriteAllText(snap, "snapshot");
+            AppConfig config = new AppConfig();
+            config.AddedItems.Add(new AddedEntry { Path = live, Category = "工具" });
+            config.Favorites.Add("add:" + snap); config.CategoryOverride["add:" + snap] = "办公软件";
+            Scanner scanner = new Scanner(config);
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            typeof(Scanner).GetField("addedSnapshot", Private).SetValue(scanner, new List<AddedEntry> { new AddedEntry { Path = snap, Category = "工具" } });
+            Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            typeof(Scanner).GetMethod("ScanAdded", Private).Invoke(scanner, new object[] { dict });
+            Check(dict.Count == 1 && string.Equals(dict.Values.First().TargetPath, snap, StringComparison.OrdinalIgnoreCase),
+                "background scan enumerated the live added list instead of the UI snapshot");
+            AppInfo found = dict.Values.First();
+            Check(!found.IsFavorite && found.Category != "办公软件", "scan applied UI-owned settings on the worker");
+            scanner.ApplyConfig(new List<AppInfo> { found });
+            Check(found.IsFavorite && found.Category == "办公软件", "settings not applied on the UI thread");
         }
 
         private static void StashScanTopLevel()

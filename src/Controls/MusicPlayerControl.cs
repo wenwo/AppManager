@@ -302,11 +302,8 @@ namespace AppManager.Controls
                 engine.SetPause(false);
                 return;
             }
-            if (mode == PlayMode.Shuffle || index + 1 < paths.Count || mode == PlayMode.RepeatAll)
-            {
-                PlayNext(true);
-                return;
-            }
+            // 没切到下一首（例如列表只剩当前一首）时必须落到“已播完”状态，不能停在“播放中”
+            if (PlayNext(true)) return;
             playing = false;
             position = duration;
             pollTimer.Stop();
@@ -332,20 +329,26 @@ namespace AppManager.Controls
             Invalidate();
         }
 
-        private void PlayNext(bool automatic)
+        /// <summary>切到下一首并开始加载；顺序播放到列表末尾自动结束时返回 false（不加载）。</summary>
+        private bool PlayNext(bool automatic)
         {
-            if (paths.Count == 0) return;
-            if (mode == PlayMode.Shuffle && paths.Count > 1)
+            if (paths.Count == 0) return false;
+            if (mode == PlayMode.Shuffle)
             {
-                int next = index;
-                while (next == index) next = random.Next(paths.Count);
-                index = next;
+                // 随机播放是连续播放：多首时随机换一首（不重复当前），只有一首时重播这一首。
+                if (paths.Count > 1)
+                {
+                    int next = index;
+                    while (next == index) next = random.Next(paths.Count);
+                    index = next;
+                }
             }
             else if (index + 1 < paths.Count) index++;
             else if (mode == PlayMode.RepeatAll || !automatic) index = 0;
-            else return;
+            else return false;
             EnsureQueueCurrentVisible();
             LoadCurrent();
+            return true;
         }
 
         private void PlayPrevious()
@@ -918,8 +921,11 @@ namespace AppManager.Controls
             playing = false;
             if (engine != null)
             {
-                try { engine.Dispose(); } catch { }
+                // 先静音式暂停（同步、很快），再交给后台销毁：避免与紧接着创建的新内核声音重叠，也不卡界面线程。
+                MpvAudioEngine old = engine;
                 engine = null;
+                try { old.SetPause(true); } catch { }
+                MpvShutdown.Destroy(old, null);
             }
             ClearTrack();
         }
@@ -951,6 +957,7 @@ namespace AppManager.Controls
             {
                 pollTimer.Dispose();
                 StopPlayback();
+                MpvShutdown.WaitAll(3000);   // 退出时让音频设备干净关闭，但不无限等待
             }
             base.Dispose(disposing);
         }

@@ -43,7 +43,10 @@ namespace AppManager
             Run("XML import replaces intended state and preserves prior audit chain", Import);
             Run("path move preserves stable identity, favorites, hidden, ordering and collection", Move);
             Run("move guards: shortcut targets stay, reused path key saves, folder contents are found", MoveGuards);
+            Run("import preparation runs in the queue: folder guard reads the database, empty batch calls back", QueuedPreparation);
+            Run("add-software picker lists only registrable executables", SoftwarePicker);
             Run("cut and move-out: vanished sources purge entries, unavailable folders do not, in-app paste moves", MoveOut);
+            Run("in-app move into a folder drops the old path's move-out watch and cut state", MoveIntoFolderForgetsWatch);
             Run("resource types: drag, batch add, move menu, cut paste, hover and picker share one rule", ResourceTypes);
             Run("backup, restore, undo and redo match complete state fingerprints", Restore);
             Run("four writers and scanner publishing: no lost commits or orphan relationships", ConcurrentWriters);
@@ -339,6 +342,56 @@ namespace AppManager
             read.AddedItems.Add(new AddedEntry { Path = Path.Combine(box, "new.txt"), Category = "资料", IsResource = true });
             Check(read.AddedItems.EntriesUnder(box + "\\").Count == 1, "unsaved addition inside the folder ignored");
         }
+        // “添加软件”候选只列可登记的 .exe：已登记（含大小写变体）、UWP、网址、文件夹/文档快捷方式和重复目标都不列。
+        private static void SoftwarePicker()
+        {
+            AppConfig c = Fixture();
+            string tool = Source("apps\\tool.exe", "exe"), known = Source("apps\\known.exe", "exe"), folder = Path.Combine(scope, "source", "apps");
+            c.AddedItems.Add(new AddedEntry { Path = known, Category = "软件测试" }); Save(c);
+            using (MainForm form = Form(c, false))
+            {
+                List<AppInfo> apps = new List<AppInfo>
+                {
+                    new AppInfo { Name = "B tool", TargetPath = tool },
+                    new AppInfo { Name = "A tool again", TargetPath = tool.ToUpperInvariant() },
+                    new AppInfo { Name = "known", TargetPath = known.ToUpperInvariant() },
+                    new AppInfo { Name = "folder link", TargetPath = folder, ShortcutPath = Path.Combine(scope, "folder.lnk") },
+                    new AppInfo { Name = "document link", TargetPath = Source("apps\\readme.txt", "doc") },
+                    new AppInfo { Name = "store app", TargetPath = "shell:AppsFolder\\Microsoft.App!App" },
+                    new AppInfo { Name = "web", TargetPath = "https://example.com/setup.exe" },
+                    new AppInfo { Name = "empty", ShortcutPath = Path.Combine(scope, "empty.lnk") },
+                    null,
+                };
+                List<AppInfo> picked = (List<AppInfo>)Invoke(form, "PickableSoftware", apps);
+                Check(picked.Count == 1 && string.Equals(picked[0].TargetPath, tool, StringComparison.OrdinalIgnoreCase),
+                    "picker listed non-software or registered items: " + string.Join("|", picked.Select(a => a.Name).ToArray()));
+            }
+        }
+        // 导入预处理在导入队列（后台）里读库完成：入队调用立即返回，文件夹内有收录项时拒绝移动，空批次也异步回调。
+        private static void QueuedPreparation()
+        {
+            AppConfig c = Fixture();
+            string guarded = Path.Combine(scope, "guarded"), kept = Path.Combine(guarded, "kept.txt");
+            Directory.CreateDirectory(guarded); File.WriteAllText(kept, "kept");
+            c.AddedItems.Add(new AddedEntry { Path = kept, Category = "资料", IsResource = true }); Save(c);
+            using (MainForm form = Form(c, true))
+            {
+                ImportBatch refused = null, empty = null;
+                Invoke(form, "QueueImport", new string[] { guarded.ToLowerInvariant() }, ImportOperation.Move, "资料", null, true, (uint)0,
+                    new Action<ImportBatch>(delegate(ImportBatch b) { refused = b; }));
+                Invoke(form, "QueueImport", new string[0], ImportOperation.Move, "资料", null, true, (uint)0,
+                    new Action<ImportBatch>(delegate(ImportBatch b) { empty = b; }));
+                Check(refused == null && empty == null, "preparation ran synchronously on the UI thread");
+                PumpUntil(() => refused != null && empty != null && !(bool)typeof(MainForm).GetField("importRunning", Private).GetValue(form));
+                Check(refused.Items.Count == 1 && refused.Items[0].State == FileImport.Failed && refused.Items[0].Error.Contains("已收录"),
+                    "folder with registered contents was not refused: " + refused.Items[0].State + " " + refused.Items[0].Error);
+                Check(empty.Items.Count == 0, "empty batch callback carried items");
+            }
+            Check(File.ReadAllText(kept) == "kept" && Directory.Exists(guarded), "refused folder move touched the source");
+            AppConfig read = Reload();
+            Check(read.AddedItems.ByPath(kept).Count == 1 && read.AddedItems.Count == c.AddedItems.Count, "refused move changed registrations");
+            Integrity(read.Database);
+        }
         private static void MoveOut()
         {
             AppConfig c = Fixture();
@@ -392,6 +445,38 @@ namespace AppManager
             string category; Check(read.CategoryOverride.TryGetValue(pasteKey, out category) && category == "另一分类" && File.Exists(paste), "in-app paste did not move the category");
             Check(read.Database.Page("资料", true, true, "", 10, null, true, false).Total == 1, "moved item still listed in the original category");
             Check(read.Database.Page("另一分类", true, true, "", 10, null, true, false).Total == 1, "moved item missing from the target category");
+            Integrity(read.Database);
+        }
+        // 应用内拖入文件夹：旧路径的移出检测与同一项的剪切状态随之撤掉
+        private static void MoveIntoFolderForgetsWatch()
+        {
+            AppConfig c = Fixture();
+            using (MainForm form = Form(c, true))
+            {
+                Type stateType = typeof(MainForm).GetNestedType("CutState", BindingFlags.NonPublic);
+                string library = Path.Combine(scope, "resources"), into = Path.Combine(library, "into");
+                Directory.CreateDirectory(into);
+                string drag = Path.Combine(library, "drag.txt"), dragKey = "add:" + drag;
+                File.WriteAllText(drag, "drag");
+                c.AddedItems.Add(new AddedEntry { Path = drag, Category = "资料", IsResource = true }); Save(c);
+                AppInfo d = new AppInfo { Key = dragKey, TargetPath = drag, Name = "drag", IsFile = true, Category = "资料" };
+                Invoke(form, "WatchMoveOut", new List<AppInfo> { d }, DateTime.MaxValue);
+                object dragCut = Activator.CreateInstance(stateType);
+                stateType.GetField("Apps").SetValue(dragCut, new List<AppInfo> { d });
+                stateType.GetField("Resource").SetValue(dragCut, true);
+                Set(form, "cutState", dragCut);
+                Invoke(form, "OnGridMoveIntoFolder", d, new AppInfo { TargetPath = into, IsFolder = true, IsFile = true });
+                PumpUntil(() => !(bool)typeof(MainForm).GetField("moveIntoFolderRunning", Private).GetValue(form));
+                Check(File.Exists(Path.Combine(into, "drag.txt")) && !File.Exists(drag), "fixture: drag into folder did not move the file");
+                Check(typeof(MainForm).GetField("cutState", Private).GetValue(form) == null, "cut state survived an in-app move into a folder");
+                System.Collections.IList watches = (System.Collections.IList)typeof(MainForm).GetField("moveOutWatches", Private).GetValue(form);
+                Check(!watches.Cast<object>().Any(w => string.Equals((string)w.GetType().GetField("Path").GetValue(w), drag, StringComparison.OrdinalIgnoreCase)),
+                    "move-out watch survived an in-app move into a folder");
+                Check(c.AddedItems.ByPath(Path.Combine(into, "drag.txt")).Count == 1, "moved entry lost its registration");
+            }
+            AppConfig read = Reload();
+            Check(read.AddedItems.ByPath(Path.Combine(scope, "resources", "into", "drag.txt")).Count == 1
+                && read.AddedItems.ByPath(Path.Combine(scope, "resources", "drag.txt")).Count == 0, "move into folder was not persisted");
             Integrity(read.Database);
         }
         private static void ResourceTypes()

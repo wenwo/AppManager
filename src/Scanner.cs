@@ -80,10 +80,21 @@ namespace AppManager
         // 按名称去重的索引（NormalizeEntryName → 条目）：MergeByName 由 O(n²) 遍历改为 O(1) 查找
         private Dictionary<string, AppInfo> nameIndex;
         private Sqlite registeredItems;
+        private List<AddedEntry> addedSnapshot;   // 本次扫描使用的收录快照（界面线程拷贝）
 
-        /// <summary>执行全量扫描，返回去重后的应用列表。</summary>
+        /// <summary>执行全量扫描，返回去重后的应用列表（在调用线程套用收藏/隐藏/分类覆盖）。</summary>
         public List<AppInfo> ScanAll()
         {
+            return ScanAll(true, null);
+        }
+
+        /// <summary>
+        /// 后台扫描用：applyConfig=false 时不读收藏、隐藏、分类覆盖等界面线程会改写的集合，由调用方回到界面线程后再 ApplyConfig；
+        /// added 为界面线程预先拷贝的收录快照（仅无数据库会话使用，为空时读 config.AddedItems）。
+        /// </summary>
+        internal List<AppInfo> ScanAll(bool applyConfig, List<AddedEntry> added)
+        {
+            addedSnapshot = added;
             registeredItems = config.Database == null ? null : new Sqlite(config.Database.FilePath, true);
             try
             {
@@ -99,10 +110,14 @@ namespace AppManager
 
             List<AppInfo> list = new List<AppInfo>(dict.Values);
             if (config.Database != null) config.Database.PublishCatalog(config, list);
-            ApplyConfig(list);
+            if (applyConfig) ApplyConfig(list);
             return list;
             }
-            finally { if (registeredItems != null) { registeredItems.Dispose(); registeredItems = null; } }
+            finally
+            {
+                addedSnapshot = null;
+                if (registeredItems != null) { registeredItems.Dispose(); registeredItems = null; }
+            }
         }
 
         /// <summary>
@@ -207,7 +222,7 @@ namespace AppManager
         private void ScanAdded(Dictionary<string, AppInfo> dict)
         {
             if (config.Database != null) return;
-            foreach (AddedEntry e in config.Database == null ? config.AddedItems : config.AddedItems.SoftwareEntries())
+            foreach (AddedEntry e in addedSnapshot ?? (IEnumerable<AddedEntry>)config.AddedItems)
             {
                 // 资源记录已建立数据库目录；扫描系统应用时不再展开十万级资源列表。
                 if (config.Database != null && e.IsResource) continue;

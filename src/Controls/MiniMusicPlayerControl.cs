@@ -80,8 +80,11 @@ namespace AppManager.Controls
             Capture = seeking = volumeDrag = false;
             if (engine != null)
             {
-                try { engine.Dispose(); } catch { }
+                // 先暂停（同步、很快）再交给后台销毁，界面线程不等 mpv 收尾。
+                MiniMpvEngine old = engine;
                 engine = null;
+                try { old.SetPause(true); } catch { }
+                MpvShutdown.Destroy(old, null);
             }
             Invalidate();
         }
@@ -466,7 +469,7 @@ namespace AppManager.Controls
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) { pollTimer.Dispose(); Stop(); }
+            if (disposing) { pollTimer.Dispose(); Stop(); MpvShutdown.WaitAll(3000); }
             base.Dispose(disposing);
         }
 

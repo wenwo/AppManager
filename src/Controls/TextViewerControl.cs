@@ -468,10 +468,10 @@ namespace AppManager.Controls
             if (MessageBox.Show(this, "是否保存对“" + Path.GetFileName(paths[index]) + "”的修改？", "文本",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
+                // 这里无法取消离开，“取消”实为丢弃修改：按钮直接写明“放弃修改”，避免误点。
                 while (!Save())
                 {
-                    if (MessageBox.Show(this, "修改没有保存。点“重试”再次保存，点“取消”放弃这些修改。", "文本",
-                            MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning) != DialogResult.Retry)
+                    if (!ConfirmDialog.Show("修改没有保存", "点“重试”再次保存；点“放弃修改”将丢弃这些修改。", "重试", "放弃修改"))
                         break;
                 }
             }

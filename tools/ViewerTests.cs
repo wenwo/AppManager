@@ -58,6 +58,8 @@ namespace AppManager
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
                 Run("music players advance to the next track when a song ends", MusicAutoAdvance);
                 Run("music stops on a missing track and the hidden mini player pauses", MusicSilencedWhenUnreachable);
+                Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
+                Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
@@ -251,6 +253,87 @@ namespace AppManager
                 mini.Stop();
                 host.Hide();
             }
+        }
+
+        // 随机播放只有一首时重播这一首；顺序播放到末尾停下且状态落到“未在播放”，不会卡在播放中。
+        private static void MusicSingleTrackModes()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string song = WriteSilence("single-track.wav", 0.4);
+            FieldInfo modeField = typeof(MusicPlayerControl).GetField("mode", BindingFlags.Instance | BindingFlags.NonPublic);
+            FieldInfo playingField = typeof(MusicPlayerControl).GetField("playing", BindingFlags.Instance | BindingFlags.NonPublic);
+            foreach (string mode in new[] { "Shuffle", "Sequential" })
+            {
+                using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+                using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+                {
+                    host.Controls.Add(player);
+                    host.Show();
+                    int starts = 0;
+                    player.PlaybackStarting += delegate { starts++; };
+                    modeField.SetValue(player, Enum.Parse(modeField.FieldType, mode));
+                    player.Open(new List<string> { song }, 0);
+                    if (mode == "Shuffle")
+                        Check(PumpUntil(delegate { return starts >= 2; }, 10000), "shuffle with a single track did not replay it (starts: " + starts + ")");
+                    else
+                    {
+                        Check(PumpUntil(delegate { return starts >= 1 && !(bool)playingField.GetValue(player); }, 10000),
+                            "sequential single track stayed in the playing state after it ended");
+                        Check(starts == 1, "sequential single track restarted");
+                    }
+                    host.Hide();
+                }
+            }
+        }
+
+        // 视频输出只用有效的 vo 列表；有视频轨却没有画面时能识别出来，纯音频文件不误报。
+        private static void VideoOutputCheck()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string image = Path.Combine(root, "video-frame.png");
+            using (Bitmap frame = new Bitmap(64, 48))
+            {
+                using (Graphics g = Graphics.FromImage(frame)) g.Clear(Color.SteelBlue);
+                frame.Save(image, ImageFormat.Png);
+            }
+            string song = WriteSilence("video-audio-only.wav", 1);
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (VideoPlayerControl video = new VideoPlayerControl { Dock = DockStyle.Fill })
+            {
+                host.Controls.Add(video);
+                host.Show();
+                video.Open(new List<string> { image }, 0);
+                FieldInfo field = typeof(VideoPlayerControl).GetField("mpv", BindingFlags.Instance | BindingFlags.NonPublic);
+                object engine = field.GetValue(video);
+                Check(engine != null, "video engine failed to initialize with the configured video outputs");
+                Func<bool> missing = delegate { return (bool)engine.GetType().GetMethod("VideoOutputMissing").Invoke(engine, null); };
+                Func<string, bool> flag = delegate(string name)
+                {
+                    object[] args = { name, false };
+                    return (bool)engine.GetType().GetMethod("TryGetFlag").Invoke(engine, args) && (bool)args[1];
+                };
+                Check(PumpUntil(delegate { return flag("vo-configured"); }, 10000), "video output never came up for a still image");
+                Check(!missing(), "configured video output reported as missing");
+                // 模拟“有视频轨、视频输出没起来”：取消视频轨后 VO 被撤掉，track-list 里仍有视频轨。
+                engine.GetType().GetMethod("SetString", BindingFlags.Instance | BindingFlags.NonPublic).Invoke(engine, new object[] { "vid", "no" });
+                Check(PumpUntil(delegate { return !flag("vo-configured"); }, 5000), "fixture: video output stayed configured");
+                Check(missing(), "video track without an output was not detected");
+                video.Open(new List<string> { song }, 0);
+                FieldInfo loaded = typeof(VideoPlayerControl).GetField("fileLoaded", BindingFlags.Instance | BindingFlags.NonPublic);
+                Check(PumpUntil(delegate { return (bool)loaded.GetValue(video); }, 10000), "audio-only file never loaded");
+                Check(!missing(), "audio-only file reported as missing video output");
+                // 关闭播放器：内核转到后台销毁，旧渲染宿主等销毁完成后才在界面线程释放
+                video.Visible = false;
+                Check(field.GetValue(video) == null, "engine still referenced after the player closed");
+                Check(PumpUntil(delegate { return MpvShutdown.Pending == 0; }, 5000), "background destroy never finished");
+                Check(PumpUntil(delegate { return video.Controls.Count == 0; }, 2000), "old video host was not released after destroy");
+                host.Hide();
+            }
+            Check(MpvShutdown.WaitAll(1000), "player disposal left an engine behind");
         }
 
         private static bool EngineFlag(object control, string property)

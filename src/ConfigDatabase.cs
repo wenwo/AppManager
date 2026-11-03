@@ -71,6 +71,87 @@ namespace AppManager
             db.Execute("CREATE INDEX IF NOT EXISTS ix_entries_key_nocase ON entries(key COLLATE NOCASE)");
         }
 
+        /// <summary>
+        /// 一次性合并历史遗留的大小写重复条目：修复前同一路径的大小写变体会各自生成 entries 行，
+        /// 收藏、归属、排序分散在两个 ID 上，列表里出现两条。保留收录记录最多（其次最早）的条目，
+        /// 其余条目的记录与收录项改指向保留条目；保留条目已有同类记录/归属时删除重复那条（主分类覆盖每条目只留一条）。
+        /// 被合并条目的键改为退役键（ID 不回收），之后的 NOCASE 查找只会命中保留条目。
+        /// 一个审计事务完成，失败整体回滚、下次加载重试；完成后记标记，之后不再全表扫描
+        /// （恢复旧快照时标记随快照回到未合并，会自动重新执行）。返回合并掉的条目数。
+        /// </summary>
+        internal int MergeCaseDuplicateEntries()
+        {
+            lock (gate)
+            using (Sqlite db = Open())
+            {
+                if (db.Scalar("SELECT value FROM metadata WHERE key='entries_case_merged'") == "1") return 0;
+                List<string[]> heads = db.Query("SELECT min(id) FROM entries WHERE key LIKE 'add:%' GROUP BY key COLLATE NOCASE HAVING count(*) > 1");
+                if (heads.Count == 0)
+                {
+                    db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('entries_case_merged','1')");
+                    return 0;
+                }
+                db.Execute("BEGIN IMMEDIATE");
+                try
+                {
+                    long operation = NewOperation(db, "migration.entries.case");
+                    db.Execute("UPDATE write_context SET operation_id=? WHERE id=1", operation);
+                    HashSet<long> affected = new HashSet<long>();
+                    int merged = 0;
+                    foreach (string[] head in heads)
+                    {
+                        List<string[]> ids = db.Query("SELECT e.id FROM entries e WHERE e.key=(SELECT key FROM entries WHERE id=?) COLLATE NOCASE " +
+                            "ORDER BY (SELECT count(*) FROM added_items a WHERE a.item_id=e.id) DESC, e.id", Number(head[0]));
+                        long keep = Number(ids[0][0]);
+                        for (int i = 1; i < ids.Count; i++)
+                        {
+                            long dup = Number(ids[i][0]);
+                            foreach (string[] r in db.Query("SELECT id,section,group_id,slot FROM records WHERE item_id=?", dup))
+                            {
+                                string key = r[1] + ":" + keep + ":" + Number(r[2]) + ":" + (r[3] ?? string.Empty);
+                                bool clash = db.Scalar("SELECT 1 FROM records WHERE record_key=?", key) != null
+                                    || (r[1] == "CategoryOverrides" && db.Scalar("SELECT 1 FROM records WHERE section='CategoryOverrides' AND item_id=?", keep) != null);
+                                if (clash) db.Execute("DELETE FROM records WHERE id=?", Number(r[0]));
+                                else db.Execute("UPDATE records SET item_id=?,record_key=? WHERE id=?", keep, key, Number(r[0]));
+                            }
+                            foreach (string[] a in db.Query("SELECT id,group_id FROM added_items WHERE item_id=?", dup))
+                            {
+                                if (db.Scalar("SELECT 1 FROM added_items WHERE item_id=? AND group_id IS ?", keep, Foreign(Number(a[1]))) != null)
+                                    db.Execute("DELETE FROM added_items WHERE id=?", Number(a[0]));
+                                else db.Execute("UPDATE added_items SET item_id=? WHERE id=?", keep, Number(a[0]));
+                            }
+                            db.Execute("DELETE FROM listing WHERE item_id=?", dup);
+                            db.Execute("DELETE FROM catalog WHERE item_id=?", dup);
+                            db.Execute("UPDATE entries SET key=? WHERE id=?", "__merged__:" + dup.ToString(CultureInfo.InvariantCulture)
+                                + ":" + keep.ToString(CultureInfo.InvariantCulture), dup);
+                            merged++;
+                        }
+                        affected.Add(keep);
+                    }
+                    UpdateAddedCatalog(db, affected);
+                    RebuildListings(db, null, affected);
+                    db.Execute("UPDATE write_context SET operation_id=NULL WHERE id=1");
+                    if (db.Scalar("SELECT count(*) FROM changes WHERE operation_id=?", operation) == "0") db.Execute("DELETE FROM operations WHERE id=?", operation);
+                    else
+                    {
+                        db.Execute("UPDATE operations SET summary=? WHERE id=?", "merged case duplicates=" + merged, operation);
+                        revision++;
+                        db.Execute("UPDATE metadata SET value=? WHERE key='revision'", revision.ToString(CultureInfo.InvariantCulture));
+                    }
+                    db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('entries_case_merged','1')");
+                    db.Execute("COMMIT");
+                    LoadBaseline(db);
+                    return merged;
+                }
+                catch
+                {
+                    db.Rollback();
+                    LoadBaseline(db);
+                    throw;
+                }
+            }
+        }
+
         private Sqlite Open() { return new Sqlite(FilePath, false); }
         internal static string DatabasePath(string xmlPath) { return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(xmlPath)), "appmanager.db"); }
 
@@ -100,6 +181,9 @@ namespace AppManager
                         if (!store.Save(legacy, "migration.xml")) throw new IOException(legacy.DatabaseError);
                     }
                 }
+                // 历史大小写重复条目：合并失败只记日志、不影响加载，下次加载重试
+                try { store.MergeCaseDuplicateEntries(); }
+                catch (Exception mergeError) { Paths.LogError(new IOException("合并大小写重复条目失败，下次加载会重试。", mergeError)); }
                 AppConfig result = store.Read();
                 result.Database = store;
                 store.EnsureCatalog(result);
@@ -643,7 +727,10 @@ namespace AppManager
                 {
                     if (Number(db.Scalar("SELECT max(id) FROM operations WHERE action NOT IN('catalog.discover','catalog.rebuild')")) != operation) throw new IOException("只允许撤销最新业务事务；请先检查操作记录。");
                     string action = db.Scalar("SELECT action FROM operations WHERE id=?", operation);
-                    if (action == "migration.xml" || action == "restore.snapshot") throw new IOException("初始化或整库恢复请使用完整备份恢复，不能逐项撤销。");
+                    // 迁移类事务（XML 迁入、大小写条目合并、同名分类拆分）带有不受审计的完成标记或会在启动时重做，
+                    // 逐项撤销会让数据与标记不一致或来回反复，只能用完整备份恢复。
+                    if ((action != null && action.StartsWith("migration.", StringComparison.Ordinal)) || action == "restore.snapshot")
+                        throw new IOException("初始化、数据迁移或整库恢复请使用完整备份恢复，不能逐项撤销。");
                     if (!string.IsNullOrEmpty(action) && action.StartsWith("physical.", StringComparison.OrdinalIgnoreCase))
                         throw new IOException("该事务同时改动了磁盘文件，不能只撤销数据库记录；请使用布局备份恢复。");
                     long undo = NewOperation(db, "rollback", "", operation);

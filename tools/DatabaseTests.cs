@@ -51,11 +51,14 @@ namespace AppManager
                 Run("physical disk transactions cannot be undone piecemeal", PhysicalUndo);
                 Run("ambak import keeps local storage paths and drops forged desktop rows", AmbakSanitize);
                 Run("bulk path lookup matches case variants and staged rows", BulkLookup);
+                Run("folder range and registered path lookups read the database directly", FolderRangeLookup);
                 Run("case-insensitive entry lookup uses an index, also after online restore", NocaseIndex);
                 Run("batched save failures are deferred on the worker and reported once", BatchSaveFailure);
                 Run("recycle bin detection never treats network paths as recyclable", RecycleDetection);
                 Run("desktop operation detection follows the operation lock held by another thread", DesktopOperationDetection);
                 Run("moving within one mode keeps the item's categories in the other mode", CrossModeMove);
+                Run("legacy cross-mode same-name categories split once without touching the other mode", CrossModeSplit);
+                Run("legacy case-variant entries merge into one identity on load, once", CaseDuplicateMerge);
                 Run("terminated writer recovers without exposing uncommitted rows", CrashRecovery);
                 Run("metadata sorting covers whole category, both directions and keyset pages", MetadataSorting);
                 Run("offline recovery keeps damaged original and restores validated snapshot", OfflineRecovery);
@@ -255,18 +258,33 @@ namespace AppManager
             c.AddedItems.Add(new AddedEntry { Path = resource, Name = "resource", Category = "照片", IsResource = true });
             c.ItemCategories["add:" + resource] = new List<string> { "col:照片/旅行" };
             Check(c.Save(), c.DatabaseError);
+            string gone = Path.Combine(root, "music-files", "gone.mp3");
             using (MainForm form = new MainForm(c))
             {
+                IntPtr handle = form.Handle;   // 结果经 RunOnUi 回到界面线程，需要句柄
                 BindingFlags flags = BindingFlags.Instance | BindingFlags.NonPublic;
                 typeof(MainForm).GetField("allApps", flags).SetValue(form, new List<AppInfo> {
-                    new AppInfo { Key = "add:" + ordinary, TargetPath = ordinary, Name = "ordinary", IsFile = true }
+                    new AppInfo { Key = "add:" + ordinary, TargetPath = ordinary, Name = "ordinary", IsFile = true },
+                    new AppInfo { Key = "add:" + gone, TargetPath = gone, Name = "gone", IsFile = true }
                 });
-                MethodInfo read = typeof(MainForm).GetMethod("MiniMusicSongs", flags);
-                List<string> all = (List<string>)read.Invoke(form, new object[] { "" });
-                Check(all.Count == 2 && all.Contains(ordinary) && all.Contains(resource), "audio missing or repeated");
-                List<string> collection = (List<string>)read.Invoke(form, new object[] { "col:照片/旅行" });
+                // 曲库查询在后台执行：调用立即返回，结果在界面线程逐个送达
+                Dictionary<string, List<string>> results = new Dictionary<string, List<string>>();
+                int uiThread = System.Threading.Thread.CurrentThread.ManagedThreadId; bool onUi = true;
+                typeof(MainForm).GetMethod("QueryMiniMusicSongs", flags).Invoke(form, new object[] { new List<string> { "", "col:照片/旅行" },
+                    new Action<string, List<string>>(delegate(string key, List<string> songs)
+                    { results[key] = songs; onUi &= System.Threading.Thread.CurrentThread.ManagedThreadId == uiThread; }) });
+                Check(results.Count == 0, "song lists were queried synchronously on the UI thread");
+                Stopwatch wait = Stopwatch.StartNew();
+                while (results.Count < 2 && wait.ElapsedMilliseconds < 10000) { Application.DoEvents(); System.Threading.Thread.Sleep(10); }
+                Check(results.Count == 2 && onUi, "song lists were not delivered on the UI thread");
+                List<string> all = results[""];
+                Check(all.Count == 2 && all.Contains(ordinary) && all.Contains(resource), "audio missing, repeated or missing file kept");
+                List<string> collection = results["col:照片/旅行"];
                 Check(collection.Count == 1 && collection[0] == resource, "collection membership lost");
             }
+            // 纯函数部分：扫描条目与库内条目去重（大小写不同也算同一路径），不存在的文件剔除
+            List<string> merged = MainForm.CollectMiniMusicSongs(c.Database, "", false, new string[] { ordinary.ToUpperInvariant(), gone, null, "" });
+            Check(merged.Count == 2 && merged.Contains(resource) && merged.Contains(ordinary), "song merge kept duplicates or missing files");
         }
         private static void ExportFailure()
         {
@@ -427,6 +445,108 @@ namespace AppManager
             return c.Database.Page(category, resources, true, "", 200, null, true, false).Items.Any(a => a.Key == key);
         }
 
+        private static void CaseDuplicateMerge()
+        {
+            string path = Path.Combine(Folder("case-merge"), "config.xml");
+            const string key = "add:C:\\Case\\File.txt";
+            AppConfig seed = new AppConfig();
+            seed.CustomCategories.Add("工具");
+            seed.AddedItems.Add(new AddedEntry { Path = "C:\\Case\\File.txt", Name = "File", Category = "工具" });
+            seed.Favorites.Add(key);
+            seed.ItemOrder["工具"] = new List<string> { key };
+            Check(seed.SaveTo(path), "fixture export");
+            AppConfig c = ConfigDatabase.Load(path); Check(!c.LoadFailed, c.DatabaseError);
+            string file = c.Database.FilePath;
+            // 模拟修复前留下的数据：小写变体有自己的条目、收录记录（与保留条目重复的“工具”+ 新的资源“照片”）、收藏和排序
+            using (Sqlite s = new Sqlite(file, false))
+            {
+                s.Execute("BEGIN IMMEDIATE");
+                s.Execute("INSERT INTO operations(utc,action,actor,session,pid) VALUES('t','legacy','t','t',0)");
+                s.Execute("UPDATE write_context SET operation_id=? WHERE id=1", s.LastId);
+                s.Execute("INSERT INTO entries(key) VALUES(?)", "add:c:\\case\\file.txt");
+                long dup = Convert.ToInt64(s.Scalar("SELECT id FROM entries WHERE key=?", "add:c:\\case\\file.txt"));
+                s.Execute("INSERT OR IGNORE INTO groups(key,name) VALUES('照片','照片')");
+                long tools = Convert.ToInt64(s.Scalar("SELECT id FROM groups WHERE key='工具'"));
+                long photos = Convert.ToInt64(s.Scalar("SELECT id FROM groups WHERE key='照片'"));
+                const string insertAdded = "INSERT INTO added_items(item_id,group_id,path,path_key,name,folder,resource) VALUES(?,?,?,?,?,0,?)";
+                s.Execute(insertAdded, dup, tools, "c:\\case\\file.txt", "C:\\CASE\\FILE.TXT", "file", 0);
+                s.Execute(insertAdded, dup, photos, "c:\\case\\file.txt", "C:\\CASE\\FILE.TXT", "file", 1);
+                const string insertRecord = "INSERT INTO records(record_key,section,item_id,group_id,ordinal,slot,payload) VALUES(?,?,?,?,?,'','<Item />')";
+                s.Execute(insertRecord, "Favorites:" + dup + ":0:", "Favorites", dup, null, 0);
+                s.Execute(insertRecord, "ItemOrders:" + dup + ":" + tools + ":", "ItemOrders", dup, tools, 1);
+                s.Execute("UPDATE write_context SET operation_id=NULL WHERE id=1");
+                s.Execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
+                s.Execute("DELETE FROM metadata WHERE key='entries_case_merged'");
+                s.Execute("COMMIT");
+            }
+            AppConfig r = ConfigDatabase.Load(path); Check(!r.LoadFailed, r.DatabaseError);
+            using (Sqlite s = new Sqlite(file, true))
+            {
+                Check(s.Scalar("SELECT count(*) FROM entries WHERE key=? COLLATE NOCASE", key) == "1", "case variants were not merged");
+                Check(s.Scalar("SELECT count(*) FROM added_items WHERE path_key='C:\\CASE\\FILE.TXT'") == "2"
+                    && s.Scalar("SELECT count(DISTINCT item_id) FROM added_items WHERE path_key='C:\\CASE\\FILE.TXT'") == "1", "memberships were lost, duplicated or still split");
+                Check(s.Scalar("SELECT count(*) FROM metadata WHERE key='entries_case_merged' AND value='1'") == "1", "merge flag missing");
+            }
+            Check(r.Favorites.Count(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) == 1, "favorite duplicated or lost");
+            Check(r.ItemOrder["工具"].Count == 1, "order kept both variants");
+            Func<string, bool, bool> listed = delegate(string category, bool resources)
+            {
+                return r.Database.Page(category, resources, true, "", 200, null, true, false).Items
+                    .Count(a => string.Equals(a.Key, key, StringComparison.OrdinalIgnoreCase)) == 1;
+            };
+            Check(listed("工具", false) && listed("照片", true), "merged item is not listed once in each mode");
+            long revision = r.Database.Revision;
+            AppConfig again = ConfigDatabase.Load(path);
+            Check(!again.LoadFailed && again.Database.Revision == revision, "merge ran again on an already merged database");
+            // 迁移事务不能逐项撤销（完成标记不受审计，撤销后数据与标记会不一致）
+            long merge = again.Database.History(20).Where(h => h[2] == "migration.entries.case").Select(h => Convert.ToInt64(h[0])).First();
+            string undoError = null;
+            try { again.Database.Undo(merge); } catch (IOException ex) { undoError = ex.Message; }
+            Check(undoError != null && undoError.Contains("迁移"), "migration transaction could be undone: " + undoError);
+        }
+
+        private static void CrossModeSplit()
+        {
+            string path = Path.Combine(Folder("cross-split"), "config.xml");
+            const string tool = "add:C:\\split\\tool.exe", pic = "add:C:\\split\\pic.jpg", both = "add:C:\\split\\both.txt", doc = "add:C:\\split\\doc.pdf";
+            AppConfig seed = new AppConfig();
+            seed.CustomCategories.Add("工具"); seed.ResourceCategories.Add("工具");   // 两边都是自定义分类
+            seed.CustomCategories.Add("照片");                                        // 软件自定义分类与资源内置分类同名
+            seed.AddedItems.Add(new AddedEntry { Path = "C:\\split\\tool.exe", Name = "tool", Category = "工具" });
+            seed.AddedItems.Add(new AddedEntry { Path = "C:\\split\\pic.jpg", Name = "pic", Category = "工具", IsResource = true });
+            seed.AddedItems.Add(new AddedEntry { Path = "C:\\split\\both.txt", Name = "both", Category = "工具" });
+            seed.AddedItems.Add(new AddedEntry { Path = "C:\\split\\both.txt", Name = "both", Category = "文件", IsResource = true });
+            seed.AddedItems.Add(new AddedEntry { Path = "C:\\split\\doc.pdf", Name = "doc", Category = "文档", IsResource = true });
+            seed.CategoryOverride[doc] = "工具";
+            seed.ItemOrder["工具"] = new List<string> { tool, pic, both };
+            seed.ItemCategories[both] = new List<string> { "工具" };
+            seed.Collections.Add(new ResourceCollection { Parent = "工具", Name = "旅行" });
+            seed.ItemCategories[pic] = new List<string> { CollectionKeys.Make("工具", "旅行") };
+            seed.CategoryViewMode["工具"] = false;
+            seed.CategoryIconNames[CategoryIcons.ConfigKey(true, "工具")] = "Star";
+            seed.CategoryIconNames[CategoryIcons.ConfigKey(false, "工具")] = "Code";
+            Check(seed.SaveTo(path), "fixture export");
+            AppConfig c = ConfigDatabase.Load(path); Check(!c.LoadFailed, c.DatabaseError);
+            List<string[]> renamed = c.SeparateCrossModeCategories();
+            Check(renamed.Count == 2, "expected two splits, got " + renamed.Count);
+            Check(c.Save("migration.categories.split"), c.DatabaseError);
+
+            AppConfig r = ConfigDatabase.Load(path); Check(!r.LoadFailed, r.DatabaseError);
+            Check(r.CustomCategories.Contains("工具") && r.ResourceCategories.Contains("工具（资源）") && !r.ResourceCategories.Contains("工具"), "resource side was not renamed");
+            Check(r.CustomCategories.Contains("照片（软件）") && !r.CustomCategories.Contains("照片"), "software side of a built-in clash was not renamed");
+            Func<string, bool, string> categoryOf = delegate(string p, bool resource) { return r.AddedItems.ByPath(p).First(e => e.IsResource == resource).Category; };
+            Check(categoryOf("C:\\split\\tool.exe", false) == "工具" && categoryOf("C:\\split\\pic.jpg", true) == "工具（资源）", "added items moved on the wrong side");
+            Check(categoryOf("C:\\split\\both.txt", false) == "工具", "software record of a dual-mode file was moved");
+            Check(r.CategoryOverride[doc] == "工具（资源）", "resource override did not follow");
+            Check(r.ItemOrder["工具"].SequenceEqual(new[] { tool, both }) && r.ItemOrder["工具（资源）"].SequenceEqual(new[] { pic, both }), "order was not split by mode");
+            Check(r.ItemCategories[both].Contains("工具") && r.ItemCategories[both].Contains("工具（资源）"), "dual-mode membership not kept on both sides");
+            Check(r.Collections[0].Parent == "工具（资源）" && r.ItemCategories[pic].Contains(CollectionKeys.Make("工具（资源）", "旅行")), "collection did not follow");
+            Check(!r.CategoryViewMode["工具（资源）"] && r.CategoryIconNames[CategoryIcons.ConfigKey(true, "工具（资源）")] == "Star"
+                && r.CategoryIconNames[CategoryIcons.ConfigKey(false, "工具")] == "Code", "view mode or icon not migrated");
+            Check(Listed(r, "工具（资源）", true, pic) && Listed(r, "工具", false, tool) && !Listed(r, "工具", true, pic), "listing was not split");
+            Check(r.SeparateCrossModeCategories().Count == 0, "split is not idempotent");
+        }
+
         private static void CrossModeMove()
         {
             const string key = "add:C:\\file.txt";
@@ -545,6 +665,43 @@ namespace AppManager
             Dictionary<string, List<AddedEntry>> found = c.AddedItems.LookupMany(new string[] { "C:\\FILE.TXT", staged.ToUpperInvariant(), staged.ToUpperInvariant() });
             Check(found["C:\\FILE.TXT"].Count == 1, "stored path lookup failed");
             Check(found[staged.ToUpperInvariant()].Count == 1, "staged path lookup failed or duplicated");
+        }
+
+        // 导入预处理在后台直接读库：文件夹内收录项用 path_key 范围查询，已登记路径批量查询。
+        private static void FolderRangeLookup()
+        {
+            AppConfig c = Fixture("range-lookup");
+            c.AddedItems.Add(new AddedEntry { Path = "D:\\Lib\\Photos", Category = "工具", IsFolder = true });
+            c.AddedItems.Add(new AddedEntry { Path = "D:\\Lib\\Photos\\a.jpg", Category = "工具" });
+            c.AddedItems.Add(new AddedEntry { Path = "D:\\Lib\\Photos2\\b.jpg", Category = "工具" });
+            c.AddedItems.Add(new AddedEntry { Path = "D:\\Lib\\Photos_x\\c.jpg", Category = "工具" });
+            c.AddedItems.Add(new AddedEntry { Path = "D:\\Lib\\Photos]\\d.jpg", Category = "工具" });
+            c.AddedItems.Add(new AddedEntry { Path = "D:\\Empty\\e.jpg", Category = "工具" });
+            Check(c.Save(), c.DatabaseError);
+            string db = c.Database.FilePath;
+            // 范围只含文件夹内部：不含文件夹自身，也不含同前缀的相邻文件夹（Photos2 / Photos_x / Photos]）。
+            Check(AddedEntryList.HasEntriesUnder(db, "d:\\lib\\photos"), "lower-case folder missed its entries");
+            Check(AddedEntryList.HasEntriesUnder(db, "D:\\Lib\\Photos\\"), "trailing separator missed entries");
+            Check(!AddedEntryList.HasEntriesUnder(db, "D:\\Lib\\Photos\\a.jpg"), "file treated as folder with entries");
+            Check(!AddedEntryList.HasEntriesUnder(db, "D:\\Lib\\Phot"), "partial name matched sibling folders");
+            Check(!AddedEntryList.HasEntriesUnder(db, "D:\\Empty2"), "unrelated folder matched");
+            Check(AddedEntryList.HasEntriesUnder(db, "D:\\"), "drive root missed entries");
+            Check(!AddedEntryList.HasEntriesUnder(db, ""), "empty folder matched");
+            List<string> under = c.AddedItems.EntriesUnder("D:\\LIB\\PHOTOS").Select(e => e.Path).ToList();
+            Check(under.Count == 1 && under[0] == "D:\\Lib\\Photos\\a.jpg", "EntriesUnder range wrong: " + string.Join("|", under.ToArray()));
+            Check(c.AddedItems.EntriesUnder("D:\\Lib\\Photos2").Count == 1 && c.AddedItems.EntriesUnder("D:\\Lib\\Photos]").Count == 1,
+                "sibling folder entries lost");
+            // 未保存的新增仍要算进去（界面线程路径）；后台读库只看已提交数据。
+            c.AddedItems.Add(new AddedEntry { Path = "D:\\Empty\\staged.jpg", Category = "工具" });
+            Check(c.AddedItems.EntriesUnder("d:\\empty").Count == 2, "staged entry missing from EntriesUnder");
+            Dictionary<string, string> registered = AddedEntryList.RegisteredPaths(db,
+                new string[] { "d:\\lib\\photos\\A.JPG", "D:\\LIB\\PHOTOS\\A.JPG", "D:\\missing.jpg", "", null });
+            Check(registered.Count == 1 && registered["d:\\lib\\photos\\a.jpg"] == "D:\\Lib\\Photos\\a.jpg",
+                "registered path lookup must map case variants to the stored path once");
+            List<string> many = new List<string>();
+            for (int i = 0; i < 600; i++) many.Add("D:\\none\\" + i + ".jpg");
+            many.Add("D:\\EMPTY\\E.JPG");
+            Check(AddedEntryList.RegisteredPaths(db, many).Count == 1, "lookup across 256-item chunks failed");
         }
 
         private static void CrashRecovery()

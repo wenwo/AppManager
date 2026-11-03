@@ -851,6 +851,125 @@ namespace AppManager
             }
         }
 
+        // ===== 历史跨模式同名分类拆分 =====
+
+        private const int SideResource = 1, SideSoftware = 2;
+
+        /// <summary>
+        /// 一次性拆分历史遗留的跨模式同名分类（新建/改名已禁止同名，这里处理禁止之前留下的数据）。
+        /// 软件与资源分类在数据库里共用同名分组，改名或删除一侧会连带另一侧的覆盖、收录项、归属与排序。
+        /// 规则：两边都是自定义分类时改资源一侧；一侧是另一模式的内置/保留名时改自定义的那一侧。
+        /// 只迁移被改名一侧模式的条目；同一路径同时登记在两种模式时无法区分，归属两边都保留。
+        /// 只改内存，调用方负责保存；没有重名时不改动任何数据，返回空列表（可重复调用）。
+        /// 返回每项 { 旧名, 新名, "resource"/"software" }。
+        /// </summary>
+        internal List<string[]> SeparateCrossModeCategories()
+        {
+            List<string[]> renamed = new List<string[]>();
+            foreach (string name in new List<string>(ResourceCategories))
+                if (CustomCategories.Contains(name) || IsSoftwareSystemName(name))
+                    renamed.Add(MoveCategorySide(name, true));
+            foreach (string name in new List<string>(CustomCategories))
+                if (IsResourceSystemName(name))
+                    renamed.Add(MoveCategorySide(name, false));
+            return renamed;
+        }
+
+        private static bool IsSoftwareSystemName(string name)
+        {
+            return Array.IndexOf(CategoryRules.BuiltIn, name) >= 0 || Array.IndexOf(CategoryRules.SoftwareReservedNames, name) >= 0;
+        }
+
+        private static bool IsResourceSystemName(string name)
+        {
+            return Array.IndexOf(CategoryRules.ResourceBuiltIn, name) >= 0 || Array.IndexOf(CategoryRules.ResourceReservedNames, name) >= 0;
+        }
+
+        private bool CategoryNameTaken(string name)
+        {
+            foreach (string n in CustomCategories) if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) return true;
+            foreach (string n in ResourceCategories) if (string.Equals(n, name, StringComparison.OrdinalIgnoreCase)) return true;
+            return IsSoftwareSystemName(name) || IsResourceSystemName(name) || CategoryRules.IsAnyReservedName(name);
+        }
+
+        /// <summary>条目键属于哪种模式：add: 键按收录记录判断（可能两边都有），其余（扫描到的软件）属于软件。</summary>
+        private int KeySides(string key)
+        {
+            if (string.IsNullOrEmpty(key) || !key.StartsWith("add:", StringComparison.OrdinalIgnoreCase)) return SideSoftware;
+            int sides = 0;
+            foreach (AddedEntry e in AddedItems.ByPath(key.Substring(4))) sides |= e.IsResource ? SideResource : SideSoftware;
+            return sides == 0 ? SideSoftware : sides;
+        }
+
+        private string[] MoveCategorySide(string oldName, bool resource)
+        {
+            int side = resource ? SideResource : SideSoftware;
+            string suffix = resource ? "（资源）" : "（软件）";
+            string newName = oldName + suffix;
+            for (int i = 2; CategoryNameTaken(newName) || CategoryRules.ValidateName(newName) != null; i++)
+                newName = oldName + suffix.Substring(0, suffix.Length - 1) + i + "）";
+
+            List<string> list = resource ? ResourceCategories : CustomCategories;
+            list[list.IndexOf(oldName)] = newName;
+            if (!resource)
+                for (int i = 0; i < SidebarOrder.Count; i++) if (SidebarOrder[i] == oldName) SidebarOrder[i] = newName;
+
+            // 收录项：只改本模式的记录（软件、资源记录各自独立成行）
+            foreach (AddedEntry e in AddedItems.InCategory(oldName))
+                if (e.IsResource == resource) e.Category = newName;
+
+            Dictionary<string, int> sides = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            Func<string, int> sideOf = delegate(string key)
+            {
+                int value;
+                if (!sides.TryGetValue(key, out value)) { value = KeySides(key); sides[key] = value; }
+                return value;
+            };
+            // 主分类覆盖是单值：只有完全属于本模式的条目才跟随改名，两边都登记的保持原值
+            foreach (string key in new List<string>(CategoryOverride.Keys))
+                if (CategoryOverride[key] == oldName && sideOf(key) == side) CategoryOverride[key] = newName;
+            MoveMemberships(ItemCategories, oldName, newName, side, sideOf);
+            MoveMemberships(ExcludedCategories, oldName, newName, side, sideOf);
+
+            List<string> order;
+            if (ItemOrder.TryGetValue(oldName, out order))
+            {
+                List<string> moved = new List<string>(), kept = new List<string>();
+                foreach (string key in order)
+                {
+                    int s = sideOf(key);
+                    if ((s & side) != 0) moved.Add(key);
+                    if (s != side) kept.Add(key);
+                }
+                if (moved.Count > 0) ItemOrder[newName] = moved;
+                if (kept.Count > 0) ItemOrder[oldName] = kept; else ItemOrder.Remove(oldName);
+            }
+            bool view;
+            if (CategoryViewMode.TryGetValue(oldName, out view)) CategoryViewMode[newName] = view;
+            string icon;
+            if (CategoryIconNames.TryGetValue(CategoryIcons.ConfigKey(resource, oldName), out icon))
+            {
+                CategoryIconNames[CategoryIcons.ConfigKey(resource, newName)] = icon;
+                CategoryIconNames.Remove(CategoryIcons.ConfigKey(resource, oldName));
+            }
+            if (resource) CollectionOps.RenameParent(this, oldName, newName);   // 集合只属于资源分类
+            return new string[] { oldName, newName, resource ? "resource" : "software" };
+        }
+
+        /// <summary>额外归属/排除：完全属于本模式的条目改为新名；两边都登记的同时保留新旧两个名字。</summary>
+        private static void MoveMemberships(Dictionary<string, List<string>> map, string oldName, string newName, int side, Func<string, int> sideOf)
+        {
+            foreach (KeyValuePair<string, List<string>> kv in map)
+            {
+                int index = kv.Value.IndexOf(oldName);
+                if (index < 0) continue;
+                int s = sideOf(kv.Key);
+                if ((s & side) == 0) continue;
+                if (s == side) kv.Value[index] = newName;
+                else if (!kv.Value.Contains(newName)) kv.Value.Add(newName);
+            }
+        }
+
         /// <summary>校验导入内容中会参与键结构或磁盘还原的名称；返回 null 表示通过。</summary>
         internal string ValidateImportedContent(bool rejectCrossModeDuplicates)
         {

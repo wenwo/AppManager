@@ -592,6 +592,12 @@ namespace AppManager
     {
         public static bool Show(string title, string message)
         {
+            return Show(title, message, "确定", "取消");
+        }
+
+        /// <summary>按钮文字可定制：取消一侧会产生后果（如放弃修改）时，用明确的动词代替“取消”。Esc 等同点击右侧按钮。</summary>
+        public static bool Show(string title, string message, string okText, string cancelText)
+        {
             bool result = false;
             Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
@@ -633,10 +639,10 @@ namespace AppManager
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(S(24), S(60), f.Width - S(48), S(60)));
             };
-            RoundButton ok = MakeBtn("确定", true);
+            RoundButton ok = MakeBtn(okText, true);
             ok.Bounds = new Rectangle(192, 142, 84, 34);
             ok.Click += delegate { result = true; f.DialogResult = DialogResult.OK; f.Close(); };
-            RoundButton cancel = MakeBtn("取消", false);
+            RoundButton cancel = MakeBtn(cancelText, false);
             cancel.Bounds = new Rectangle(292, 142, 84, 34);
             cancel.Click += delegate { result = false; f.DialogResult = DialogResult.Cancel; f.Close(); };
             f.Controls.Add(ok);

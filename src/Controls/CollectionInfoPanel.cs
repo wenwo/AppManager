@@ -44,6 +44,10 @@ namespace AppManager.Controls
         private readonly Dictionary<int, Bitmap> memberThumbs = new Dictionary<int, Bitmap>();
         private bool thumbLoading;
         private volatile int thumbGen;
+        private volatile int thumbFinishedGen = -1;   // 最后一个后台线程结束时写入本代编号，不依赖回界面线程的通知送达
+
+        /// <summary>当前这一代缩略图仍在加载：结束通知因句柄不在而丢失时，不会一直显示“加载中”、也不会挡住下次加载。</summary>
+        private bool ThumbsLoading { get { return thumbLoading && thumbFinishedGen != thumbGen; } }
         private int thumbPage;
         private int thumbHover = -1;
         private int thumbPress = -1;
@@ -438,7 +442,7 @@ namespace AppManager.Controls
         /// </summary>
         private void StartThumbLoad()
         {
-            if (thumbLoading || memberPaths.Count == 0) return;
+            if (ThumbsLoading || memberPaths.Count == 0) return;
             int total = Math.Min(memberPaths.Count, MaxMemberThumbs);
             // 已加载过的下标直接跳过（重复进入编辑页不重复解码）
             bool[] done = new bool[total];
@@ -481,7 +485,7 @@ namespace AppManager.Controls
                         }
                         finally
                         {
-                            if (Interlocked.Decrement(ref active) == 0) PostThumbLoadDone(gen);
+                            if (Interlocked.Decrement(ref active) == 0) { thumbFinishedGen = gen; PostThumbLoadDone(gen); }
                         }
                     });
                     queued++;
@@ -491,7 +495,7 @@ namespace AppManager.Controls
             {
                 // 线程池拒绝排队时，未启动的 worker 不会执行 finally：预扣计数，避免一直显示“加载中”
                 if (queued < workers && Interlocked.Add(ref active, -(workers - queued)) == 0)
-                    PostThumbLoadDone(gen);
+                { thumbFinishedGen = gen; PostThumbLoadDone(gen); }
             }
         }
 
@@ -900,7 +904,7 @@ namespace AppManager.Controls
         {
             int perPage = thumbPerPage;
             int pages = ThumbPageCount();
-            bool pageLoading = thumbLoading && CurrentPageMissing();
+            bool pageLoading = ThumbsLoading && CurrentPageMissing();
             PaintCaption(g, pageLoading ? "从集合选择封面 · 加载中…" : "从集合选择封面",
                 new Rectangle(thumbStartX, pickerCaptionY, Math.Max(0, thumbAreaWidth - 104), 20));
 
