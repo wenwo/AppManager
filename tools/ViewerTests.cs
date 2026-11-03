@@ -56,6 +56,7 @@ namespace AppManager
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
+                Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
                 Run("text edits save with original encoding, BOM and newlines", TextSaving);
                 Run("lossy decoding opens read-only; mixed newlines detected; failed save keeps original", TextSafety);
@@ -406,6 +407,41 @@ namespace AppManager
                 return box.Text;
             }
         }
+        private static void MarkdownHostile()
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            // 每层引用/链接都会递归：没有上限时这些输入会把调用栈压穿，进程直接退出。
+            string quotes = new string('>', 100000) + " deep";
+            Check(MarkdownRtf.Render(quotes, 9000).Contains("deep"), "deep quote lost its text");
+            StringBuilder links = new StringBuilder();
+            for (int i = 0; i < 20000; i++) links.Append('[');
+            links.Append("core");
+            for (int i = 0; i < 20000; i++) links.Append("](u)");
+            Check(MarkdownRtf.Render(links.ToString(), 9000).Contains("core"), "deep link lost its text");
+            StringBuilder nested = new StringBuilder();   // 不超过长度上限，专门走嵌套深度上限
+            for (int i = 0; i < 1000; i++) nested.Append('[');
+            nested.Append("mid");
+            for (int i = 0; i < 1000; i++) nested.Append("](u)");
+            Check(nested.Length < MarkdownRtf.MaxInlineLength && MarkdownRtf.Render(nested.ToString(), 9000).Contains("mid"), "nested link lost its text");
+            StringBuilder lines = new StringBuilder();
+            for (int depth = 1; depth <= MarkdownRtf.MaxBlockDepth + 8; depth++)
+                lines.Append(new string('>', depth)).Append(" level").Append(depth).Append('\n');
+            Check(MarkdownRtf.Render(lines.ToString(), 9000).Contains("level" + (MarkdownRtf.MaxBlockDepth + 8)), "text beyond depth limit dropped");
+            // 未闭合的起始符：每个都会扫描到行尾，超长段落必须跳过行内解析。
+            StringBuilder emphasis = new StringBuilder();
+            for (int i = 0; i < 30000; i++) emphasis.Append("*a [b ");
+            MarkdownRtf.Render(emphasis.ToString(), 9000);
+            Check(watch.ElapsedMilliseconds < 8000, "hostile markdown took " + watch.ElapsedMilliseconds + " ms");
+            using (CancellationTokenSource cancel = new CancellationTokenSource())
+            {
+                cancel.Cancel();
+                bool canceled = false;
+                try { MarkdownRtf.Render("# a\n\nb\n", 9000, cancel.Token); }
+                catch (OperationCanceledException) { canceled = true; }
+                Check(canceled, "markdown render ignored cancellation");
+            }
+        }
+
         private static void MarkdownRendering()
         {
             string text = RenderedText("# 标题 #\n\n**粗体** *斜体* ~~删除~~ `a{b}\\c` [链接](http://x) ![图](a.png)\n"

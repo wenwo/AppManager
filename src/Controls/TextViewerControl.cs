@@ -170,7 +170,7 @@ namespace AppManager.Controls
                 if (render)
                 {
                     cancellation.ThrowIfCancellationRequested();
-                    preview.RenderedRtf = MarkdownRtf.Render(preview.Content, twips);
+                    preview.RenderedRtf = MarkdownRtf.Render(preview.Content, twips, cancellation);
                 }
                 return preview;
             }, delegate(TextPreview preview, Exception error)
