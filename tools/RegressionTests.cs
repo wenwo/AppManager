@@ -66,6 +66,7 @@ namespace AppManager
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
+                Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
             }
             finally
             {
@@ -1143,6 +1144,31 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void GridScrollFollowsWidth()
+        {
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000), Size = new Size(1400, 700) })
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Location = Point.Empty, Size = new Size(1300, 600) })
+            {
+                host.Controls.Add(grid);
+                host.Show();
+                grid.GridMode = true;
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int i = 0; i < 60; i++) apps.Add(new AppInfo { Key = "af:grid-" + i, Name = "Grid " + i });
+                grid.SetApps(apps);
+                MethodInfo rows = typeof(Controls.AppGridControl).GetMethod("GridRows", Private);
+                int wideRows = (int)rows.Invoke(grid, null), wideHeight = grid.AutoScrollMinSize.Height;
+                grid.Size = new Size(420, 600);   // 窗口变窄：每行放得下的卡片变少，总行数增加
+                int narrowRows = (int)rows.Invoke(grid, null), narrowHeight = grid.AutoScrollMinSize.Height;
+                Check(narrowRows > wideRows, "fixture did not change the column count");
+                // 高度 = 行数 × 行高 + 固定边距：两种宽度下的高度差必须正好是行数差的整数倍
+                Check(narrowHeight > wideHeight && (narrowHeight - wideHeight) % (narrowRows - wideRows) == 0,
+                    "scroll range kept the wide layout: wide=" + wideHeight + "/" + wideRows + " narrow=" + narrowHeight + "/" + narrowRows);
+                grid.Size = new Size(1300, 600);
+                Check(grid.AutoScrollMinSize.Height == wideHeight, "scroll range did not shrink back after widening");
+                host.Hide();
+            }
         }
 
         private static void MultiMembershipCategories()

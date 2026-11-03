@@ -430,8 +430,40 @@ namespace AppManager.Controls
             return selected.Contains(index);
         }
 
+        private int lastColumns = -1;   // 上次计算滚动范围时的网格列数（列表模式为 -1）
+        private int lastDpi = -1;       // 卡片路径与列宽缓存对应的 DPI
+
+        protected override void OnClientSizeChanged(EventArgs e)
+        {
+            base.OnClientSizeChanged(e);
+            RefreshLayoutCaches();
+        }
+
+        /// <summary>
+        /// 宽度变化会改变网格列数，进而改变总行数：滚动范围必须重算，否则窗口变窄后底部几行滚不到。
+        /// DPI 变化时卡片路径与列宽缓存都按旧 DPI 计算，必须重建。
+        /// </summary>
+        private void RefreshLayoutCaches()
+        {
+            int dpi = DpiHelper.ForControl(this);
+            bool dpiChanged = dpi != lastDpi;
+            if (dpiChanged)
+            {
+                lastDpi = dpi;
+                if (gridItemPath != null) { gridItemPath.Dispose(); gridItemPath = null; }
+                locTextMaxW = -1;
+                catTextMaxW = -1;
+            }
+            if (dpiChanged || (grid ? Columns() : -1) != lastColumns)
+            {
+                UpdateScroll();
+                Invalidate();
+            }
+        }
+
         private void UpdateScroll()
         {
+            lastColumns = grid ? Columns() : -1;
             int h;
             if (grid)
             {
@@ -592,6 +624,8 @@ namespace AppManager.Controls
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            // 跨显示器拖动等 DPI 变化不一定伴随尺寸变化：绘制前补查一次，避免沿用旧 DPI 的卡片路径与列宽
+            if (DpiHelper.ForControl(this) != lastDpi) RefreshLayoutCaches();
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TranslateTransform(AutoScrollPosition.X, AutoScrollPosition.Y);
