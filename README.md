@@ -58,4 +58,4 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\fetch-libmpv.ps1 -De
 ## 其他
 
 - `AppManager.exe`、`libmpv-2.dll`、`libmpv-LICENSE.txt`、`selftest.log`、数据库、扫描缓存、旧配置留底 `config.xml.before-sqlite`、收纳/快捷中心数据和备份等运行时产物位于 `%LOCALAPPDATA%\AppManager`，不进入开发仓库。
-- 本机私有规则文件（`AGENTS.md`、`CLAUDE.md`、`.trae/rules/project_rules.md`）只在本机生效，不提交。
+- AI 助手规则统一维护在 `AGENTS.md`；`CLAUDE.md` 和 `.trae/rules/project_rules.md` 只做入口引用，随仓库同步，保证换机器后规则一致。

@@ -29,6 +29,4 @@ _probe_icon.png
 .idea/
 *.iml
 
-# 本机私有规则与说明文档（只在本机生效，不提交）
-# AI 助手共用规则 AGENTS.md / CLAUDE.md 需随仓库同步，不在此忽略
-.trae/rules/project_rules.md
+# AI 助手共用规则随仓库同步（AGENTS.md / CLAUDE.md / .trae/rules/project_rules.md）
