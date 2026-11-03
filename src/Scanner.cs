@@ -679,6 +679,7 @@ namespace AppManager
                     exist.InstallLocation = app.InstallLocation;
                 if (string.IsNullOrEmpty(exist.DisplayIcon) && !string.IsNullOrEmpty(app.DisplayIcon))
                     exist.DisplayIcon = app.DisplayIcon;
+                if (app.IsDesktop) exist.IsDesktop = true;
             }
             else
             {
@@ -695,7 +696,8 @@ namespace AppManager
         {
             if (IsSelfTarget(app.TargetPath)) return;
             string name = NormalizeEntryName(app.Name);
-            if (name.Length > 0)
+            // 只在软件/快捷方式之间按名称去重：文件、文件夹（含指向文档的快捷方式）同名不代表同一个程序
+            if (name.Length > 0 && !app.IsFile)
             {
                 AppInfo exist;
                 if (nameIndex != null && nameIndex.TryGetValue(name, out exist))
@@ -711,14 +713,15 @@ namespace AppManager
                     return;
                 }
             }
-            dict[app.DisplayKey()] = app;
-            RegisterNameIndex(app);
+            // 同键已存在时按 Merge 合并字段，不能直接覆盖：被覆盖的旧对象会留在名称索引里继续吞掉同名条目
+            Merge(dict, app);
         }
 
         /// <summary>把条目登记到名称去重索引（首个同名条目优先，与 MergeByName 的顺序语义一致）。</summary>
         private void RegisterNameIndex(AppInfo app)
         {
-            if (nameIndex == null || app == null) return;
+            // 文件/文件夹条目不进名称索引：收纳目录里叫“Python”的文件夹不能吞掉 Python 这个软件
+            if (nameIndex == null || app == null || app.IsFile) return;
             string name = NormalizeEntryName(app.Name);
             if (name.Length > 0 && !nameIndex.ContainsKey(name)) nameIndex[name] = app;
         }

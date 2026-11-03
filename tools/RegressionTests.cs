@@ -64,6 +64,7 @@ namespace AppManager
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
+                Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
             }
             finally
             {
@@ -1141,6 +1142,32 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void ScannerNameMerge()
+        {
+            Scanner scanner = new Scanner(new AppConfig());
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            MethodInfo merge = typeof(Scanner).GetMethod("Merge", Private);
+            MethodInfo byName = typeof(Scanner).GetMethod("MergeByName", Private);
+            // 收纳目录里的同名文件夹先扫到
+            merge.Invoke(scanner, new object[] { dict, new AppInfo { Key = "add:D:\\Manage\\Python", Name = "Python",
+                TargetPath = "D:\\Manage\\Python", IsFile = true, IsFolder = true } });
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "af:python", Name = "Python",
+                TargetPath = "shell:AppsFolder\\Python.Regression" } });
+            Check(dict.Values.Count(a => a.Name == "Python") == 2, "same-name folder swallowed the software");
+            // 软件先出现，再来一个同名的文档快捷方式
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "af:chrome", Name = "Chrome",
+                TargetPath = "shell:AppsFolder\\Chrome.Regression" } });
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "lnk:chrome-doc", Name = "Chrome", ShortcutPath = "C:\\Desk\\Chrome.lnk",
+                TargetPath = "C:\\Docs\\Chrome.pdf", IsFile = true, IsDesktop = true } });
+            Check(dict.Values.Count(a => a.Name == "Chrome") == 2, "document shortcut merged into the software");
+            // 软件之间仍按名称去重
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "lnk:chrome", Name = "Chrome", ShortcutPath = "C:\\Desk\\Chrome (2).lnk",
+                TargetPath = "C:\\Program Files\\Chrome\\chrome.exe", IsDesktop = true } });
+            Check(dict.Values.Count(a => a.Name == "Chrome") == 2 && dict.Values.Any(a => a.Key == "af:chrome" && a.IsDesktop),
+                "software shortcuts are no longer deduplicated by name");
         }
 
         private static void SearchContextRemoval()
