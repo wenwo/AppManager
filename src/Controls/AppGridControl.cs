@@ -537,14 +537,14 @@ namespace AppManager.Controls
         /// <summary>
         /// 把文字测量扩展到本次绘制的可见行：首绘不再整表测量（万级条目首屏卡顿），
         /// 滚动时只量新露出的行；列宽取历史最大值、只增不减，避免滚动中来回跳动。
-        /// 跳转式滚动（与已测区间不相邻）直接重置测量区间；无范围调用方（表头）先量前 50 行。
+        /// 跳转式滚动（与已测区间不相邻）直接重置测量区间；空列表不测量，尚无有效范围的表头先量前 50 行。
         /// </summary>
         private void ExtendMeasuredRange(Graphics g)
         {
+            if (apps.Count == 0) return;
             int first = measureFirst, last = Math.Min(measureLast, apps.Count - 1);
-            if (last < first)
+            if (first < 0 || last < first)
             {
-                if (apps.Count == 0) return;
                 first = 0; last = Math.Min(apps.Count, 50) - 1;
             }
             if (measuredHi < measuredLo || first > measuredHi + 1 || last < measuredLo - 1)

@@ -78,6 +78,8 @@ namespace AppManager
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
                 Run("grid measures only visible rows; column width grows while scrolling to wider rows", GridVisibleMeasurement);
+                Run("list header paints before rows for empty and populated lists with bounded measurement", GridHeaderFirstPaint);
+                Run("list header survives filtering to empty, refill, view switches and sorting", GridHeaderRefresh);
                 Run("stash scan reads root shortcuts and legacy records only, never stashed folder trees", StashScanTopLevel);
                 Run("background scan uses the UI snapshot and leaves UI-owned settings to the UI thread", ScanUsesUiSnapshot);
                 Run("apps folder known-folder ids resolve to real paths; app ids stay unchanged", KnownFolderIds);
@@ -1931,6 +1933,67 @@ namespace AppManager
                 grid.Size = new Size(1300, 600);
                 Check(grid.AutoScrollMinSize.Height == wideHeight, "scroll range did not shrink back after widening");
                 host.Hide();
+            }
+        }
+
+        private static void GridHeaderFirstPaint()
+        {
+            foreach (int count in new int[] { 0, 1, 49, 50, 51, 10000 })
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Size = new Size(960, 420), GridMode = false, ShowTimeColumn = true, ShowRowActions = true })
+            {
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int index = 0; index < count; index++)
+                    apps.Add(new AppInfo { Key = "header:" + index, Name = "Header " + index, Category = "照片", TargetPath = Path.Combine(root, "header-" + index + ".jpg") });
+                grid.SetApps(apps);
+                CheckGridHeaderPaint(grid);
+                int measured = (int)typeof(Controls.AppGridControl).GetField("measuredHi", Private).GetValue(grid);
+                Check(count == 0 ? measured == -1 : measured >= 0 && measured < Math.Min(count, 50),
+                    "header measured outside the first 50 rows: count=" + count + " measured=" + measured);
+            }
+        }
+
+        private static void GridHeaderRefresh()
+        {
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Size = new Size(960, 420), GridMode = false, ShowTimeColumn = true, ShowRowActions = true })
+            using (Bitmap bitmap = new Bitmap(grid.Width, grid.Height))
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                List<AppInfo> apps = new List<AppInfo> { new AppInfo { Key = "header:photo", Name = "Photo", Category = "照片" } };
+                string sorted = null;
+                grid.SortRequested += delegate(string column) { sorted = column; };
+                foreach (int count in new int[] { 1, 0, 1, 0 })
+                {
+                    grid.SetApps(count == 0 ? new List<AppInfo>() : apps);
+                    int dpi = DpiHelper.ForControl(grid);
+                    grid.HandleHeaderClick(graphics, new Point(DpiHelper.Scale(60, dpi), DpiHelper.Scale(18, dpi)));
+                    Check(sorted == "name", "header sorting failed after filtering to " + count + " rows");
+                    sorted = null;
+                    grid.SetSortIndicator("name", true);
+                    CheckGridHeaderPaint(grid);
+                    grid.DrawToBitmap(bitmap, new Rectangle(Point.Empty, grid.Size));
+                    grid.GridMode = true;
+                    grid.GridMode = false;
+                    CheckGridHeaderPaint(grid);
+                }
+            }
+        }
+
+        private static void CheckGridHeaderPaint(Controls.AppGridControl grid)
+        {
+            int height = DpiHelper.Scale(Controls.AppGridControl.ListHeaderH, DpiHelper.ForControl(grid));
+            using (Bitmap bitmap = new Bitmap(grid.Width, height))
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                grid.PaintListHeader(graphics, grid.Width);
+                grid.PaintListHeader(graphics, grid.Width);
+                int textPixels = 0;
+                for (int pixelY = 0; pixelY < height; pixelY++)
+                    for (int pixelX = 0; pixelX < bitmap.Width; pixelX++)
+                    {
+                        Color color = bitmap.GetPixel(pixelX, pixelY);
+                        if (color.R < 200 && color.G < 200 && color.B < 200) textPixels++;
+                    }
+                Check(textPixels > 20, "header column labels were not rendered");
             }
         }
 
