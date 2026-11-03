@@ -224,6 +224,10 @@ namespace AppManager.Controls
                 Invalidate();
                 return;
             }
+            // keep-open=yes 且播放列表只有一项时，mpv 播到结尾只会暂停并置 eof-reached，不发 END_FILE(EOF)；
+            // 只等结束事件的话，自动下一首、列表循环、随机、单曲循环都不会生效。
+            bool eof;
+            if (!ended && fileLoaded && !endedHandled && engine.TryGetFlag("eof-reached", out eof) && eof) ended = true;
             if (ended && fileLoaded && !endedHandled)
             {
                 endedHandled = true;

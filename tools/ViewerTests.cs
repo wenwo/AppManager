@@ -55,6 +55,7 @@ namespace AppManager
                 Run("PDF corrupt/missing/oversize/cancelled inputs recover", PdfFailures);
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
+                Run("music players advance to the next track when a song ends", MusicAutoAdvance);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
@@ -193,6 +194,55 @@ namespace AppManager
                 Check(TextPreview.Read(legacy, CancellationToken.None).Content == Encoding.Default.GetString(File.ReadAllBytes(legacy)), "BOM prefix false positive");
             }
         }
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern bool SetDllDirectory(string path);
+
+        private static string WriteSilence(string name, double seconds)
+        {
+            string path = Path.Combine(root, name);
+            int rate = 8000, samples = (int)(rate * seconds);
+            using (BinaryWriter w = new BinaryWriter(File.Create(path)))
+            {
+                w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + samples * 2); w.Write(Encoding.ASCII.GetBytes("WAVE"));
+                w.Write(Encoding.ASCII.GetBytes("fmt ")); w.Write(16); w.Write((short)1); w.Write((short)1);
+                w.Write(rate); w.Write(rate * 2); w.Write((short)2); w.Write((short)16);
+                w.Write(Encoding.ASCII.GetBytes("data")); w.Write(samples * 2); w.Write(new byte[samples * 2]);
+            }
+            return path;
+        }
+
+        private static bool PumpUntil(Func<bool> done, int milliseconds)
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            while (!done() && watch.ElapsedMilliseconds < milliseconds) { Application.DoEvents(); Thread.Sleep(15); }
+            return done();
+        }
+
+        private static void MusicAutoAdvance()
+        {
+            // 播放器依赖运行目录里的 libmpv-2.dll；未安装时跳过（构建脚本会自动下载）。
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string first = WriteSilence("auto-first.wav", 0.4), second = WriteSilence("auto-second.wav", 0.4);
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+            {
+                host.Controls.Add(mini);
+                host.Controls.Add(player);
+                host.Show();
+                player.Open(new List<string> { first, second }, 0);
+                Check(PumpUntil(delegate { return string.Equals(player.CurrentPath, second, StringComparison.OrdinalIgnoreCase); }, 15000),
+                    "full player did not advance after the song ended (current: " + player.CurrentPath + ")");
+                player.Visible = false;
+                mini.LoadPlaylist(new List<string> { first, second }, "回归", "regression", 0);
+                Check(PumpUntil(delegate { return mini.CurrentIndex == 1; }, 15000), "mini player did not advance after the song ended");
+                mini.Stop();
+                host.Hide();
+            }
+        }
+
         private static void TextSafety()
         {
             // 合法 UTF-8、带 BOM 的 UTF-8、UTF-16 与合法的系统编码文本都能无损往返，可以编辑。

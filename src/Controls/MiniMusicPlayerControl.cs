@@ -119,10 +119,19 @@ namespace AppManager.Controls
                 title = "无法播放此音乐";
                 pollTimer.Stop();
             }
-            else if (ended) { PlayNext(); return; }
+            else
+            {
+                // keep-open=yes 时播到结尾只会暂停并置 eof-reached，不发结束事件：两者都算播完。
+                // duration > 0 表示当前文件已加载，避免切歌瞬间读到旧文件状态而连跳两首。
+                bool eof;
+                if (!ended && duration > 0 && engine.TryGetFlag("eof-reached", out eof) && eof) ended = true;
+                if (ended) { PlayNext(); return; }
+            }
             double value;
+            bool paused;
             if (engine.TryGetDouble("duration", out value) && value >= 0) duration = value;
             if (!seeking && engine.TryGetDouble("time-pos", out value) && value >= 0) position = value;
+            if (!error && engine.TryGetFlag("pause", out paused)) playing = !paused;   // 与引擎实际状态同步
             Invalidate();
         }
 
@@ -456,6 +465,8 @@ namespace AppManager.Controls
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)] private static extern int mpv_set_property_string(IntPtr context, string name, string value);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
             private static extern int mpv_get_property_double(IntPtr context, string name, int format, ref double value);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
+            private static extern int mpv_get_property_flag(IntPtr context, string name, int format, ref int value);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int mpv_command(IntPtr context, IntPtr args);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr mpv_wait_event(IntPtr context, double timeout);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern void mpv_terminate_destroy(IntPtr context);
@@ -500,6 +511,15 @@ namespace AppManager.Controls
             {
                 value = 0;
                 return context != IntPtr.Zero && mpv_get_property_double(context, name, 5, ref value) >= 0;
+            }
+
+            public bool TryGetFlag(string name, out bool value)
+            {
+                value = false;
+                int raw = 0;
+                if (context == IntPtr.Zero || mpv_get_property_flag(context, name, 3, ref raw) < 0) return false;   // MPV_FORMAT_FLAG
+                value = raw != 0;
+                return true;
             }
 
             public void DrainEvents(out bool ended, out bool error)
