@@ -65,6 +65,7 @@ namespace AppManager
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
+                Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
             }
             finally
             {
@@ -1142,6 +1143,28 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void MultiMembershipCategories()
+        {
+            AppConfig config = new AppConfig();
+            config.ResourceCategories.Add("回归相册");
+            string path = Path.Combine(root, "multi-member.jpg");
+            File.WriteAllText(path, "jpg");
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "multi-member", Category = "照片", IsResource = true });
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "multi-member", Category = "回归相册", IsResource = true });
+            config.AddedItems.Add(new AddedEntry { Path = path, Name = "multi-member", Category = "开发工具", IsResource = false });
+            AppInfo pic = new AppInfo { Key = "add:" + path, Name = "multi-member", TargetPath = path, Category = "照片", IsFile = true };
+            using (MainForm form = CategoryForm(config, pic))
+            {
+                Check((bool)Invoke(form, "InCategory", pic, "照片"), "primary category lost");
+                Check((bool)Invoke(form, "InCategory", pic, "回归相册"), "second added category not recognised");
+                Check(!(bool)Invoke(form, "InCategory", pic, "文档"), "unrelated category matched");
+                config.CategoryOverride[pic.Key] = "文档";   // 在资源模式里移动到“文档”
+                Check((bool)Invoke(form, "InCategory", pic, "文档"), "moved category not recognised");
+                Check(!(bool)Invoke(form, "InCategory", pic, "回归相册"), "same-mode membership survived a move");
+                Check((bool)Invoke(form, "InCategory", pic, "开发工具"), "other-mode membership lost after a move");
+            }
         }
 
         private static void ScannerNameMerge()

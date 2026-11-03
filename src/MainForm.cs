@@ -2431,12 +2431,26 @@ namespace AppManager
             // 显式分类覆盖（含「移动到分类」结果）优先于规则归类
             string ov;
             bool overridden = config.CategoryOverride.TryGetValue(a.Key, out ov) && !string.IsNullOrEmpty(ov);
-            if (overridden) return ov == category;
+            if (overridden)
+            {
+                if (ov == category) return true;
+                // 覆盖（移动到分类）只作用于同一模式：另一模式下的收录归属仍然有效，与列表投影一致
+                return a.IsFile && IsResourceCategoryName(ov) != IsResourceCategoryName(category)
+                    && IsAddedToCategory(a, category);
+            }
             // 「快捷中心」：桌面收纳项 + 手动添加项
             if (category == QuickCenter)
                 return a.IsDesktop || a.Category == QuickCenter || IsAddedToCategory(a, QuickCenter);
-            // 内置分类：未被 override 覆盖时按规则分类
-            return a.Category == category;
+            // 内置分类：未被 override 覆盖时按规则分类；同一文件可收录在多个分类（多条收录记录），
+            // 列表投影会展示每一条归属，这里也必须认，否则第二个分类里“加入集合”等操作会被判为不属于而跳过
+            return a.Category == category || (a.IsFile && IsAddedToCategory(a, category));
+        }
+
+        /// <summary>分类名是否属于资源模式（内置资源分类或用户资源分类）；软件与资源分类不允许重名。</summary>
+        private bool IsResourceCategoryName(string category)
+        {
+            return Array.IndexOf(CategoryRules.ResourceBuiltIn, category) >= 0 || category == "全部资源"
+                || config.ResourceCategories.Contains(category);
         }
 
         /// <summary>是否为手动添加在指定分类下的条目（按路径匹配 AddedItems）。</summary>
