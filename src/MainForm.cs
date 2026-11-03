@@ -471,6 +471,11 @@ namespace AppManager
         /// <summary>窗体真正关闭时释放托盘资源，避免残留图标。</summary>
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            // 先收起播放器再走基类关闭：mpv 的视频输出挂在宿主窗口上，必须在窗口句柄销毁前终止；
+            // 否则（尤其“关闭到托盘”时直接点×退出）终止发生在句柄销毁之后，能否顺利退出取决于 mpv 自身容错。
+            try { if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
+            try { if (musicPlayer != null && !musicPlayer.IsDisposed) HideMusicPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
+            try { if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.Stop(); } catch (Exception ex) { Paths.LogError(ex); }
             importTip.Dispose();
             if (importStatusTimer != null) importStatusTimer.Dispose();
             StopAutoScan();
