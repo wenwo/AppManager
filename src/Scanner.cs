@@ -515,18 +515,20 @@ namespace AppManager
             try
             {
                 foreach (string f in Directory.EnumerateFiles(folder, "*.*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
-                {
-                    string ext = Path.GetExtension(f).ToLowerInvariant();
-                    if (ext != ".lnk") continue;
-                    AppInfo app = ResolveShortcut(f, source);
-                    if (app == null) continue;
-                    // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
-                    if (!IsAliveTarget(app.TargetPath, app.IsUwp)) continue;
-                    if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
-                    MergeByName(dict, app);
-                }
+                    AddShortcut(dict, f, source);
             }
             catch { }
+        }
+
+        private void AddShortcut(Dictionary<string, AppInfo> dict, string file, string source)
+        {
+            if (!string.Equals(Path.GetExtension(file), ".lnk", StringComparison.OrdinalIgnoreCase)) return;
+            AppInfo app = ResolveShortcut(file, source);
+            if (app == null) return;
+            // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
+            if (!IsAliveTarget(app.TargetPath, app.IsUwp)) return;
+            if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
+            MergeByName(dict, app);
         }
 
         private AppInfo ResolveShortcut(string path, string source)
@@ -658,10 +660,27 @@ namespace AppManager
         private void ScanDesktopBackup(Dictionary<string, AppInfo> dict)
         {
             // 新版收纳目录 + 旧版 DesktopStash（升级后旧收纳的快捷方式也要能在快捷中心看到）
+            // 收纳的快捷方式都平铺在收纳目录根下；Files/Folders 子目录里是整理时搬入的用户文件和文件夹。
+            // 只扫根目录：递归会在每次扫描时遍历整棵用户目录（如 node_modules），还会把其中的 .lnk 误当成快捷中心条目，
+            // 遇到无权限子目录时整个枚举中断，所有已收纳快捷方式一起从列表消失。
             if (Directory.Exists(Paths.DesktopBackupDir))
-                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop", true);
+                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop", false);
             if (Directory.Exists(Paths.LegacyStashDir))
-                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop", true);
+            {
+                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop", false);
+                // 旧版 DesktopStash 可能保留了子目录结构：按收纳清单逐条解析快捷方式，不递归整个目录
+                List<DesktopBackupEntry> entries;
+                try { entries = new List<DesktopBackupEntry>(config.DesktopBackup); }
+                catch (InvalidOperationException) { entries = new List<DesktopBackupEntry>(); }   // 界面线程正在修改清单
+                string prefix = Path.GetFullPath(Paths.LegacyStashDir).TrimEnd('\\') + "\\";
+                foreach (DesktopBackupEntry e in entries)
+                {
+                    if (e == null || e.IsDir || string.IsNullOrEmpty(e.CurrentPath)) continue;
+                    if (!e.CurrentPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    try { if (File.Exists(e.CurrentPath)) AddShortcut(dict, e.CurrentPath, "Desktop"); }
+                    catch (Exception ex) { Paths.LogError(ex); }
+                }
+            }
         }
 
         // ===== 去重与配置 =====

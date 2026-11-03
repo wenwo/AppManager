@@ -67,6 +67,7 @@ namespace AppManager
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
+                Run("stash scan reads root shortcuts and legacy records only, never stashed folder trees", StashScanTopLevel);
             }
             finally
             {
@@ -1144,6 +1145,41 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void StashScanTopLevel()
+        {
+            MethodInfo create = typeof(DesktopOrganizer).GetMethod("CreateShortcut", BindingFlags.Static | BindingFlags.NonPublic);
+            string target = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe");
+            string rootLink = Path.Combine(Paths.DesktopBackupDir, "Stash Root Regression.lnk");
+            string nested = Path.Combine(Paths.DesktopBackupDir, "Folders", "Project", "sub");
+            string nestedLink = Path.Combine(nested, "Stash Nested Regression.lnk");
+            string legacyDir = Path.Combine(Paths.LegacyStashDir, "old", "group");
+            string legacyLink = Path.Combine(legacyDir, "Stash Legacy Regression.lnk");
+            string legacyOrphan = Path.Combine(legacyDir, "Stash Legacy Orphan.lnk");
+            Directory.CreateDirectory(nested);
+            Directory.CreateDirectory(legacyDir);
+            foreach (string link in new string[] { rootLink, nestedLink, legacyLink, legacyOrphan })
+                create.Invoke(null, new object[] { link, target, "regression" });
+            try
+            {
+                AppConfig config = new AppConfig();
+                config.DesktopBackup.Add(new DesktopBackupEntry { OriginalPath = "C:\\Desk\\legacy.lnk", CurrentPath = legacyLink, IsShortcut = true });
+                Scanner scanner = new Scanner(config);
+                typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+                Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+                typeof(Scanner).GetMethod("ScanDesktopBackup", Private).Invoke(scanner, new object[] { dict });
+                Func<string, bool> found = delegate(string name) { return dict.Values.Any(a => a.Name == name); };
+                Check(found("Stash Root Regression"), "root stash shortcut missing");
+                Check(found("Stash Legacy Regression"), "legacy recorded shortcut missing");
+                Check(!found("Stash Nested Regression"), "shortcut inside a stashed folder became a quick-center item");
+                Check(!found("Stash Legacy Orphan"), "legacy stash was scanned recursively");
+            }
+            finally
+            {
+                foreach (string link in new string[] { rootLink, nestedLink, legacyLink, legacyOrphan })
+                    try { File.Delete(link); } catch { }
+            }
         }
 
         private static void GridScrollFollowsWidth()
