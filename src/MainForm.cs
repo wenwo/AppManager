@@ -4338,18 +4338,41 @@ namespace AppManager
         /// </summary>
         private void SetHardCategory(AppInfo app, string category)
         {
+            SetHardCategory(app, category, currentCategory);
+        }
+
+        /// <summary>
+        /// source：从哪个分类移出（当前浏览的分类、剪切时所在的分类）。只移除来源分类和原主分类的额外归属，
+        /// 其他分类的额外归属与集合关系（col:）保留——集合在条目移回父分类后可以恢复。
+        /// </summary>
+        private void SetHardCategory(AppInfo app, string category, string source)
+        {
             SetCategoryExcluded(app, category, false);
+            string previous = app.Category;
             config.CategoryOverride[app.Key] = category;
-            config.ItemCategories.Remove(app.Key);
+            List<string> extra;
+            if (config.ItemCategories.TryGetValue(app.Key, out extra))
+            {
+                foreach (string from in new string[] { source, previous })
+                    if (!string.IsNullOrEmpty(from) && from != category
+                        && !IsReadOnlyCategory(from) && !CollectionKeys.IsCollectionKey(from))
+                        extra.Remove(from);
+                if (extra.Count == 0) config.ItemCategories.Remove(app.Key);
+            }
             app.Category = category;
         }
 
         /// <summary>批量硬归属：逐项写入分类覆盖后统一落盘刷新。</summary>
         private void SetHardCategory(List<AppInfo> apps, string cat)
         {
+            SetHardCategory(apps, cat, currentCategory);
+        }
+
+        private void SetHardCategory(List<AppInfo> apps, string cat, string source)
+        {
             if (apps == null || apps.Count == 0) return;
             for (int i = 0; i < apps.Count; i++)
-                if (apps[i] != null) SetHardCategory(apps[i], cat);
+                if (apps[i] != null) SetHardCategory(apps[i], cat, source);
             config.Save();
             RefreshGrid();
         }

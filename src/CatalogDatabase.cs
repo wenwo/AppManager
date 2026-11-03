@@ -118,6 +118,7 @@ namespace AppManager
             using (Sqlite.Statement read = db.Prepare("SELECT c.metadata,c.kind,c.active,g.key,c.size,c.modified FROM catalog c LEFT JOIN groups g ON g.id=c.base_group WHERE c.item_id=?"))
             using (Sqlite.Statement relations = db.Prepare("SELECT r.section,g.key,r.ordinal,r.item_id FROM records r LEFT JOIN groups g ON g.id=r.group_id WHERE r.item_id=? OR r.item_id=(SELECT id FROM entries WHERE key=?) ORDER BY CASE WHEN r.item_id=? THEN 0 ELSE 1 END"))
             using (Sqlite.Statement memberships = db.Prepare("SELECT g.key,a.resource FROM added_items a LEFT JOIN groups g ON g.id=a.group_id WHERE a.item_id=?"))
+            using (Sqlite.Statement sectionOf = db.Prepare("SELECT r.section FROM records r JOIN groups g ON g.id=r.group_id WHERE g.key=? AND r.section IN ('ResourceCategories','CustomCategories') LIMIT 1"))
             using (Sqlite.Statement remove = db.Prepare("DELETE FROM listing WHERE item_id=?"))
             using (Sqlite.Statement insert = db.Prepare("INSERT OR IGNORE INTO listing(group_id,item_id,kind,hidden,rank,name,size,modified) VALUES(?,?,?,?,?,?,?,?)"))
             using (Sqlite.Statement setHidden = db.Prepare("UPDATE catalog SET hidden=? WHERE item_id=?"))
@@ -150,21 +151,22 @@ namespace AppManager
                         }
                     }
                     setHidden.Bind(isHidden, id); setHidden.Read();
-                    AddCategory(categories, primary, kind == 2 ? 2 : 0);
-                    if (!overridden)
+                    // 分类覆盖属于哪个模式：按覆盖目标分类本身判断（资源/软件），不能一律当作条目的展示模式。
+                    bool overrideResource = overridden ? IsResourceCategory(sectionOf, primary, kind == 2) : kind == 2;
+                    AddCategory(categories, primary, overrideResource ? 2 : 0);
+                    // 同一路径可同时登记在软件分类和资源分类（跨模式复制）：每条归属都要投影，不能只保留主分类。
+                    // 显式分类覆盖表示在该模式里「移动到分类」：只有同一模式下的原归属不再展示，
+                    // 另一模式的归属保持不变（在资源里移动不能让软件侧的分类跟着消失）。
+                    memberships.Bind(id);
+                    while (memberships.Read())
                     {
-                        // 同一路径可同时登记在软件分类和资源分类（跨模式复制）：每条归属都要投影，不能只保留主分类。
-                        // 显式分类覆盖表示「移动到分类」，原分类不再展示，只保留覆盖后的主分类与额外归属。
-                        memberships.Bind(id);
-                        while (memberships.Read())
-                        {
-                            string[] membership = memberships.Row();
-                            bool resource = membership[1] == "1";
-                            if (resource) resourceMember = true; else softwareMember = true;
-                            AddCategory(categories, membership[0], resource ? 2 : 0);
-                        }
-                        if (a.IsDesktop) AddCategory(categories, "快捷中心", kind == 2 ? 2 : 0);
+                        string[] membership = memberships.Row();
+                        bool resource = membership[1] == "1";
+                        if (overridden && resource == overrideResource) continue;
+                        if (resource) resourceMember = true; else softwareMember = true;
+                        AddCategory(categories, membership[0], resource ? 2 : 0);
                     }
+                    if (!overridden && a.IsDesktop) AddCategory(categories, "快捷中心", kind == 2 ? 2 : 0);
                     foreach (string cat in excluded) categories.Remove(cat);
                     // 集合成员必须仍属于父分类，集合关系自身保留，移回父分类后可恢复。
                     List<string> invalid = new List<string>();
@@ -229,6 +231,21 @@ namespace AppManager
                 }
             }
             catch (Exception ex) { Paths.LogError(new IOException("归属投影修复失败，后续保存时会重建。", ex)); }
+        }
+
+        /// <summary>
+        /// 分类属于资源模式还是软件模式：内置名单直接判定，自定义分类看它登记在哪个分类列表；
+        /// 都判断不出时沿用条目的展示模式（fallback）。软件/资源分类不允许重名，结论唯一。
+        /// </summary>
+        private static bool IsResourceCategory(Sqlite.Statement sectionOf, string category, bool fallback)
+        {
+            if (string.IsNullOrEmpty(category)) return fallback;
+            if (Array.IndexOf(CategoryRules.ResourceBuiltIn, category) >= 0 || category == "全部资源") return true;
+            if (Array.IndexOf(CategoryRules.BuiltIn, category) >= 0 || category == "快捷中心" || category == "常用"
+                || category == "全部软件" || category == "全部文件") return false;
+            sectionOf.Bind(category);
+            if (!sectionOf.Read()) return fallback;
+            return sectionOf.Row()[0] == "ResourceCategories";
         }
 
         private static void AddCategory(Dictionary<string, int> categories, string category, int kind)

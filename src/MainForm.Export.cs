@@ -35,6 +35,7 @@ namespace AppManager
             public uint Sequence;
             public bool Resource;
             public List<AppInfo> Apps;
+            public string Category;   // 剪切时所在分类：粘贴时只从这里移出，其他归属保留
         }
 
         private readonly List<MoveOutWatch> moveOutWatches = new List<MoveOutWatch>();
@@ -153,7 +154,8 @@ namespace AppManager
             EndCut();
             if (!cut) return;
             cutState = new CutState { Sequence = GetClipboardSequenceNumber(),
-                Resource = contentMode == SidebarControl.ContentMode.Website, Apps = new List<AppInfo>(apps) };
+                Resource = contentMode == SidebarControl.ContentMode.Website, Apps = new List<AppInfo>(apps),
+                Category = currentCategory };
             WatchMoveOut(apps, DateTime.MaxValue);
             grid.SetCutKeys(apps.Select(a => a.Key));
         }
@@ -309,7 +311,7 @@ namespace AppManager
             moveOutWatches.RemoveAll(w => cut.Apps.Any(a => string.Equals(a.Key, w.App.Key, StringComparison.OrdinalIgnoreCase)));
             ClearClipboardIfCurrent(cut.Sequence);
             EndCut();
-            if (changed) SetHardCategory(items, category);
+            if (changed) SetHardCategory(items, category, cut.Category);
             if (collection != null) AddItemsToCategory(items, collection);
             if (skipped > 0) ShowNotice("已跳过 " + skipped + " 个类型不符的项目：" + typeHint);
         }

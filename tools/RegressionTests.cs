@@ -48,6 +48,7 @@ namespace AppManager
                 Run("category removal: hidden toggle, single/batch, reload and rejoin", CategoryRemoval);
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
                 Run("category icon-only edit keeps item order; rename migrates it", CategoryIconOnlyEdit);
+                Run("move to category removes only the source membership and keeps collections", MoveKeepsOtherMemberships);
                 Run("resource defaults: remove, preserve library, reload and menu rejoin", ResourceCategoryRemoval);
                 Run("category removal: failed save rolls back membership and permits retry", CategoryRemovalSaveFailure);
                 Run("default category addition: single/batch, multiple memberships, removal and reload", DefaultCategoryAddition);
@@ -763,6 +764,25 @@ namespace AppManager
                     Invoke(form, "SetHardCategory", fresh, "开发工具");
                     Check((bool)Invoke(form, "InCategory", fresh, "开发工具"), "move back failed");
                 }
+            }
+        }
+
+        private static void MoveKeepsOtherMemberships()
+        {
+            AppConfig config = new AppConfig();
+            config.ResourceCategories.Add("回归资源");
+            AppInfo pic = new AppInfo { Key = "add:C:\\regression\\move.jpg", Name = "move", TargetPath = "C:\\regression\\move.jpg",
+                Category = "照片", IsFile = true };
+            config.ItemCategories[pic.Key] = new List<string> { "照片", "回归资源", CollectionKeys.Make("照片", "旅行") };
+            using (MainForm form = CategoryForm(config, pic))
+            {
+                Invoke(form, "SetHardCategory", pic, "文档");
+                List<string> extra;
+                Check(config.CategoryOverride[pic.Key] == "文档" && pic.Category == "文档", "move did not set the category");
+                Check(config.ItemCategories.TryGetValue(pic.Key, out extra), "move dropped every extra membership");
+                Check(!extra.Contains("照片"), "item stayed in its source category");
+                Check(extra.Contains("回归资源") && extra.Contains(CollectionKeys.Make("照片", "旅行")),
+                    "move dropped unrelated memberships: " + string.Join(",", extra.ToArray()));
             }
         }
 

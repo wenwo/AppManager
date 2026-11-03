@@ -55,6 +55,7 @@ namespace AppManager
                 Run("batched save failures are deferred on the worker and reported once", BatchSaveFailure);
                 Run("recycle bin detection never treats network paths as recyclable", RecycleDetection);
                 Run("desktop operation detection follows the operation lock held by another thread", DesktopOperationDetection);
+                Run("moving within one mode keeps the item's categories in the other mode", CrossModeMove);
                 Run("terminated writer recovers without exposing uncommitted rows", CrashRecovery);
                 Run("metadata sorting covers whole category, both directions and keyset pages", MetadataSorting);
                 Run("offline recovery keeps damaged original and restores validated snapshot", OfflineRecovery);
@@ -393,6 +394,33 @@ namespace AppManager
             DriveInfo drive = new DriveInfo(Path.GetPathRoot(Path.GetFullPath(local)));
             Check(Launcher.CanUseRecycleBin(local) == (drive.IsReady && drive.DriveType == DriveType.Fixed),
                 "fixed local drive detection depends on per-user recycle folder");
+        }
+
+        private static bool Listed(AppConfig c, string category, bool resources, string key)
+        {
+            return c.Database.Page(category, resources, true, "", 200, null, true, false).Items.Any(a => a.Key == key);
+        }
+
+        private static void CrossModeMove()
+        {
+            const string key = "add:C:\\file.txt";
+            AppConfig c = Fixture("cross-move");
+            c.CategoryOverride.Remove(key);
+            // 同一文件既在软件分类“工具”，又跨模式复制到了资源分类“照片”
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\file.txt", Name = "file", Category = "照片", IsResource = true });
+            Check(c.Save("cross.copy"), c.DatabaseError);
+            Check(Listed(c, "工具", false, key) && Listed(c, "照片", true, key), "cross-mode copy not listed in both modes");
+            // 在资源模式里移动到“文档”：资源侧离开“照片”，软件侧“工具”必须保留
+            c.CategoryOverride[key] = "文档";
+            Check(c.Save("cross.move.resource"), c.DatabaseError);
+            Check(Listed(c, "文档", true, key) && !Listed(c, "照片", true, key), "resource move did not move within resources");
+            Check(Listed(c, "工具", false, key), "resource move removed the software category");
+            // 在软件模式里移动到自定义软件分类：软件侧离开“工具”，资源侧“照片”保留
+            c.CustomCategories.Add("回归软件");
+            c.CategoryOverride[key] = "回归软件";
+            Check(c.Save("cross.move.software"), c.DatabaseError);
+            Check(Listed(c, "回归软件", false, key) && !Listed(c, "工具", false, key), "software move did not move within software");
+            Check(Listed(c, "照片", true, key) && !Listed(c, "回归软件", true, key), "software move changed the resource side");
         }
 
         private static void DesktopOperationDetection()
