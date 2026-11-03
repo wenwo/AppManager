@@ -329,7 +329,39 @@ namespace AppManager
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_lzip(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_zstd(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_filter_compress(IntPtr a);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_all(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_7zip(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_ar(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_cab(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_cpio(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_empty(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_iso9660(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_lha(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_rar(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_rar5(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_tar(IntPtr a);
+            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_zip(IntPtr a);
+
+            /// <summary>
+            /// 逐个注册需要的格式，不用 format_all：其中的 mtree 读取器在列目录时会按清单里的路径
+            /// （contents=\\server\share\x 或本机任意路径）打开/查询外部文件，一个伪装成 .tar 的文本文件
+            /// 就能让程序访问任意路径（可能泄露 NTLM 凭据）。warc/xar 与查看器无关，一并不注册。
+            /// 旧系统缺少某个导出时跳过该格式。
+            /// </summary>
+            private static void SupportArchiveFormats(IntPtr a)
+            {
+                Func<IntPtr, int>[] formats =
+                {
+                    archive_read_support_format_7zip, archive_read_support_format_ar, archive_read_support_format_cab,
+                    archive_read_support_format_cpio, archive_read_support_format_empty, archive_read_support_format_iso9660,
+                    archive_read_support_format_lha, archive_read_support_format_rar, archive_read_support_format_rar5,
+                    archive_read_support_format_tar, archive_read_support_format_zip
+                };
+                foreach (Func<IntPtr, int> register in formats)
+                {
+                    try { register(a); }
+                    catch (EntryPointNotFoundException) { }
+                }
+            }
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_support_format_raw(IntPtr a);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_set_read_callback(IntPtr a, ReadCallback callback);
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int archive_read_set_skip_callback(IntPtr a, SkipCallback callback);
@@ -399,7 +431,7 @@ namespace AppManager
                         archive_read_support_filter_zstd(a);
                         archive_read_support_filter_compress(a);
                         if (raw) archive_read_support_format_raw(a);
-                        else archive_read_support_format_all(a);
+                        else SupportArchiveFormats(a);
                         archive_read_set_read_callback(a, source.ReadDelegate);
                         archive_read_set_skip_callback(a, source.SkipDelegate);
                         archive_read_set_seek_callback(a, source.SeekDelegate);

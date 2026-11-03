@@ -819,6 +819,10 @@ namespace AppManager
             byte[] noise = new byte[4096]; new Random(7).NextBytes(noise); File.WriteAllBytes(junk, noise);
             try { ArchivePreview.Read(junk, CancellationToken.None); throw new Exception("junk rar accepted"); }
             catch (InvalidDataException ex) { Check(ex.Message == "无法识别的压缩包格式", "junk message: " + ex.Message); }
+            // mtree 清单伪装成 .tar：不能被当成压缩包解析（mtree 读取器会按 contents= 访问外部/网络路径）
+            string mtreeTarget = WriteText("mtree-target.txt", "x", Encoding.ASCII);
+            string mtree = WriteText("mtree.tar", "#mtree\n./probe.txt type=file size=1 contents=" + mtreeTarget.Replace('\\', '/') + "\n", Encoding.ASCII);
+            Expect<InvalidDataException>(delegate { ArchivePreview.Read(mtree, CancellationToken.None); });
             // 0 字节的 .zip：libarchive 视为空归档，查看器显示「压缩包为空」
             string emptyZip = WriteText("empty.zip", "", Encoding.ASCII);
             ArchivePreview empty = ArchivePreview.Read(emptyZip, CancellationToken.None);
