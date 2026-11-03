@@ -312,6 +312,72 @@ namespace AppManager
         /// 恢复到指定备份：用备份里的配置与收纳目录覆盖当前状态。
         /// 当前收纳目录先整体挪到 Backups\_prerestore_&lt;时间&gt; 下留底，避免误删用户文件。
         /// </summary>
+        /// <summary>
+        /// 快照清单里没有、当前清单里有且文件仍在的收纳条目（快照之后新收纳的）：
+        /// 所在目录被快照替换时，把文件从留底目录挪回新装的收纳目录（同名另取名）；目录未被替换时原地保留。
+        /// 记录一并加入恢复后的清单。moves 记录（留底位置, 新位置），失败回滚时据此放回。
+        /// </summary>
+        private static void CarryNewerStash(AppConfig live, AppConfig restored, bool replaceDesktop, string oldDesktop,
+            bool replaceStash, string oldStash, List<string[]> moves)
+        {
+            HashSet<string> known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (DesktopBackupEntry e in restored.DesktopBackup)
+                if (e != null && !string.IsNullOrEmpty(e.CurrentPath)) known.Add(e.CurrentPath);
+            foreach (DesktopBackupEntry e in live.DesktopBackup)
+            {
+                if (e == null || string.IsNullOrEmpty(e.CurrentPath) || known.Contains(e.CurrentPath)) continue;
+                string target = e.CurrentPath;
+                string aside = null;
+                string rel = RelativeUnder(Paths.DesktopBackupDir, target);
+                if (rel != null && replaceDesktop) aside = Path.Combine(oldDesktop, rel);
+                else
+                {
+                    rel = RelativeUnder(Paths.LegacyStashDir, target);
+                    if (rel != null && replaceStash) aside = Path.Combine(oldStash, rel);
+                }
+                if (aside != null)
+                {
+                    if (!(e.IsDir ? Directory.Exists(aside) : File.Exists(aside))) continue;
+                    if (File.Exists(target) || Directory.Exists(target)) target = UniqueSibling(target);
+                    string parent = Path.GetDirectoryName(target);
+                    if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+                    if (e.IsDir) Directory.Move(aside, target); else File.Move(aside, target);
+                    moves.Add(new string[] { aside, target });
+                }
+                else if (!(e.IsDir ? Directory.Exists(target) : File.Exists(target))) continue;
+                restored.DesktopBackup.Add(new DesktopBackupEntry
+                {
+                    OriginalPath = e.OriginalPath, CurrentPath = target,
+                    IsShortcut = e.IsShortcut, IsDir = e.IsDir, IsCopy = e.IsCopy
+                });
+                known.Add(target);
+            }
+        }
+
+        /// <summary>path 位于 root 之内时返回相对路径，否则返回 null。</summary>
+        private static string RelativeUnder(string root, string path)
+        {
+            try
+            {
+                string prefix = Path.GetFullPath(root).TrimEnd('\\') + "\\";
+                string full = Path.GetFullPath(path);
+                return full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) && full.Length > prefix.Length
+                    ? full.Substring(prefix.Length) : null;
+            }
+            catch { return null; }
+        }
+
+        private static string UniqueSibling(string path)
+        {
+            string dir = Path.GetDirectoryName(path);
+            string name = Path.GetFileNameWithoutExtension(path), ext = Path.GetExtension(path);
+            for (int i = 2; ; i++)
+            {
+                string candidate = Path.Combine(dir, name + " (" + i + ")" + ext);
+                if (!File.Exists(candidate) && !Directory.Exists(candidate)) return candidate;
+            }
+        }
+
         public static bool Restore(string id, out string error)
         {
             error = null;
@@ -367,6 +433,7 @@ namespace AppManager
                     string oldStash = Path.Combine(transaction, "DesktopStash");
                     bool desktopAside = false, desktopInstalled = false;
                     bool stashAside = false, stashInstalled = false;
+                    List<string[]> carried = new List<string[]>();
                     try
                     {
                     if (replaceDesktop)
@@ -389,12 +456,25 @@ namespace AppManager
                         Directory.Move(newStash, Paths.LegacyStashDir);
                         stashInstalled = true;
                     }
+                    // 快照之后才收纳的条目：文件挪回新收纳目录、记录并入恢复后的清单，否则它们会失去还原入口
+                    CarryNewerStash(liveConfig, restoredConfig, replaceDesktop, oldDesktop, replaceStash, oldStash, carried);
                     if (hadConfig)
                         File.Copy(oldConfig, Path.Combine(Paths.DataDir, "config.before-restore.xml"), true);
                         if (!restoredConfig.Save("physical.layout.restore")) throw new IOException("恢复配置写入失败：" + restoredConfig.DatabaseError);
                     }
                     catch
                     {
+                    // 先把挪进新目录的较新收纳文件放回留底目录，再删除新装的目录，不能连带删掉
+                    for (int m = carried.Count - 1; m >= 0; m--)
+                    {
+                        string from = carried[m][0], to = carried[m][1];
+                        try
+                        {
+                            if (Directory.Exists(to) && !Directory.Exists(from)) Directory.Move(to, from);
+                            else if (File.Exists(to) && !File.Exists(from)) File.Move(to, from);
+                        }
+                        catch (Exception moveBack) { Paths.LogError(moveBack); }
+                    }
                     if (desktopInstalled && Directory.Exists(Paths.DesktopBackupDir))
                         Directory.Delete(Paths.DesktopBackupDir, true);
                     if (desktopAside && Directory.Exists(oldDesktop) && !Directory.Exists(Paths.DesktopBackupDir))

@@ -62,6 +62,7 @@ namespace AppManager
                 Run("move into folder keeps favorite, hidden, order, membership and cover", MoveIntoFolderKeepsRecords);
                 Run("resource page creates entries in the resource store", ResourceCreateEntries);
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
+                Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
             }
             finally
             {
@@ -1139,6 +1140,47 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void RestoreKeepsNewerStash()
+        {
+            // 前面的配额用例留下了 3 份留底：先挪到备份目录外，结束后放回，避免触发留底上限
+            string parked = Path.Combine(Paths.DataDir, "parked-prerestore");
+            Directory.CreateDirectory(parked);
+            foreach (string dir in Directory.GetDirectories(Paths.BackupsDir, "_prerestore_*"))
+                Directory.Move(dir, Path.Combine(parked, Path.GetFileName(dir)));
+            Snapshot();   // 快照：收纳目录里只有 saved.txt，清单为空
+            try
+            {
+                Directory.CreateDirectory(Paths.DesktopBackupDir);
+                string desktop = DesktopOrganizer.UserDesktop;
+                string newer = Path.Combine(Paths.DesktopBackupDir, "newer.txt");
+                string sameName = Path.Combine(Paths.DesktopBackupDir, "saved.txt");
+                File.WriteAllText(newer, "newer");
+                File.WriteAllText(sameName, "live-version");
+                AppConfig live = AppConfig.Load();
+                live.DesktopBackup.Clear();
+                live.DesktopBackup.Add(new DesktopBackupEntry { OriginalPath = Path.Combine(desktop, "newer.txt"), CurrentPath = newer, IsShortcut = false });
+                live.DesktopBackup.Add(new DesktopBackupEntry { OriginalPath = Path.Combine(desktop, "saved.txt"), CurrentPath = sameName, IsShortcut = false });
+                Check(live.Save(), "fixture save failed: " + live.DatabaseError);
+                string error;
+                Check(LayoutBackup.Restore("fixture", out error), "restore failed: " + error);
+                AppConfig loaded = AppConfig.Load();
+                string renamed = Path.Combine(Paths.DesktopBackupDir, "saved (2).txt");
+                Check(File.Exists(newer) && File.ReadAllText(newer) == "newer", "newer stash file was not carried back");
+                Check(loaded.DesktopBackup.Exists(e => string.Equals(e.CurrentPath, newer, StringComparison.OrdinalIgnoreCase)), "newer stash record dropped");
+                Check(File.ReadAllText(sameName) == "saved", "snapshot file was not restored");
+                Check(File.Exists(renamed) && File.ReadAllText(renamed) == "live-version"
+                    && loaded.DesktopBackup.Exists(e => string.Equals(e.CurrentPath, renamed, StringComparison.OrdinalIgnoreCase)),
+                    "same-name newer stash was lost");
+            }
+            finally
+            {
+                foreach (string dir in Directory.GetDirectories(Paths.BackupsDir, "_prerestore_*"))
+                    try { Directory.Delete(dir, true); } catch { }
+                foreach (string dir in Directory.GetDirectories(parked))
+                    try { Directory.Move(dir, Path.Combine(Paths.BackupsDir, Path.GetFileName(dir))); } catch { }
+            }
         }
 
         private static string Snapshot()
