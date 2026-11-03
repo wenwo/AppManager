@@ -1,7 +1,9 @@
 using System;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
+using Microsoft.Win32.SafeHandles;
 
 namespace AppManager
 {
@@ -26,6 +28,9 @@ namespace AppManager
         {
             cancellation.ThrowIfCancellationRequested();
             DateTime lastWrite = File.GetLastWriteTimeUtc(path);
+            bool readOnly;
+            try { readOnly = (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0; }
+            catch { readOnly = false; }
             byte[] raw;
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             {
@@ -66,6 +71,8 @@ namespace AppManager
                 // 系统编码回退或带 BOM 的文件解码时会把非法字节悄悄换成 ?/U+FFFD；
                 // 这种内容一旦保存，原始字节就永久丢了，只能只读查看。
                 preview.ReadOnlyReason = "编码无法无损识别，已按只读打开，避免保存时改坏原内容";
+            else if (readOnly)
+                preview.ReadOnlyReason = "文件为只读，已按只读打开；如需编辑请先取消文件的只读属性";
             preview.MixedNewlines = HasMixedNewlines(preview.Content);
             return preview;
         }
@@ -140,8 +147,13 @@ namespace AppManager
             strict.EncoderFallback = EncoderFallback.ExceptionFallback;
             byte[] preamble = encoding.GetPreamble();
             byte[] body = strict.GetBytes(content ?? string.Empty);
-            string temp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)),
-                "." + Path.GetFileName(path) + "." + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
+            // 符号链接解析到最终目标再写，保住链接本身；硬链接（多个名字）就地重写：
+            // 原子替换会让其它名字继续指向旧内容，静默分叉成两份。
+            string target = ResolveFinalPath(path) ?? path;
+            if (File.Exists(target) && LinkCount(target) > 1) { WriteInPlace(target, preamble, body); return; }
+            // 固定短名：原名接近文件名长度上限时，附加原文件名会让临时文件必然创建失败。
+            string temp = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(target)),
+                ".am-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".tmp");
             string backup = temp + ".bak";
             try
             {
@@ -152,21 +164,121 @@ namespace AppManager
                     stream.Flush(true);
                 }
                 // 指定备份名：ReplaceFile 中途失败（1176/1177）时原件会留在备份名下，而不是凭空消失。
-                File.Replace(temp, path, backup, true);
+                if (File.Exists(target)) File.Replace(temp, target, backup, true);
+                else File.Move(temp, target);   // 原文件已被删除或另存为新位置：直接落位
             }
             catch
             {
-                RestoreAfterFailedReplace(path, temp, backup);
+                RestoreAfterFailedReplace(target, temp, backup);
                 throw;
             }
             finally
             {
                 // 只有原路径上确实有文件时才清理；否则临时文件/备份可能是唯一的副本。
-                if (File.Exists(path))
+                if (File.Exists(target))
                 {
                     TryDelete(temp);
                     TryDelete(backup);
                 }
+            }
+        }
+
+        // ===== 链接感知 =====
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder path, uint length, uint flags);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out ByHandleInfo info);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ByHandleInfo
+        {
+            public uint Attributes;
+            public System.Runtime.InteropServices.ComTypes.FILETIME Creation, Access, Write;
+            public uint Volume, SizeHigh, SizeLow, Links, IndexHigh, IndexLow;
+        }
+
+        /// <summary>符号链接解析到最终目标路径；非链接或解析失败返回 null（按原路径保存，保持旧行为）。</summary>
+        private static string ResolveFinalPath(string path)
+        {
+            try
+            {
+                if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) == 0) return null;
+                using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    StringBuilder text = new StringBuilder(1024);
+                    uint length = GetFinalPathNameByHandle(stream.SafeFileHandle, text, (uint)text.Capacity, 0);
+                    if (length >= text.Capacity)
+                    {
+                        text.Capacity = (int)length + 1;
+                        length = GetFinalPathNameByHandle(stream.SafeFileHandle, text, (uint)text.Capacity, 0);
+                    }
+                    if (length == 0 || length >= text.Capacity) return null;
+                    string final = text.ToString(0, (int)length);
+                    if (final.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) return @"\\" + final.Substring(8);
+                    if (final.StartsWith(@"\\?\", StringComparison.Ordinal)) return final.Substring(4);
+                    return final;
+                }
+            }
+            catch { return null; }
+        }
+
+        /// <summary>文件的硬链接数（名字数）；查询失败按 1 处理，保持原子替换的旧行为。</summary>
+        private static uint LinkCount(string path)
+        {
+            try
+            {
+                using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                {
+                    ByHandleInfo info;
+                    return GetFileInformationByHandle(stream.SafeFileHandle, out info) ? info.Links : 1;
+                }
+            }
+            catch { return 1; }
+        }
+
+        /// <summary>就地重写：保持硬链接关系（其它名字同步看到新内容）；先在同目录留备份，失败时逐字节恢复原件。</summary>
+        private static void WriteInPlace(string path, byte[] preamble, byte[] body)
+        {
+            string backup = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(path)),
+                ".am-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".bak");
+            File.Copy(path, backup, false);
+            try
+            {
+                using (FileStream stream = new FileStream(path, FileMode.Truncate, FileAccess.Write, FileShare.None))
+                {
+                    stream.Write(preamble, 0, preamble.Length);
+                    stream.Write(body, 0, body.Length);
+                    stream.Flush(true);
+                }
+                TryDelete(backup);
+            }
+            catch
+            {
+                // 就地恢复原件；恢复失败时保留备份供手动找回
+                if (RestoreInPlace(path, backup)) TryDelete(backup);
+                throw;
+            }
+        }
+
+        /// <summary>就地重写失败后从备份逐字节恢复原件（不能用 File.Replace，那会断开硬链接）。</summary>
+        private static bool RestoreInPlace(string path, string backup)
+        {
+            try
+            {
+                using (FileStream from = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.None))
+                using (FileStream to = new FileStream(path, FileMode.Truncate, FileAccess.Write, FileShare.None))
+                {
+                    from.CopyTo(to);
+                    to.Flush(true);
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Paths.LogError(new IOException("文本保存失败后恢复原文件失败，备份保留在：" + backup, ex));
+                return false;
             }
         }
 

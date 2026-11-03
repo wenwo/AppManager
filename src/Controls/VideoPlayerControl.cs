@@ -450,13 +450,15 @@ namespace AppManager.Controls
         protected override void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e);
-            Capture = false;
-            if (volDrag) { volDrag = false; return; }
-            if (seeking) { seeking = false; return; }
+            bool dragged = volDrag || seeking;
+            if (volDrag) { SetVolumeByX(e.X); volDrag = false; }
+            else if (seeking) { SeekTo(e.X); seeking = false; }
+            if (dragged) { Capture = false; return; }
             if (e.Button == MouseButtons.Left && press >= 0)
             {
                 int btn = press;
                 press = -1;
+                Capture = false;
                 Invalidate();
                 if (HitButton(e.Location) == btn)
                 {
@@ -469,7 +471,21 @@ namespace AppManager.Controls
                         case 4: ToggleMute(); break;
                     }
                 }
+                return;
             }
+            Capture = false;
+        }
+
+        /// <summary>鼠标捕获被系统/其它窗口抢走时结束拖动，避免进度条一直停在拖动态。</summary>
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (Capture) return;
+            if (!volDrag && !seeking && press < 0) return;
+            volDrag = false;
+            seeking = false;
+            press = -1;
+            Invalidate();
         }
 
         /// <summary>视频区单击：挂起到双击间隔，仍无第二击才暂停/播放（双击由 OnMouseDoubleClick 接管全屏）。</summary>
@@ -892,11 +908,13 @@ namespace AppManager.Controls
             private const string Dll = "libmpv-2.dll";
             private const int FormatFlag = 3;
             private const int FormatDouble = 5;
+            private const int EventStartFile = 6;
             private const int EventEndFile = 7;
             private const int EventFileLoaded = 8;
             private const int EndFileReasonError = 4;
 
             private IntPtr ctx;
+            private bool awaitingStart;   // loadfile 之后、START_FILE 之前到达的事件属于上一首
 
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
             private static extern IntPtr mpv_create();
@@ -941,8 +959,9 @@ namespace AppManager.Controls
             /// <summary>创建并初始化内核；wid 为渲染宿主窗口句柄。失败时抛异常（DLL 缺失/选项或初始化失败）。</summary>
             public MpvEngine(IntPtr wid)
             {
-                // vo=gpu 在部分显卡驱动/远程桌面下初始化失败：按候选顺序回退渲染后端
-                string[] voCandidates = { "gpu", "win" };
+                // gpu 失败时由 mpv 在同一个实例内回退到 direct3d；直接指定 win 作为最后的候选，
+                // 避免只靠 initialize 返回值判断（渲染后端通常在首次加载文件时才真正初始化）。
+                string[] voCandidates = { "gpu,direct3d", "win" };
                 Exception last = null;
                 for (int vi = 0; vi < voCandidates.Length; vi++)
                 {
@@ -981,7 +1000,11 @@ namespace AppManager.Controls
                 throw last ?? new InvalidOperationException("mpv 初始化失败");
             }
 
-            public void LoadFile(string path) { Command("loadfile", path); }
+            public void LoadFile(string path)
+            {
+                awaitingStart = true;
+                Command("loadfile", path);
+            }
             public void SetPause(bool paused) { SetString("pause", paused ? "yes" : "no"); }
             public void SetVolume(int volume)
             {
@@ -1020,6 +1043,8 @@ namespace AppManager.Controls
                     if (evp == IntPtr.Zero) return;
                     MpvEvent ev = (MpvEvent)Marshal.PtrToStructure(evp, typeof(MpvEvent));
                     if (ev.EventId == 0) return;   // MPV_EVENT_NONE：队列已空
+                    if (ev.EventId == EventStartFile) { awaitingStart = false; continue; }
+                    if (awaitingStart) continue;   // 上一首遗留的 FILE_LOADED/END_FILE 不能算到新文件上
                     if (ev.EventId == EventFileLoaded) fileLoaded = true;
                     else if (ev.EventId == EventEndFile && ev.Data != IntPtr.Zero)
                     {

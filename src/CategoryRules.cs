@@ -4,7 +4,7 @@ namespace AppManager
 {
     /// <summary>
     /// 自动分类规则：9 大内置分类 + 关键词匹配，未命中归为"其他"。
-    /// 关键词采用小写包含匹配，前序分类优先级高于后序。
+    /// 关键词采用小写包含匹配；多个词命中时取最长词，长度相同时前序分类优先。
     /// </summary>
     internal static class CategoryRules
     {
@@ -21,13 +21,40 @@ namespace AppManager
             "照片", "视频", "音乐", "文档", "证件", "压缩包", "文件"
         };
 
+        /// <summary>软件模式固定条目名；自定义分类不得占用。</summary>
+        public static readonly string[] SoftwareReservedNames = new string[]
+        {
+            "全部软件", "全部文件", "常用", "快捷中心"
+        };
+
+        /// <summary>资源模式固定条目名；自定义分类不得占用。</summary>
+        public static readonly string[] ResourceReservedNames = new string[]
+        {
+            "全部资源"
+        };
+
+        /// <summary>名称是否为指定模式的固定条目名（不区分大小写）。</summary>
+        public static bool IsReservedName(string name, bool resource)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            foreach (string item in resource ? ResourceReservedNames : SoftwareReservedNames)
+                if (string.Equals(item, name, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>名称是否为任一模式的固定条目名；导入时两个模式共用分类键，必须全局避开。</summary>
+        public static bool IsAnyReservedName(string name)
+        {
+            return IsReservedName(name, false) || IsReservedName(name, true);
+        }
+
         /// <summary>各分类关键词，与 BuiltIn 一一对应（"其他"无关键词，仅兜底）。</summary>
         private static readonly string[][] Keywords = new string[][]
         {
             new string[] { "visual studio", "vscode", "vs code", "intellij", "pycharm", "webstorm", "rider", "goland", "clion", "phpstorm", "eclipse", "netbeans", "codeblocks", "dev c++", "devc", "git", "github", "docker", "postman", "jetbrains", "notepad++", "sublime", "vim", "emacs", "maven", "gradle", "jdk", "android studio", "unity", "unreal", "terminal", "powershell", "wsl", "mysql", "navicat", "dbeaver", "redis", "mongodb", "node", "python", "jupyter", "anaconda", "conda", " rust", "c++", ".net", " idea", "cmake", "nasm", "fiddler", "wireshark", "make" },
             new string[] { "任务管理", "注册表", "资源管理", "控制面板", "设备管理", "磁盘", "清理", "卸载", "优化", "驱动", "ccleaner", "everything", "powertoys", "7-zip", "7zip", "winrar", "压缩", "regedit", "msconfig", "服务", "services" },
-            new string[] { "office", "word", "excel", "powerpoint", "ppt", "outlook", "wps", "access", "onenote", "visio", "project", "pdf", "acrobat", "福昕", "foxit", "cajviewer", "nitro", "libreoffice", "openoffice", "typora", "markdown", "xmind", "思维导图", "幕布" },
-            new string[] { "chrome", "谷歌浏览器", "edge", "firefox", "火狐", "opera", "brave", "vivaldi", "safari", "浏览器", "browser", "360极速", "360安全浏览器", "qq浏览器", "搜狗", "uc浏览器", "maxthon", "chromium" },
+            new string[] { "office", "word", "excel", "powerpoint", "ppt", "outlook", "wps", "access", "onenote", "visio", "project", "pdf", "acrobat", "福昕", "foxit", "cajviewer", "nitro", "libreoffice", "openoffice", "typora", "markdown", "xmind", "思维导图", "幕布", "输入法" },
+            new string[] { "chrome", "谷歌浏览器", "edge", "firefox", "火狐", "opera", "brave", "vivaldi", "safari", "浏览器", "browser", "360极速", "360安全浏览器", "qq浏览器", "搜狗浏览器", "uc浏览器", "maxthon", "chromium" },
             new string[] { "微信", "qq", "tim", "钉钉", "dingtalk", "telegram", "电报", "discord", "skype", "飞书", "lark", "slack", "企业微信", "wxwork", "陌陌", "yy", "kakao", "line", "whatsapp" },
             new string[] { "音乐", "网易云", "netease", "qq音乐", "酷狗", "酷我", "kugou", "spotify", "foobar", "aimp", "player", "播放器", "vlc", "potplayer", "哔哩哔哩", "bilibili", "obs", "直播", "抖音", "tiktok", "剪映", "premiere", "after effect" },
             new string[] { "photoshop", "ps ", "illustrator", "figma", "sketch", "indesign", "coreldraw", "cdr", "paint", "gimp", "affinity", "3ds max", "maya", "blender", "autocad", "solidworks", "snipaste", "截图", "snagit" },
@@ -61,17 +88,23 @@ namespace AppManager
         {
             if (string.IsNullOrEmpty(name)) return "其他";
             string lower = name.ToLowerInvariant();
+            string best = null;
+            int bestLength = 0;
             for (int i = 0; i < BuiltIn.Length; i++)
             {
                 string[] kws = Keywords[i];
                 if (kws == null) continue;
                 for (int j = 0; j < kws.Length; j++)
                 {
-                    if (MatchesKeyword(lower, kws[j]))
-                        return BuiltIn[i];
+                    // 更具体的词优先：QQ音乐应归媒体娱乐而不是通讯社交，搜狗输入法应归办公而不是浏览器
+                    if (kws[j].Trim().Length > bestLength && MatchesKeyword(lower, kws[j]))
+                    {
+                        best = BuiltIn[i];
+                        bestLength = kws[j].Trim().Length;
+                    }
                 }
             }
-            return "其他";
+            return best ?? "其他";
         }
 
         /// <summary>

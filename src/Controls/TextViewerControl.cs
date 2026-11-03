@@ -4,6 +4,7 @@ using System.IO;
 using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
 using System.Windows.Forms;
 
 namespace AppManager.Controls
@@ -22,7 +23,9 @@ namespace AppManager.Controls
         private readonly RoundButton externalButton;
         private readonly RoundButton saveButton;
         private readonly Font textFont;
-        private readonly Timer renderTimer;
+        private readonly System.Windows.Forms.Timer renderTimer;
+        private int renderGeneration;
+        private CancellationTokenSource renderCancellation;
         private readonly List<string> paths = new List<string>();
         private int index;
         private Rectangle backRect;
@@ -119,8 +122,8 @@ namespace AppManager.Controls
             Controls.Add(markdownBox);
 
             // 窗口拖拽缩放时合并重排：表格/代码块列宽随可用宽度重新渲染
-            renderTimer = new Timer { Interval = 200 };
-            renderTimer.Tick += delegate { renderTimer.Stop(); RenderMarkdown(true); };
+            renderTimer = new System.Windows.Forms.Timer { Interval = 200 };
+            renderTimer.Tick += delegate { renderTimer.Stop(); QueueMarkdownResizeRender(); };
         }
 
         public void Open(List<string> textPaths, int startIndex)
@@ -145,6 +148,7 @@ namespace AppManager.Controls
         {
             loader.Clear();
             renderTimer.Stop();
+            CancelResizeRender();
             loadFailed = false;
             loading = true;
             truncated = false;
@@ -207,6 +211,7 @@ namespace AppManager.Controls
             ResolvePendingEdits();
             loader.Clear();
             renderTimer.Stop();
+            CancelResizeRender();
             SetEditorText(string.Empty);
             editorLoaded = false;
             textBox.Visible = false;
@@ -274,6 +279,59 @@ namespace AppManager.Controls
             return width * 1440 / Math.Max(96, DpiHelper.ForControl(this));
         }
 
+        /// <summary>窗口尺寸变化后在后台重新渲染 Markdown；旧任务立即取消，UI 线程只负责装入结果。</summary>
+        private void QueueMarkdownResizeRender()
+        {
+            if (!MarkdownVisible || current == null) return;
+            CancelResizeRender();
+            CancellationTokenSource source = new CancellationTokenSource();
+            renderCancellation = source;
+            int generation = ++renderGeneration;
+            int width = MarkdownWidth();
+            int twips = MarkdownTwips(width);
+            string text = EditorText();
+            int version = editVersion;
+            CancellationToken token = source.Token;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string rtf;
+                try { rtf = MarkdownRtf.Render(text, twips, token); }
+                catch (OperationCanceledException) { return; }
+                catch (Exception ex) { Paths.LogError(ex); return; }
+                try
+                {
+                    BeginInvoke((Action)delegate
+                    {
+                        if (IsDisposed || Disposing || generation != renderGeneration || token.IsCancellationRequested) return;
+                        if (!MarkdownVisible || current == null) return;
+                        int firstChar = markdownBox.TextLength > 0
+                            ? markdownBox.GetCharIndexFromPosition(new Point(1, 1)) : 0;
+                        markdownBox.Rtf = rtf;
+                        renderedVersion = version;
+                        renderedWidth = width;
+                        markdownBox.Select(0, 0);
+                        if (firstChar > 0)
+                        {
+                            int line = markdownBox.GetLineFromCharIndex(Math.Min(firstChar, markdownBox.TextLength));
+                            SendMessage(markdownBox.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)line);
+                        }
+                    });
+                }
+                catch { }
+            });
+        }
+
+        private void CancelResizeRender()
+        {
+            if (renderCancellation != null)
+            {
+                renderCancellation.Cancel();
+                renderCancellation.Dispose();
+                renderCancellation = null;
+            }
+            renderGeneration++;
+        }
+
         // ===== 编辑与保存 =====
 
         private void SetEditorText(string text)
@@ -336,18 +394,28 @@ namespace AppManager.Controls
                     return false;
                 Encoding encoding = current.Encoding ?? new UTF8Encoding(false);
                 string content = text.Replace("\n", newline);
-                try { TextPreview.Write(path, content, encoding); }
+                string target = path;
+                if (!File.Exists(path))
+                {
+                    // 原文件已被外部删除/移走：写回必然失败，提供另存为
+                    using (SaveFileDialog pick = new SaveFileDialog { FileName = Path.GetFileName(path), OverwritePrompt = true })
+                    {
+                        if (pick.ShowDialog(this) != DialogResult.OK) return false;
+                        target = pick.FileName;
+                    }
+                }
+                try { TextPreview.Write(target, content, encoding); }
                 catch (EncoderFallbackException)
                 {
                     if (MessageBox.Show(this, "部分字符无法用原编码（" + encoding.EncodingName + "）保存，是否改用 UTF-8 保存？",
                             "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                         return false;
                     encoding = new UTF8Encoding(false);
-                    TextPreview.Write(path, content, encoding);
+                    TextPreview.Write(target, content, encoding);
                 }
                 current.Encoding = encoding;
                 current.MixedNewlines = false;
-                current.LastWriteUtc = File.GetLastWriteTimeUtc(path);
+                if (target == path) current.LastWriteUtc = File.GetLastWriteTimeUtc(path);
                 savedText = text;
                 MarkClean();
                 return true;
@@ -640,6 +708,7 @@ namespace AppManager.Controls
                 if (textBox != null) textBox.Dispose();
                 if (markdownBox != null) markdownBox.Dispose();
                 textFont.Dispose();
+                CancelResizeRender();
             }
             base.Dispose(disposing);
         }

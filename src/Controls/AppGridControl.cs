@@ -22,6 +22,7 @@ namespace AppManager.Controls
 
         // 多选（Ctrl 点选 / Shift 连选）：仅记录当前列表下标，换列表即清空
         private readonly List<int> selected = new List<int>();
+        private readonly HashSet<int> selectedSet = new HashSet<int>();   // 多选命中判断 O(1)，列表仍保留选择顺序
         private int selectAnchor = -1;      // 连选锚点
         private bool collapseOnUp;          // 已选多项时普通点击：未拖动则在松手时收敛为单项
         private readonly SolidBrush selectFillBrush = new SolidBrush(Color.FromArgb(24, Theme.Accent));
@@ -56,6 +57,9 @@ namespace AppManager.Controls
         private bool sortAsc = true;
         private int catTextMaxW = -1;   // 分类列胶囊组最大宽度（按当前 apps 缓存）
         private int actionReserveMax = -1;   // 整表统一预留的最大操作按钮数（保证列 X 一致）
+        private int measureFirst = -1, measureLast = -1;   // 本次绘制可见的下标范围（PaintList 设置）
+        private int measuredLo, measuredHi = -1;   // 已测量的连续下标区间 [lo, hi]（列宽取历史最大、只增不减）
+        private int paintedLocW = -1, paintedCatW = -1;   // 上次绘制使用的列宽：变化时整表重绘，保证各行与表头对齐
 
         // 拖动排序状态：按下→越过系统阈值→拖动→落点缝隙
         private bool allowReorder;
@@ -121,6 +125,8 @@ namespace AppManager.Controls
         public event Action<AppInfo> RenameRequested;
         /// <summary>列表行右侧操作按钮：删除。</summary>
         public event Action<AppInfo> DeleteRequested;
+        /// <summary>键盘 Delete：把当前全部选中项交给上层批量处理。</summary>
+        public event Action<List<AppInfo>> DeleteSelectionRequested;
 
         /// <summary>是否允许拖动排序（仅在可排序分类下由外部开启）。</summary>
         public bool AllowReorder
@@ -226,8 +232,15 @@ namespace AppManager.Controls
             }
         }
 
+        private Func<AppInfo, string> categoryTextProvider;
+        private readonly Dictionary<AppInfo, string> categoryTextCache = new Dictionary<AppInfo, string>();
+
         /// <summary>由外部提供：返回条目「所属」分类的显示文本（多个用逗号分隔）。</summary>
-        public Func<AppInfo, string> CategoryTextProvider { get; set; }
+        public Func<AppInfo, string> CategoryTextProvider
+        {
+            get { return categoryTextProvider; }
+            set { categoryTextProvider = value; categoryTextCache.Clear(); }
+        }
 
         /// <summary>列表「大小/时间」列缓存项：显示文本与排序值一次读取，重绘不再读盘。</summary>
         private sealed class ListMeta
@@ -312,17 +325,22 @@ namespace AppManager.Controls
             ResetDrag();   // 列表被替换后旧下标立即失效，拖动状态必须作废，避免松手时把错误条目搬进错误目录
             apps.Clear();
             apps.AddRange(list);
+            categoryTextCache.Clear();
+            for (int i = 0; i < apps.Count; i++) CategoryList(apps[i]);   // 预计算并缓存，绘制路径不再同步读库
             selected.Clear();
+            selectedSet.Clear();
             selectAnchor = -1;
             collapseOnUp = false;
             for (int i = 0; i < apps.Count; i++)
             {
                 string k = apps[i].DisplayKey();
-                if (!string.IsNullOrEmpty(k) && oldKeys.Contains(k)) { selected.Add(i); selectAnchor = i; }
+                if (!string.IsNullOrEmpty(k) && oldKeys.Contains(k)) { AddSelected(i); selectAnchor = i; }
             }
             locTextMaxW = -1;
             catTextMaxW = -1;
             actionReserveMax = -1;
+            measureFirst = measureLast = -1;
+            measuredLo = 0; measuredHi = -1;
             UpdateScroll();
             StartMetaLoad();
             Invalidate();
@@ -422,12 +440,13 @@ namespace AppManager.Controls
             collapseOnUp = false;
             if (selected.Count == 0) return;
             selected.Clear();
+            selectedSet.Clear();
             Invalidate();
         }
 
         private bool IsSelected(int index)
         {
-            return selected.Contains(index);
+            return selectedSet.Contains(index);
         }
 
         private int lastColumns = -1;   // 上次计算滚动范围时的网格列数（列表模式为 -1）
@@ -453,6 +472,7 @@ namespace AppManager.Controls
                 if (gridItemPath != null) { gridItemPath.Dispose(); gridItemPath = null; }
                 locTextMaxW = -1;
                 catTextMaxW = -1;
+                measuredLo = 0; measuredHi = -1;
             }
             if (dpiChanged || (grid ? Columns() : -1) != lastColumns)
             {
@@ -486,21 +506,12 @@ namespace AppManager.Controls
         }
 
         /// <summary>
-        /// 位置列宽度：按当前条目文本最大宽度取值（贴右边缘、右侧不留白），
-        /// 结果按 SetApps 缓存；并夹在 [LocColMinW, 行宽 42%] 内，保证左侧名称区不被挤没。
+        /// 位置列宽度：按已测量行的文本最大宽度取值（贴右边缘、右侧不留白），
+        /// 只测量可见行、随滚动增量扩展；并夹在 [LocColMinW, 行宽 42%] 内，保证左侧名称区不被挤没。
         /// </summary>
         private int LocationColumnWidth(Graphics g, int rowWidth)
         {
-            if (locTextMaxW < 0)
-            {
-                int m = 0;
-                for (int i = 0; i < apps.Count; i++)
-                {
-                    int w = (int)Math.Ceiling(g.MeasureString(LocationText(apps[i]), subFont).Width);
-                    if (w > m) m = w;
-                }
-                locTextMaxW = m;
-            }
+            ExtendMeasuredRange(g);
             int w2 = locTextMaxW + 2;
             // 资源列表多出「时间」列，位置列上限相应收紧，优先保证名称列可读
             int cap = (int)(rowWidth * (ShowTimeColumn ? 0.32f : 0.42f));
@@ -510,26 +521,54 @@ namespace AppManager.Controls
         }
 
         /// <summary>
-        /// 分类列宽度：按当前条目胶囊组最大宽度取值（左对齐、上下对齐），
-        /// 结果按 SetApps 缓存；并夹在 [CatColMinW, 行宽 26%] 内，保证左侧名称区不被挤没。
+        /// 分类列宽度：按已测量行的胶囊组最大宽度取值（左对齐、上下对齐），
+        /// 只测量可见行、随滚动增量扩展；并夹在 [CatColMinW, 行宽 26%] 内，保证左侧名称区不被挤没。
         /// </summary>
         private int CategoryColumnWidth(Graphics g, int rowWidth)
         {
-            if (catTextMaxW < 0)
-            {
-                int m = 0;
-                for (int i = 0; i < apps.Count; i++)
-                {
-                    int w = CategoryGroupWidth(g, apps[i]);
-                    if (w > m) m = w;
-                }
-                catTextMaxW = m;
-            }
+            ExtendMeasuredRange(g);
             int w2 = catTextMaxW + 2;
             int cap = (int)(rowWidth * 0.26f);
             if (w2 > cap) w2 = cap;
             if (w2 < CatColMinW) w2 = CatColMinW;
             return w2;
+        }
+
+        /// <summary>
+        /// 把文字测量扩展到本次绘制的可见行：首绘不再整表测量（万级条目首屏卡顿），
+        /// 滚动时只量新露出的行；列宽取历史最大值、只增不减，避免滚动中来回跳动。
+        /// 跳转式滚动（与已测区间不相邻）直接重置测量区间；无范围调用方（表头）先量前 50 行。
+        /// </summary>
+        private void ExtendMeasuredRange(Graphics g)
+        {
+            int first = measureFirst, last = Math.Min(measureLast, apps.Count - 1);
+            if (last < first)
+            {
+                if (apps.Count == 0) return;
+                first = 0; last = Math.Min(apps.Count, 50) - 1;
+            }
+            if (measuredHi < measuredLo || first > measuredHi + 1 || last < measuredLo - 1)
+            {
+                MeasureRows(g, first, last);
+                measuredLo = first; measuredHi = last;
+                return;
+            }
+            if (first < measuredLo) { MeasureRows(g, first, measuredLo - 1); measuredLo = first; }
+            if (last > measuredHi) { MeasureRows(g, measuredHi + 1, last); measuredHi = last; }
+        }
+
+        private void MeasureRows(Graphics g, int first, int last)
+        {
+            int loc = locTextMaxW, cat = catTextMaxW;
+            for (int i = first; i <= last; i++)
+            {
+                int w = (int)Math.Ceiling(g.MeasureString(LocationText(apps[i]), subFont).Width);
+                if (w > loc) loc = w;
+                int cw = CategoryGroupWidth(g, apps[i]);
+                if (cw > cat) cat = cw;
+            }
+            locTextMaxW = loc;
+            catTextMaxW = cat;
         }
 
         /// <summary>整表统一的右侧操作按钮预留宽度（按最大按钮数），保证各行数据列上下对齐。</summary>
@@ -553,7 +592,19 @@ namespace AppManager.Controls
         private List<string> CategoryList(AppInfo a)
         {
             List<string> cats = new List<string>();
-            string text = (CategoryTextProvider != null) ? CategoryTextProvider(a) : a.Category;
+            string text;
+            if (a == null) return cats;
+            if (!categoryTextCache.TryGetValue(a, out text))
+            {
+                try { text = categoryTextProvider != null ? categoryTextProvider(a) : a.Category; }
+                catch (Exception ex)
+                {
+                    // 分类文本是展示信息：读库失败时退回条目自身分类，不能让绘制线程反复抛异常
+                    Paths.LogError(ex);
+                    text = a.Category;
+                }
+                categoryTextCache[a] = text ?? string.Empty;
+            }
             if (string.IsNullOrEmpty(text)) return cats;
             string[] raw = text.Split(',');
             for (int i = 0; i < raw.Length; i++)
@@ -673,10 +724,15 @@ namespace AppManager.Controls
         private void PaintGrid(Graphics g, Rectangle clip)
         {
             EnsurePaths();
-            for (int i = 0; i < apps.Count; i++)
+            // 只迭代与裁剪区相交的行（±1 行余量覆盖外扩的阴影/悬停），长列表滚动不再整表扫描
+            int cols = Columns();
+            int cellStep = GridItemHeight + GridItemGap;
+            int firstRow = clip.IsEmpty ? 0 : Math.Max(0, (clip.Y - GridItemGap) / cellStep - 1);
+            int lastRow = clip.IsEmpty ? GridRows() - 1 : Math.Min(GridRows() - 1, (clip.Bottom - GridItemGap) / cellStep + 1);
+            int last = Math.Min(apps.Count, (lastRow + 1) * cols) - 1;
+            for (int i = firstRow * cols; i <= last; i++)
             {
                 Rectangle r = GridRect(i);
-                if (!clip.IsEmpty && !clip.IntersectsWith(r)) continue;
                 bool hover = (i == hoverIndex);
 
                 // 默认平面卡片，仅悬停时轻微上浮并显示弱阴影
@@ -729,11 +785,17 @@ namespace AppManager.Controls
 
             int actionReserve = ActionReserveWidth();
 
+            // 只迭代与裁剪区相交的行（±1 行余量覆盖外扩的阴影/悬停），长列表滚动不再整表扫描
+            int top = ListTop + Dpi(ListHeaderH);
+            int rowStep = ListRowH + ListGap;
+            int first = clip.IsEmpty ? 0 : Math.Max(0, (clip.Y - top) / rowStep - 1);
+            int last = clip.IsEmpty ? apps.Count - 1 : Math.Min(apps.Count - 1, (clip.Bottom - top) / rowStep + 1);
+            measureFirst = first; measureLast = last;
+
             // 每条记录独立成卡片，不再合并为整块容器
-            for (int i = 0; i < apps.Count; i++)
+            for (int i = first; i <= last; i++)
             {
                 Rectangle r = ListRowRect(i);
-                if (!clip.IsEmpty && !clip.IntersectsWith(r)) continue;
                 AppInfo a = apps[i];
 
                 // 独立卡片：白底圆角；选中强调色淡底 + 描边，悬停浅灰
@@ -781,6 +843,12 @@ namespace AppManager.Controls
             int textLeft = row.X + 12 + ListIcon + 10;   // 与行内图标右侧的名称起点一致
             int catW = CategoryColumnWidth(g, row.Width);
             int locW = LocationColumnWidth(g, row.Width);
+            // 可见行增量测量让列宽随滚动增长：变宽后整表重绘一次，保证各行与表头列对齐
+            if (catW != paintedCatW || locW != paintedLocW)
+            {
+                paintedCatW = catW; paintedLocW = locW;
+                Invalidate();
+            }
 
             nameRect = Rectangle.Empty;
             timeRect = Rectangle.Empty;
@@ -1309,14 +1377,26 @@ namespace AppManager.Controls
                     List<AppInfo> sel = SelectedApps;
                     if (sel.Count > 0)
                     {
-                        Action<AppInfo> h = DeleteRequested;
-                        if (h != null) h(sel[0]);
+                        Action<List<AppInfo>> batch = DeleteSelectionRequested;
+                        if (batch != null) batch(sel);
+                        else
+                        {
+                            Action<AppInfo> h = DeleteRequested;
+                            if (h != null) h(sel[0]);
+                        }
                     }
                     return true;
                 }
                 if (delta != 0)
                 {
-                    int cur = selected.Count > 0 ? selected[selected.Count - 1] : (delta > 0 ? -1 : apps.Count);
+                    // 没有选中项时，任何方向键都从第 0 项开始；不能按步进量直接落到首行末尾
+                    if (selected.Count == 0)
+                    {
+                        SelectSingle(0);
+                        EnsureVisible(0);
+                        return true;
+                    }
+                    int cur = selected[selected.Count - 1];
                     int next = cur + delta;
                     if (next < 0) next = 0;
                     if (next >= apps.Count) next = apps.Count - 1;
@@ -1418,7 +1498,8 @@ namespace AppManager.Controls
         private void SelectSingle(int index)
         {
             selected.Clear();
-            selected.Add(index);
+            selectedSet.Clear();
+            AddSelected(index);
             selectAnchor = index;
             Invalidate();
         }
@@ -1426,7 +1507,8 @@ namespace AppManager.Controls
         /// <summary>Ctrl 点击：切换单项选中。</summary>
         private void ToggleSelected(int index)
         {
-            if (!selected.Remove(index)) selected.Add(index);
+            if (selectedSet.Remove(index)) selected.Remove(index);
+            else AddSelected(index);
             Invalidate();
         }
 
@@ -1437,8 +1519,14 @@ namespace AppManager.Controls
             int from = Math.Min(selectAnchor, index);
             int to = Math.Max(selectAnchor, index);
             selected.Clear();
-            for (int i = from; i <= to; i++) selected.Add(i);
+            selectedSet.Clear();
+            for (int i = from; i <= to; i++) AddSelected(i);
             Invalidate();
+        }
+
+        private void AddSelected(int index)
+        {
+            if (selectedSet.Add(index)) selected.Add(index);
         }
 
         /// <summary>本次拖动的条目集合：多选且拖动项在选区内时整批携带，否则单选拖动项。</summary>
@@ -1656,7 +1744,8 @@ namespace AppManager.Controls
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            grid.PaintListHeader(e.Graphics, Width);
+            // 与数据行、点击命中同一宽度（网格客户区，不含滚动条）
+            grid.PaintListHeader(e.Graphics, Math.Min(Width, grid.ClientSize.Width));
         }
 
         protected override void OnMouseDown(MouseEventArgs e)

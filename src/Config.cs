@@ -8,11 +8,17 @@ namespace AppManager
 {
     internal static class SafeXml
     {
+        internal const long MaxXmlBytes = 128L * 1024 * 1024;
+
         public static XmlDocument Load(string filePath)
         {
+            FileInfo info = new FileInfo(filePath);
+            if (info.Length > MaxXmlBytes)
+                throw new InvalidDataException("XML 文件超过 128 MB 上限：" + filePath);
             XmlReaderSettings settings = new XmlReaderSettings();
             settings.DtdProcessing = DtdProcessing.Prohibit;
             settings.XmlResolver = null;
+            settings.MaxCharactersInDocument = MaxXmlBytes;
             using (XmlReader reader = XmlReader.Create(filePath, settings))
             {
                 XmlDocument doc = new XmlDocument();
@@ -64,6 +70,30 @@ namespace AppManager
         }
 
         public static string LogFile { get { return Path.Combine(DataDir, "error.log"); } }
+
+        public static string RenameLogFile { get { return Path.Combine(DataDir, "rename.log"); } }
+
+        /// <summary>
+        /// 改名意图日志：磁盘改名前先记意图，资源库保存后再记结果；进程在两者之间中断时，
+        /// 最后一条「改名」行就是未完成的意图（磁盘已改、记录未迁移）。绝不抛出。
+        /// </summary>
+        public static void LogRenameIntent(string stage, string oldPath, string newPath)
+        {
+            try
+            {
+                // 与 error.log 同一口径：只保留最近 5MB；轮转失败也不能影响主流程。
+                FileInfo log = new FileInfo(RenameLogFile);
+                if (log.Exists && log.Length >= 5L * 1024 * 1024)
+                {
+                    string previous = RenameLogFile + ".1";
+                    try { if (File.Exists(previous)) File.Delete(previous); } catch { }
+                    try { File.Move(RenameLogFile, previous); } catch { }
+                }
+                File.AppendAllText(RenameLogFile, string.Format("[{0:yyyy-MM-dd HH:mm:ss}] {1}：{2} => {3}\r\n",
+                    DateTime.Now, stage, oldPath, newPath), System.Text.Encoding.UTF8);
+            }
+            catch { }
+        }
 
         /// <summary>异常写入 error.log，绝不抛出。</summary>
         public static void LogError(Exception ex)
@@ -801,7 +831,7 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 从备份包导入配置；根节点校验失败返回 null（调用方据此中止覆盖，避免脏数据）。
+        /// 从备份包导入配置；根节点或内容校验失败返回 null（调用方据此中止覆盖，避免脏数据）。
         /// </summary>
         public static AppConfig ImportFrom(string filePath)
         {
@@ -811,13 +841,14 @@ namespace AppManager
                 XmlDocument doc = SafeXml.Load(filePath);
                 if (doc.DocumentElement == null || doc.DocumentElement.Name != "AppManagerConfig")
                     return null;
+                AppConfig imported = ReadDocument(doc);
+                return imported.LoadFailed ? null : imported;
             }
             catch (Exception ex)
             {
                 System.Diagnostics.Debug.WriteLine("备份包校验失败: " + ex.Message);
                 return null;
             }
-            return LoadFrom(filePath);
         }
 
         /// <summary>校验导入内容中会参与键结构或磁盘还原的名称；返回 null 表示通过。</summary>
@@ -840,10 +871,10 @@ namespace AppManager
                 if (!resources.Add(name)) return "资源分类“" + name + "”重复。";
             }
             foreach (string name in software)
-                if (name == "全部软件" || name == "常用" || name == "快捷中心")
+                if (CategoryRules.IsAnyReservedName(name))
                     return "软件分类“" + name + "”是系统保留名称。";
             foreach (string name in resources)
-                if (name == "全部资源") return "资源分类“" + name + "”是系统保留名称。";
+                if (CategoryRules.IsAnyReservedName(name)) return "资源分类“" + name + "”是系统保留名称。";
             if (rejectCrossModeDuplicates)
             {
                 foreach (string name in resources)

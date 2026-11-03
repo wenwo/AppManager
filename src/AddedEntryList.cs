@@ -146,6 +146,29 @@ namespace AppManager
             if (pathCache.Count >= 512) pathCache.Clear(); pathCache[path ?? ""] = result;
             return result;
         }
+
+        /// <summary>指定分类下的收录项（含尚未保存的改动）；删除分类时只读这些行，不遍历整张表。</summary>
+        internal List<AddedEntry> InCategory(string category)
+        {
+            List<AddedEntry> result = new List<AddedEntry>();
+            if (string.IsNullOrEmpty(category)) return result;
+            if (Store != null)
+            {
+                using (Sqlite db = new Sqlite(Store.FilePath, true))
+                    foreach (string[] row in db.Query(Columns + " WHERE g.key=? ORDER BY a.id", category))
+                    {
+                        if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
+                        AddedEntry entry = Hydrate(row);
+                        if (entry.Category == category && !result.Contains(entry)) result.Add(entry);
+                    }
+                foreach (AddedEntry entry in Dirty.Values)
+                    if (!Removed.Contains(entry.RecordId) && entry.Category == category && !result.Contains(entry)) result.Add(entry);
+            }
+            foreach (AddedEntry entry in New)
+                if (entry.Category == category && !result.Contains(entry)) result.Add(entry);
+            return result;
+        }
+
         /// <summary>位于指定文件夹之内（不含文件夹自身）的收录项，包括尚未保存的改动。</summary>
         internal List<AddedEntry> EntriesUnder(string folder)
         {

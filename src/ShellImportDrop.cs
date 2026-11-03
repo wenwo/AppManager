@@ -41,6 +41,8 @@ namespace AppManager
                 original = field.GetValue(original);
             }
             native = original as System.Runtime.InteropServices.ComTypes.IDataObject;
+            // DataObject 的 COM SetData 未实现，托管包装不能走原生回写。
+            if (native is DataObject) native = null;
             try
             {
                 IAsyncOperation async = original as IAsyncOperation;

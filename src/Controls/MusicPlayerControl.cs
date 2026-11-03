@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -17,17 +18,24 @@ namespace AppManager.Controls
         public event Action PlaybackStarting;
         public event Action<string, bool> PlaybackStateChanged;
         private enum PlayMode { Sequential, RepeatAll, RepeatOne, Shuffle }
-        private readonly Timer pollTimer = new Timer { Interval = 150 };
+        private const int PlayingPollMs = 150;
+        private const int PausedPollMs = 600;
+        private readonly Timer pollTimer = new Timer { Interval = PlayingPollMs };
         private readonly Random random = new Random();
         private List<string> paths = new List<string>();
         private int index, volume = 60, queueFirst, hover = -1, pressed = -1;
         private MusicTrackInfo track;
+        private Bitmap scaledCover;
+        private Image scaledCoverSource;
+        private int scaledCoverWidth, scaledCoverHeight;
         private List<LyricLine> lyrics = new List<LyricLine>();
         private MpvAudioEngine engine;
         private bool engineUnavailable, fileLoaded, seeking, volumeDrag;
         private bool endedHandled, playing, queueVisible, muted;
         private string failure = "";
         private double duration, position;
+        private double pendingSeek = -1;   // 从迷你播放器展开时，等文件加载完成后再跳转
+        private bool pendingPause;
         private float titleScroll;
         private DateTime loadDeadline;
         private int metadataGeneration;
@@ -76,9 +84,17 @@ namespace AppManager.Controls
 
         public void Open(List<string> audioPaths, int startIndex)
         {
+            Open(audioPaths, startIndex, 0, false);
+        }
+
+        /// <summary>展开迷你播放器时沿用其进度与暂停状态，避免从 0 秒重新播放。</summary>
+        public void Open(List<string> audioPaths, int startIndex, double startPosition, bool startPaused)
+        {
             paths = audioPaths ?? new List<string>();
             if (paths.Count == 0) { RequestClose(); return; }
             index = Math.Max(0, Math.Min(startIndex, paths.Count - 1));
+            pendingSeek = Math.Max(0, startPosition);
+            pendingPause = startPaused;
             queueVisible = false;
             queueFirst = Math.Max(0, index - 4);
             Visible = true;
@@ -194,6 +210,7 @@ namespace AppManager.Controls
                             return;
                         }
                         if (track != null) track.Dispose();
+                        ClearScaledCover();
                         track = loaded;
                         lyrics = loadedLyrics;
                         Invalidate();
@@ -208,11 +225,28 @@ namespace AppManager.Controls
             if (engine == null || index < 0 || index >= paths.Count) return;
             bool loaded = false, error = false, ended = false;
             engine.DrainEvents(ref loaded, ref error, ref ended);
-            if (loaded) fileLoaded = true;
+            if (loaded && !fileLoaded)
+            {
+                fileLoaded = true;
+                if (pendingSeek > 0)
+                {
+                    engine.Seek(pendingSeek);
+                    position = pendingSeek;
+                }
+                pendingSeek = -1;
+                if (pendingPause)
+                {
+                    engine.SetPause(true);
+                    playing = false;
+                }
+                pendingPause = false;
+            }
             if (!fileLoaded && DateTime.UtcNow > loadDeadline)
             {
                 failure = "加载音乐超时";
                 playing = false;
+                pendingSeek = -1;
+                pendingPause = false;
                 engine.Stop();
                 pollTimer.Stop();
                 NotifyPlaybackState();
@@ -223,6 +257,8 @@ namespace AppManager.Controls
             {
                 failure = "无法播放此音乐";
                 playing = false;
+                pendingSeek = -1;
+                pendingPause = false;
                 pollTimer.Stop();
                 NotifyPlaybackState();
                 Invalidate();
@@ -238,14 +274,22 @@ namespace AppManager.Controls
                 HandleEnded();
                 return;
             }
+            double previousPosition = position;
             double value;
             bool flag;
             if (engine.TryGetDouble("duration", out value) && value >= 0) duration = value;
             if (!seeking && engine.TryGetDouble("time-pos", out value) && value >= 0) position = value;
             if (engine.TryGetFlag("pause", out flag)) playing = !flag;
             NotifyPlaybackState();
-            titleScroll += 3F;
-            Invalidate();
+            int interval = playing ? PlayingPollMs : PausedPollMs;
+            if (pollTimer.Interval != interval) pollTimer.Interval = interval;
+            if (playing) titleScroll += 3F;
+            if (playing || Math.Abs(position - previousPosition) > 0.0001)
+            {
+                Rectangle dirty = Rectangle.Union(playerCard, contentRect);
+                dirty.Inflate(4, 4);
+                Invalidate(dirty);
+            }
         }
 
         private void HandleEnded()
@@ -282,6 +326,7 @@ namespace AppManager.Controls
                 if (starting != null) starting();
             }
             engine.SetPause(!playing);
+            pollTimer.Interval = playing ? PlayingPollMs : PausedPollMs;
             pollTimer.Start();
             NotifyPlaybackState();
             Invalidate();
@@ -416,12 +461,8 @@ namespace AppManager.Controls
                 g.SetClip(path);
                 if (track != null && track.Cover != null)
                 {
-                    float scale = Math.Max(coverRect.Width / (float)track.Cover.Width, coverRect.Height / (float)track.Cover.Height);
-                    int width = (int)(track.Cover.Width * scale + 0.5F);
-                    int height = (int)(track.Cover.Height * scale + 0.5F);
-                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(track.Cover, new Rectangle(coverRect.X + (coverRect.Width - width) / 2,
-                        coverRect.Y + (coverRect.Height - height) / 2, width, height));
+                    EnsureScaledCover();
+                    if (scaledCover != null) g.DrawImage(scaledCover, coverRect);
                 }
                 else
                 {
@@ -444,6 +485,53 @@ namespace AppManager.Controls
             }
             g.Restore(state);
             using (Pen pen = new Pen(Color.FromArgb(25, 0, 0, 0))) Draw.DrawRoundedRect(g, pen, coverRect, 18);
+        }
+
+        /// <summary>按当前封面区域缓存高质量缩放结果，避免 150ms 轮询时反复重采样大图。</summary>
+        private void EnsureScaledCover()
+        {
+            Image source = track == null ? null : track.Cover;
+            if (source == null)
+            {
+                ClearScaledCover();
+                return;
+            }
+            if (scaledCover != null && scaledCoverSource == source
+                && scaledCoverWidth == coverRect.Width && scaledCoverHeight == coverRect.Height) return;
+            ClearScaledCover();
+            if (coverRect.Width <= 0 || coverRect.Height <= 0) return;
+            try
+            {
+                Bitmap result = new Bitmap(coverRect.Width, coverRect.Height, PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(result))
+                {
+                    g.Clear(Color.Transparent);
+                    float scale = Math.Max(coverRect.Width / (float)source.Width,
+                        coverRect.Height / (float)source.Height);
+                    int width = (int)(source.Width * scale + 0.5F);
+                    int height = (int)(source.Height * scale + 0.5F);
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+                    g.DrawImage(source, new Rectangle((coverRect.Width - width) / 2,
+                        (coverRect.Height - height) / 2, width, height));
+                }
+                scaledCover = result;
+                scaledCoverSource = source;
+                scaledCoverWidth = coverRect.Width;
+                scaledCoverHeight = coverRect.Height;
+            }
+            catch { ClearScaledCover(); }
+        }
+
+        private void ClearScaledCover()
+        {
+            if (scaledCover != null)
+            {
+                scaledCover.Dispose();
+                scaledCover = null;
+            }
+            scaledCoverSource = null;
+            scaledCoverWidth = scaledCoverHeight = 0;
         }
 
         private void DrawTabs(Graphics g)
@@ -740,8 +828,8 @@ namespace AppManager.Controls
             if (e.Button != MouseButtons.Left) return;
             Focus();
             pressed = HitTest(e.Location);
-            if (pressed == 8) { seeking = true; UpdateSeek(e.X); }
-            else if (pressed == 9) { volumeDrag = true; UpdateVolume(e.X); }
+            if (pressed == 8) { seeking = true; Capture = true; UpdateSeek(e.X); }
+            else if (pressed == 9) { volumeDrag = true; Capture = true; UpdateVolume(e.X); }
             Invalidate();
         }
 
@@ -761,6 +849,12 @@ namespace AppManager.Controls
             else if (action == 4) PlayNext(false);
             else if (action == 5) ToggleMuteFromMiniPlayer();
             else if (action == 6 || action == 7) { queueVisible = action == 7; EnsureQueueCurrentVisible(); Invalidate(); }
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!Capture) seeking = volumeDrag = false;
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
@@ -833,6 +927,7 @@ namespace AppManager.Controls
         private void ClearTrack()
         {
             metadataGeneration++;
+            ClearScaledCover();
             if (track != null) { track.Dispose(); track = null; }
             lyrics = new List<LyricLine>();
         }
@@ -864,8 +959,9 @@ namespace AppManager.Controls
         {
             private const string Dll = "libmpv-2.dll";
             private const int FormatFlag = 3, FormatDouble = 5;
-            private const int EventEndFile = 7, EventFileLoaded = 8;
+            private const int EventStartFile = 6, EventEndFile = 7, EventFileLoaded = 8;
             private IntPtr context;
+            private bool awaitingStart;   // loadfile 之后、START_FILE 之前到达的事件属于上一首
 
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
             private static extern IntPtr mpv_create();
@@ -931,7 +1027,11 @@ namespace AppManager.Controls
                 }
             }
 
-            public void LoadFile(string path) { Command("loadfile", path); }
+            public void LoadFile(string path)
+            {
+                awaitingStart = true;
+                Command("loadfile", path);
+            }
             public void SetPause(bool paused) { SetString("pause", paused ? "yes" : "no"); }
             public void SetVolume(int value) { SetString("volume", value.ToString(CultureInfo.InvariantCulture)); }
             public void SetMute(bool mute) { SetString("mute", mute ? "yes" : "no"); }
@@ -962,6 +1062,8 @@ namespace AppManager.Controls
                     if (eventPointer == IntPtr.Zero) return;
                     MpvEvent mediaEvent = (MpvEvent)Marshal.PtrToStructure(eventPointer, typeof(MpvEvent));
                     if (mediaEvent.EventId == 0) return;
+                    if (mediaEvent.EventId == EventStartFile) { awaitingStart = false; continue; }
+                    if (awaitingStart) continue;   // 上一首遗留的事件不能算到新曲目上
                     if (mediaEvent.EventId == EventFileLoaded) loaded = true;
                     else if (mediaEvent.EventId == EventEndFile && mediaEvent.Data != IntPtr.Zero)
                     {

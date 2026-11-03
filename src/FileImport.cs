@@ -836,19 +836,20 @@ namespace AppManager
                 SaveSoon(batch);
                 if (batch.SpaceLimited) break;
             }
-            DetachRetained(batch);
+            DetachRetained(batch, cancel);
             Save(batch);
         }
 
         // ===== 撤回与恢复 =====
 
         // 仅保源异常路径复制数据；正常同卷移动保持零数据复制。
-        private static void DetachRetained(ImportBatch batch)
+        private static void DetachRetained(ImportBatch batch, CancellationToken cancel = default(CancellationToken))
         {
             foreach (ImportItem item in batch.Items.Where(i => !i.Reference && (i.State == Copied || i.State == DeleteFailed)))
             {
                 foreach (ImportFileStamp stamp in item.Files.Where(f => f.Linked && !f.Deleted))
                 {
+                    if (cancel.IsCancellationRequested) return;
                     string target = At(item, item.Target, stamp.Relative);
                     string temporary = target + ".detach-" + batch.Id;
                     try
@@ -869,7 +870,7 @@ namespace AppManager
                             if (Identity(handle) != stamp.TargetId) throw new IOException("目标文件身份已变化。");
                             independent = new ImportFileStamp { Relative = stamp.Relative, Length = new FileInfo(target).Length,
                                 Modified = File.GetLastWriteTimeUtc(target).Ticks };
-                            Place(target, temporary, independent, false, CancellationToken.None);
+                            Place(target, temporary, independent, false, cancel);
                             MarkDelete(handle);
                         }
                         File.Move(temporary, target);
@@ -877,6 +878,10 @@ namespace AppManager
                         stamp.Length = independent.Length; stamp.Modified = independent.Modified; stamp.Streams = independent.Streams;
                         stamp.DetachedPath = null;
                         if (!item.Folder) item.TargetId = stamp.TargetId;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;   // 保留已写入的临时名，下次恢复时可按 DetachedPath 继续核对
                     }
                     catch (Exception ex)
                     {
@@ -1040,7 +1045,7 @@ namespace AppManager
             File.WriteAllText(Marker(batch), string.Empty);
             CopyAll(batch, progress, cancel);
             if (batch.Operation == ImportOperation.Move && (cancel.IsCancellationRequested || batch.Items.Any(i => i.State == Failed)))
-                DetachRetained(batch);
+                DetachRetained(batch, cancel);
             try { batch.Committed = commit(batch); }
             catch (Exception ex) { batch.Committed = false; batch.Error = "入库记录保存失败：" + ex.Message; }
             batch.DeleteAuthorized = batch.Committed && batch.Items.All(i => i.State == Copied || i.State == Linked || i.State == Skipped);

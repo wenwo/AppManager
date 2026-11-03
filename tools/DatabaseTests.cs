@@ -60,6 +60,7 @@ namespace AppManager
                 Run("metadata sorting covers whole category, both directions and keyset pages", MetadataSorting);
                 Run("offline recovery keeps damaged original and restores validated snapshot", OfflineRecovery);
                 Run("legacy name flags update indexed projection when removed", LegacyFlags);
+                Run("collection first members batch query picks cover candidates and honours hidden", CollectionFirstMembers);
                 if (args.Length > 0 && args[0] == "--scale") Run("300000 items, page plans, single relation update and restart", Scale);
                 if (args.Length == 2 && args[0] == "--verify-copy") Run("current user XML copy migrates without semantic data loss", delegate { VerifyCopy(args[1]); });
             }
@@ -114,6 +115,31 @@ namespace AppManager
         }
         private static long GroupId(ConfigDatabase db, string key)
         { using (Sqlite s = new Sqlite(db.FilePath, true)) return Convert.ToInt64(s.Scalar("SELECT id FROM groups WHERE key=?", key)); }
+
+        /// <summary>4-4：集合封面候选的批量查询与逐集合 Page 的首位成员口径一致，且遵守隐藏过滤。</summary>
+        private static void CollectionFirstMembers()
+        {
+            AppConfig c = Fixture("collection-covers");
+            // 旅行集合：名字更小的非图片成员 + 名字更大的第二张图片
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\aaa-doc.txt", Name = "aaa", Category = "照片", IsResource = true });
+            c.ItemCategories["add:C:\\aaa-doc.txt"] = new List<string> { "col:照片/旅行" };
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\zzz.png", Name = "zzz", Category = "照片", IsResource = true });
+            c.ItemCategories["add:C:\\zzz.png"] = new List<string> { "col:照片/旅行" };
+            c.Collections.Add(new ResourceCollection { Parent = "照片", Name = "空集" });
+            Check(c.Save(), c.DatabaseError);
+            List<string> keys = new List<string> { "col:照片/旅行", "col:照片/空集" };
+            Dictionary<string, AppInfo> images = c.Database.CollectionFirstMembers(keys, true, true);
+            Dictionary<string, AppInfo> first = c.Database.CollectionFirstMembers(keys, true, false);
+            AppInfo dbg; string got = images.TryGetValue("col:照片/旅行", out dbg) ? dbg.TargetPath : "<none:" + images.Count + ">";
+            got += " len=" + got.Length + " keys=" + string.Join("|", images.Keys);
+            Check(images.ContainsKey("col:照片/旅行") && images["col:照片/旅行"].TargetPath == "C:\\image.jpg", "first image member wrong: " + got);
+            Check(first.ContainsKey("col:照片/旅行") && first["col:照片/旅行"].TargetPath == "C:\\aaa-doc.txt", "first member wrong");
+            Check(!images.ContainsKey("col:照片/空集") && !first.ContainsKey("col:照片/空集"), "empty collection yielded a member");
+            // 隐藏首个图片成员后（不显示隐藏项）落到下一张图片
+            c.Hidden.Add("add:C:\\image.jpg"); Check(c.Save(), c.DatabaseError);
+            images = c.Database.CollectionFirstMembers(keys, false, true);
+            Check(images.ContainsKey("col:照片/旅行") && images["col:照片/旅行"].TargetPath == "C:\\zzz.png", "hidden filter ignored");
+        }
         private static void Rename()
         {
             AppConfig c = Fixture("rename"); long parent = GroupId(c.Database, "照片"), collection = GroupId(c.Database, "col:照片/旅行");
@@ -493,6 +519,22 @@ namespace AppManager
             Check(bad.PrepareAmbakImport(local, out dropped) != null, "slash category accepted");
             AppConfig cross = new AppConfig(); cross.CustomCategories.Add("Same"); cross.ResourceCategories.Add("Same");
             Check(cross.PrepareAmbakImport(local, out dropped) != null, "cross-mode duplicate accepted");
+            AppConfig reserved = new AppConfig(); reserved.CustomCategories.Add("全部文件");
+            Check(reserved.PrepareAmbakImport(local, out dropped) != null, "software reserved name accepted");
+            AppConfig reservedResource = new AppConfig(); reservedResource.ResourceCategories.Add("全部文件");
+            Check(reservedResource.PrepareAmbakImport(local, out dropped) != null, "resource category accepted a software reserved name");
+
+            string oversized = Path.Combine(root, "oversized.ambak");
+            try
+            {
+                using (FileStream file = new FileStream(oversized, FileMode.Create, FileAccess.Write, FileShare.None))
+                    file.SetLength(SafeXml.MaxXmlBytes + 1);
+                bool rejected = false;
+                try { SafeXml.Load(oversized); }
+                catch (InvalidDataException) { rejected = true; }
+                Check(rejected && AppConfig.ImportFrom(oversized) == null, "oversized XML was accepted");
+            }
+            finally { try { if (File.Exists(oversized)) File.Delete(oversized); } catch { } }
         }
 
         private static void BulkLookup()

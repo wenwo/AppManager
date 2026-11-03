@@ -303,6 +303,10 @@ namespace AppManager
                         FileImport.Run(batch, delegate { return true; }, delegate(int index, string name) { if (index == 1) cancel.Cancel(); }, cancel.Token);
                     Check(batch.Items[0].State == FileImport.Copied && batch.Items[1].State == FileImport.Failed && !batch.DeleteAuthorized, "cancel states");
                     Check(batch.Items.All(i => File.Exists(i.Source)), "cancel deleted source");
+                    Check(batch.Items[0].Files.All(f => f.Linked), "cancelled detach still copied hard-linked data");
+                    string targetDir = Path.GetDirectoryName(batch.Items[0].Target);
+                    Check(!Directory.Exists(targetDir) || !Directory.GetFiles(targetDir, "*.detach-*", SearchOption.AllDirectories).Any(),
+                        "cancelled detach left a temporary copy");
                 });
                 Test("recovery removes identified duplicates but preserves incomplete staging", delegate
                 {
@@ -401,6 +405,21 @@ namespace AppManager
                         }
                     }
                     finally { if (Directory.Exists(cross)) Directory.Delete(cross, true); }
+                });
+                Test("managed DataObject writes performed drop effect", delegate
+                {
+                    AsyncSource source = new AsyncSource();
+                    DataObject dropped = new DataObject(source);
+                    ShellImportDrop transfer = new ShellImportDrop(dropped);
+                    ImportBatch batch = new ImportBatch {
+                        Committed = true, Operation = ImportOperation.Move };
+                    batch.Items.Add(new ImportItem { State = FileImport.Moved });
+                    transfer.Complete(batch);
+                    object performed = dropped.GetData("Performed DropEffect");
+                    MemoryStream stream = performed as MemoryStream;
+                    Check(stream != null, "drop effect missing");
+                    Check(BitConverter.ToUInt32(stream.ToArray(), 0) == 0,
+                        "wrong effect");
                 });
             }
             finally { Directory.Delete(root, true); }

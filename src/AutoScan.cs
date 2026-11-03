@@ -27,6 +27,8 @@ namespace AppManager
             new System.Collections.Generic.HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly object _knownLock = new object();
         private bool _disposed;
+        private bool _paused;
+        private bool _dirtyWhilePaused;
 
         /// <summary>防抖后触发一次：表示「开始菜单或桌面发生了变化」。</summary>
         public event EventHandler ChangesDetected;
@@ -135,29 +137,50 @@ namespace AppManager
 
         private void OnCreated(object sender, FileSystemEventArgs e)
         {
-            if (IsDesktopShortcut(e.FullPath))
+            bool desktop = IsDesktopWatcher(sender);
+            if (desktop && !DesktopOrganizer.IsShortcutFile(e.FullPath)) return;   // 桌面临时下载文件等变化不触发全量重扫
+            if (desktop && IsDesktopShortcut(e.FullPath))
                 lock (_knownLock) { _knownDesktopShortcuts.Add(e.FullPath); }
             Post(e.FullPath, true);
         }
 
         private void OnRenamed(object sender, RenamedEventArgs e)
         {
+            bool desktop = IsDesktopWatcher(sender);
+            bool oldShortcut = DesktopOrganizer.IsShortcutFile(e.OldFullPath);
+            bool newShortcut = DesktopOrganizer.IsShortcutFile(e.FullPath);
+            if (desktop && !oldShortcut && !newShortcut) return;
             bool wasKnown;
             lock (_knownLock)
             {
-                wasKnown = _knownDesktopShortcuts.Remove(e.OldFullPath);
-                if (IsDesktopShortcut(e.FullPath)) _knownDesktopShortcuts.Add(e.FullPath);
+                wasKnown = oldShortcut && _knownDesktopShortcuts.Remove(e.OldFullPath);
+                if (newShortcut && IsDesktopShortcut(e.FullPath)) _knownDesktopShortcuts.Add(e.FullPath);
             }
             // 重命名一个监听前已存在的桌面快捷方式 ≠ 新出现：不搬运，只触发重扫
             if (wasKnown) Post(string.Empty, false);
-            else Post(e.FullPath, true);
+            else Post(newShortcut ? e.FullPath : string.Empty, newShortcut);
         }
 
         private void OnDeleted(object sender, FileSystemEventArgs e)
         {
+            if (IsDesktopWatcher(sender) && !DesktopOrganizer.IsShortcutFile(e.FullPath)) return;
             lock (_knownLock) { _knownDesktopShortcuts.Remove(e.FullPath); }
             if (ConsumeIgnoredDeletion(e.FullPath)) { return; }
             Post(string.Empty, false);
+        }
+
+        private static bool IsDesktopWatcher(object sender)
+        {
+            FileSystemWatcher w = sender as FileSystemWatcher;
+            if (w == null) return false;
+            return SameDirectory(w.Path, DesktopOrganizer.UserDesktop)
+                || SameDirectory(w.Path, DesktopOrganizer.PublicDesktop);
+        }
+
+        private static bool SameDirectory(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            return string.Equals(a.TrimEnd('\\', '/'), b.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
         }
 
         private void OnWatcherError(object sender, ErrorEventArgs e)
@@ -190,6 +213,7 @@ namespace AppManager
                 {
                     if (!_newDesktopFiles.Contains(path)) { _newDesktopFiles.Add(path); }
                 }
+                if (_paused) { _dirtyWhilePaused = true; return; }
                 _debounce.Stop();
                 _debounce.Start();
             }
@@ -197,6 +221,26 @@ namespace AppManager
             {
                 // 计时器已随窗口释放：忽略
             }
+        }
+
+        /// <summary>暂停重扫通知（桌面整理/还原期间调用，结束后 Resume 合并成一次）。</summary>
+        public void Pause()
+        {
+            if (_disposed) return;
+            // 暂停前已经排队的防抖事件也要在恢复后补发，避免整理期间的最后一次变化丢失。
+            if (_debounce.Enabled) _dirtyWhilePaused = true;
+            _paused = true;
+            _debounce.Stop();
+        }
+
+        /// <summary>恢复通知；暂停期间有变化时补一次防抖重扫。</summary>
+        public void Resume()
+        {
+            if (_disposed || !_paused) return;
+            _paused = false;
+            if (!_dirtyWhilePaused) return;
+            _dirtyWhilePaused = false;
+            _debounce.Start();
         }
 
         /// <summary>是否位于用户桌面 / 公共桌面下的快捷方式（本程序自身入口不算）。</summary>

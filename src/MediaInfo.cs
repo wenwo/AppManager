@@ -75,7 +75,7 @@ namespace AppManager
             if (DateTime.TryParseExact(s, "yyyy:MM:dd HH:mm:ss",
                     CultureInfo.InvariantCulture, DateTimeStyles.None, out t))
                 return t.ToString("yyyy-MM-dd HH:mm:ss");
-            return s;
+            return null;   // 占位/损坏日期不能挡住后续有效字段
         }
 
         // ===== 视频：mp4/mov/m4v 的 mvhd =====
@@ -157,13 +157,17 @@ namespace AppManager
                     if (version == 1)
                     {
                         if (ReadFull(s, buf, 0, 8) < 8) return false;
-                        taken = MvhdEpoch.AddSeconds(ReadU64BE(buf, 0));
+                        ulong seconds = ReadU64BE(buf, 0);
+                        if (seconds == 0) return false;   // 未写入 creation_time 时保持“无拍摄时间”，由调用方回退文件时间
+                        taken = MvhdEpoch.AddSeconds(seconds);
                         return true;
                     }
                     else
                     {
                         if (ReadFull(s, buf, 0, 4) < 4) return false;
-                        taken = MvhdEpoch.AddSeconds(ReadU32BE(buf, 0));
+                        uint seconds = ReadU32BE(buf, 0);
+                        if (seconds == 0) return false;
+                        taken = MvhdEpoch.AddSeconds(seconds);
                         return true;
                     }
                 }

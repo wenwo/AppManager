@@ -279,10 +279,16 @@ namespace AppManager.Controls
         }
 
         /// <summary>滚轮滚动（供主窗体滚轮路由调用）：每次滚动一行，避免集合行高 38px × 系统行数造成跳动过大。</summary>
+        private int wheelRemainder;   // 不足一像素的滚轮累计量（单位：delta × 像素）
+
         public void ScrollByWheel(int delta)
         {
             if (collapsed || delta == 0 || MaxScroll <= 0) return;
-            SetScroll(scrollOffset - (delta / 120) * RowH);
+            // 按像素换算并累计余数：精确式触控板每次 delta 小于 120，整除会得到 0 而完全滚不动
+            wheelRemainder += delta * RowH;
+            int pixels = wheelRemainder / 120;
+            wheelRemainder -= pixels * 120;
+            if (pixels != 0) SetScroll(scrollOffset - pixels);
         }
 
         private void SetScroll(int offset)

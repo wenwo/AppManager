@@ -98,10 +98,11 @@ namespace AppManager
                 try
                 {
                     object value = metadata.GetQuery(query);
-                    if (value != null) return Convert.ToInt32(value);
+                    if (value == null) continue;
+                    int orientation = Convert.ToInt32(value);
+                    if (orientation >= 1 && orientation <= 8) return orientation;
                 }
-                catch (NotSupportedException) { }
-                catch (System.Runtime.InteropServices.COMException) { }
+                catch (Exception) { }   // 元数据缺失、类型异常或越界时回退为未旋转
             }
             return 1;
         }

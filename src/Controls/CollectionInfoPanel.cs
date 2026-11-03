@@ -457,29 +457,41 @@ namespace AppManager.Controls
 
             int cursor = -1;
             int active = Math.Min(3, Math.Max(1, Environment.ProcessorCount / 2));
-            for (int w = 0; w < active; w++)
+            int workers = active;
+            int queued = 0;
+            try
             {
-                ThreadPool.QueueUserWorkItem(delegate
+                for (int w = 0; w < workers; w++)
                 {
-                    try
+                    ThreadPool.QueueUserWorkItem(delegate
                     {
-                        while (true)
+                        try
                         {
-                            int idx = Interlocked.Increment(ref cursor);
-                            if (idx >= total || gen != thumbGen) break;
-                            if (done[idx]) continue;
-                            Bitmap b = null;
-                            try { b = Icons.LoadCoverThumb(paths[idx], ThumbSize, ThumbSize); }
-                            catch { }
-                            if (gen != thumbGen) { if (b != null) b.Dispose(); break; }
-                            if (b != null) PostThumbLoaded(gen, idx, b);
+                            while (true)
+                            {
+                                int idx = Interlocked.Increment(ref cursor);
+                                if (idx >= total || gen != thumbGen) break;
+                                if (done[idx]) continue;
+                                Bitmap b = null;
+                                try { b = Icons.LoadCoverThumb(paths[idx], ThumbSize, ThumbSize); }
+                                catch { }
+                                if (gen != thumbGen) { if (b != null) b.Dispose(); break; }
+                                if (b != null) PostThumbLoaded(gen, idx, b);
+                            }
                         }
-                    }
-                    finally
-                    {
-                        if (Interlocked.Decrement(ref active) == 0) PostThumbLoadDone(gen);
-                    }
-                });
+                        finally
+                        {
+                            if (Interlocked.Decrement(ref active) == 0) PostThumbLoadDone(gen);
+                        }
+                    });
+                    queued++;
+                }
+            }
+            catch
+            {
+                // 线程池拒绝排队时，未启动的 worker 不会执行 finally：预扣计数，避免一直显示“加载中”
+                if (queued < workers && Interlocked.Add(ref active, -(workers - queued)) == 0)
+                    PostThumbLoadDone(gen);
             }
         }
 

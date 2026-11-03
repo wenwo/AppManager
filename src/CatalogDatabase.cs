@@ -268,7 +268,7 @@ namespace AppManager
         }
 
         // 游标翻页，不使用深 OFFSET。name/id 为稳定次序，防止同名条目跨页重复或漏读。
-        internal CatalogPage Page(string category, bool resources, bool showHidden, string keyword, int limit, CatalogPage after, bool byName, bool descending, string sortColumn = null)
+        internal CatalogPage Page(string category, bool resources, bool showHidden, string keyword, int limit, CatalogPage after, bool byName, bool descending, string sortColumn = null, string[] extensions = null)
         {
             if (limit < 1 || limit > 500) throw new ArgumentOutOfRangeException("limit");
             bool search = !string.IsNullOrEmpty(keyword);
@@ -301,7 +301,22 @@ namespace AppManager
                     where = "l.group_id=? AND " + (resources ? "l.kind=2" : "l.kind=0") + (showHidden ? "" : " AND l.hidden=0");
                     args.Add(categoryGroup);
                 }
-                result.Total = after == null ? Convert.ToInt32(db.Scalar("SELECT count(*) FROM " + (search ? "catalog c" : "listing l") + " WHERE " + where, args.ToArray())) : after.Total;
+                if (extensions != null && extensions.Length > 0)
+                {
+                    // 先按扩展名收窄再解包 XML：曲库等场景不需要把整个分类的条目都反序列化一遍。
+                    StringBuilder filter = new StringBuilder(" AND (");
+                    for (int i = 0; i < extensions.Length; i++)
+                    {
+                        if (i > 0) filter.Append(" OR ");
+                        filter.Append("c.metadata LIKE ?");
+                        args.Add("%" + extensions[i] + "\"%");
+                    }
+                    filter.Append(")");
+                    where += filter.ToString();
+                }
+                string countFrom = extensions != null && extensions.Length > 0
+                    ? from : (search ? "catalog c" : "listing l");
+                result.Total = after == null ? Convert.ToInt32(db.Scalar("SELECT count(*) FROM " + countFrom + " WHERE " + where, args.ToArray())) : after.Total;
                 string name = search ? "c.search_name" : "l.name";
                 string itemId = search ? "c.item_id" : "l.item_id";
                 string rank = metadataSort ? (search ? "c." : "l.") + (sortColumn == "size" ? "size" : "modified") : (search || byName ? "0" : "l.rank");
@@ -330,6 +345,60 @@ namespace AppManager
                 }
                 return result;
             }
+        }
+
+        /// <summary>
+        /// 集合侧边栏封面的批量查询：一次 GROUP BY 取每个集合按（名称, item_id）排序的首个成员（与 Page 的
+        /// 摘要次序一致），替代逐集合分页查询。imagesOnly 时先按图片扩展名收窄；返回集合键到成员的映射，
+        /// 空集合不出现在结果里。SQLite 恰好一个 MIN 聚合时裸列取达到最小值那一行的值。
+        /// </summary>
+        internal Dictionary<string, AppInfo> CollectionFirstMembers(IList<string> collectionKeys, bool showHidden, bool imagesOnly)
+        {
+            Dictionary<string, AppInfo> result = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+            if (collectionKeys == null || collectionKeys.Count == 0) return result;
+            StringBuilder ids = new StringBuilder();
+            lock (gate)
+            {
+                foreach (string key in collectionKeys)
+                {
+                    long id;
+                    if (!groups.TryGetValue(key, out id)) continue;
+                    if (ids.Length > 0) ids.Append(',');
+                    ids.Append(id);   // 内部自增 id，不是用户输入，直接拼接
+                }
+            }
+            if (ids.Length == 0) return result;
+            List<object> args = new List<object>();
+            string where = "l.group_id IN (" + ids + ") AND l.kind=2" + (showHidden ? "" : " AND l.hidden=0");
+            if (imagesOnly)
+            {
+                // 与 Page 的扩展名过滤同口径：先收窄再解包 XML
+                StringBuilder filter = new StringBuilder(" AND (");
+                string[] extensions = MediaRules.ImageExt;
+                for (int i = 0; i < extensions.Length; i++)
+                {
+                    if (i > 0) filter.Append(" OR ");
+                    filter.Append("c.metadata LIKE ?");
+                    args.Add("%" + extensions[i] + "\"%");
+                }
+                filter.Append(")");
+                where += filter.ToString();
+            }
+            using (Sqlite db = Open())
+            {
+                foreach (string[] row in db.Query(
+                    "SELECT gl.key,c.metadata,c.hidden,g.key,MIN(l.name || char(31) || printf('%020d', l.item_id)) FROM listing l"
+                    + " JOIN catalog c ON c.item_id=l.item_id LEFT JOIN groups g ON g.id=c.base_group JOIN groups gl ON gl.id=l.group_id"
+                    + " WHERE " + where + " GROUP BY l.group_id", args.ToArray()))
+                {
+                    AppInfo a = Unpack(row[1]);
+                    a.IsHidden = row[2] == "1";
+                    if (row[3] != null) a.Category = row[3];
+                    a.DatabaseKind = 2;
+                    result[row[0]] = a;
+                }
+            }
+            return result;
         }
 
         // 文件元数据分批索引，目录切换和分页不触发全分类同步读盘。

@@ -94,6 +94,7 @@ namespace AppManager
         private readonly HashSet<string> coverFailed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private bool selfTestRunning;   // 设置页自测防重入
+        private bool importBackupRunning;   // 备份包解析/校验防重入
         private bool desktopOperationRunning;
         private bool moveIntoFolderRunning;
         private FormWindowState preTrayWindowState = FormWindowState.Normal;   // 收托盘前的窗口状态（用于恢复最大化）
@@ -515,6 +516,8 @@ namespace AppManager
             if (m.Msg == WM_MOUSEMOVE && (Control.MouseButtons == MouseButtons.None || resizingWindow))
                 SetResizeCursorFromChild(m.HWnd);
             if (m.Msg != WM_MOUSEWHEEL) return false;
+            // 只路由发往主窗口的滚轮：模态对话框（属性、数据维护等）叠在侧栏上方时，滚轮属于对话框，不能被侧栏吞掉
+            if (!IsMainWindowMessage(m.HWnd)) return false;
             long lp = m.LParam.ToInt64();
             Point screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
             int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
@@ -738,7 +741,8 @@ namespace AppManager
             // 侧栏空白区可拖动窗体
             sidebar.MouseDown += delegate(object s, MouseEventArgs e)
             {
-                if (e.Button == MouseButtons.Left && sidebar.IsBlankArea(e.Location))
+                // 最大化（铺满工作区的自定义最大化）与全屏时不能拖动，否则窗口被拖离却仍处于“最大化”状态
+                if (e.Button == MouseButtons.Left && !IsFormMaximized && !playerFullscreen && sidebar.IsBlankArea(e.Location))
                 {
                     ReleaseCapture();
                     SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
@@ -751,6 +755,7 @@ namespace AppManager
             grid.MenuRequested += OnContextMenu;
             grid.RenameRequested += RenameAddedEntry;
             grid.DeleteRequested += OnGridRowRemove;   // 集合内=移除（仅移出该集合）；分类/全部资源=删除
+            grid.DeleteSelectionRequested += OnGridSelectionRemove;   // 键盘 Delete：一次处理全部选中项
             grid.CategoryTextProvider = GetCategoryText;
             grid.ReorderRequested += OnGridReorder;
             grid.DragMoved += OnGridDragMoved;
@@ -767,6 +772,11 @@ namespace AppManager
             // 列表栏位表头：盖在网格顶部的固定条（独立 HWND 不参与滚动），根治滚动时列名晃动/穿模
             headerStrip = new ListHeaderStrip(grid);
             Controls.Add(headerStrip);
+            // 滚动条出现/消失会改变网格客户区宽度：表头条随之同步，保持与数据列对齐
+            grid.ClientSizeChanged += delegate
+            {
+                if (headerStrip != null && headerStrip.Width != grid.ClientSize.Width) headerStrip.Width = grid.ClientSize.Width;
+            };
 
             // 集合侧边栏：资源分类的第二级内嵌栏（全部 + 自定义集合 + 新建），单击选中/双击进入/右键编辑删除
             collectionSidebar = new CollectionSidebar();
@@ -784,7 +794,7 @@ namespace AppManager
             // 集合侧边栏空白区可拖动窗体（行/底部按钮/滚动条除外）
             collectionSidebar.MouseDown += delegate(object s, MouseEventArgs e)
             {
-                if (e.Button == MouseButtons.Left && collectionSidebar.IsBlankArea(e.Location))
+                if (e.Button == MouseButtons.Left && !IsFormMaximized && !playerFullscreen && collectionSidebar.IsBlankArea(e.Location))
                 {
                     ReleaseCapture();
                     SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
@@ -1079,9 +1089,10 @@ namespace AppManager
             int gridH = Math.Max(0, gridHeight - Dpi(ContentFooterH));
             grid.Location = new Point(contentX, top);
             grid.Size = new Size(contentW, gridH);
-            // 表头固定条与网格同宽、贴其顶部（覆盖网格顶部表头死区，不参与滚动）
+            // 表头固定条贴网格顶部（覆盖网格顶部表头死区，不参与滚动）；宽度取网格客户区（不含竖向滚动条），
+            // 与数据行、表头点击命中区同一宽度，也不会盖住滚动条顶部
             headerStrip.Location = grid.Location;
-            headerStrip.Size = new Size(contentW, Dpi(AppGridControl.ListHeaderH));
+            headerStrip.Size = new Size(grid.ClientSize.Width, Dpi(AppGridControl.ListHeaderH));
             Point contentLoc = new Point(contentX, top);
             imageViewer.Location = contentLoc;
             imageViewer.Size = new Size(contentW, gridHeight);
@@ -1174,8 +1185,8 @@ namespace AppManager
 
         private void UpdateRegion()
         {
-            // 最大化时窗口与屏幕边缘贴合；Region 回退路径下需取消圆角，避免四角留缺口
-            if ((IsFormMaximized || playerFullscreen) && !IsWindows11OrGreater())
+            // 最大化/全屏时窗口与屏幕边缘贴合；Region 与 DWM 圆角都应取消，避免四角留缺口
+            if (IsFormMaximized || playerFullscreen)
             {
                 Region = null;
                 return;
@@ -1204,7 +1215,13 @@ namespace AppManager
                 }
             }
             catch { }
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, DpiHelper.Scale(12, DpiHelper.ForControl(f)))); } catch { }
+            try
+            {
+                using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle,
+                    DpiHelper.Scale(12, DpiHelper.ForControl(f))))
+                    f.Region = new Region(path);
+            }
+            catch { }
         }
 
         /// <summary>通过 RtlGetVersion 判断是否为 Windows 11（Build ≥ 22000）。</summary>
@@ -2242,10 +2259,10 @@ namespace AppManager
 
         /// <summary>右键「删除」二次确认：文件进回收站可恢复，但收录记录与归属配置会一并清理；
         /// 多选时合并为一次确认并提示数量（对齐资源管理器）。</summary>
-        private void ConfirmDeleteEntriesDisk(List<AppInfo> apps)
+        private bool ConfirmDeleteEntriesDisk(List<AppInfo> apps)
         {
             List<AppInfo> valid = DeletableEntries(apps);
-            if (valid.Count == 0) return;
+            if (valid.Count == 0) return false;
             bool permanent = false;
             foreach (AppInfo app in valid)
                 if (!Launcher.CanUseRecycleBin(app.TargetPath)) { permanent = true; break; }
@@ -2255,8 +2272,9 @@ namespace AppManager
             msg += permanent
                 ? "\n\n警告：选中的位置没有可用回收站，将继续永久删除，无法恢复。"
                 : "\n文件将移入回收站，可恢复；如系统无法放入回收站，会先再次确认。";
-            if (!ConfirmDialog.Show("删除文件", msg)) return;
+            if (!ConfirmDialog.Show("删除文件", msg)) return false;
             DeleteEntriesDisk(valid);
+            return true;
         }
 
         /// <summary>过滤出可实际删除的条目：自建收录且磁盘上仍存在。</summary>
@@ -2532,7 +2550,7 @@ namespace AppManager
             {
                 AppInfo a = apps[i];
                 if (a == null || string.IsNullOrEmpty(a.Key)) continue;
-                if (isCollection && !CanJoinResourceCategory(a, col.Parent)) continue;
+                if (isCollection && !CanJoinResourceCategory(a, col.Parent)) { mismatched++; continue; }
                 if (InCategory(a, category)) continue;
                 // 拖到侧栏分类 / 批量「加入分类」同样受资源分类类型约束（照片只收图片……），与导入一致
                 if (!isCollection && !FitsTargetCategory(a, category)) { mismatched++; continue; }
@@ -2547,8 +2565,9 @@ namespace AppManager
                     rollback.Add(delegate { CollectionOps.RemoveMember(config, a.Key, category); });
                 }
             }
+            string hintCategory = isCollection ? col.Parent : category;
             string skippedText = mismatched == 0 ? null
-                : (changed ? "已跳过 " + mismatched + " 个类型不符的项目：" : "未加入：") + MediaRules.CategoryTypeHint(category);
+                : (changed ? "已跳过 " + mismatched + " 个类型不符的项目：" : "未加入：") + MediaRules.CategoryTypeHint(hintCategory);
             if (!changed)
             {
                 if (skippedText != null) ShowNotice(skippedText);
@@ -2722,7 +2741,8 @@ namespace AppManager
         private List<CollectionSidebar.Item> BuildCollectionItems()
         {
             List<CollectionSidebar.Item> list = new List<CollectionSidebar.Item>();
-            List<AppInfo> pool = config.Database == null ? VisibleResourcePool(currentCategory) : new List<AppInfo>();
+            List<AppInfo> pool = config.Database == null ? VisibleResourcePool(currentCategory) : null;
+            if (config.Database != null) EnsureCollectionCovers(currentCategory);
             CollectionSidebar.Item all = new CollectionSidebar.Item();
             all.IsAll = true;
             all.Key = string.Empty;
@@ -2739,16 +2759,23 @@ namespace AppManager
                 AppInfo firstImage = null;
                 if (config.Database != null)
                 {
-                    CatalogPage summary = DatabaseSummary(it.Key);
-                    pool = summary.Items;
+                    // 批量缓存的封面候选：首个图片成员（跳过封面解码失败的），失败时回退首个成员
+                    AppInfo image;
+                    if (collectionCoverImages.TryGetValue(it.Key, out image)
+                        && !IsCoverFailed(image.TargetPath, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize))
+                        firstImage = image;
+                    if (firstImage == null) first = CollectionCoverFallback(it.Key);
                 }
-                for (int j = 0; j < pool.Count; j++)
+                else
                 {
-                    if (!IsInExtraCategory(pool[j], it.Key)) continue;
-                    if (first == null) first = pool[j];   // 兜底：无可用图片成员时用首个成员版式化
-                    if (IsImageMember(pool[j]) && !IsCoverFailed(pool[j].TargetPath,
-                        CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize))
-                    { firstImage = pool[j]; break; }   // 跳过已损坏图片，尝试后续成员
+                    for (int j = 0; j < pool.Count; j++)
+                    {
+                        if (!IsInExtraCategory(pool[j], it.Key)) continue;
+                        if (first == null) first = pool[j];   // 兜底：无可用图片成员时用首个成员版式化
+                        if (IsImageMember(pool[j]) && !IsCoverFailed(pool[j].TargetPath,
+                            CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize))
+                        { firstImage = pool[j]; break; }   // 跳过已损坏图片，尝试后续成员
+                    }
                 }
                 it.Cover = BuildCover(c, firstImage ?? first, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize);
                 list.Add(it);
@@ -3298,7 +3325,7 @@ namespace AppManager
                 ? CategoryRules.ResourceBuiltIn.Concat(config.ResourceCategories)
                 : CategoryRules.BuiltIn.Concat(config.CustomCategories))
                 if (string.Equals(item, name, StringComparison.OrdinalIgnoreCase)) return true;
-            string[] pseudo = resource ? new string[] { "全部资源" } : new string[] { "全部软件", "常用", "快捷中心" };
+            string[] pseudo = resource ? CategoryRules.ResourceReservedNames : CategoryRules.SoftwareReservedNames;
             foreach (string item in pseudo)
                 if (string.Equals(item, name, StringComparison.OrdinalIgnoreCase)) return true;
             return false;
@@ -3437,6 +3464,13 @@ namespace AppManager
                 config.ItemOrder[name] = config.ItemOrder[oldName];
                 config.ItemOrder.Remove(oldName);
             }
+            // 视图模式按分类名记忆：改名后一并迁移，避免新名字丢失网格/列表偏好
+            bool viewMode;
+            if (config.CategoryViewMode.TryGetValue(oldName, out viewMode))
+            {
+                config.CategoryViewMode[name] = viewMode;
+                config.CategoryViewMode.Remove(oldName);
+            }
             if (!resource)
             {
                 for (int i = 0; i < config.SidebarOrder.Count; i++)
@@ -3460,30 +3494,41 @@ namespace AppManager
         {
             if (!ConfirmDialog.Show("删除分类", "确认删除分类「" + category + "」？\n该分类下的条目将回归默认分类。")) return;
             bool resource = contentMode == SidebarControl.ContentMode.Website;
+            List<string> collectionCovers = new List<string>();
+            if (resource)
+                foreach (ResourceCollection c in config.Collections)
+                    if (c.Parent == category && !string.IsNullOrEmpty(c.Cover)) collectionCovers.Add(c.Cover);
             if (resource) config.ResourceCategories.Remove(category);
             else config.CustomCategories.Remove(category);
             List<string> keys = new List<string>(config.CategoryOverride.Keys);
             foreach (string k in keys)
                 if (config.CategoryOverride[k] == category) config.CategoryOverride.Remove(k);
-            foreach (AddedEntry e in config.AddedItems)
-                if (e.Category == category)
-                    e.Category = resource ? "文件" : CategoryRules.Classify(Path.GetFileName(e.Path));
+            // 只查询该分类下的条目：分类删除不应在 UI 线程遍历整张 added_items 表
+            foreach (AddedEntry e in config.AddedItems.InCategory(category))
+                e.Category = resource ? "文件" : CategoryRules.Classify(Path.GetFileName(e.Path));
             // 清理指向已删分类的额外归属记录
             foreach (List<string> extra in config.ItemCategories.Values)
                 extra.Remove(category);
             foreach (List<string> excluded in config.ExcludedCategories.Values)
                 excluded.Remove(category);
             config.ItemOrder.Remove(category);
+            config.CategoryViewMode.Remove(category);
             config.CategoryIconNames.Remove(CategoryIconKey(category));
             RemoveLegacyCategoryIconIfUnused(category);
             if (!resource) config.SidebarOrder.Remove(category);
             // 清理该分类下的集合定义与成员归属键，避免留下无法进入的孤儿集合
             if (resource) CollectionOps.RemoveByParent(config, category);
-            config.Save();
+            if (!config.Save())
+            {
+                MessageBox.Show(this, "删除分类未能保存。\n" + config.DatabaseError, "删除分类",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                RefreshGrid();
+                return;
+            }
             if (currentCategory == category) currentCategory = resource ? "全部资源" : "全部软件";
+            foreach (string cover in collectionCovers) DeleteManagedCoverIfUnused(cover, null);
             RebuildSidebar();
-            sidebar.SetActive(currentCategory);
-            RefreshGrid();
+            OnSidebarSelect(currentCategory);   // 同步侧栏选中、视图模式、添加按钮可见性与列表
         }
 
         private void UpdateCount(int shown, int total)
@@ -3729,7 +3774,7 @@ namespace AppManager
                     do
                     {
                         page = config.Database.Page(key.Length == 0 ? (resources ? "全部资源" : "全部文件") : key,
-                            resources, config.ShowHidden, "", 500, page, true, false);
+                            resources, config.ShowHidden, "", 500, page, true, false, null, MediaRules.AudioExt);
                         foreach (AppInfo app in page.Items)
                             if (!app.IsFolder && MediaRules.IsAudio(app.TargetPath) && File.Exists(app.TargetPath) && seen.Add(app.TargetPath)) songs.Add(app.TargetPath);
                     } while (page.Items.Count > 0);
@@ -3797,14 +3842,18 @@ namespace AppManager
 
         private void ExpandMiniMusicPlayer(int songIndex)
         {
-            List<string> songs = MiniMusicSongs(miniMusic.CollectionKey);
+            // 沿用迷你播放器当前列表、进度和暂停态：重新查询可能改变排序，导致标题与下标对不上
+            List<string> songs = miniMusic.SongPaths;
+            if (songs.Count == 0) songs = MiniMusicSongs(miniMusic.CollectionKey);
             if (songs.Count == 0) return;
             songIndex = Math.Max(0, Math.Min(songIndex, songs.Count - 1));
+            double position = miniMusic.Position;
+            bool paused = !miniMusic.IsPlaying;
             miniMusic.Stop();
             HideOtherViewers(musicPlayer);
             grid.Visible = false;
             musicPlayer.BringToFront();
-            musicPlayer.Open(songs, songIndex);
+            musicPlayer.Open(songs, songIndex, position, paused);
         }
 
         private void ShowMusicPlayer(AppInfo app)
@@ -3924,7 +3973,7 @@ namespace AppManager
                 items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
                 items.Add(MkSep());
                 // 只读全集分类：以「加入」方式把条目多归属到其它分类（原归属与「全部」中的条目均不变）
-                items.Add(MkSubMenu(website ? "移动到分类…" : "添加到默认分类…", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
+                items.Add(MkSubMenu(website ? "添加到分类…" : "添加到默认分类…", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
                 if (!website)
                     items.Add(MkSubMenu("添加到自定义…", BuildAddCategoryItems(app, true)));
                 AddDeleteMenu(items, app);
@@ -4021,7 +4070,7 @@ namespace AppManager
                 items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
                 items.Add(MkSep());
                 // 只读全集分类：以「加入」方式多归属到资源分类
-                items.Add(MkSubMenu("移动到分类…", BuildResourceAddItems(targets)));
+                items.Add(MkSubMenu("添加到分类…", BuildResourceAddItems(targets)));
                 if (AnyDeletableEntry(targets))
                     items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
                 return;
@@ -4245,10 +4294,25 @@ namespace AppManager
 
         private bool InCustom(AppInfo app)
         {
+            // 在当前自定义分类中看菜单时，只判断该分类；在「全部/搜索」等聚合视图中判断任意自定义归属
+            if (config.CustomCategories.Contains(currentCategory)) return InCustomCategory(app, currentCategory);
+            if (app == null) return false;
             string ov;
-            if (config.CategoryOverride.TryGetValue(app.Key, out ov))
-                return config.CustomCategories.Contains(ov);
+            if (config.CategoryOverride.TryGetValue(app.Key, out ov) && config.CustomCategories.Contains(ov)) return true;
+            List<string> extra;
+            if (!string.IsNullOrEmpty(app.Key) && config.ItemCategories.TryGetValue(app.Key, out extra))
+                for (int i = 0; i < extra.Count; i++)
+                    if (config.CustomCategories.Contains(extra[i])) return true;
             return false;
+        }
+
+        private bool InCustomCategory(AppInfo app, string category)
+        {
+            if (app == null || string.IsNullOrEmpty(category)) return false;
+            string ov;
+            if (config.CategoryOverride.TryGetValue(app.Key, out ov) && ov == category) return true;
+            List<string> extra;
+            return !string.IsNullOrEmpty(app.Key) && config.ItemCategories.TryGetValue(app.Key, out extra) && extra.Contains(category);
         }
 
         private bool AnyInCustom(List<AppInfo> apps)
@@ -4532,8 +4596,7 @@ namespace AppManager
                 MessageBox.Show(error, "添加到自定义", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            if (!config.CustomCategories.Contains(name)) config.CustomCategories.Add(name);
-            config.CategoryIconNames[CategoryIconKey(name)] = edit.Icon.ToString();
+            EnsureCustomCategory(name, edit.Icon);
             AddItemToCategory(app, name);
             RebuildSidebar();
             RefreshGrid();
@@ -4552,41 +4615,56 @@ namespace AppManager
                 MessageBox.Show(error, "添加到自定义", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            if (!config.CustomCategories.Contains(name)) config.CustomCategories.Add(name);
-            config.CategoryIconNames[CategoryIconKey(name)] = edit.Icon.ToString();
+            EnsureCustomCategory(name, edit.Icon);
             RebuildSidebar();
             AddItemsToCategory(apps, name);
         }
 
+        /// <summary>确保自定义分类存在；已存在时保留原图标，避免「添加到自定义」静默覆盖用户设置。</summary>
+        private void EnsureCustomCategory(string name, CategoryIconKind icon)
+        {
+            if (config.CustomCategories.Contains(name)) return;
+            config.CustomCategories.Add(name);
+            config.CategoryIconNames[CategoryIconKey(name)] = icon.ToString();
+        }
+
         private void RemoveFromCustom(AppInfo app)
         {
-            if (!ConfirmDialog.Show("从自定义移除", "确认将此应用从自定义分类移除？")) return;
-            string ov;
-            if (config.CategoryOverride.TryGetValue(app.Key, out ov)
-                && config.CustomCategories.Contains(ov))
-            {
-                config.CategoryOverride.Remove(app.Key);
-                app.Category = CategoryRules.Classify(app.Name);
-                config.Save();
-                RefreshGrid();
-            }
+            if (app == null) return;
+            List<AppInfo> one = new List<AppInfo>();
+            one.Add(app);
+            RemoveFromCustom(one);
         }
 
         private void RemoveFromCustom(List<AppInfo> apps)
         {
             if (apps == null || apps.Count == 0) return;
             if (!ConfirmDialog.Show("从自定义移除", "确认将选中的 " + apps.Count + " 个项目从自定义分类移除？")) return;
+            // 在某个自定义分类中只移除该分类归属；在全部/搜索等聚合视图中移除所有自定义归属
+            bool scoped = config.CustomCategories.Contains(currentCategory);
             bool changed = false;
             for (int i = 0; i < apps.Count; i++)
             {
                 AppInfo app = apps[i];
                 if (app == null) continue;
                 string ov;
-                if (!config.CategoryOverride.TryGetValue(app.Key, out ov)
-                    || !config.CustomCategories.Contains(ov)) continue;
-                config.CategoryOverride.Remove(app.Key);
-                app.Category = CategoryRules.Classify(app.Name);
-                changed = true;
+                if (config.CategoryOverride.TryGetValue(app.Key, out ov)
+                    && config.CustomCategories.Contains(ov) && (!scoped || ov == currentCategory))
+                {
+                    config.CategoryOverride.Remove(app.Key);
+                    app.Category = CategoryRules.Classify(app.Name);
+                    changed = true;
+                }
+                if (scoped)
+                {
+                    if (CollectionOps.RemoveMember(config, app.Key, currentCategory)) changed = true;
+                    continue;
+                }
+                List<string> extra;
+                if (!config.ItemCategories.TryGetValue(app.Key, out extra)) continue;
+                List<string> custom = extra.FindAll(delegate(string value) { return config.CustomCategories.Contains(value); });
+                foreach (string category in custom)
+                    if (CollectionOps.RemoveMember(config, app.Key, category)) changed = true;
             }
             if (!changed) return;
             config.Save();
@@ -5228,6 +5306,29 @@ namespace AppManager
             DeleteAddedEntry(app);
         }
 
+        /// <summary>键盘 Delete：与行按钮同语义，但集合内一次移出全部选中项，磁盘删除也只确认一次。</summary>
+        private void OnGridSelectionRemove(List<AppInfo> apps)
+        {
+            if (apps == null || apps.Count == 0) return;
+            if (contentMode == SidebarControl.ContentMode.Website)
+            {
+                if (currentCollection != null && !SearchActive)
+                {
+                    RemoveItemsFromCategory(apps, currentCollection);
+                    return;
+                }
+                List<AppInfo> disk = DeletableEntries(apps);
+                if (disk.Count > 0 && !ConfirmDeleteEntriesDisk(disk)) return;
+                HashSet<string> diskPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (AppInfo a in disk) if (a != null && a.TargetPath != null) diskPaths.Add(a.TargetPath);
+                List<AppInfo> records = new List<AppInfo>();
+                foreach (AppInfo a in apps) if (a != null && !diskPaths.Contains(a.TargetPath ?? "")) records.Add(a);
+                if (records.Count > 0) DeleteAddedEntries(records);
+                return;
+            }
+            DeleteAddedEntries(apps);
+        }
+
         /// <summary>
         /// 可“从当前分类移除”的目标：当前分类可编辑，且（搜索态下）条目确实属于当前分类。
         /// 搜索结果是全局的，对不在该分类的条目写排除记录会让它以后被悄悄隐藏。
@@ -5245,19 +5346,42 @@ namespace AppManager
         private void DeleteAddedEntry(AppInfo app)
         {
             if (app == null) return;
-            if (!ConfirmDialog.Show("删除条目", "确认删除「" + app.Name + "」？\n（仅移除记录，不删除磁盘文件）")) return;
-            bool removed = false;
-            foreach (AddedEntry e in config.AddedItems.ByPath(app.TargetPath))
+            List<AppInfo> one = new List<AppInfo>();
+            one.Add(app);
+            DeleteAddedEntries(one);
+        }
+
+        /// <summary>批量移除收录记录（不动磁盘文件）：一次确认、一次保存、一次刷新。</summary>
+        private void DeleteAddedEntries(List<AppInfo> apps)
+        {
+            List<AppInfo> valid = new List<AppInfo>();
+            HashSet<string> paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (AppInfo app in apps)
             {
-                if (string.Equals(e.Path, app.TargetPath, StringComparison.OrdinalIgnoreCase))
+                if (app == null || string.IsNullOrEmpty(app.TargetPath)) continue;
+                if (!paths.Add(app.TargetPath)) continue;
+                if (config.AddedItems.ByPath(app.TargetPath).Count > 0) valid.Add(app);
+            }
+            if (valid.Count == 0) return;
+            string msg = valid.Count == 1
+                ? "确认删除「" + valid[0].Name + "」？\n（仅移除记录，不删除磁盘文件）"
+                : "确认删除这 " + valid.Count + " 个条目？\n（仅移除记录，不删除磁盘文件）";
+            if (!ConfirmDialog.Show("删除条目", msg)) return;
+            bool removed = false;
+            foreach (AppInfo app in valid)
+            {
+                foreach (AddedEntry e in config.AddedItems.ByPath(app.TargetPath))
                 {
-                    config.AddedItems.Remove(e);
-                    removed = true;
+                    if (string.Equals(e.Path, app.TargetPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        config.AddedItems.Remove(e);
+                        removed = true;
+                    }
                 }
+                // 该路径的收录记录已全部移除：以 add:路径 为键的收藏、隐藏、分类覆盖、额外归属、排序一并清理，不留残留
+                PurgeEntryKeys(app.TargetPath, "add:" + app.TargetPath);
             }
             if (!removed) return;
-            // 该路径的收录记录已全部移除：以 add:路径 为键的收藏、隐藏、分类覆盖、额外归属、排序一并清理，不留残留
-            PurgeEntryKeys(app.TargetPath, "add:" + app.TargetPath);
             InvalidateAddedIndex();
             config.Save();
             StartScan(false);
@@ -5343,6 +5467,7 @@ namespace AppManager
             desktopOperationRunning = true;
             organizeBtn.Enabled = false;
             ShowStatusBar(status, 0, 0);
+            if (autoScan != null) autoScan.Pause();   // 整理过程中大量文件变动只登记，结束后合并一次重扫
             AppConfig cfg = config;
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -5357,6 +5482,7 @@ namespace AppManager
                 {
                     desktopOperationRunning = false;
                     organizeBtn.Enabled = true;
+                    if (autoScan != null) autoScan.Resume();
                     HideStatusBar();
                     ReportBatchSaveFailure(cfg, saveError);
                     if (failure != null)
@@ -5644,64 +5770,107 @@ namespace AppManager
             }
         }
 
-        /// <summary>导入备份包（.ambak）：校验通过后整库覆盖；覆盖前自动备份当前配置。</summary>
+        /// <summary>导入备份包（.ambak）：后台校验通过并确认后整库覆盖；覆盖前自动备份当前配置。</summary>
         private void ImportBackup()
         {
+            if (importBackupRunning) return;
+            string filePath;
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
                 dlg.Title = "导入备份包";
                 dlg.Filter = "应用中心备份包 (*.ambak)|*.ambak|所有文件 (*.*)|*.*";
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                AppConfig imported = AppConfig.ImportFrom(dlg.FileName);
-                if (imported == null)
-                {
-                    MessageBox.Show("备份包无效或已损坏，已中止导入。", "导入备份包",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                int droppedDesktop;
-                string validation = imported.PrepareAmbakImport(config, out droppedDesktop);
-                if (validation != null)
-                {
-                    MessageBox.Show("备份包内容不安全或名称无效，已中止导入：\n" + validation, "导入备份包",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                if (!ConfirmDialog.Show("导入备份包",
-                    "导入将整库覆盖当前配置（分类、收录条目、网址、排序、桌面备份清单）。\n" +
-                    "存储位置会保留本机设置。" +
-                    (droppedDesktop > 0 ? "\n有 " + droppedDesktop + " 条桌面收纳记录不属于当前收纳目录，将被忽略。" : "") +
-                    "\n导入前会自动备份当前配置。确认继续？")) return;
-
-                string bak = config.BackupSnapshot();
-                if (bak == null)
-                {
-                    MessageBox.Show("无法备份当前配置，已中止导入。", "导入备份包",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                if (!imported.Save("import.ambak"))
-                {
-                    MessageBox.Show(this, "导入未保存：" + imported.DatabaseError, "导入备份包", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                config = imported;
-                BindDatabaseErrors();
-                InvalidateAddedIndex();   // 整库覆盖：旧索引对应旧 config，必须重建
-                scanner = new Scanner(config);
-                organizer = new DesktopOrganizer(config);
-                currentCategory = "全部软件";
-                RebuildSidebar();
-                sidebar.SetActive(currentCategory);
-                RestoreViewToggle(GetCategoryGridMode(currentCategory));
-                grid.GridMode = GetCategoryGridMode(currentCategory);
-                SyncHeaderStrip();
-                addBtn.Visible = CanEditCategory(currentCategory);
-                LayoutControls();
-                ReloadLibrary();
-                MessageBox.Show("导入完成，已还原至备份包状态。\n原配置已备份至：\n" + bak, "导入备份包",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                filePath = dlg.FileName;
             }
+            importBackupRunning = true;
+            ShowStatusBar("正在校验备份包…", 0, 0);
+            AppConfig localPaths = new AppConfig
+            {
+                ManageRootPath = config.ManageRootPath,
+                FolderStorePath = config.FolderStorePath,
+                FileStorePath = config.FileStorePath,
+                ResourceStorePath = config.ResourceStorePath
+            };
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                AppConfig imported = null;
+                string validation = null;
+                int droppedDesktop = 0;
+                Exception failure = null;
+                try
+                {
+                    imported = AppConfig.ImportFrom(filePath);
+                    if (imported != null)
+                        validation = imported.PrepareAmbakImport(localPaths, out droppedDesktop);
+                }
+                catch (Exception ex)
+                {
+                    failure = ex;
+                    Paths.LogError(ex);
+                }
+                RunOnUi(delegate
+                {
+                    importBackupRunning = false;
+                    HideStatusBar();
+                    if (failure != null)
+                    {
+                        MessageBox.Show(this, "导入失败：" + failure.Message, "导入备份包",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        return;
+                    }
+                    if (imported == null)
+                    {
+                        MessageBox.Show("备份包无效或已损坏，已中止导入。", "导入备份包",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (validation != null)
+                    {
+                        MessageBox.Show("备份包内容不安全或名称无效，已中止导入：\n" + validation, "导入备份包",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (!ConfirmDialog.Show("导入备份包",
+                        "导入将整库覆盖当前配置（分类、收录条目、网址、排序、桌面备份清单）。\n" +
+                        "存储位置会保留本机设置。" +
+                        (droppedDesktop > 0 ? "\n有 " + droppedDesktop + " 条桌面收纳记录不属于当前收纳目录，将被忽略。" : "") +
+                        "\n导入前会自动备份当前配置。确认继续？")) return;
+
+                    // 校验期间设置可能已变化，保存前再取一次当前存储位置。
+                    imported.ManageRootPath = config.ManageRootPath;
+                    imported.FolderStorePath = config.FolderStorePath;
+                    imported.FileStorePath = config.FileStorePath;
+                    imported.ResourceStorePath = config.ResourceStorePath;
+                    string bak = config.BackupSnapshot();
+                    if (bak == null)
+                    {
+                        MessageBox.Show("无法备份当前配置，已中止导入。", "导入备份包",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (!imported.Save("import.ambak"))
+                    {
+                        MessageBox.Show(this, "导入未保存：" + imported.DatabaseError, "导入备份包", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    config = imported;
+                    BindDatabaseErrors();
+                    InvalidateAddedIndex();   // 整库覆盖：旧索引对应旧 config，必须重建
+                    scanner = new Scanner(config);
+                    organizer = new DesktopOrganizer(config);
+                    currentCategory = "全部软件";
+                    RebuildSidebar();
+                    sidebar.SetActive(currentCategory);
+                    RestoreViewToggle(GetCategoryGridMode(currentCategory));
+                    grid.GridMode = GetCategoryGridMode(currentCategory);
+                    SyncHeaderStrip();
+                    addBtn.Visible = CanEditCategory(currentCategory);
+                    LayoutControls();
+                    ReloadLibrary();
+                    MessageBox.Show("导入完成，已还原至备份包状态。\n原配置已备份至：\n" + bak, "导入备份包",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                });
+            });
         }
 
         /// <summary>换列表后统一刷新：后台重扫（完成后自行刷新网格与图标），UI 线程不再同步扫描。</summary>

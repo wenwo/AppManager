@@ -345,18 +345,35 @@ namespace AppManager
             string cut = Source("cut.txt", "cut"), cutKey = "add:" + cut;
             string offline = Source("offline\\keep.txt", "keep"), offlineKey = "add:" + offline;
             string paste = Source("paste.txt", "paste"), pasteKey = "add:" + paste;
-            foreach (string path in new[] { cut, offline, paste }) c.AddedItems.Add(new AddedEntry { Path = path, Category = "资料", IsResource = true });
+            string flap = Source("flap.txt", "flap"), flapKey = "add:" + flap;
+            foreach (string path in new[] { cut, offline, paste, flap }) c.AddedItems.Add(new AddedEntry { Path = path, Category = "资料", IsResource = true });
             c.Favorites.Add(cutKey); c.ItemCategories[cutKey] = new List<string> { Collection }; Save(c);
             using (MainForm form = Form(c, true))
             {
                 AppInfo a = new AppInfo { Key = cutKey, TargetPath = cut, Name = "cut", IsFile = true, Category = "资料" };
                 AppInfo b = new AppInfo { Key = offlineKey, TargetPath = offline, Name = "keep", IsFile = true, Category = "资料" };
-                Invoke(form, "WatchMoveOut", new List<AppInfo> { a, b }, DateTime.MaxValue);
+                AppInfo f = new AppInfo { Key = flapKey, TargetPath = flap, Name = "flap", IsFile = true, Category = "资料" };
+                Invoke(form, "WatchMoveOut", new List<AppInfo> { a, b, f }, DateTime.MaxValue);
                 Invoke(form, "CheckMoveOuts");
                 Check(c.AddedItems.ByPath(cut).Count == 1, "purged while the source is still in place");
                 File.Move(cut, Path.Combine(scope, "elsewhere.txt"));                                  // 被资源管理器移走
                 Directory.Move(Path.GetDirectoryName(offline), Path.Combine(scope, "offline-gone"));   // 所在目录也不可用：视为卷离线
+                string flapAway = Path.Combine(scope, "flap-away.txt");
+                File.Move(flap, flapAway);
                 Invoke(form, "CheckMoveOuts");
+                Check(c.AddedItems.ByPath(cut).Count == 1 && c.AddedItems.ByPath(flap).Count == 1,
+                    "entry was purged after a single missing check");
+
+                // 文件重新出现即清零，随后必须再连续缺失两次才清理
+                File.Move(flapAway, flap);
+                Invoke(form, "CheckMoveOuts");
+                Check(c.AddedItems.ByPath(cut).Count == 0 && c.AddedItems.ByPath(flap).Count == 1,
+                    "missing counter did not reset when the source returned");
+                File.Move(flap, Path.Combine(scope, "flap-away-2.txt"));
+                Invoke(form, "CheckMoveOuts");
+                Check(c.AddedItems.ByPath(flap).Count == 1, "entry was purged after a single missing check");
+                Invoke(form, "CheckMoveOuts");
+                Check(c.AddedItems.ByPath(flap).Count == 0, "entry survived two consecutive missing checks");
 
                 // 本应用剪切后粘贴回应用：按「移动到分类」改归属，剪切随之结束
                 Type stateType = typeof(MainForm).GetNestedType("CutState", BindingFlags.NonPublic);
@@ -370,6 +387,7 @@ namespace AppManager
             }
             AppConfig read = Reload();
             Check(read.AddedItems.ByPath(cut).Count == 0 && !read.Favorites.Contains(cutKey) && !read.ItemCategories.ContainsKey(cutKey), "moved-out entry not purged");
+            Check(read.AddedItems.ByPath(flap).Count == 0, "transient then moved-out entry not purged");
             Check(read.AddedItems.ByPath(offline).Count == 1, "entry purged although its folder is unavailable");
             string category; Check(read.CategoryOverride.TryGetValue(pasteKey, out category) && category == "另一分类" && File.Exists(paste), "in-app paste did not move the category");
             Check(read.Database.Page("资料", true, true, "", 10, null, true, false).Total == 1, "moved item still listed in the original category");

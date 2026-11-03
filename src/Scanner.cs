@@ -397,7 +397,7 @@ namespace AppManager
         private static readonly string[] NonAppNameFragments = new string[]
         {
             "release note", "faq", "manual", "documentation", "readme", "website",
-            "getting started", "install additional", "uninstall", "卸载", "帮助", "使用说明", "说明文档"
+            "getting started", "install additional", "帮助", "使用说明", "说明文档"
         };
 
         /// <summary>
@@ -935,15 +935,15 @@ namespace AppManager
                     {
                         if (a == null || string.IsNullOrEmpty(a.Name)) continue;
                         w.WriteStartElement("app");
-                        w.WriteAttributeString("name", a.Name);
-                        if (!string.IsNullOrEmpty(a.TargetPath)) w.WriteAttributeString("target", a.TargetPath);
-                        if (!string.IsNullOrEmpty(a.ShortcutPath)) w.WriteAttributeString("shortcut", a.ShortcutPath);
-                        if (!string.IsNullOrEmpty(a.InstallLocation)) w.WriteAttributeString("install", a.InstallLocation);
-                        if (!string.IsNullOrEmpty(a.UninstallString)) w.WriteAttributeString("uninstall", a.UninstallString);
-                        if (!string.IsNullOrEmpty(a.DisplayIcon)) w.WriteAttributeString("icon", a.DisplayIcon);
-                        if (!string.IsNullOrEmpty(a.Category)) w.WriteAttributeString("category", a.Category);
-                        if (!string.IsNullOrEmpty(a.Source)) w.WriteAttributeString("source", a.Source);
-                        if (!string.IsNullOrEmpty(a.Key)) w.WriteAttributeString("key", a.Key);
+                        WriteSafeAttribute(w, "name", a.Name);
+                        if (!string.IsNullOrEmpty(a.TargetPath)) WriteSafeAttribute(w, "target", a.TargetPath);
+                        if (!string.IsNullOrEmpty(a.ShortcutPath)) WriteSafeAttribute(w, "shortcut", a.ShortcutPath);
+                        if (!string.IsNullOrEmpty(a.InstallLocation)) WriteSafeAttribute(w, "install", a.InstallLocation);
+                        if (!string.IsNullOrEmpty(a.UninstallString)) WriteSafeAttribute(w, "uninstall", a.UninstallString);
+                        if (!string.IsNullOrEmpty(a.DisplayIcon)) WriteSafeAttribute(w, "icon", a.DisplayIcon);
+                        if (!string.IsNullOrEmpty(a.Category)) WriteSafeAttribute(w, "category", a.Category);
+                        if (!string.IsNullOrEmpty(a.Source)) WriteSafeAttribute(w, "source", a.Source);
+                        if (!string.IsNullOrEmpty(a.Key)) WriteSafeAttribute(w, "key", a.Key);
                         if (a.IsUwp) w.WriteAttributeString("uwp", "1");
                         if (a.IsDesktop) w.WriteAttributeString("desktop", "1");
                         if (a.IsFile) w.WriteAttributeString("file", "1");
@@ -957,6 +957,41 @@ namespace AppManager
                 else File.Move(tmp, path);
             }
             catch (Exception ex) { Paths.LogError(ex); }
+        }
+
+        private static void WriteSafeAttribute(XmlWriter writer, string name, string value)
+        {
+            writer.WriteAttributeString(name, XmlSafe(value));
+        }
+
+        /// <summary>移除 XML 1.0 不允许的控制字符，避免一个非法字符让整份扫描缓存写入失败。</summary>
+        private static string XmlSafe(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value ?? string.Empty;
+            StringBuilder safe = null;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (XmlConvert.IsXmlChar(c))
+                {
+                    if (safe != null) safe.Append(c);
+                    continue;
+                }
+                if (char.IsHighSurrogate(c) && i + 1 < value.Length
+                    && XmlConvert.IsXmlSurrogatePair(c, value[i + 1]))
+                {
+                    if (safe != null) { safe.Append(c); safe.Append(value[i + 1]); }
+                    i++;
+                    continue;
+                }
+                if (safe == null)
+                {
+                    safe = new StringBuilder(value.Length);
+                    safe.Append(value, 0, i);
+                }
+                safe.Append(' ');
+            }
+            return safe == null ? value : safe.ToString();
         }
     }
 }

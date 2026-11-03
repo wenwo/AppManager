@@ -574,7 +574,7 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 还原单条：副本模式先核对原件，原件仍在才清理备份副本（进回收站）；
+        /// 还原单条：副本模式先核对原件，原件仍在且内容一致才清理备份副本（进回收站）；
         /// 原件已丢失则按搬家逻辑移回。搬家模式把备份项移回原位置。
         /// 返回是否已处理（备份缺失或移动不完整时保留清单项）。
         /// </summary>
@@ -601,6 +601,12 @@ namespace AppManager
                         if (originalExists)
                         {
                             if (!backupExists) return true;
+                            if (!SameCopyContent(e))
+                            {
+                                Debug.WriteLine("还原失败: 原件与备份内容不一致，未删除副本 " + e.CurrentPath);
+                                LastRestoreError = "原件与备份内容不一致，已保留备份：" + e.CurrentPath;
+                                return false;
+                            }
                             if (!Launcher.CanUseRecycleBin(e.CurrentPath))
                             {
                                 Debug.WriteLine("还原失败: 该位置没有可用回收站，未永久删除副本 " + e.CurrentPath);
@@ -642,6 +648,90 @@ namespace AppManager
                 }
             }
         }
+
+        /// <summary>副本还原前核对两份内容；任何无法完整读取或安全比较的情况都返回 false，保留备份。</summary>
+        private static bool SameCopyContent(DesktopBackupEntry entry)
+        {
+            try
+            {
+                return entry.IsDir
+                    ? SameDirectoryContent(entry.OriginalPath, entry.CurrentPath, 0)
+                    : SameFileContent(entry.OriginalPath, entry.CurrentPath);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("副本内容核对失败，保留备份: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static bool SameDirectoryContent(string original, string backup, int depth)
+        {
+            if (depth > 64 || !Directory.Exists(original) || !Directory.Exists(backup)) return false;
+            if (IsReparsePoint(original) || IsReparsePoint(backup)) return false;
+
+            string[] originalFiles = Directory.GetFiles(original);
+            string[] backupFiles = Directory.GetFiles(backup);
+            if (originalFiles.Length != backupFiles.Length) return false;
+            Array.Sort(originalFiles, StringComparer.OrdinalIgnoreCase);
+            Array.Sort(backupFiles, StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < originalFiles.Length; i++)
+            {
+                if (!string.Equals(Path.GetFileName(originalFiles[i]), Path.GetFileName(backupFiles[i]), StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (!SameFileContent(originalFiles[i], backupFiles[i])) return false;
+            }
+
+            string[] originalDirs = Directory.GetDirectories(original);
+            string[] backupDirs = Directory.GetDirectories(backup);
+            if (originalDirs.Length != backupDirs.Length) return false;
+            Array.Sort(originalDirs, StringComparer.OrdinalIgnoreCase);
+            Array.Sort(backupDirs, StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < originalDirs.Length; i++)
+            {
+                if (!string.Equals(Path.GetFileName(originalDirs[i]), Path.GetFileName(backupDirs[i]), StringComparison.OrdinalIgnoreCase))
+                    return false;
+                if (!SameDirectoryContent(originalDirs[i], backupDirs[i], depth + 1)) return false;
+            }
+            return true;
+        }
+
+        private static bool SameFileContent(string original, string backup)
+        {
+            if (!File.Exists(original) || !File.Exists(backup)) return false;
+            if (IsReparsePoint(original) || IsReparsePoint(backup)) return false;
+            if (new FileInfo(original).Length != new FileInfo(backup).Length) return false;
+
+            const int bufferSize = 64 * 1024;
+            byte[] originalBuffer = new byte[bufferSize];
+            byte[] backupBuffer = new byte[bufferSize];
+            using (FileStream left = new FileStream(original, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan))
+            using (FileStream right = new FileStream(backup, FileMode.Open, FileAccess.Read, FileShare.Read, bufferSize, FileOptions.SequentialScan))
+            {
+                for (;;)
+                {
+                    int leftRead = ReadBlock(left, originalBuffer);
+                    int rightRead = ReadBlock(right, backupBuffer);
+                    if (leftRead != rightRead) return false;
+                    if (leftRead == 0) return true;
+                    for (int i = 0; i < leftRead; i++)
+                        if (originalBuffer[i] != backupBuffer[i]) return false;
+                }
+            }
+        }
+
+        private static int ReadBlock(FileStream stream, byte[] buffer)
+        {
+            int total = 0;
+            while (total < buffer.Length)
+            {
+                int read = stream.Read(buffer, total, buffer.Length - total);
+                if (read <= 0) break;
+                total += read;
+            }
+            return total;
+        }
+
         internal static bool IsManagedBackupPath(string path)
         {
             if (string.IsNullOrEmpty(path)) return false;
@@ -660,21 +750,22 @@ namespace AppManager
             string full = path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             if (string.Equals(root, full, StringComparison.OrdinalIgnoreCase)) return false;
             if (!(full + Path.DirectorySeparatorChar).StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) return false;
-            return !HasReparsePoint(root, full);
+            return !HasReparsePointBelow(root, full);
         }
 
-        private static bool HasReparsePoint(string root, string path)
+        /// <summary>检查 root 之下（不含 root 自身）是否有重解析点；root 本身是 junction 时仍视为可信起点。</summary>
+        private static bool HasReparsePointBelow(string root, string path)
         {
             string current = path;
             while (!string.IsNullOrEmpty(current))
             {
+                if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) return false;
                 try
                 {
                     if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return true;
                 }
                 catch (FileNotFoundException) { }
                 catch (DirectoryNotFoundException) { }
-                if (string.Equals(current, root, StringComparison.OrdinalIgnoreCase)) return false;
                 string parent = Path.GetDirectoryName(current);
                 if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.OrdinalIgnoreCase)) return false;
                 current = parent.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -704,16 +795,19 @@ namespace AppManager
 
         internal static bool IsSafeRestoreTarget(string path)
         {
-            if (string.IsNullOrEmpty(path) || !Path.IsPathRooted(path) || path.Length < 3
-                || path[1] != ':' || (path[2] != '\\' && path[2] != '/') || path.IndexOf(':', 2) >= 0)
-                return false;
+            if (string.IsNullOrEmpty(path) || !Path.IsPathRooted(path)) return false;
             try
             {
-                SafeDirectory.EnsureNoLinks(path);
                 string full = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                bool drive = full.Length >= 3 && full[1] == ':' && (full[2] == '\\' || full[2] == '/');
+                bool unc = full.StartsWith("\\\\", StringComparison.Ordinal) || full.StartsWith("//", StringComparison.Ordinal);
+                if (!drive && !unc) return false;
+                // 拒绝 NTFS 备用数据流；UNC 路径中任何冒号都属于非法文件名
+                if (full.IndexOf(':', drive ? 2 : 0) >= 0) return false;
                 string user = Path.GetFullPath(UserDesktop).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                 string shared = Path.GetFullPath(PublicDesktop).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-                return IsStrictChildOf(user, full) || IsStrictChildOf(shared, full);
+                string root = IsStrictChildOf(user, full) ? user : (IsStrictChildOf(shared, full) ? shared : null);
+                return root != null && !HasReparsePointBelow(root, full);
             }
             catch { return false; }
         }

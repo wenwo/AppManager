@@ -12,7 +12,7 @@ namespace AppManager
     /// <summary>
     /// 导出：复制/剪切到剪贴板、拖出到其它程序，语义对齐资源管理器。
     /// 剪贴板只放文件列表与首选效果，由粘贴方（资源管理器等）执行复制或移动；
-    /// 剪切与移动拖出是否完成以磁盘为准：源文件消失且所在目录仍在，才视为已移出并清理条目。
+    /// 剪切与移动拖出是否完成以磁盘为准：源文件连续两次消失且所在目录仍在，才视为已移出并清理条目。
     /// 不实现「粘贴成功后由来源删除」：目标只复制时源文件保留，失败方向是多一份文件而不是丢文件。
     /// </summary>
     public partial class MainForm
@@ -27,6 +27,7 @@ namespace AppManager
             public AppInfo App;
             public string Path;
             public DateTime Expires;
+            public int MissingChecks;
         }
 
         /// <summary>当前剪贴板上由本应用放入的剪切内容。</summary>
@@ -242,8 +243,16 @@ namespace AppManager
             for (int i = moveOutWatches.Count - 1; i >= 0; i--)
             {
                 MoveOutWatch watch = moveOutWatches[i];
-                if (SourceMovedAway(watch.Path)) { moved.Add(watch.App); moveOutWatches.RemoveAt(i); }
-                else if (now >= watch.Expires) moveOutWatches.RemoveAt(i);
+                if (SourceMovedAway(watch.Path))
+                {
+                    // 资源管理器跨盘移动存在短暂的“源已删、目标未写完”，连续两次缺失才清理。
+                    if (++watch.MissingChecks >= 2) { moved.Add(watch.App); moveOutWatches.RemoveAt(i); }
+                }
+                else
+                {
+                    watch.MissingChecks = 0;
+                    if (now >= watch.Expires) moveOutWatches.RemoveAt(i);
+                }
             }
             if (moveOutWatches.Count == 0 && moveOutTimer != null) moveOutTimer.Stop();
             if (moved.Count == 0) return;

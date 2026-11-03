@@ -80,7 +80,7 @@ namespace AppManager
             for (int i = 0; i < items.Count; i++)
                 h += items[i].Separator ? 9 : ItemH;
             ClientSize = new Size(width, h);
-            try { Region = new Region(Draw.RoundedPath(ClientRectangle, S(12))); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(ClientRectangle, S(12))) Region = new Region(path); } catch { }
             if (!isSubmenu)
             {
                 // 仅根菜单持有收起定时器：光标离开级联链后延时收起子菜单
@@ -599,7 +599,25 @@ namespace AppManager
             f.ClientSize = new Size(400, 200);
             f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
+            f.KeyPreview = true;
+            f.KeyDown += delegate(object sender, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    result = false;
+                    f.DialogResult = DialogResult.Cancel;
+                    f.Close();
+                    e.Handled = true;
+                }
+                else if (e.KeyCode == Keys.Enter)
+                {
+                    result = true;
+                    f.DialogResult = DialogResult.OK;
+                    f.Close();
+                    e.Handled = true;
+                }
+            };
+            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -728,7 +746,7 @@ namespace AppManager
             form.BackColor = Theme.Card;
             form.ShowInTaskbar = false;
             form.KeyPreview = true;
-            try { form.Region = new Region(Draw.RoundedPath(form.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(form.ClientRectangle, 18)) form.Region = new Region(path); } catch { }
             form.Paint += delegate(object sender, PaintEventArgs e)
             {
                 Graphics graphics = e.Graphics;
@@ -836,7 +854,7 @@ namespace AppManager
             form.ClientSize = new Size(420, 324);
             form.BackColor = Theme.Card;
             form.ShowInTaskbar = false;
-            try { form.Region = new Region(Draw.RoundedPath(form.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(form.ClientRectangle, 18)) form.Region = new Region(path); } catch { }
             form.Paint += delegate(object sender, PaintEventArgs e)
             {
                 Graphics graphics = e.Graphics;
@@ -967,7 +985,7 @@ namespace AppManager
             f.ClientSize = new Size(400, 218 + extra);
             f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -1092,7 +1110,7 @@ namespace AppManager
             f.ClientSize = new Size(400, 260);
             f.BackColor = Theme.Background;
             f.ShowInTaskbar = false;
-            try { f.Region = new Region(Draw.RoundedPath(f.ClientRectangle, 18)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -1611,7 +1629,7 @@ namespace AppManager
             return Encoding.ASCII.GetString(value).Trim('\0', ' ');
         }
 
-        /// <summary>EXIF 时间统一为「yyyy-MM-dd HH:mm:ss」；解析失败时保留原始文本。</summary>
+        /// <summary>EXIF 时间统一为「yyyy-MM-dd HH:mm:ss」；占位/解析失败返回 null，让后续字段回退。</summary>
         private static string ExifDate(byte[] value)
         {
             string s = ExifAscii(value);
@@ -1619,7 +1637,7 @@ namespace AppManager
             if (DateTime.TryParseExact(s, "yyyy:MM:dd HH:mm:ss", CultureInfo.InvariantCulture,
                     DateTimeStyles.None, out t))
                 return t.ToString("yyyy-MM-dd HH:mm:ss");
-            return s;
+            return null;
         }
 
         /// <summary>GPS 度分秒（3 组有理数）换算为十进制度；非法数据返回 NaN。</summary>

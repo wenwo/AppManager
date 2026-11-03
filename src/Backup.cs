@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
@@ -75,6 +76,7 @@ namespace AppManager
                     bool preRestore = id.StartsWith("_prerestore_", StringComparison.Ordinal);
                     if (id.StartsWith("_", StringComparison.Ordinal) && !preRestore) { continue; }
                     if (id.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) { continue; }
+                    if (id.EndsWith(".old", StringComparison.OrdinalIgnoreCase)) { continue; }
                     try { SafeDirectory.EnsureNoLinks(dir); }
                     catch (IOException) { continue; }
                     catch (UnauthorizedAccessException) { continue; }
@@ -176,6 +178,7 @@ namespace AppManager
                 try
                 {
                     Directory.CreateDirectory(RootDir);
+                    CleanupTemporaryDirectories();
 
                     string stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
                     string dirId = stamp;
@@ -192,9 +195,16 @@ namespace AppManager
                     Directory.CreateDirectory(temp);
 
                     string showName = string.IsNullOrEmpty(name) ? DefaultName() : name.Trim();
-                    WriteSnapshot(temp, showName, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-
-                    Directory.Move(temp, target);
+                    try
+                    {
+                        WriteSnapshot(temp, showName, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                        Directory.Move(temp, target);
+                    }
+                    catch
+                    {
+                        TryDeleteDirectory(temp);   // 失败的半成品不能留在备份目录里
+                        throw;
+                    }
                     id = dirId;
                     return true;
                 }
@@ -266,6 +276,7 @@ namespace AppManager
             {
                 try
                 {
+                    CleanupTemporaryDirectories();
                     string target = Path.Combine(RootDir, id);
                     string metaFile = Path.Combine(target, "meta.xml");
                     if (!File.Exists(metaFile))
@@ -281,7 +292,12 @@ namespace AppManager
                     string temp = target + ".tmp";
                     if (Directory.Exists(temp)) { Directory.Delete(temp, true); }
                     Directory.CreateDirectory(temp);
-                    WriteSnapshot(temp, showName, created);
+                    try { WriteSnapshot(temp, showName, created); }
+                    catch
+                    {
+                        TryDeleteDirectory(temp);
+                        throw;
+                    }
 
                     // 先把旧备份整体挪到 .old 留底，再换入新快照；换入失败则回滚，任何时刻都有一份完整备份
                     string old = target + ".old";
@@ -497,6 +513,28 @@ namespace AppManager
             }
         }
 
+        /// <summary>清理上次中断留下的 .tmp 半成品目录；调用方必须持有 OperationSync。</summary>
+        private static void CleanupTemporaryDirectories()
+        {
+            try
+            {
+                if (!Directory.Exists(RootDir)) return;
+                foreach (string dir in Directory.EnumerateDirectories(RootDir))
+                {
+                    string name = Path.GetFileName(dir);
+                    if (!name.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)) continue;
+                    TryDeleteDirectory(dir);
+                }
+            }
+            catch (Exception ex) { Paths.LogError(ex); }
+        }
+
+        private static void TryDeleteDirectory(string dir)
+        {
+            try { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+            catch (Exception ex) { Paths.LogError(ex); }
+        }
+
         public static bool Delete(string id, out string error)
         {
             error = null;
@@ -608,7 +646,7 @@ namespace AppManager
             BackColor = Theme.Background;
             ClientSize = new Size(620, 486);
             KeyPreview = true;
-            try { Region = new Region(Draw.RoundedPath(ClientRectangle, Theme.CornerRadius)); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(ClientRectangle, Theme.CornerRadius)) Region = new Region(path); } catch { }
 
             int pad = 24;
             list = new ListBox();

@@ -40,6 +40,10 @@ namespace AppManager.Controls
 
         public string CollectionKey { get { return collectionKey; } }
         public int CurrentIndex { get { return index; } }
+        public double Position { get { return position; } }
+        public bool IsPlaying { get { return playing; } }
+        /// <summary>当前播放列表快照：展开到完整播放器时复用同一顺序，避免重新查询导致下标错位。</summary>
+        public List<string> SongPaths { get { return new List<string>(paths); } }
 
         public MiniMusicPlayerControl()
         {
@@ -469,7 +473,9 @@ namespace AppManager.Controls
         private sealed class MiniMpvEngine : IDisposable
         {
             private const string Dll = "libmpv-2.dll";
+            private const int EventStartFile = 6, EventEndFile = 7;
             private IntPtr context;
+            private bool awaitingStart;   // loadfile 之后、START_FILE 之前到达的事件属于上一首
 
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern IntPtr mpv_create();
             [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] private static extern int mpv_initialize(IntPtr context);
@@ -513,7 +519,11 @@ namespace AppManager.Controls
                 catch { Dispose(); throw; }
             }
 
-            public void LoadFile(string path) { Command("loadfile", path); }
+            public void LoadFile(string path)
+            {
+                awaitingStart = true;
+                Command("loadfile", path);
+            }
             public void SetPause(bool paused) { mpv_set_property_string(context, "pause", paused ? "yes" : "no"); }
             public void SetVolume(int value) { mpv_set_property_string(context, "volume", value.ToString(CultureInfo.InvariantCulture)); }
             public void SetMute(bool mute) { mpv_set_property_string(context, "mute", mute ? "yes" : "no"); }
@@ -543,7 +553,9 @@ namespace AppManager.Controls
                     if (pointer == IntPtr.Zero) return;
                     MpvEvent mediaEvent = (MpvEvent)Marshal.PtrToStructure(pointer, typeof(MpvEvent));
                     if (mediaEvent.EventId == 0) return;
-                    if (mediaEvent.EventId != 7 || mediaEvent.Data == IntPtr.Zero) continue;
+                    if (mediaEvent.EventId == EventStartFile) { awaitingStart = false; continue; }
+                    if (awaitingStart) continue;   // 上一首遗留的事件不能算到新曲目上
+                    if (mediaEvent.EventId != EventEndFile || mediaEvent.Data == IntPtr.Zero) continue;
                     MpvEventEndFile end = (MpvEventEndFile)Marshal.PtrToStructure(mediaEvent.Data, typeof(MpvEventEndFile));
                     if (end.Reason == 0) ended = true;
                     else if (end.Reason == 4) error = true;

@@ -30,6 +30,7 @@ namespace AppManager.Controls
         private string failureText = "无法加载此文件，请使用外部查看器打开";
         private readonly PreviewLoader<Image> loader;
         private readonly RoundButton externalButton;
+        private readonly System.Windows.Forms.Timer zoomTimer;
 
         // 缩放/平移：DisplayScale = fitScale * zoomFactor，zoomFactor=1 表示「适应窗口」
         private float fitScale = 1F;
@@ -39,6 +40,7 @@ namespace AppManager.Controls
         private int wheelRemainder;    // 高精度滚轮余量累积（delta 不足一档时不丢缩放）
         private Point panStart;
         private PointF panOrigin;
+        private bool zooming;          // 连续缩放期间用低质量插值，停手后再补一次高质量绘制
 
         // 界面按钮悬停/按下态：-1 无；0 上一张 1 缩小 2 比例 3 放大 4 下一张 5 返回
         private int hover = -1;
@@ -77,6 +79,8 @@ namespace AppManager.Controls
             TabStop = true;
             Visible = false;
             loader = new PreviewLoader<Image>(this);
+            zoomTimer = new System.Windows.Forms.Timer { Interval = 180 };
+            zoomTimer.Tick += delegate { zoomTimer.Stop(); zooming = false; Invalidate(); };
             externalButton = new RoundButton { Text = "外部打开", Accent = false };
             externalButton.Click += delegate
             {
@@ -140,6 +144,8 @@ namespace AppManager.Controls
             zoomFactor = 1F;
             pan = PointF.Empty;
             panning = false;
+            zooming = false;
+            zoomTimer.Stop();
             press = hover = -1;
             Capture = false;
             wheelRemainder = 0;
@@ -169,6 +175,8 @@ namespace AppManager.Controls
             paths.Clear();
             pdfPage = pdfPages = 0;
             panning = false;
+            zooming = false;
+            zoomTimer.Stop();
             Capture = false;
             Cursor = Cursors.Default;
             Visible = false;
@@ -237,6 +245,9 @@ namespace AppManager.Controls
             pan.X = pt.X - (area.X + (area.Width - image.Width * newS) / 2F) - ix * newS;
             pan.Y = pt.Y - (area.Y + (area.Height - image.Height * newS) / 2F) - iy * newS;
             ClampPan();
+            zooming = true;
+            zoomTimer.Stop();
+            zoomTimer.Start();
             Invalidate();
         }
 
@@ -431,6 +442,7 @@ namespace AppManager.Controls
             {
                 ReleaseImage();
                 loader.Dispose();
+                zoomTimer.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -490,7 +502,7 @@ namespace AppManager.Controls
                 GraphicsState st = g.Save();
                 g.SetClip(path);
                 // 拖动过程中降到双线性插值，大图平移每帧不再做高质量三次采样
-                g.InterpolationMode = panning ? InterpolationMode.Bilinear : InterpolationMode.HighQualityBicubic;
+                g.InterpolationMode = panning || zooming ? InterpolationMode.Bilinear : InterpolationMode.HighQualityBicubic;
                 g.PixelOffsetMode = PixelOffsetMode.HighQuality;
                 g.DrawImage(image, ImageDestRect());
                 g.Restore(st);
