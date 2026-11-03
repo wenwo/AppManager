@@ -68,6 +68,7 @@ namespace AppManager
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
                 Run("stash scan reads root shortcuts and legacy records only, never stashed folder trees", StashScanTopLevel);
+                Run("apps folder known-folder ids resolve to real paths; app ids stay unchanged", KnownFolderIds);
             }
             finally
             {
@@ -1145,6 +1146,22 @@ namespace AppManager
             Check(Directory.GetDirectories(root, "retry-target.copy-*").Length == 0, "staging leaked");
             copy.Invoke(null, new object[] { source, target });
             Check(File.ReadAllText(Path.Combine(target, "sub", "x.txt")) == "payload", "retry failed");
+        }
+
+        private static void KnownFolderIds()
+        {
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            // FOLDERID_Windows / FOLDERID_System
+            Check(string.Equals(Scanner.ResolveKnownFolderPath("{F38BF404-1D43-42F2-9305-67DE0B28FC23}\\notepad.exe"),
+                Path.Combine(windows, "notepad.exe"), StringComparison.OrdinalIgnoreCase), "Windows known folder not resolved");
+            Check(string.Equals(Scanner.ResolveKnownFolderPath("{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\cmd.exe"),
+                Path.Combine(Environment.SystemDirectory, "cmd.exe"), StringComparison.OrdinalIgnoreCase), "System known folder not resolved");
+            // 解析后不存在的路径、普通 UWP 应用 ID、非法 GUID 都保持原样
+            string missing = "{F38BF404-1D43-42F2-9305-67DE0B28FC23}\\no-such-app-regression.exe";
+            Check(Scanner.ResolveKnownFolderPath(missing) == missing, "missing resolved path replaced the id");
+            Check(Scanner.ResolveKnownFolderPath("Microsoft.WindowsCalculator_8wekyb3d8bbwe!App") == "Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", "app id changed");
+            string bad = "{ZZZZZZZZ-1D43-42F2-9305-67DE0B28FC23}\\x.exe";
+            Check(Scanner.ResolveKnownFolderPath(bad) == bad && Scanner.ResolveKnownFolderPath(null) == null, "invalid id handling");
         }
 
         private static void StashScanTopLevel()

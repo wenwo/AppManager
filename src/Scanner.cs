@@ -248,13 +248,15 @@ namespace AppManager
         /// 桌面应用的解析路径为可执行文件路径；打包/UWP 应用无文件路径，以 shell:AppsFolder\&lt;AUMID&gt; 作为启动目标。
         /// 返回枚举到的条目数（0 表示枚举失败，调用方回退开始菜单扫描）。
         /// </summary>
+        /// <summary>返回 AppsFolder 收录的条目数；枚举不完整时返回 0，让调用方补扫开始菜单（按名称去重，不会重复）。</summary>
         private int ScanAppsFolder(Dictionary<string, AppInfo> dict)
         {
-            List<string[]> items = EnumerateAppsFolder();
+            bool complete;
+            List<string[]> items = EnumerateAppsFolder(out complete);
             foreach (string[] it in items)
             {
                 string name = it[0];
-                string id = it[1];
+                string id = ResolveKnownFolderPath(it[1]);
                 if (IsNonAppEntry(name, id)) continue;
 
                 AppInfo app = new AppInfo();
@@ -289,7 +291,31 @@ namespace AppManager
                 }
                 MergeByName(dict, app);
             }
-            return items.Count;
+            return complete ? items.Count : 0;
+        }
+
+        [DllImport("shell32.dll")]
+        private static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint flags, IntPtr token, out IntPtr path);
+
+        /// <summary>
+        /// AppsFolder 对 Program Files、System32 等位置下的 Win32 程序返回“{已知文件夹GUID}\相对路径”而不是真实路径；
+        /// 不还原就会因文件“不存在”被当成 UWP：图标发糊、显示为打包应用、排除自身失效。还原后路径不存在时保持原值。
+        /// </summary>
+        internal static string ResolveKnownFolderPath(string id)
+        {
+            if (string.IsNullOrEmpty(id) || id.Length < 40 || id[0] != '{' || id[37] != '}' || id[38] != '\\') return id;
+            Guid folder;
+            try { folder = new Guid(id.Substring(0, 38)); }
+            catch (FormatException) { return id; }
+            IntPtr raw = IntPtr.Zero;
+            try
+            {
+                if (SHGetKnownFolderPath(folder, 0, IntPtr.Zero, out raw) != 0 || raw == IntPtr.Zero) return id;
+                string resolved = Path.Combine(Marshal.PtrToStringUni(raw), id.Substring(39));
+                return File.Exists(resolved) || Directory.Exists(resolved) ? resolved : id;
+            }
+            catch (Exception) { return id; }
+            finally { if (raw != IntPtr.Zero) Marshal.FreeCoTaskMem(raw); }
         }
 
         /// <summary>
@@ -297,8 +323,10 @@ namespace AppManager
         /// 打包/UWP 应用的解析路径为 AppUserModelID（如 Chrome、cn.apifox.app）；
         /// 传统桌面应用的解析路径为可执行文件路径。失败时返回空列表。
         /// </summary>
-        private static List<string[]> EnumerateAppsFolder()
+        /// <summary>complete=false 表示枚举中途失败，结果只是一部分，调用方需要补扫开始菜单。</summary>
+        private static List<string[]> EnumerateAppsFolder(out bool complete)
         {
+            complete = false;
             List<string[]> result = new List<string[]>();
             object shell = null;
             object folder = null;
@@ -331,11 +359,17 @@ namespace AppManager
                             CultureInfo.InvariantCulture);
                         if (!string.IsNullOrEmpty(name)) result.Add(new string[] { name, id ?? string.Empty });
                     }
+                    catch (Exception ex)
+                    {
+                        // 单项读取失败只跳过这一项，不能打断整个枚举（否则后续软件全部丢失）
+                        Debug.WriteLine("读取 AppsFolder 条目失败: " + ex.Message);
+                    }
                     finally
                     {
                         ReleaseCom(item);
                     }
                 }
+                complete = true;
             }
             catch (Exception ex)
             {
