@@ -92,6 +92,36 @@ namespace AppManager
                     Check(FileImport.IsDiskFull(new System.ComponentModel.Win32Exception(39)), "Win32 disk full");
                     Check(!FileImport.IsDiskFull(new UnauthorizedAccessException()) && !FileImport.IsDiskFull(new IOException("other")), "unrelated error misclassified");
                 });
+                Test("resource store selection skips an unavailable location and keeps a folder together", delegate
+                {
+                    string dir = Path.Combine(root, "multi-store-" + Guid.NewGuid().ToString("N"));
+                    string blocked = Path.Combine(dir, "blocked"), usable = Path.Combine(dir, "usable");
+                    string source = Path.Combine(dir, "source", "album");
+                    Directory.CreateDirectory(dir);
+                    File.WriteAllText(blocked, "not a directory");
+                    Directory.CreateDirectory(usable);
+                    Directory.CreateDirectory(source);
+                    File.WriteAllText(Path.Combine(source, "inside.txt"), "inside");
+
+                    ImportBatch batch = new ImportBatch { JournalDirectory = Path.Combine(dir, "journal"), Operation = ImportOperation.Copy, Category = "docs" };
+                    ImportItem item = new ImportItem { Source = source, Folder = true };
+                    batch.Items.Add(item);
+                    batch.ResolveTarget = delegate(ImportItem current)
+                    {
+                        long size; string error, categoryDir;
+                        if (!ResourceStore.TryGetSize(current.Source, current.Folder, CancellationToken.None, out size, out error))
+                            throw new IOException(error);
+                        string targetRoot = ResourceStore.ChooseRoot(new[] { blocked, usable }, current.Source, current.Folder,
+                            batch.Category, batch.Operation, size, null, out categoryDir, out error);
+                        if (targetRoot == null) throw new IOException(error);
+                        return Path.Combine(categoryDir, Path.GetFileName(current.Source.TrimEnd('\\', '/')));
+                    };
+                    Run(batch);
+                    Check(item.State == FileImport.Copied && item.Target.StartsWith(Path.Combine(usable, "docs"), StringComparison.OrdinalIgnoreCase),
+                        "folder was not moved to the next usable location");
+                    Check(File.ReadAllText(Path.Combine(item.Target, "inside.txt")) == "inside", "folder content was split or lost");
+                    Check(File.Exists(Path.Combine(source, "inside.txt")), "copy removed the source folder");
+                });
                 Test("insufficient space stops separation without copying or deleting sources", delegate
                 {
                     foreach (bool committed in new[] { false, true })

@@ -41,6 +41,9 @@ namespace AppManager
     public sealed class ImportItem
     {
         public string Source, Target, Error, TargetId, StagingId, State = FileImport.Waiting;
+        public string TargetRoot;
+        public long RequiredBytes;
+        public bool SizeKnown;
         public bool Folder, Reference;
         public List<string> Directories = new List<string>();
         public List<ImportFileStamp> Files = new List<ImportFileStamp>();
@@ -50,11 +53,12 @@ namespace AppManager
     public sealed class ImportBatch
     {
         public string Id = Guid.NewGuid().ToString("N"), Category, Collection, Error;
-        public bool Resource, Committed, DeleteAuthorized, Finished, SpaceLimited;
+        public bool Resource, Committed, DeleteAuthorized, Finished, SpaceLimited, Stopped;
         public ImportOperation Operation;
         public List<ImportItem> Items = new List<ImportItem>();
         [XmlIgnore] public string JournalDirectory;
         [XmlIgnore] public uint ClipboardSequence;
+        [XmlIgnore] internal Func<ImportItem, string> ResolveTarget;
         internal int SavedAt;
     }
 
@@ -188,6 +192,27 @@ namespace AppManager
         {
             string a = Volume(source), b = Volume(target);
             return a != null && b != null && string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>目标路径所在卷的可用字节数；目录尚未创建时向最近的已存在父目录探测。</summary>
+        internal static bool TryGetAvailableBytes(string path, out ulong available)
+        {
+            available = 0;
+            string current;
+            try { current = Path.GetFullPath(path); }
+            catch (Exception ex)
+            {
+                if (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException) return false;
+                throw;
+            }
+            while (!Directory.Exists(current))
+            {
+                string parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent)) break;
+                current = parent;
+            }
+            ulong total, free;
+            return GetDiskFreeSpaceEx(current, out available, out total, out free);
         }
 
         private static bool SameFile(SafeFileHandle a, SafeFileHandle b)
@@ -697,54 +722,120 @@ namespace AppManager
                 ImportItem item = batch.Items[i];
                 if (progress != null) progress(i, Path.GetFileName(item.Source));
                 if (item.State == Failed || item.State == Skipped) continue;
+                if (batch.Stopped) { item.State = Failed; item.Error = batch.Error ?? "导入已停止。"; continue; }
                 if (batch.SpaceLimited) { item.State = Failed; item.Error = SpaceMessage; continue; }
-                string staging = null;
-                bool stagingOwned = false;
-                try
+                bool needTarget = !item.Reference && batch.ResolveTarget != null;
+                while (true)
                 {
-                    cancel.ThrowIfCancellationRequested();
-                    if (!File.Exists(item.Source) && !Directory.Exists(item.Source)) throw new IOException("源文件不存在。");
-                    if (item.Reference) { item.Target = item.Source; item.State = Linked; SaveSoon(batch); continue; }
-                    EnsureNoLinks(item.Source);
-                    if (item.Folder && Within(item.Source, item.Target)) throw new IOException("不能将文件夹导入自身内部。");
-                    EnsureNoLinks(item.Target);
-                    Directory.CreateDirectory(Path.GetDirectoryName(item.Target));
-                    item.Files.Clear(); item.Directories.Clear(); item.TargetDirectories.Clear();
-                    Snapshot(item, item.Folder ? (FileSystemInfo)new DirectoryInfo(item.Source) : new FileInfo(item.Source), "", 0, cancel);
-                    staging = item.Target + ".import-" + batch.Id;
-                    if (File.Exists(staging) || Directory.Exists(staging)) throw new IOException("临时目标已存在。");
-                    stagingOwned = true;
-                    if (item.Folder)
+                    if (needTarget)
                     {
-                        foreach (string dir in item.Directories) Directory.CreateDirectory(At(item, staging, dir));
-                        item.StagingId = Identity(staging);
+                        string target = null;
+                        try { target = batch.ResolveTarget(item); }
+                        catch (Exception ex)
+                        {
+                            if (!(ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException
+                                || ex is NotSupportedException || ex is PathTooLongException)) throw;
+                            item.Error = ex.Message;
+                        }
+                        if (string.IsNullOrEmpty(target))
+                        {
+                            item.State = Failed;
+                            if (string.IsNullOrEmpty(item.Error)) item.Error = "没有可用的资源存储位置。";
+                            break;
+                        }
+                        item.Target = target;
+                        needTarget = false;
+                        try { Save(batch); }   // 换盘后的新目标必须先写日志，崩溃时才能找到临时副本。
+                        catch (Exception ex)
+                        {
+                            item.State = Failed;
+                            item.Error = "无法写入导入日志，未开始复制：" + ex.Message;
+                            batch.Stopped = true;
+                            batch.Error = item.Error;
+                            break;
+                        }
                     }
-                    bool link = batch.Operation == ImportOperation.Move;
-                    foreach (ImportFileStamp stamp in item.Files)
+                    string staging = null;
+                    bool stagingOwned = false, retry = false;
+                    try
                     {
                         cancel.ThrowIfCancellationRequested();
-                        link = Place(At(item, item.Source, stamp.Relative), At(item, staging, stamp.Relative), stamp, link, cancel);
+                        if (!File.Exists(item.Source) && !Directory.Exists(item.Source)) throw new IOException("源文件不存在。");
+                        if (item.Reference) { item.Target = item.Source; item.State = Linked; SaveSoon(batch); break; }
+                        EnsureNoLinks(item.Source);
+                        if (item.Folder && Within(item.Source, item.Target)) throw new IOException("不能将文件夹导入自身内部。");
+                        EnsureNoLinks(item.Target);
+                        Directory.CreateDirectory(Path.GetDirectoryName(item.Target));
+                        item.Files.Clear(); item.Directories.Clear(); item.TargetDirectories.Clear();
+                        Snapshot(item, item.Folder ? (FileSystemInfo)new DirectoryInfo(item.Source) : new FileInfo(item.Source), "", 0, cancel);
+                        staging = item.Target + ".import-" + batch.Id;
+                        if (File.Exists(staging) || Directory.Exists(staging)) throw new IOException("临时目标已存在。");
+                        stagingOwned = true;
+                        if (item.Folder)
+                        {
+                            foreach (string dir in item.Directories) Directory.CreateDirectory(At(item, staging, dir));
+                            item.StagingId = Identity(staging);
+                        }
+                        bool link = batch.Operation == ImportOperation.Move;
+                        foreach (ImportFileStamp stamp in item.Files)
+                        {
+                            cancel.ThrowIfCancellationRequested();
+                            link = Place(At(item, item.Source, stamp.Relative), At(item, staging, stamp.Relative), stamp, link, cancel);
+                        }
+                        if (!item.Folder) item.StagingId = item.Files[0].TargetId;
+                        if (item.Folder) CopyDirectoryInfo(item, staging, cancel);
+                        CheckTree(item, false);
+                        // CreateNew/Move 均不覆盖；其他进程占用目标名时，此项失败并保源。
+                        if (item.Folder) Directory.Move(staging, item.Target); else File.Move(staging, item.Target);
+                        item.TargetId = item.StagingId;
+                        staging = null; item.State = Copied;
                     }
-                    if (!item.Folder) item.StagingId = item.Files[0].TargetId;
-                    if (item.Folder) CopyDirectoryInfo(item, staging, cancel);
-                    CheckTree(item, false);
-                    // CreateNew/Move 均不覆盖；其他进程占用目标名时，此项失败并保源。
-                    if (item.Folder) Directory.Move(staging, item.Target); else File.Move(staging, item.Target);
-                    item.TargetId = item.StagingId;
-                    staging = null; item.State = Copied;
+                    catch (OperationCanceledException) { item.State = Failed; item.Error = "已取消"; }
+                    catch (Exception ex)
+                    {
+                        if (IsDiskFull(ex) && !item.Reference && batch.ResolveTarget != null)
+                        {
+                            bool cleaned = staging == null || !stagingOwned || RemoveStaging(staging);
+                            if (!cleaned)
+                            {
+                                item.State = Failed;
+                                item.Error = "临时副本未能清理，已停止换盘。请手动处理：" + staging;
+                                batch.Stopped = true;
+                                batch.Error = item.Error;
+                            }
+                            else
+                            {
+                                staging = null;
+                                item.State = Waiting; item.Error = null;
+                                needTarget = true; retry = true;
+                            }
+                        }
+                        if (!retry)
+                        {
+                            item.State = Failed;
+                            if (batch.Stopped)
+                            {
+                                if (string.IsNullOrEmpty(item.Error)) item.Error = ex.Message;
+                            }
+                            else
+                            {
+                                RecordError(batch, ex);
+                                item.Error = IsDiskFull(ex) ? SpaceMessage : ex.Message;
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        if (staging != null && stagingOwned && !RemoveStaging(staging))
+                        {
+                            item.Error = (string.IsNullOrEmpty(item.Error) ? "" : item.Error + "；") + "临时副本未能清理，已保留：" + staging;
+                            batch.Stopped = true;
+                            batch.Error = item.Error;
+                        }
+                    }
+                    SaveSoon(batch);
+                    if (!retry) break;
                 }
-                catch (OperationCanceledException) { item.State = Failed; item.Error = "已取消"; }
-                catch (Exception ex)
-                {
-                    RecordError(batch, ex);
-                    item.State = Failed; item.Error = IsDiskFull(ex) ? SpaceMessage : ex.Message;
-                }
-                finally
-                {
-                    if (staging != null && stagingOwned && !RemoveStaging(staging))
-                        item.Error = (string.IsNullOrEmpty(item.Error) ? "" : item.Error + "；") + "临时副本未能清理，已保留：" + staging;
-                }
-                SaveSoon(batch);
             }
             Save(batch); // 提交前必须持久化全部校验信息。
         }

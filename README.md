@@ -11,6 +11,12 @@ Windows 桌面应用管理器：应用列表、资源分类与集合、图片查
 
 `build.ps1` 默认将新构建发布到运行目录：先写入同目录暂存文件，自测和数据库回归通过后再原子替换。应用运行中会拒绝覆盖，构建前请先从托盘菜单退出。
 
+## 资源存储位置
+
+设置页的「存储位置」支持添加多个资源存储根目录，列表顺序就是导入时的优先顺序。同一卷内移动只用硬链接，不要求额外空间；复制或跨卷移动会先计算文件/文件夹大小，要求目标位置剩余空间至少再保留 1 GB。复制中途遇到磁盘满时，程序清理本批临时副本并改用下一个启用的位置，源文件保持不变；一个文件或文件夹不会拆分到多个位置。
+
+停用某个位置后不再向它导入新文件，但仍会识别其中已有的库内文件；全部位置都停用时不接收新资源，也不会偷偷回退到默认目录。旧版单一路径会自动成为第一个启用位置，配置文件仍把第一个启用位置写入旧字段供旧版本读取。导入 `.ambak` 备份包时保留本机的位置列表。
+
 ## 构建
 
 要求：Windows 10/11 64 位（libmpv 仅提供 x64），.NET Framework 4.8（`csc.exe`），PowerShell 5.1。
@@ -19,7 +25,7 @@ Windows 桌面应用管理器：应用列表、资源分类与集合、图片查
 powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 ```
 
-`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe` 并发布到 `%LOCALAPPDATA%\AppManager\AppManager.exe`，随后运行内置自测（`--selftest`，当前 63 项），日志写入运行目录的 `selftest.log`。
+`build.ps1` 会编译 `src` 下全部源码为单文件 `AppManager.exe` 并发布到 `%LOCALAPPDATA%\AppManager\AppManager.exe`，随后运行内置自测（`--selftest`，当前 65 项），日志写入运行目录的 `selftest.log`。
 
 分类、集合、内容关系、配置和操作记录存入本机 SQLite 数据库，首次启动自动迁移 XML 并保留原件。列表支持索引分页，设置页提供操作记录、撤销、完整备份和恢复。表结构、索引、升级和恢复说明见 [DATABASE.md](DATABASE.md)。构建还会运行隔离的数据库回归；`-ScaleDatabaseTests` 可额外验证 30 万条数据。
 

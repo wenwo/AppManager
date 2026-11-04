@@ -335,6 +335,8 @@ namespace AppManager
         public string FileStorePath = string.Empty;
         // 资源模式本地文件的存储根目录（留空时按 ManageRootPath\Resources 兜底；各分类在其下建子目录）
         public string ResourceStorePath = string.Empty;
+        // 资源存储位置池；顺序即优先顺序。ResourceStorePath 继续保存第一个启用位置，供旧版本读取。
+        public List<ResourceStoreLocation> ResourceStoreLocations = new List<ResourceStoreLocation>();
 
         // 拖动排序持久化：分类名 -> 有序稳定键列表（AppInfo.Key），各分类独立
         public Dictionary<string, List<string>> ItemOrder = new Dictionary<string, List<string>>();
@@ -446,6 +448,13 @@ namespace AppManager
                 cfg.FolderStorePath = XmlElementText(root, "FolderStorePath", string.Empty);
                 cfg.FileStorePath = XmlElementText(root, "FileStorePath", string.Empty);
                 cfg.ResourceStorePath = XmlElementText(root, "ResourceStorePath", string.Empty);
+                foreach (XmlNode n in root.SelectNodes("ResourceStoreLocations/Item"))
+                {
+                    string path = XmlAttr(n, "path");
+                    if (!string.IsNullOrWhiteSpace(path))
+                        cfg.ResourceStoreLocations.Add(new ResourceStoreLocation(path, XmlAttributeBool(n, "enabled", true)));
+                }
+                cfg.ResourceStorePath = cfg.LegacyResourceStorePath();
                 foreach (XmlNode n in root.SelectNodes("AddedItems/Item"))
                 {
                     AddedEntry e = new AddedEntry();
@@ -587,6 +596,7 @@ namespace AppManager
                 FolderStorePath = fresh.FolderStorePath;
                 FileStorePath = fresh.FileStorePath;
                 ResourceStorePath = fresh.ResourceStorePath;
+                ResourceStoreLocations = fresh.ResourceStoreLocations;
                 ItemOrder = fresh.ItemOrder;
                 ItemCategories = fresh.ItemCategories;
                 ExcludedCategories = fresh.ExcludedCategories;
@@ -674,7 +684,17 @@ namespace AppManager
             w.WriteElementString("ManageRootPath", ManageRootPath ?? string.Empty);
             w.WriteElementString("FolderStorePath", FolderStorePath ?? string.Empty);
             w.WriteElementString("FileStorePath", FileStorePath ?? string.Empty);
-            w.WriteElementString("ResourceStorePath", ResourceStorePath ?? string.Empty);
+            w.WriteElementString("ResourceStorePath", LegacyResourceStorePath());
+            w.WriteStartElement("ResourceStoreLocations");
+            foreach (ResourceStoreLocation location in ResourceStoreLocations ?? new List<ResourceStoreLocation>())
+            {
+                if (location == null || string.IsNullOrWhiteSpace(location.Path)) continue;
+                w.WriteStartElement("Item");
+                w.WriteAttributeString("path", location.Path);
+                w.WriteAttributeString("enabled", location.Enabled ? "true" : "false");
+                w.WriteEndElement();
+            }
+            w.WriteEndElement();
             WriteList(w, "Favorites", Favorites);
             WriteList(w, "Hidden", Hidden);
             WriteList(w, "CustomCategories", CustomCategories);
@@ -778,6 +798,15 @@ namespace AppManager
             w.WriteElementString("OrganizeFile", OrganizeFile ? "true" : "false");
             w.WriteElementString("OrganizeDir", OrganizeDir ? "true" : "false");
             w.WriteEndElement();
+        }
+
+        /// <summary>旧版字段始终写第一个启用位置；全部停用时留空，旧版本自行回退默认目录。</summary>
+        private string LegacyResourceStorePath()
+        {
+            if (ResourceStoreLocations == null || ResourceStoreLocations.Count == 0) return ResourceStorePath ?? string.Empty;
+            foreach (ResourceStoreLocation location in ResourceStoreLocations)
+                if (location != null && location.Enabled && !string.IsNullOrWhiteSpace(location.Path)) return location.Path;
+            return string.Empty;
         }
 
         private static void ReplaceAtomic(string tmp, string target)
@@ -1112,6 +1141,9 @@ namespace AppManager
             FolderStorePath = local.FolderStorePath;
             FileStorePath = local.FileStorePath;
             ResourceStorePath = local.ResourceStorePath;
+            ResourceStoreLocations = new List<ResourceStoreLocation>();
+            foreach (ResourceStoreLocation location in local.ResourceStoreLocations)
+                if (location != null) ResourceStoreLocations.Add(location.Clone());
 
             List<DesktopBackupEntry> safe = new List<DesktopBackupEntry>();
             foreach (DesktopBackupEntry entry in DesktopBackup)

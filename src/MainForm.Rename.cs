@@ -126,12 +126,11 @@ namespace AppManager
             if (!string.IsNullOrEmpty(config.ManageRootPath)) manageRoots.Add(DesktopOrganizer.NormalizeRoot(config.ManageRootPath));
             else { manageRoots.Add(@"H:\Manage"); manageRoots.Add(DesktopOrganizer.QuickCenterDir); }   // 与 ResolveManageRoot 的回退顺序一致
 
-            if (!string.IsNullOrEmpty(config.ResourceStorePath)) resourceRoots.Add(DesktopOrganizer.NormalizeRoot(config.ResourceStorePath));
+            resourceRoots.AddRange(KnownResourceStoreRoots());
             if (!string.IsNullOrEmpty(config.FileStorePath)) legacyStores.Add(DesktopOrganizer.NormalizeRoot(config.FileStorePath));
             if (!string.IsNullOrEmpty(config.FolderStorePath)) legacyStores.Add(DesktopOrganizer.NormalizeRoot(config.FolderStorePath));
             foreach (string manage in manageRoots)
             {
-                if (string.IsNullOrEmpty(config.ResourceStorePath)) resourceRoots.Add(Path.Combine(manage, "Resources"));
                 if (string.IsNullOrEmpty(config.FileStorePath)) legacyStores.Add(Path.Combine(manage, "Files"));
                 if (string.IsNullOrEmpty(config.FolderStorePath)) legacyStores.Add(manage);   // 文件夹默认直接存放在管理根下
                 structural.Add(manage);
@@ -399,6 +398,7 @@ namespace AppManager
             foreach (ResourceCollection collection in config.Collections)
                 collection.Cover = EntryPaths.Rebase(collection.Cover, oldPath, newPath);
             if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.RebasePath(oldPath, newPath);
+            if (musicPlayer != null && !musicPlayer.IsDisposed) musicPlayer.RebasePath(oldPath, newPath);
             InvalidateAddedIndex();   // 上文改写了 AddedEntry.Path，按旧路径建的索引必须失效
             return moved;
         }

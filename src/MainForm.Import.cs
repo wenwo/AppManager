@@ -131,12 +131,10 @@ namespace AppManager
             string key = (resource ? "r|" : "s|") + category;
             bool same;
             if (probe.Same.TryGetValue(key, out same)) return same;
-            same = true;
-            foreach (bool folder in probe.Folders.Distinct())
-            {
-                string volume = FileImport.Volume(ImportDirectory(category, resource, folder));
-                if (volume == null || !string.Equals(volume, probe.Volumes[0], StringComparison.OrdinalIgnoreCase)) { same = false; break; }
-            }
+            same = resource
+                ? ResourceStore.CanMoveWithinSourceVolume(ActiveResourceStoreRoots(), probe.Paths, probe.Folders, category)
+                : probe.Folders.Select(f => FileImport.Volume(ImportDirectory(category, false, f)))
+                    .All(v => v != null && string.Equals(v, probe.Volumes[0], StringComparison.OrdinalIgnoreCase));
             probe.Same[key] = same;
             return same;
         }
@@ -252,7 +250,10 @@ namespace AppManager
                     category = PickImportCategory(resource, paths);
                     if (category == null) return;
                     collection = null;
-                    bool same = !mixed && paths.All(p => FileImport.SameVolume(p, ImportDirectory(category, resource, Directory.Exists(p))));
+                    bool same = !mixed && (resource
+                        ? ResourceStore.CanMoveWithinSourceVolume(ActiveResourceStoreRoots(), paths,
+                            paths.Select(p => Directory.Exists(p)).ToList(), category)
+                        : paths.All(p => FileImport.SameVolume(p, ImportDirectory(category, false, Directory.Exists(p)))));
                     DragDropEffects effect = FileImport.ResolveEffect(same, modifiers, allowed);
                     if (effect == DragDropEffects.None) return;
                     operation = effect == DragDropEffects.Move ? ImportOperation.Move : ImportOperation.Copy;
@@ -426,13 +427,18 @@ namespace AppManager
             // 路径归属、文件夹内收录检查等预处理放进导入队列在后台执行，批量拖入几千个文件时不卡界面；
             // 后台直接读库（AddedEntryList 实例不是线程安全的）。没有数据库的会话（读取失败/测试）仍在界面线程预处理。
             string folderDir = StoreDirectory(category, resource, true), fileDir = StoreDirectory(category, resource, false);
+            List<string> activeRoots = resource ? ActiveResourceStoreRoots() : null;
+            List<string> knownRoots = resource ? KnownResourceStoreRoots() : null;
             string databaseFile = config.Database != null ? config.Database.FilePath : null;
             if (databaseFile == null)
             {
-                ImportBatch prepared = PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
-                    RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
+                ImportBatch prepared = resource
+                    ? PrepareImportBatchMultiStore(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                        RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; }, knownRoots)
+                    : PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                        RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
                 if (prepared.Items.Count == 0) { if (completed != null) completed(prepared); return; }
-                EnqueueImport(delegate { RunPreparedImport(prepared, completed, cancel); });
+                EnqueueImport(delegate { RunPreparedImport(prepared, activeRoots, completed, cancel); });
                 return;
             }
             EnqueueImport(delegate
@@ -440,9 +446,13 @@ namespace AppManager
                 ImportBatch prepared;
                 try
                 {
-                    prepared = PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
-                        delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list); },
-                        delegate(string folder) { return AddedEntryList.HasEntriesUnder(databaseFile, folder); });
+                    prepared = resource
+                        ? PrepareImportBatchMultiStore(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                            delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list); },
+                            delegate(string folder) { return AddedEntryList.HasEntriesUnder(databaseFile, folder); }, knownRoots)
+                        : PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                            delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list); },
+                            delegate(string folder) { return AddedEntryList.HasEntriesUnder(databaseFile, folder); });
                 }
                 catch (Exception ex)
                 {
@@ -460,7 +470,7 @@ namespace AppManager
                     return;
                 }
                 if (prepared.Items.Count == 0) { RunOnUi(delegate { if (completed != null) completed(prepared); }); return; }
-                RunPreparedImport(prepared, completed, cancel);
+                RunPreparedImport(prepared, activeRoots, completed, cancel);
             });
         }
 
@@ -479,6 +489,22 @@ namespace AppManager
         /// </summary>
         private ImportBatch PrepareImportBatch(string[] paths, ImportOperation operation, string category, string collection, bool resource,
             uint sequence, string folderDir, string fileDir, Func<List<string>, Dictionary<string, string>> registeredPaths, Func<string, bool> hasEntriesUnder)
+        {
+            return PrepareImportBatchCore(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                registeredPaths, hasEntriesUnder, null);
+        }
+
+        private ImportBatch PrepareImportBatchMultiStore(string[] paths, ImportOperation operation, string category, string collection, bool resource,
+            uint sequence, string folderDir, string fileDir, Func<List<string>, Dictionary<string, string>> registeredPaths,
+            Func<string, bool> hasEntriesUnder, List<string> knownRoots)
+        {
+            return PrepareImportBatchCore(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
+                registeredPaths, hasEntriesUnder, knownRoots);
+        }
+
+        private ImportBatch PrepareImportBatchCore(string[] paths, ImportOperation operation, string category, string collection, bool resource,
+            uint sequence, string folderDir, string fileDir, Func<List<string>, Dictionary<string, string>> registeredPaths,
+            Func<string, bool> hasEntriesUnder, List<string> knownRoots)
         {
             ImportBatch batch = new ImportBatch { Category = category, Collection = collection, Resource = resource,
                 Operation = operation, ClipboardSequence = sequence, JournalDirectory = ImportJournal };
@@ -506,12 +532,13 @@ namespace AppManager
                     if (known) source = registered;
                     bool folder = Directory.Exists(source);
                     string dir = folder ? folderDir : fileDir;
-                    bool reference = (!resource && !folder && IsSoftwareFile(source)) || known || FileImport.Within(dir, source);
+                    bool reference = (!resource && !folder && IsSoftwareFile(source)) || known
+                        || (resource ? ResourceStore.IsUnderAny(knownRoots, source) : FileImport.Within(dir, source));
                     ImportItem item = new ImportItem { Source = source, Target = dir, Folder = folder, Reference = reference };
                     // 软件页面只登记程序（原位引用），不复制、不移动任何文件或文件夹。
                     if (!resource && (folder || !IsSoftwareFile(source)))
                     { item.State = FileImport.Skipped; item.Error = "软件页面只登记程序（.exe），文件和文件夹请到资源页面导入。"; }
-                    else if (folder && FileImport.Within(source, dir)) { item.State = FileImport.Failed; item.Error = "不能将文件夹导入自身内部。"; }
+                    else if (!resource && folder && FileImport.Within(source, dir)) { item.State = FileImport.Failed; item.Error = "不能将文件夹导入自身内部。"; }
                     // 移动会让文件夹内已收录的项目全部指向旧路径而失效；复制不影响它们。
                     else if (folder && !reference && operation == ImportOperation.Move && hasEntriesUnder(source))
                     { item.State = FileImport.Failed; item.Error = "文件夹内包含已收录的项目，不能移动；请改用复制（拖放时按住 Ctrl）。"; }
@@ -535,14 +562,74 @@ namespace AppManager
             return batch;
         }
 
+        /// <summary>每个文件/文件夹在真正复制前选盘；磁盘满换盘时也用这个入口，文件夹不会被拆开。</summary>
+        private Func<ImportItem, string> CreateResourceTargetResolver(ImportBatch batch, List<string> roots, CancellationToken cancel)
+        {
+            Dictionary<ImportItem, HashSet<string>> triedByItem = new Dictionary<ImportItem, HashSet<string>>();
+            HashSet<string> reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            return delegate(ImportItem item)
+            {
+                if (roots == null || roots.Count == 0)
+                {
+                    item.Error = "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。";
+                    return null;
+                }
+                HashSet<string> tried;
+                if (!triedByItem.TryGetValue(item, out tried))
+                    triedByItem[item] = tried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                if (!string.IsNullOrEmpty(item.TargetRoot)) tried.Add(item.TargetRoot);
+
+                string root = null, dir = null, error = null;
+                // 同卷移动不占新空间，先只尝试同卷位置；成功时无需扫描文件夹大小。
+                if (batch.Operation == ImportOperation.Move)
+                    root = ResourceStore.ChooseRoot(roots, item.Source, item.Folder, batch.Category,
+                        batch.Operation, long.MaxValue, tried, out dir, out error);
+
+                if (root == null)
+                {
+                    if (!item.SizeKnown)
+                    {
+                        long size;
+                        if (!ResourceStore.TryGetSize(item.Source, item.Folder, cancel, out size, out error))
+                        {
+                            item.Error = error;
+                            return null;
+                        }
+                        item.RequiredBytes = size;
+                        item.SizeKnown = true;
+                    }
+                    root = ResourceStore.ChooseRoot(roots, item.Source, item.Folder, batch.Category,
+                        batch.Operation, item.RequiredBytes, tried, out dir, out error);
+                }
+                if (root == null)
+                {
+                    item.Error = string.IsNullOrEmpty(error) ? ResourceStore.CapacityMessage : error;
+                    return null;
+                }
+
+                item.TargetRoot = root;
+                string name = Path.GetFileName(item.Source.TrimEnd('\\', '/'));
+                string target = Path.Combine(dir, name);
+                int suffix = 1;
+                while (reserved.Contains(target) || File.Exists(target) || Directory.Exists(target))
+                    target = Path.Combine(dir, Path.GetFileNameWithoutExtension(name) + "_" + suffix++ + Path.GetExtension(name));
+                reserved.Add(target);
+                item.Error = null;
+                return target;
+            };
+        }
+
         /// <summary>在导入队列（后台线程）中执行已生成的批次：预留目标名、复制/移动、提交入库，结束后回到界面线程收尾。</summary>
-        private void RunPreparedImport(ImportBatch batch, Action<ImportBatch> completed, CancellationToken cancel)
+        private void RunPreparedImport(ImportBatch batch, List<string> resourceRoots, Action<ImportBatch> completed, CancellationToken cancel)
         {
             try
             {
+                if (batch.Resource)
+                    batch.ResolveTarget = CreateResourceTargetResolver(batch, resourceRoots, cancel);
                 // 文件名在串行任务开始时预留，避免排队任务使用过期的同名判断。
                 HashSet<string> reserved = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (ImportItem item in batch.Items.Where(i => i.State != FileImport.Failed && i.State != FileImport.Skipped && !i.Reference))
+                foreach (ImportItem item in batch.Items.Where(i => i.State != FileImport.Failed && i.State != FileImport.Skipped && !i.Reference
+                    && batch.ResolveTarget == null))
                 {
                     string dir = item.Target, name = Path.GetFileName(item.Source.TrimEnd('\\', '/'));
                     string target = Path.Combine(dir, name); int suffix = 1;

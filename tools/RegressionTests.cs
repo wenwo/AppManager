@@ -59,6 +59,7 @@ namespace AppManager
                 Run("deleting a resource category removes covers, view mode and the add button", CategoryDeleteCleansState);
                 Run("main form disposed without Close leaves no message filter behind", DisposedFormMessageFilter);
                 Run("storage dialog writes back only the edited fields", StoreDialogSavesOnlyEdits);
+                Run("storage locations keep order, disabled roots and legacy first-path compatibility", ResourceStoreLocationsPool);
                 Run("custom category add/remove uses the same memberships and keeps an existing icon", CustomCategoryAddRemove);
                 Run("classification keeps uninstaller apps and prefers specific keywords", ClassificationRules);
                 Run("move to category removes only the source membership and keeps collections", MoveKeepsOtherMemberships);
@@ -79,6 +80,7 @@ namespace AppManager
                 Run("legacy stores: default locations under the manage root skip the store structure", LegacyStoreDefaultRoots);
                 Run("legacy stores: startup prompt leaves files on decline and moves them on accept", LegacyStoreStartupPrompt);
                 Run("resource page creates entries in the resource store", ResourceCreateEntries);
+                Run("resource page creation falls back to the next enabled storage location", ResourceCreateFallsBackToNextStore);
                 Run("software page files migrate to typed resource categories; executables and resource relations stay", SoftwareFilesMigrate);
                 Run("scanner keeps programs, protocols and packaged apps; drops folder and document targets", SoftwareScanTargets);
                 Run("software page refuses external drops, file imports, new files and the all-files view", SoftwarePageRefusesFiles);
@@ -1183,7 +1185,8 @@ namespace AppManager
 
         private static void StoreDialogSavesOnlyEdits()
         {
-            MethodInfo apply = typeof(MainForm).GetMethod("ApplyStoreEdits", BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo apply = typeof(MainForm).GetMethod("ApplyStoreEdits", BindingFlags.Static | BindingFlags.NonPublic, null,
+                new Type[] { typeof(AppConfig), typeof(string), typeof(string).MakeByRefType() }, null);
             AppConfig cfg = new AppConfig { FolderStorePath = "D:\\Old\\Folders", FileStorePath = "D:\\Custom\\Files\\", ResourceStorePath = "" };
             // 打开后什么都不改：不能把默认路径写进配置
             object[] args = { cfg, "", null };
@@ -1201,6 +1204,87 @@ namespace AppManager
             Check((bool)apply.Invoke(null, args) && cfg.ResourceStorePath == "", "clearing did not restore the default");
             // 旧版文件/文件夹位置不再经由对话框修改
             Check(cfg.FolderStorePath == "D:\\Old\\Folders" && cfg.FileStorePath == "D:\\Custom\\Files\\", "dialog changed the legacy store paths");
+        }
+
+        private static void ResourceStoreLocationsPool()
+        {
+            string dir = Path.Combine(root, "store-locations");
+            Directory.CreateDirectory(dir);
+            string first = Path.Combine(dir, "first"), second = Path.Combine(dir, "second"),
+                third = Path.Combine(dir, "third"), fallback = Path.Combine(dir, "fallback");
+
+            AppConfig legacy = new AppConfig { ResourceStorePath = first };
+            List<ResourceStoreLocation> editable = ResourceStore.EditableLocations(legacy);
+            Check(editable.Count == 1 && editable[0].Enabled && SameText(editable[0].Path, first),
+                "legacy single path did not become the first location");
+            Check(ResourceStore.ActiveRoots(legacy, fallback).SequenceEqual(new[] { first }, StringComparer.OrdinalIgnoreCase),
+                "legacy path was not used as the active root");
+
+            string legacyXml = Path.Combine(dir, "legacy.xml");
+            Check(legacy.SaveTo(legacyXml), "legacy config save failed");
+            AppConfig legacyLoaded = AppConfig.LoadFrom(legacyXml);
+            List<ResourceStoreLocation> legacyEditable = ResourceStore.EditableLocations(legacyLoaded);
+            Check(legacyLoaded != null && legacyLoaded.ResourceStoreLocations.Count == 0
+                && SameText(legacyLoaded.ResourceStorePath, first)
+                && legacyEditable.Count == 1 && legacyEditable[0].Enabled
+                && SameText(legacyEditable[0].Path, first),
+                "legacy single path did not stay compatible with the location pool");
+
+            AppConfig pool = new AppConfig { ResourceStorePath = first };
+            pool.ResourceStoreLocations.Add(new ResourceStoreLocation(first, true));
+            pool.ResourceStoreLocations.Add(new ResourceStoreLocation(second, false));
+            pool.ResourceStoreLocations.Add(new ResourceStoreLocation(third, true));
+            Check(ResourceStore.ActiveRoots(pool, fallback).SequenceEqual(new[] { first, third }, StringComparer.OrdinalIgnoreCase),
+                "enabled locations were not returned in order");
+            Check(ResourceStore.KnownRoots(pool, fallback).SequenceEqual(new[] { first, second, third }, StringComparer.OrdinalIgnoreCase),
+                "disabled locations were lost from the known roots");
+            Check(SameText(ResourceStore.PrimaryRoot(pool, fallback), first), "primary root was not the first enabled location");
+            Check(ResourceStore.Summary(pool, fallback).Contains("共 2 个位置"), "active location count was not summarized");
+
+            string poolXml = Path.Combine(dir, "pool.xml");
+            Check(pool.SaveTo(poolXml), "multi-location config save failed");
+            AppConfig poolLoaded = AppConfig.LoadFrom(poolXml);
+            Check(poolLoaded != null && poolLoaded.ResourceStoreLocations.Count == 3
+                && SameText(poolLoaded.ResourceStorePath, first)
+                && SameText(poolLoaded.ResourceStoreLocations[1].Path, second)
+                && !poolLoaded.ResourceStoreLocations[1].Enabled
+                && SameText(poolLoaded.ResourceStoreLocations[2].Path, third),
+                "location order or enabled flags did not round-trip");
+
+            pool.ResourceStoreLocations[0].Enabled = false;
+            pool.ResourceStoreLocations[2].Enabled = false;
+            Check(ResourceStore.ActiveRoots(pool, fallback).Count == 0, "all-disabled pool still accepted new files");
+            Check(ResourceStore.KnownRoots(pool, fallback).Count == 3, "all-disabled pool forgot its known roots");
+            Check(ResourceStore.Summary(pool, fallback).Contains("均已停用"), "all-disabled pool was not reported clearly");
+            string disabledXml = Path.Combine(dir, "disabled.xml");
+            Check(pool.SaveTo(disabledXml), "all-disabled config save failed");
+            AppConfig disabledLoaded = AppConfig.LoadFrom(disabledXml);
+            Check(disabledLoaded != null && disabledLoaded.ResourceStoreLocations.Count == 3
+                && disabledLoaded.ResourceStoreLocations.All(l => !l.Enabled)
+                && string.IsNullOrEmpty(disabledLoaded.ResourceStorePath),
+                "all-disabled pool did not keep locations while clearing the legacy field");
+
+            MethodInfo applyList = typeof(MainForm).GetMethod("ApplyStoreEdits", BindingFlags.Static | BindingFlags.NonPublic, null,
+                new Type[] { typeof(AppConfig), typeof(List<ResourceStoreLocation>), typeof(string).MakeByRefType() }, null);
+            AppConfig edit = new AppConfig();
+            object[] args = { edit, new List<ResourceStoreLocation> {
+                new ResourceStoreLocation(first, true), new ResourceStoreLocation(first, false) }, null };
+            Check(!(bool)applyList.Invoke(null, args) && args[2] != null && ((string)args[2]).Contains("重复"),
+                "duplicate locations were accepted");
+            args = new object[] { edit, new List<ResourceStoreLocation> {
+                new ResourceStoreLocation(first, true), new ResourceStoreLocation(Path.Combine(first, "nested"), true) }, null };
+            Check(!(bool)applyList.Invoke(null, args) && args[2] != null && ((string)args[2]).Contains("包含"),
+                "nested locations were accepted");
+            args = new object[] { edit, new List<ResourceStoreLocation> { new ResourceStoreLocation(first, false) }, null };
+            Check((bool)applyList.Invoke(null, args) && edit.ResourceStoreLocations.Count == 1
+                && !edit.ResourceStoreLocations[0].Enabled && edit.ResourceStorePath == "",
+                "all-disabled edit did not clear the legacy path");
+        }
+
+        private static bool SameText(string a, string b)
+        {
+            return string.Equals((a ?? string.Empty).TrimEnd('\\', '/'),
+                (b ?? string.Empty).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
         }
 
         private static void DisposedFormMessageFilter()
@@ -1736,6 +1820,38 @@ namespace AppManager
             List<AddedEntry> created = config.AddedItems.Where(e => string.Equals(Path.GetDirectoryName(e.Path), dir, StringComparison.OrdinalIgnoreCase)).ToList();
             Check(created.Count == 2 && created.All(e => e.IsResource), "resource page created entries outside the resource store");
             Check(created.Any(e => !e.IsFolder) && created.Any(e => e.IsFolder), "resource page did not create both file and folder");
+        }
+
+        private static void ResourceCreateFallsBackToNextStore()
+        {
+            string dir = Path.Combine(root, "resource-create-fallback");
+            Directory.CreateDirectory(dir);
+            string blocked = Path.Combine(dir, "blocked");
+            string usable = Path.Combine(dir, "usable");
+            File.WriteAllText(blocked, "not a directory");
+            Directory.CreateDirectory(usable);
+
+            AppConfig config = new AppConfig
+            {
+                ManageRootPath = Path.Combine(dir, "manage"),
+                ResourceStorePath = blocked
+            };
+            config.ResourceStoreLocations.Add(new ResourceStoreLocation(blocked, true));
+            config.ResourceStoreLocations.Add(new ResourceStoreLocation(usable, true));
+            config.ResourceCategories.Add("资料");
+            using (MainForm form = ResourceForm(config, "资料"))
+            {
+                Check(form.Handle != IntPtr.Zero, "resource form handle not created");
+                Invoke(form, "CreateManagedEntry", false);
+                Invoke(form, "CreateManagedEntry", true);
+            }
+
+            string expected = Path.Combine(usable, "资料");
+            List<AddedEntry> created = config.AddedItems.Where(e => string.Equals(Path.GetDirectoryName(e.Path), expected,
+                StringComparison.OrdinalIgnoreCase)).ToList();
+            Check(created.Count == 2 && created.All(e => e.IsResource),
+                "resource creation did not fail over to the next enabled location");
+            Check(!Directory.Exists(Path.Combine(blocked, "资料")), "blocked location was used for new entries");
         }
 
         private static void SoftwareFilesMigrate()

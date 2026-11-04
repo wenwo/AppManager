@@ -618,6 +618,11 @@ namespace AppManager
             string outside = Path.Combine(root, "ambak-outside.txt");
             File.WriteAllText(kept, "kept"); File.WriteAllText(unsafeOriginal, "unsafe"); File.WriteAllText(outside, "outside");
 
+            string localStoreOne = Path.Combine(root, "ambak-store-one"), localStoreTwo = Path.Combine(root, "ambak-store-two");
+            local.ResourceStoreLocations.Add(new ResourceStoreLocation(localStoreOne, true));
+            local.ResourceStoreLocations.Add(new ResourceStoreLocation(localStoreTwo, false));
+            local.ResourceStorePath = localStoreOne;
+
             AppConfig imported = new AppConfig();
             imported.ManageRootPath = "D:\\foreign";
             imported.FolderStorePath = "D:\\foreign-folders";
@@ -634,6 +639,10 @@ namespace AppManager
             Check(imported.ManageRootPath == local.ManageRootPath && imported.FolderStorePath == local.FolderStorePath
                 && imported.FileStorePath == local.FileStorePath && imported.ResourceStorePath == local.ResourceStorePath,
                 "import overwrote local storage paths");
+            Check(imported.ResourceStoreLocations.Count == 2
+                && imported.ResourceStoreLocations[0].Path == localStoreOne && imported.ResourceStoreLocations[0].Enabled
+                && imported.ResourceStoreLocations[1].Path == localStoreTwo && !imported.ResourceStoreLocations[1].Enabled,
+                "import did not keep the local storage location pool");
 
             AppConfig bad = new AppConfig(); bad.CustomCategories.Add("Bad/Name");
             Check(bad.PrepareAmbakImport(local, out dropped) != null, "slash category accepted");

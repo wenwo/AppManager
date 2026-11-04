@@ -984,7 +984,7 @@ namespace AppManager
                 ShowStorageLocationDialog();
                 // 对话框可能改了存储目录，回到页面后刷新展示的路径
                 settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                    config.CloseToTray, ResourceStoreRoot());
+                    config.CloseToTray, ResourceStoreSummary());
             };
             settingsPage.RescanRequested += delegate { StartScan(); };
             settingsPage.LayoutBackupRequested += delegate { ShowLayoutBackups(); };
@@ -2210,20 +2210,49 @@ namespace AppManager
         private void CreateManagedEntry(bool folder)
         {
             if (contentMode != SidebarControl.ContentMode.Website || !CanEditCategory(currentCategory)) return;
-            string dir = StoreDirectory(currentCategory, true, folder);
             string name = folder ? "新建文件夹" : "新建文本文档.txt";
-            string path;
-            try
+            List<string> roots = ActiveResourceStoreRoots();
+            if (roots.Count == 0)
             {
-                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                path = UniqueDest(dir, name);
-                if (folder) Directory.CreateDirectory(path);
-                else File.Create(path).Dispose();            // 0 字节空文本文档
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine("新建" + (folder ? "文件夹" : "文档") + "失败: " + ex.Message);
+                MessageBox.Show(this, "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。",
+                    "新建", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
+            }
+            HashSet<string> tried = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string path = null;
+            string dir = null;
+            while (path == null)
+            {
+                string error;
+                string root = ResourceStore.ChooseRoot(roots, null, folder, currentCategory, ImportOperation.Copy,
+                    0, tried, out dir, out error);
+                if (root == null)
+                {
+                    MessageBox.Show(this, error ?? ResourceStore.CapacityMessage, "新建",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                try
+                {
+                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    path = UniqueDest(dir, name);
+                    if (folder) Directory.CreateDirectory(path);
+                    else File.Create(path).Dispose();            // 0 字节空文本文档
+                }
+                catch (Exception ex)
+                {
+                    if (FileImport.IsDiskFull(ex))
+                    {
+                        tried.Add(root);
+                        dir = null;
+                        path = null;
+                        continue;
+                    }
+                    Paths.LogError(new IOException("新建" + (folder ? "文件夹" : "文档") + "失败: " + dir, ex));
+                    MessageBox.Show(this, "新建失败：" + ex.Message, "新建",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
             }
             AddedEntry e = new AddedEntry();
             e.Path = path;
@@ -4998,14 +5027,22 @@ namespace AppManager
             if (paths == null || paths.Length == 0 || !CanEditCategory(category)) return;
             bool resource = contentMode == SidebarControl.ContentMode.Website;
             bool crossVolume = false;
-            foreach (string path in paths)
+            if (resource)
             {
-                try
+                crossVolume = !ResourceStore.CanMoveWithinSourceVolume(ActiveResourceStoreRoots(), paths,
+                    paths.Select(p => Directory.Exists(p)).ToList(), category);
+            }
+            else
+            {
+                foreach (string path in paths)
                 {
-                    bool folder = Directory.Exists(path);
-                    if (!FileImport.SameVolume(path, StoreDirectory(category, resource, folder))) { crossVolume = true; break; }
+                    try
+                    {
+                        bool folder = Directory.Exists(path);
+                        if (!FileImport.SameVolume(path, StoreDirectory(category, false, folder))) { crossVolume = true; break; }
+                    }
+                    catch { crossVolume = true; break; }
                 }
-                catch { crossVolume = true; break; }
             }
             // 软件页面只原位登记程序，不复制文件：跨磁盘提示只对资源导入有意义。
             // 走 ShowNotice：导入进行中/结果展示中改用浮层，避免清掉正在显示的进度条。
@@ -5035,23 +5072,46 @@ namespace AppManager
             return DesktopOrganizer.QuickCenterDir;
         }
 
-        /// <summary>资源存储位置：只解析配置，不产生目录或配置写入（设置页展示、对话框占位提示与旧文件整理用）。</summary>
-        private string ConfiguredResourceStorePath()
+        private string DefaultResourceStoreRoot()
         {
-            return string.IsNullOrEmpty(config.ResourceStorePath)
-                ? Path.Combine(ConfiguredManageRoot(), "Resources") : DesktopOrganizer.NormalizeRoot(config.ResourceStorePath);
+            return Path.Combine(ConfiguredManageRoot(), "Resources");
         }
 
-        /// <summary>资源存储根目录：配置了「资源存储位置」则用之，否则回退 ManageRoot\Resources。</summary>
+        /// <summary>资源存储位置：只解析配置，不产生目录或配置写入。</summary>
+        private string ConfiguredResourceStorePath()
+        {
+            return ResourceStore.PrimaryRoot(config, DefaultResourceStoreRoot());
+        }
+
+        private string ResourceStoreSummary()
+        {
+            return ResourceStore.Summary(config, DefaultResourceStoreRoot());
+        }
+
+        private List<string> ActiveResourceStoreRoots()
+        {
+            return ResourceStore.ActiveRoots(config, DefaultResourceStoreRoot());
+        }
+
+        private List<string> KnownResourceStoreRoots()
+        {
+            return ResourceStore.KnownRoots(config, DefaultResourceStoreRoot());
+        }
+
+        /// <summary>复制本机存储位置设置，供备份包导入继续保留多位置配置。</summary>
+        private static void CopyResourceStoreLocations(AppConfig source, AppConfig target)
+        {
+            target.ResourceStoreLocations = new List<ResourceStoreLocation>();
+            foreach (ResourceStoreLocation location in source.ResourceStoreLocations ?? new List<ResourceStoreLocation>())
+                if (location != null) target.ResourceStoreLocations.Add(location.Clone());
+            target.ResourceStorePath = source.ResourceStorePath;
+        }
+
+        /// <summary>首个启用位置；全部停用时仅回退默认目录用于展示，不参与导入。</summary>
         private string ResourceStoreRoot()
         {
-            if (!string.IsNullOrEmpty(config.ResourceStorePath))
-            {
-                string p = DesktopOrganizer.NormalizeRoot(config.ResourceStorePath);
-                try { Directory.CreateDirectory(p); return p; }
-                catch { }
-            }
-            string root = Path.Combine(ResolveManageRoot(), "Resources");
+            List<string> roots = ActiveResourceStoreRoots();
+            string root = roots.Count > 0 ? roots[0] : Path.Combine(ResolveManageRoot(), "Resources");
             try { Directory.CreateDirectory(root); }
             catch { }
             return root;
@@ -5060,7 +5120,7 @@ namespace AppManager
         /// <summary>资源分类的存储目录：资源存储根目录下的分类子目录（分类名做非法字符替换）。</summary>
         private string ResourceStoreOf(string category)
         {
-            string dir = Path.Combine(ResourceStoreRoot(), SafeDirName(category));
+            string dir = ResourceStore.CategoryDirectory(ResourceStoreRoot(), category);
             try { Directory.CreateDirectory(dir); }
             catch { }
             return dir;
@@ -5822,7 +5882,7 @@ namespace AppManager
             grid.GridMode = GetCategoryGridMode(currentCategory);
             SyncHeaderStrip();
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                config.CloseToTray, ResourceStoreRoot());
+                config.CloseToTray, ResourceStoreSummary());
             StartAutoScan();
             SeparateCrossModeCategories();   // 布局备份等旧快照可能带回同名分类
             MigrateSoftwareFiles();          // 旧快照也可能带回软件页面里的文件条目
@@ -5918,6 +5978,7 @@ namespace AppManager
                 FileStorePath = config.FileStorePath,
                 ResourceStorePath = config.ResourceStorePath
             };
+            CopyResourceStoreLocations(config, localPaths);
             ThreadPool.QueueUserWorkItem(delegate
             {
                 AppConfig imported = null;
@@ -5968,6 +6029,7 @@ namespace AppManager
                     imported.FolderStorePath = config.FolderStorePath;
                     imported.FileStorePath = config.FileStorePath;
                     imported.ResourceStorePath = config.ResourceStorePath;
+                    CopyResourceStoreLocations(config, imported);
                     string bak = config.BackupSnapshot();
                     if (bak == null)
                     {
@@ -6091,7 +6153,7 @@ namespace AppManager
             HideMusicPlayer();
             miniMusic.Stop();
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                config.CloseToTray, ResourceStoreRoot());
+                config.CloseToTray, ResourceStoreSummary());
             SetMainContentVisible(false);
             settingsBtn.Visible = false;
             settingsPage.Visible = true;
@@ -6136,16 +6198,12 @@ namespace AppManager
         /// <summary>存储位置设置：设定资源导入的存储根目录（iOS 风格对话框）。</summary>
         private void ShowStorageLocationDialog()
         {
-            // 输入框只显示配置里的原始值；留空时用占位提示显示当前会用到的默认位置。
-            // 打开对话框不创建目录、不探测并写回 H:\Manage；没有改动时不写回，
-            // 不能把解析出的默认路径固化进配置（否则以后插上 H 盘、改了收纳根都不再跟随）。
-            string resourcePath = config.ResourceStorePath ?? string.Empty;
-
+            List<ResourceStoreLocation> edited = ResourceStore.EditableLocations(config);
             using (Form f = new BufferedDialogForm())
             {
                 f.FormBorderStyle = FormBorderStyle.None;
                 f.StartPosition = FormStartPosition.CenterParent;
-                f.ClientSize = new Size(520, 218);
+                f.ClientSize = new Size(640, 476);
                 f.BackColor = Theme.Background;
                 f.ShowInTaskbar = false;
                 ApplyRoundedCorners(f);
@@ -6168,12 +6226,119 @@ namespace AppManager
                 desc.AutoSize = true;
                 f.Controls.Add(desc);
 
-                TextBox resourceBox = MakePathRow(f, "资源存储位置（按分类建子目录）", resourcePath, 82, "默认：" + ConfiguredResourceStorePath());
-                // 避免输入框获得焦点后被整体选中（观感突兀）
-                f.Shown += delegate
+                Label hint = new Label();
+                hint.Text = "按列表顺序使用；全部停用时不导入。同盘移动不复制，文件夹不会被拆开。默认：" + DefaultResourceStoreRoot();
+                hint.Font = Theme.CaptionFont;
+                hint.ForeColor = Theme.TextSecondary;
+                hint.BackColor = Color.Transparent;
+                hint.Location = new Point(24, 74);
+                hint.AutoSize = true;
+                f.Controls.Add(hint);
+
+                ListBox list = new ListBox();
+                list.Font = Theme.BodyFont;
+                list.Location = new Point(24, 102);
+                list.Size = new Size(592, 216);
+                list.HorizontalScrollbar = true;
+                list.SelectionMode = SelectionMode.One;
+                list.IntegralHeight = false;
+                f.Controls.Add(list);
+
+                Action updateButtons = null;
+                RoundButton add = new RoundButton();
+                add.Text = "添加位置…";
+                add.Accent = false;
+                add.Size = new Size(112, 34);
+                add.Location = new Point(24, 330);
+                f.Controls.Add(add);
+
+                RoundButton up = new RoundButton();
+                up.Text = "上移";
+                up.Accent = false;
+                up.Size = new Size(72, 34);
+                up.Location = new Point(144, 330);
+                f.Controls.Add(up);
+
+                RoundButton down = new RoundButton();
+                down.Text = "下移";
+                down.Accent = false;
+                down.Size = new Size(72, 34);
+                down.Location = new Point(224, 330);
+                f.Controls.Add(down);
+
+                RoundButton toggle = new RoundButton();
+                toggle.Text = "停用";
+                toggle.Accent = false;
+                toggle.Size = new Size(96, 34);
+                toggle.Location = new Point(304, 330);
+                f.Controls.Add(toggle);
+
+                Action refresh = delegate
                 {
-                    resourceBox.SelectionStart = resourceBox.TextLength;
-                    resourceBox.SelectionLength = 0;
+                    int selected = list.SelectedIndex;
+                    list.BeginUpdate();
+                    list.Items.Clear();
+                    foreach (ResourceStoreLocation location in edited)
+                        list.Items.Add(location.Enabled ? location.Path : "已停用 · " + location.Path);
+                    list.EndUpdate();
+                    if (edited.Count > 0) list.SelectedIndex = Math.Max(0, Math.Min(selected, edited.Count - 1));
+                    if (updateButtons != null) updateButtons();
+                };
+
+                updateButtons = delegate
+                {
+                    int index = list.SelectedIndex;
+                    bool has = index >= 0 && index < edited.Count;
+                    up.Enabled = has && index > 0;
+                    down.Enabled = has && index < edited.Count - 1;
+                    toggle.Enabled = has;
+                    if (has) toggle.Text = edited[index].Enabled ? "停用" : "启用";
+                };
+                list.SelectedIndexChanged += delegate { updateButtons(); };
+
+                add.Click += delegate
+                {
+                    using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+                    {
+                        dlg.Description = "选择资源存储位置";
+                        dlg.ShowNewFolderButton = true;
+                        if (dlg.ShowDialog(f) != DialogResult.OK) return;
+                        string path = NormalizeStoreInput(dlg.SelectedPath);
+                        for (int i = 0; i < edited.Count; i++)
+                        {
+                            if (!string.Equals(edited[i].Path, path, StringComparison.OrdinalIgnoreCase)) continue;
+                            edited[i].Enabled = true;
+                            refresh();
+                            list.SelectedIndex = i;
+                            return;
+                        }
+                        edited.Add(new ResourceStoreLocation(path, true));
+                        refresh();
+                        list.SelectedIndex = edited.Count - 1;
+                    }
+                };
+
+                Action<int> move = delegate(int delta)
+                {
+                    int index = list.SelectedIndex;
+                    int other = index + delta;
+                    if (index < 0 || other < 0 || other >= edited.Count) return;
+                    ResourceStoreLocation value = edited[index];
+                    edited[index] = edited[other];
+                    edited[other] = value;
+                    refresh();
+                    list.SelectedIndex = other;
+                };
+                up.Click += delegate { move(-1); };
+                down.Click += delegate { move(1); };
+
+                toggle.Click += delegate
+                {
+                    int index = list.SelectedIndex;
+                    if (index < 0 || index >= edited.Count) return;
+                    edited[index].Enabled = !edited[index].Enabled;
+                    refresh();
+                    list.SelectedIndex = index;
                 };
 
                 RoundButton ok = new RoundButton();
@@ -6184,7 +6349,7 @@ namespace AppManager
                 ok.Click += delegate
                 {
                     string error;
-                    bool changed = ApplyStoreEdits(config, resourceBox.Text, out error);
+                    bool changed = ApplyStoreEdits(config, edited, out error);
                     if (error != null)
                     {
                         MessageBox.Show(this, error, "存储位置设置", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -6209,6 +6374,7 @@ namespace AppManager
                 cancel.Click += delegate { f.Close(); };
                 f.Controls.Add(cancel);
 
+                refresh();
                 ConfirmDialog.ShowModal(f);   // 模态 + 遮罩层
             }
         }
@@ -6244,17 +6410,65 @@ namespace AppManager
             return value.Length == 0 ? string.Empty : DesktopOrganizer.NormalizeRoot(value);
         }
 
-        /// <summary>
-        /// 存储位置对话框的保存逻辑：校验后只在规范化后确实变化时写回，空值表示沿用默认。
-        /// 返回是否被修改；校验失败时 error 非空，配置保持不变。旧版文件/文件夹位置不再提供修改。
-        /// </summary>
+        /// <summary>单一路径兼容入口；空值表示沿用默认位置。</summary>
         private static bool ApplyStoreEdits(AppConfig cfg, string resourceText, out string error)
         {
             string resource = NormalizeStoreInput(resourceText);
-            error = ValidateStorePath(resource, "资源存储位置");
-            if (error != null) return false;
-            if (string.Equals(NormalizeStoreInput(cfg.ResourceStorePath), resource, StringComparison.OrdinalIgnoreCase)) return false;
-            cfg.ResourceStorePath = resource;
+            List<ResourceStoreLocation> locations = new List<ResourceStoreLocation>();
+            if (!string.IsNullOrEmpty(resource)) locations.Add(new ResourceStoreLocation(resource, true));
+            return ApplyStoreEdits(cfg, locations, out error);
+        }
+
+        /// <summary>校验并保存有序存储位置列表；停用项保留，旧版本字段写入第一个启用位置。</summary>
+        private static bool ApplyStoreEdits(AppConfig cfg, List<ResourceStoreLocation> locations, out string error)
+        {
+            error = null;
+            List<ResourceStoreLocation> normalized = new List<ResourceStoreLocation>();
+            foreach (ResourceStoreLocation location in locations)
+            {
+                if (location == null || string.IsNullOrWhiteSpace(location.Path)) continue;
+                string path = NormalizeStoreInput(location.Path);
+                error = ValidateStorePath(path, "存储位置");
+                if (error != null) return false;
+                foreach (ResourceStoreLocation existing in normalized)
+                {
+                    if (string.Equals(existing.Path, path, StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "存储位置重复：" + path;
+                        return false;
+                    }
+                    try
+                    {
+                        if (FileImport.Within(existing.Path, path) || FileImport.Within(path, existing.Path))
+                        {
+                            error = "存储位置不能互相包含：" + existing.Path + " / " + path;
+                            return false;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!(ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)) throw;
+                        error = "存储位置格式无效：" + ex.Message;
+                        return false;
+                    }
+                }
+                normalized.Add(new ResourceStoreLocation(path, location.Enabled));
+            }
+
+            string legacy = string.Empty;
+            foreach (ResourceStoreLocation location in normalized)
+                if (location.Enabled) { legacy = location.Path; break; }
+
+            List<ResourceStoreLocation> current = ResourceStore.EditableLocations(cfg);
+            bool same = current.Count == normalized.Count;
+            if (same)
+                for (int i = 0; i < current.Count; i++)
+                    if (current[i].Enabled != normalized[i].Enabled
+                        || !string.Equals(current[i].Path, normalized[i].Path, StringComparison.OrdinalIgnoreCase)) { same = false; break; }
+            if (same && string.Equals(NormalizeStoreInput(cfg.ResourceStorePath), legacy, StringComparison.OrdinalIgnoreCase)) return false;
+
+            cfg.ResourceStoreLocations = normalized;
+            cfg.ResourceStorePath = legacy;
             return true;
         }
 

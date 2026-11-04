@@ -31,7 +31,8 @@ namespace AppManager
         internal sealed class LegacyStoreScan
         {
             internal string DatabaseFile, ResourceRoot;
-            internal readonly List<string> LegacyStores = new List<string>(), ResourceRoots = new List<string>(), Structural = new List<string>();
+            internal readonly List<string> LegacyStores = new List<string>(), ResourceRoots = new List<string>(),
+                TargetRoots = new List<string>(), Structural = new List<string>();
         }
 
         internal sealed class LegacyMoveResult
@@ -56,6 +57,7 @@ namespace AppManager
         private LegacyStoreScan SnapshotLegacyStores()
         {
             LegacyStoreScan scan = new LegacyStoreScan { DatabaseFile = config.Database.FilePath, ResourceRoot = ConfiguredResourceStorePath() };
+            scan.TargetRoots.AddRange(ActiveResourceStoreRoots());
             StoreRoots(scan.ResourceRoots, scan.LegacyStores, scan.Structural);
             return scan;
         }
@@ -125,7 +127,13 @@ namespace AppManager
                         if (!folder && IsLauncherFile(source)) { skipped.Add(name + "：程序或快捷方式"); continue; }
                         if ((File.GetAttributes(source) & FileAttributes.ReparsePoint) != 0) { skipped.Add(name + "：链接"); continue; }
                         if (folder && AddedEntryList.HasEntriesUnder(scan.DatabaseFile, source)) { skipped.Add(name + "：文件夹内还有单独收录的项目"); continue; }
-                        string dir = Path.GetFullPath(Path.Combine(scan.ResourceRoot, SafeDirName(rows[0][3])));
+                        string error;
+                        string dir;
+                        if (ChooseLegacyTarget(scan.TargetRoots, source, folder, rows[0][3], out dir, out error) == null)
+                        {
+                            skipped.Add(name + "：" + (error ?? ResourceStore.CapacityMessage));
+                            continue;
+                        }
                         moves.Add(new LegacyMove { Source = source, Name = name, Folder = folder, Target = dir });
                     }
                     catch (Exception ex)
@@ -137,6 +145,18 @@ namespace AppManager
             }
             AssignLegacyTargets(scan.DatabaseFile, moves);
             return moves;
+        }
+
+        private static string ChooseLegacyTarget(List<string> roots, string source, bool folder, string category,
+            out string directory, out string error)
+        {
+            string root = ResourceStore.ChooseRoot(roots, source, folder, category, ImportOperation.Move,
+                long.MaxValue, null, out directory, out error, false);
+            if (root != null) return root;
+            long size;
+            if (!ResourceStore.TryGetSize(source, folder, CancellationToken.None, out size, out error)) return null;
+            return ResourceStore.ChooseRoot(roots, source, folder, category, ImportOperation.Move,
+                size, null, out directory, out error, false);
         }
 
         /// <summary>目标名：避开磁盘上已有的、曾收录过的（避免继承旧条目的设置）与本批已占用的名称，重名追加 _1、_2…</summary>
