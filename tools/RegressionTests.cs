@@ -37,6 +37,7 @@ namespace AppManager
                 Run("auto stash quiet period starts when the whole restore batch ends", RestoreSuppressionStartsAtEnd);
                 Run("collection thumbnails do not stay loading when the completion post is lost", CollectionThumbsLostPost);
                 Run("desktop copy mode keeps same-name files and rolls back failed save", DesktopCopySafety);
+                Run("auto stash reuses a matching backup instead of adding a suffix", AutoStashReusesMatchingBackup);
                 Run("self shortcuts are identified by target instead of display name", SelfShortcutTarget);
                 Run("copy: complete tree and file contents", CopyComplete);
                 Run("copy limits: entries / bytes / timeout / depth", CopyLimits);
@@ -77,6 +78,7 @@ namespace AppManager
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
                 Run("scanner merges duplicate launch targets only when arguments also match", ScannerLaunchIdentityMerge);
+                Run("newer desktop shortcut replaces launch target while keeping identity", NewerShortcutKeepsIdentity);
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
                 Run("grid measures only visible rows; column width grows while scrolling to wider rows", GridVisibleMeasurement);
@@ -1394,6 +1396,60 @@ namespace AppManager
             Check(!DesktopOrganizer.IsSelfShortcut(broken), "broken shortcut was treated as self");
         }
 
+        private static void AutoStashReusesMatchingBackup()
+        {
+            AppConfig config = new AppConfig();
+            MethodInfo create = typeof(DesktopOrganizer).GetMethod("CreateShortcut", BindingFlags.Static | BindingFlags.NonPublic);
+            string name = "UpdateTool-" + Guid.NewGuid().ToString("N") + ".lnk";
+            string targetA = Path.Combine(root, "update-a.exe"), targetB = Path.Combine(root, "update-b.exe");
+            File.WriteAllText(targetA, "a"); File.WriteAllText(targetB, "b");
+            string[] sources = new string[3];
+            for (int i = 0; i < sources.Length; i++)
+            {
+                string dir = Path.Combine(root, "update-source-" + i);
+                Directory.CreateDirectory(dir);
+                sources[i] = Path.Combine(dir, name);
+            }
+            create.Invoke(null, new object[] { sources[0], targetA, "regression" });
+            create.Invoke(null, new object[] { sources[1], targetA, "regression" });
+            create.Invoke(null, new object[] { sources[2], targetB, "regression" });
+            string backup = Path.Combine(Paths.DesktopBackupDir, name);
+            string suffixed = Path.Combine(Paths.DesktopBackupDir, Path.GetFileNameWithoutExtension(name) + "_1.lnk");
+            int failed;
+            Check(DesktopOrganizer.AutoStashShortcuts(config, new List<string> { sources[0] }, out failed) == 1 && failed == 0,
+                "first matching backup fixture was not stashed");
+            Check(DesktopOrganizer.AutoStashShortcuts(config, new List<string> { sources[1] }, out failed) == 1 && failed == 0,
+                "same target shortcut was not accepted");
+            Check(File.Exists(backup) && !File.Exists(suffixed), "same target created a suffixed backup");
+            Check(!File.Exists(sources[1]) && config.DesktopBackup.Count == 1, "same target left a duplicate source or record");
+
+            string lockedFirst = Path.Combine(root, "locked-first.lnk");
+            string lockedSecondDir = Path.Combine(root, "locked-second");
+            Directory.CreateDirectory(lockedSecondDir);
+            string lockedSecond = Path.Combine(lockedSecondDir, "locked-first.lnk");
+            create.Invoke(null, new object[] { lockedFirst, targetA, "regression" });
+            create.Invoke(null, new object[] { lockedSecond, targetA, "regression" });
+            Check(DesktopOrganizer.AutoStashShortcuts(config, new List<string> { lockedFirst }, out failed) == 1 && failed == 0,
+                "locked-source fixture was not stashed");
+            string lockedBackup = Path.Combine(Paths.DesktopBackupDir, "locked-first.lnk");
+            DesktopBackupEntry lockedEntry = config.DesktopBackup.Single(entry => entry.CurrentPath == lockedBackup);
+            using (new FileStream(lockedSecond, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Check(DesktopOrganizer.AutoStashShortcuts(config, new List<string> { lockedSecond }, out failed) == 1 && failed == 0,
+                    "locked source was not copied into the existing backup");
+                Check(File.Exists(lockedSecond) && lockedEntry.IsCopy,
+                    "reused backup did not record that the source still exists: source=" + File.Exists(lockedSecond)
+                    + " copy=" + lockedEntry.IsCopy + " records=" + config.DesktopBackup.Count
+                    + " backups=" + string.Join(" | ", Directory.GetFiles(Paths.DesktopBackupDir, "locked-*.lnk")));
+            }
+
+            int recordsBeforeDifferentTarget = config.DesktopBackup.Count;
+            Check(DesktopOrganizer.AutoStashShortcuts(config, new List<string> { sources[2] }, out failed) == 1 && failed == 0,
+                "different target shortcut was not stashed");
+            Check(File.Exists(suffixed) && config.DesktopBackup.Count == recordsBeforeDifferentTarget + 1,
+                "different targets did not keep distinct backups");
+        }
+
         private static void ResourceCreateEntries()
         {
             AppConfig config = RenameConfig("resource-create");
@@ -2136,6 +2192,71 @@ namespace AppManager
             byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "add:wps-file", Name = "WPS document",
                 TargetPath = "D:\\APP\\WPS\\ksolaunch.exe", IsFile = true } });
             Check(dict.Count == 4, "file entry was merged into a software launch target");
+        }
+
+        private static void NewerShortcutKeepsIdentity()
+        {
+            Scanner scanner = new Scanner(new AppConfig());
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            typeof(Scanner).GetField("launchIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            FieldInfo timestamp = typeof(AppInfo).GetField("ShortcutLastWriteTimeUtc", Private);
+            FieldInfo currentDesktop = typeof(AppInfo).GetField("IsCurrentDesktopShortcut", Private);
+            Action<AppInfo, DateTime, bool> mark = delegate(AppInfo app, DateTime time, bool onDesktop)
+            {
+                if (timestamp != null) timestamp.SetValue(app, time);
+                if (currentDesktop != null) currentDesktop.SetValue(app, onDesktop);
+            };
+            Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            MethodInfo byName = typeof(Scanner).GetMethod("MergeByName", Private);
+            DateTime now = DateTime.UtcNow;
+            AppInfo oldBackup = new AppInfo { Key = "lnk:old-backup", Name = "Update Tool", ShortcutPath = "D:\\Backup\\Update Tool.lnk",
+                TargetPath = "D:\\App\\old.exe", IsDesktop = true };
+            string oldShortcutPath = oldBackup.ShortcutPath;
+            AppInfo newDesktop = new AppInfo { Key = "lnk:new-desktop", Name = "Update Tool", ShortcutPath = "D:\\Desktop\\Update Tool.lnk",
+                TargetPath = "D:\\App\\new.exe", IsDesktop = true };
+            mark(oldBackup, now.AddHours(-2), false);
+            mark(newDesktop, now.AddHours(-1), true);
+            byName.Invoke(scanner, new object[] { dict, oldBackup });
+            byName.Invoke(scanner, new object[] { dict, newDesktop });
+            AppInfo selected = dict.Values.Single();
+            Check(dict.Count == 1 && selected.Key == oldBackup.Key, "new shortcut replaced the persistent identity");
+            Check(selected.TargetPath == newDesktop.TargetPath && selected.ShortcutPath == newDesktop.ShortcutPath,
+                "desktop shortcut did not replace the old launch target");
+            Check(dict.ContainsKey(newDesktop.ShortcutPath) && !dict.ContainsKey(oldShortcutPath),
+                "scanner index kept the old shortcut path: keys=" + string.Join(" | ", new List<string>(dict.Keys)));
+
+            AppInfo staleDesktop = new AppInfo { Key = "lnk:stale-desktop", Name = "Update Tool", ShortcutPath = "D:\\Desktop2\\Update Tool.lnk",
+                TargetPath = "D:\\App\\stale.exe", IsDesktop = true };
+            mark(staleDesktop, now.AddHours(-3), true);
+            byName.Invoke(scanner, new object[] { dict, staleDesktop });
+            Check(selected.TargetPath == newDesktop.TargetPath, "older desktop shortcut replaced the newer current entry");
+
+            AppInfo backupFirst = new AppInfo { Key = "lnk:backup-first", Name = "Backup Tool", ShortcutPath = "D:\\Backup\\Backup Tool.lnk",
+                TargetPath = "D:\\App\\backup-old.exe", IsDesktop = true };
+            AppInfo backupNew = new AppInfo { Key = "lnk:backup-new", Name = "Backup Tool", ShortcutPath = "D:\\Backup\\Backup Tool_1.lnk",
+                TargetPath = "D:\\App\\backup-new.exe", IsDesktop = true };
+            mark(backupFirst, now.AddHours(-2), false);
+            mark(backupNew, now, false);
+            byName.Invoke(scanner, new object[] { dict, backupFirst });
+            byName.Invoke(scanner, new object[] { dict, backupNew });
+            AppInfo backupSelected = dict.Values.Single(app => app.Name == "Backup Tool");
+            Check(backupSelected.Key == backupFirst.Key && backupSelected.TargetPath == backupNew.TargetPath,
+                "newer backup shortcut did not win while preserving identity");
+
+            Scanner reverseScanner = new Scanner(new AppConfig());
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(reverseScanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            typeof(Scanner).GetField("launchIndex", Private).SetValue(reverseScanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            Dictionary<string, AppInfo> reverseDict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            AppInfo desktopFirst = new AppInfo { Key = "lnk:new-desktop", Name = "Update Tool", ShortcutPath = "D:\\Desktop\\Update Tool.lnk",
+                TargetPath = "D:\\App\\new.exe", IsDesktop = true, IsCurrentDesktopShortcut = true, ShortcutLastWriteTimeUtc = now };
+            AppInfo backupLater = new AppInfo { Key = "lnk:old-backup", Name = "Update Tool", ShortcutPath = "D:\\Backup\\Update Tool.lnk",
+                TargetPath = "D:\\App\\old.exe", IsDesktop = true, ShortcutLastWriteTimeUtc = now.AddHours(-2) };
+            byName.Invoke(reverseScanner, new object[] { reverseDict, desktopFirst });
+            byName.Invoke(reverseScanner, new object[] { reverseDict, backupLater });
+            AppInfo reverseSelected = reverseDict.Values.Single();
+            Check(reverseSelected.Key == backupLater.Key && reverseSelected.TargetPath == desktopFirst.TargetPath
+                && reverseSelected.ShortcutPath == desktopFirst.ShortcutPath,
+                "desktop-first scan did not preserve the backup identity and desktop launch target");
         }
 
         private static void SearchContextRemoval()

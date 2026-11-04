@@ -102,28 +102,57 @@ namespace AppManager
                     if (!IsShortcutFile(path) || IsSelfShortcut(path)) continue;
                     string dest = null;
                     bool sourceRemoved = false;
+                    bool reused = false;
+                    DesktopBackupEntry added = null;
                     try
                     {
                         if (!Directory.Exists(ShortcutDestDir)) Directory.CreateDirectory(ShortcutDestDir);
                         dest = Path.Combine(ShortcutDestDir, Path.GetFileName(path));
-                        if (File.Exists(dest)) dest = UniquePath(ShortcutDestDir, Path.GetFileName(path), false);
-                        File.Copy(path, dest, false);
+                        if (File.Exists(dest) && SameShortcutLaunch(dest, path))
+                        {
+                            reused = TryReplaceShortcut(path, dest);
+                        }
+                        if (!reused)
+                        {
+                            if (File.Exists(dest)) dest = UniquePath(ShortcutDestDir, Path.GetFileName(path), false);
+                            File.Copy(path, dest, false);
+                        }
                         try { File.Delete(path); sourceRemoved = true; }
                         catch (Exception ex) { Paths.LogError(new IOException("自动收纳已复制但源快捷方式未删除: " + path, ex)); }
 
-                        DesktopBackupEntry entry = new DesktopBackupEntry();
-                        entry.OriginalPath = path;
-                        entry.CurrentPath = dest;
-                        entry.IsShortcut = true;
-                        entry.IsDir = false;
-                        entry.IsCopy = !sourceRemoved;
-                        cfg.DesktopBackup.Add(entry);
-                        if (!cfg.Save("physical.desktop.autostash"))
+                        DesktopBackupEntry entry = cfg.DesktopBackup.Find(delegate(DesktopBackupEntry value)
                         {
-                            cfg.DesktopBackup.Remove(entry);
-                            RollbackBackedItem(path, dest, false, sourceRemoved);
-                            failed++;
-                            continue;
+                            return value != null && string.Equals(value.CurrentPath, dest, StringComparison.OrdinalIgnoreCase);
+                        });
+                        if (entry == null)
+                        {
+                            entry = new DesktopBackupEntry();
+                            entry.OriginalPath = path;
+                            entry.CurrentPath = dest;
+                            entry.IsShortcut = true;
+                            entry.IsDir = false;
+                            entry.IsCopy = !sourceRemoved;
+                            cfg.DesktopBackup.Add(entry);
+                            added = entry;
+                            if (!cfg.Save("physical.desktop.autostash"))
+                            {
+                                cfg.DesktopBackup.Remove(entry);
+                                RestoreAutoStashSource(path, dest, sourceRemoved, reused);
+                                failed++;
+                                continue;
+                            }
+                        }
+                        else if (entry.IsCopy == sourceRemoved)
+                        {
+                            bool oldCopy = entry.IsCopy;
+                            entry.IsCopy = !sourceRemoved;
+                            if (!cfg.Save("physical.desktop.autostash"))
+                            {
+                                entry.IsCopy = oldCopy;
+                                RestoreAutoStashSource(path, dest, sourceRemoved, reused);
+                                failed++;
+                                continue;
+                            }
                         }
                         moved++;
                     }
@@ -131,12 +160,50 @@ namespace AppManager
                     {
                         Paths.LogError(ex);
                         failed++;
-                        if (dest != null)
-                            try { if (File.Exists(dest)) File.Delete(dest); } catch { }
+                        if (added != null) cfg.DesktopBackup.Remove(added);
+                        if (dest != null) RestoreAutoStashSource(path, dest, sourceRemoved, reused);
                     }
                 }
                 return moved;
             }
+        }
+
+        private static bool SameShortcutLaunch(string left, string right)
+        {
+            AppInfo first = Scanner.ResolveShortcut(left, "Desktop");
+            AppInfo second = Scanner.ResolveShortcut(right, "Desktop");
+            return first != null && second != null && Scanner.SameLaunchIdentity(first, second);
+        }
+
+        private static bool TryReplaceShortcut(string source, string dest)
+        {
+            string temp = Path.Combine(Path.GetDirectoryName(dest), "." + Path.GetFileNameWithoutExtension(dest) + "." + Guid.NewGuid().ToString("N") + ".tmp");
+            try
+            {
+                File.Copy(source, temp, false);
+                if (!SameShortcutLaunch(temp, source)) return false;
+                File.Replace(temp, dest, null, true);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Paths.LogError(new IOException("自动收纳替换同目标快捷方式失败: " + dest, ex));
+                return false;
+            }
+            finally
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); } catch { }
+            }
+        }
+
+        private static void RestoreAutoStashSource(string source, string dest, bool sourceRemoved, bool reused)
+        {
+            try
+            {
+                if (sourceRemoved && !File.Exists(source) && File.Exists(dest)) File.Copy(dest, source, false);
+                if (!reused && File.Exists(dest)) File.Delete(dest);
+            }
+            catch (Exception ex) { Paths.LogError(new IOException("自动收纳失败后恢复源快捷方式失败: " + source, ex)); }
         }
 
         /// <summary>还原后抑制自动收纳的时长，从整个还原操作结束时起算。</summary>

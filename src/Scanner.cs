@@ -552,30 +552,31 @@ namespace AppManager
         {
             string user = Environment.GetFolderPath(Environment.SpecialFolder.StartMenu);
             string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu);
-            ScanShortcuts(user, dict, "StartMenu", true);
-            ScanShortcuts(common, dict, "StartMenu", true);
+            ScanShortcuts(user, dict, "StartMenu", true, false);
+            ScanShortcuts(common, dict, "StartMenu", true, false);
         }
 
         /// <summary>
         /// 扫描目录内快捷方式并收录，按名称去重（同名合并且保留有效启动目标），
         /// 避免同一软件经桌面/开始菜单/收纳目录等多来源重复出现。
         /// </summary>
-        private void ScanShortcuts(string folder, Dictionary<string, AppInfo> dict, string source, bool recursive)
+        private void ScanShortcuts(string folder, Dictionary<string, AppInfo> dict, string source, bool recursive, bool currentDesktop)
         {
             if (!Directory.Exists(folder)) return;
             try
             {
                 foreach (string f in Directory.EnumerateFiles(folder, "*.*", recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly))
-                    AddShortcut(dict, f, source);
+                    AddShortcut(dict, f, source, currentDesktop);
             }
             catch { }
         }
 
-        private void AddShortcut(Dictionary<string, AppInfo> dict, string file, string source)
+        private void AddShortcut(Dictionary<string, AppInfo> dict, string file, string source, bool currentDesktop)
         {
             if (!string.Equals(Path.GetExtension(file), ".lnk", StringComparison.OrdinalIgnoreCase)) return;
             AppInfo app = ResolveShortcut(file, source);
             if (app == null) return;
+            app.IsCurrentDesktopShortcut = currentDesktop;
             // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
             if (!IsAliveTarget(app.TargetPath, app.IsUwp)) return;
             if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
@@ -606,6 +607,7 @@ namespace AppManager
 
                 AppInfo app = new AppInfo();
                 app.LaunchArguments = a.Trim();
+                try { app.ShortcutLastWriteTimeUtc = File.GetLastWriteTimeUtc(path); } catch { }
                 app.ShortcutPath = path;
                 app.Name = Path.GetFileNameWithoutExtension(path);
                 app.Source = source;
@@ -705,8 +707,8 @@ namespace AppManager
             string desk = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
             string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
             // 桌面只扫顶层：递归遍历会把用户放在桌面的工程目录整棵扫进来，耗时且产生噪音条目
-            ScanShortcuts(desk, dict, "Desktop", false);
-            ScanShortcuts(common, dict, "Desktop", false);
+            ScanShortcuts(desk, dict, "Desktop", false, true);
+            ScanShortcuts(common, dict, "Desktop", false, true);
         }
 
         private void ScanDesktopBackup(Dictionary<string, AppInfo> dict)
@@ -716,10 +718,10 @@ namespace AppManager
             // 只扫根目录：递归会在每次扫描时遍历整棵用户目录（如 node_modules），还会把其中的 .lnk 误当成快捷中心条目，
             // 遇到无权限子目录时整个枚举中断，所有已收纳快捷方式一起从列表消失。
             if (Directory.Exists(Paths.DesktopBackupDir))
-                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop", false);
+                ScanShortcuts(Paths.DesktopBackupDir, dict, "Desktop", false, false);
             if (Directory.Exists(Paths.LegacyStashDir))
             {
-                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop", false);
+                ScanShortcuts(Paths.LegacyStashDir, dict, "Desktop", false, false);
                 // 旧版 DesktopStash 可能保留了子目录结构：按收纳清单逐条解析快捷方式，不递归整个目录
                 List<DesktopBackupEntry> entries;
                 try { entries = new List<DesktopBackupEntry>(config.DesktopBackup); }
@@ -729,7 +731,7 @@ namespace AppManager
                 {
                     if (e == null || e.IsDir || string.IsNullOrEmpty(e.CurrentPath)) continue;
                     if (!e.CurrentPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
-                    try { if (File.Exists(e.CurrentPath)) AddShortcut(dict, e.CurrentPath, "Desktop"); }
+                    try { if (File.Exists(e.CurrentPath)) AddShortcut(dict, e.CurrentPath, "Desktop", false); }
                     catch (Exception ex) { Paths.LogError(ex); }
                 }
             }
@@ -776,7 +778,7 @@ namespace AppManager
             AppInfo sameLaunch;
             if (launch != null && launchIndex != null && launchIndex.TryGetValue(launch, out sameLaunch))
             {
-                MergeDetails(sameLaunch, app);
+                MergeShortcut(dict, sameLaunch, app);
                 return;
             }
             string name = NormalizeEntryName(app.Name);
@@ -786,12 +788,73 @@ namespace AppManager
                 AppInfo exist;
                 if (nameIndex != null && nameIndex.TryGetValue(name, out exist))
                 {
-                    MergeDetails(exist, app);
+                    MergeShortcut(dict, exist, app);
                     return;
                 }
             }
             // 同键已存在时按 Merge 合并字段，不能直接覆盖：被覆盖的旧对象会留在名称索引里继续吞掉同名条目
             Merge(dict, app);
+        }
+
+        private void MergeShortcut(Dictionary<string, AppInfo> dict, AppInfo exist, AppInfo candidate)
+        {
+            if (ShouldAdoptCandidateIdentity(exist, candidate))
+            {
+                exist.Key = candidate.Key;
+                MergeDetails(exist, candidate);
+                return;
+            }
+            if (PreferShortcut(exist, candidate)) ReplaceLaunch(dict, exist, candidate);
+            else MergeDetails(exist, candidate);
+        }
+
+        private static bool ShouldAdoptCandidateIdentity(AppInfo exist, AppInfo candidate)
+        {
+            if (exist == null || candidate == null || string.IsNullOrEmpty(candidate.ShortcutPath)) return false;
+            if (exist.IsCurrentDesktopShortcut != candidate.IsCurrentDesktopShortcut)
+                return exist.IsCurrentDesktopShortcut;
+            return !exist.IsCurrentDesktopShortcut && !string.IsNullOrEmpty(exist.ShortcutPath)
+                && candidate.ShortcutLastWriteTimeUtc < exist.ShortcutLastWriteTimeUtc;
+        }
+
+        private static bool PreferShortcut(AppInfo exist, AppInfo candidate)
+        {
+            if (candidate == null || exist == null) return false;
+            if (candidate.IsCurrentDesktopShortcut != exist.IsCurrentDesktopShortcut)
+                return candidate.IsCurrentDesktopShortcut;
+            return candidate.ShortcutLastWriteTimeUtc > exist.ShortcutLastWriteTimeUtc;
+        }
+
+        private void ReplaceLaunch(Dictionary<string, AppInfo> dict, AppInfo exist, AppInfo candidate)
+        {
+            string oldDisplay = exist.DisplayKey();
+            string oldLaunch = LaunchIdentity(exist);
+            exist.TargetPath = candidate.TargetPath;
+            exist.ShortcutPath = candidate.ShortcutPath;
+            exist.DisplayIcon = string.IsNullOrEmpty(candidate.DisplayIcon) ? exist.DisplayIcon : candidate.DisplayIcon;
+            exist.Source = candidate.Source;
+            exist.IsUwp = candidate.IsUwp;
+            exist.IsFile = candidate.IsFile;
+            exist.IsFolder = candidate.IsFolder;
+            exist.LaunchArguments = candidate.LaunchArguments;
+            exist.ShortcutLastWriteTimeUtc = candidate.ShortcutLastWriteTimeUtc;
+            exist.IsCurrentDesktopShortcut = candidate.IsCurrentDesktopShortcut;
+            MergeDetails(exist, candidate);
+            string newDisplay = exist.DisplayKey();
+            AppInfo indexed;
+            if (!string.Equals(oldDisplay, newDisplay, StringComparison.OrdinalIgnoreCase)
+                && dict.TryGetValue(oldDisplay, out indexed) && ReferenceEquals(indexed, exist))
+            {
+                dict.Remove(oldDisplay);
+                dict[newDisplay] = exist;
+            }
+            if (launchIndex != null && !string.Equals(oldLaunch, LaunchIdentity(exist), StringComparison.Ordinal))
+            {
+                AppInfo launchSource;
+                if (oldLaunch != null && launchIndex.TryGetValue(oldLaunch, out launchSource) && ReferenceEquals(launchSource, exist))
+                    launchIndex.Remove(oldLaunch);
+                RegisterLaunchIndex(exist);
+            }
         }
 
         /// <summary>把条目登记到名称去重索引（首个同名条目优先，与 MergeByName 的顺序语义一致）。</summary>
@@ -820,6 +883,12 @@ namespace AppManager
             }
             catch { return null; }
             return target.ToUpperInvariant() + "\0" + (app.LaunchArguments ?? string.Empty).Trim();
+        }
+
+        internal static bool SameLaunchIdentity(AppInfo left, AppInfo right)
+        {
+            string a = LaunchIdentity(left), b = LaunchIdentity(right);
+            return a != null && string.Equals(a, b, StringComparison.Ordinal);
         }
 
         /// <summary>条目名称归一化（去重比较用）：先剔除重名后缀，再转小写去符号。</summary>
