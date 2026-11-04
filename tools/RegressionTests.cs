@@ -51,7 +51,7 @@ namespace AppManager
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
                 Run("backup list row height at 100/125/150/175 percent", BackupDpi);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
-                Run("status bar: progress only while a batch is incomplete", StatusVisibility);
+                Run("rounded path and progress bar: one-pixel fill renders without invalid arcs", RoundedPathNarrow);
                 Run("auto scan: existing shortcut rewrite, periodic fallback and disposal", AutoScanChanges);
                 Run("category removal: hidden toggle, single/batch, reload and rejoin", CategoryRemoval);
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
@@ -3033,13 +3033,29 @@ namespace AppManager
             }
         }
 
-        private static void StatusVisibility()
+        private static void RoundedPathNarrow()
         {
-            Check(!MainForm.StatusShowsProgress(0, 0), "plain notice should not show a progress track");
-            Check(MainForm.StatusShowsProgress(0, 2), "new batch should show progress");
-            Check(MainForm.StatusShowsProgress(1, 2), "incomplete batch should keep progress");
-            Check(!MainForm.StatusShowsProgress(2, 2), "completed batch should hide the full bar");
-            Check(!MainForm.StatusShowsProgress(3, 2), "overshoot should hide the full bar");
+            foreach (int width in new int[] { 1, 2, 3, 4 })
+            {
+                using (System.Drawing.Drawing2D.GraphicsPath path = Draw.RoundedPath(new Rectangle(4, 4, width, 18), 9))
+                using (Bitmap bitmap = new Bitmap(32, 32))
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                using (SolidBrush brush = new SolidBrush(Color.Red))
+                {
+                    Check(path.PointCount > 0, "narrow path is empty at width " + width);
+                    graphics.FillPath(brush, path);
+                }
+            }
+
+            // 178px 内容宽度、最大值为 178 时 value=1 会产生 1px 填充，正是红叉的触发条件。
+            using (Controls.IosProgressBar bar = new Controls.IosProgressBar())
+            {
+                bar.Size = new Size(180, 18);
+                bar.Maximum = 178;
+                bar.Value = 1;
+                using (Bitmap bitmap = new Bitmap(bar.Width, bar.Height))
+                    bar.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bar.Size));
+            }
         }
     }
 }

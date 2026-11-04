@@ -85,15 +85,21 @@ namespace AppManager
             return sf;
         }
         /// <summary>
-        /// 构造圆角矩形路径；半径自动夹到短边一半，防止越界。
+        /// 构造圆角矩形路径；半径自动夹到短边一半，防止越界。宽度或高度不足 2 像素时
+        /// 无法形成圆角，回退为直角矩形，避免 AddArc 收到 0 尺寸。
         /// </summary>
         public static GraphicsPath RoundedPath(Rectangle rect, int radius)
         {
-            int d = radius * 2;
-            if (d > rect.Width) { radius = rect.Width / 2; d = radius * 2; }
-            if (d > rect.Height) { radius = rect.Height / 2; d = radius * 2; }
-            if (radius < 1) radius = 1;
             GraphicsPath p = new GraphicsPath();
+            if (rect.Width <= 0 || rect.Height <= 0) return p;
+            int limit = Math.Min(rect.Width, rect.Height) / 2;
+            if (radius > limit) radius = limit;
+            if (radius < 1)
+            {
+                p.AddRectangle(rect);
+                return p;
+            }
+            int d = radius * 2;
             p.AddArc(rect.X, rect.Y, d, d, 180, 90);
             p.AddArc(rect.Right - d, rect.Y, d, d, 270, 90);
             p.AddArc(rect.Right - d, rect.Bottom - d, d, d, 0, 90);
