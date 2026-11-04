@@ -1018,6 +1018,7 @@ namespace AppManager
             Controls.Add(statusBar);
             statusLabel = new Label();
             statusLabel.AutoSize = false;
+            statusLabel.AutoEllipsis = true;
             statusLabel.BackColor = Color.Transparent;
             statusLabel.Font = Theme.BodyFont;
             statusLabel.ForeColor = Theme.TextPrimary;
@@ -1141,6 +1142,14 @@ namespace AppManager
                 statusProgress.Size = new Size(Dpi(180), Dpi(18));
                 statusDetail.Location = new Point(Dpi(366), 0);
                 statusDetail.Size = new Size(Math.Max(0, statusBar.Width - Dpi(378)), footerH);
+            }
+            else if (statusDetail.Visible)
+            {
+                // 导入结果只保留文字统计：进度条在完成态没有信息量，不再占位
+                int labelWidth = Math.Min(statusLabel.PreferredWidth + Dpi(2), Math.Max(Dpi(160), statusBar.Width * 2 / 5));
+                statusLabel.Size = new Size(labelWidth, footerH);
+                statusDetail.Location = new Point(statusLabel.Right + Dpi(10), 0);
+                statusDetail.Size = new Size(Math.Max(0, statusBar.Width - statusDetail.Left - Dpi(12)), footerH);
             }
             else
             {
@@ -5007,8 +5016,9 @@ namespace AppManager
                 }
                 catch { crossVolume = true; break; }
             }
-            // 软件页面只原位登记程序，不复制文件：跨磁盘提示只对资源导入有意义
-            if (crossVolume && resource) ShowStatusBar("跨磁盘添加：将复制到存储位置并保留源文件…", 0, 0);
+            // 软件页面只原位登记程序，不复制文件：跨磁盘提示只对资源导入有意义。
+            // 走 ShowNotice：导入进行中/结果展示中改用浮层，避免清掉正在显示的进度条。
+            if (crossVolume && resource) ShowNotice("跨磁盘添加：将复制到存储位置并保留源文件…");
             QueueImport(paths, crossVolume ? ImportOperation.Copy : ImportOperation.Move, category, collectionKey, resource, 0);
         }
 
@@ -5140,13 +5150,19 @@ namespace AppManager
             ResetImportStatus();
             statusBar.Visible = true;
             statusLabel.Text = text;
-            statusProgress.Visible = total > 0;
+            statusProgress.Visible = StatusShowsProgress(value, total);
             statusDetail.Visible = total > 0;
             statusProgress.Maximum = Math.Max(1, total);
             statusProgress.Value = Math.Min(value, statusProgress.Maximum);
             statusDetail.Text = string.Empty;
             statusBar.BringToFront();
             LayoutControls();
+        }
+
+        /// <summary>只有批次尚未完成时才显示进度条；完成态和无进度通知都不显示空轨道或满格条。</summary>
+        internal static bool StatusShowsProgress(int value, int total)
+        {
+            return total > 0 && value < total;
         }
 
         private void UpdateStatus(int index, int total, string currentName)

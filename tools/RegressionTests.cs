@@ -51,6 +51,7 @@ namespace AppManager
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
                 Run("backup list row height at 100/125/150/175 percent", BackupDpi);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
+                Run("status bar: progress only while a batch is incomplete", StatusVisibility);
                 Run("auto scan: existing shortcut rewrite, periodic fallback and disposal", AutoScanChanges);
                 Run("category removal: hidden toggle, single/batch, reload and rejoin", CategoryRemoval);
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
@@ -3030,6 +3031,15 @@ namespace AppManager
                     Check(failure == null, "status exception: " + failure);
                 }
             }
+        }
+
+        private static void StatusVisibility()
+        {
+            Check(!MainForm.StatusShowsProgress(0, 0), "plain notice should not show a progress track");
+            Check(MainForm.StatusShowsProgress(0, 2), "new batch should show progress");
+            Check(MainForm.StatusShowsProgress(1, 2), "incomplete batch should keep progress");
+            Check(!MainForm.StatusShowsProgress(2, 2), "completed batch should hide the full bar");
+            Check(!MainForm.StatusShowsProgress(3, 2), "overshoot should hide the full bar");
         }
     }
 }
