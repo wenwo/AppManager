@@ -155,6 +155,11 @@ namespace AppManager
         private const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
         private const int DWMWCP_ROUND = 2;
 
+        // 从 exe 内嵌图标资源按指定尺寸取图：支持 PNG 压缩的 256px 条目（Icon 类自身无法解析）
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern uint PrivateExtractIcons(string fileName, int iconIndex, int cxIcon, int cyIcon,
+            IntPtr[] icons, int[] iconIds, uint iconsCount, uint flags);
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct OSVERSIONINFOEX
         {
@@ -195,6 +200,8 @@ namespace AppManager
             DoubleBuffered = true;
             Font = Theme.BodyFont;
             Text = "应用中心";
+            // 不显式设置 Icon 时，WinForms 会把内置默认图标（彩色方块）画到窗口和任务栏按钮上。
+            Icon = ResolveAppIcon();
             AllowDrop = true;   // 窗体空白区（顶栏等）也接受外部拖入
         }
 
@@ -654,9 +661,20 @@ namespace AppManager
             else { mw.Show(); mw.Activate(); }
         }
 
-        /// <summary>解析托盘图标：优先取 exe 关联图标（编译期已嵌入），失败则回退系统默认程序图标。</summary>
+        /// <summary>
+        /// 解析窗口/托盘图标：优先按 256px 从 exe 内嵌图标组取图（任务栏/高 DPI 下更清晰），
+        /// 失败回退 32px 关联图标，再回退系统默认程序图标。
+        /// </summary>
         private static Icon ResolveAppIcon()
         {
+            try
+            {
+                IntPtr[] handles = new IntPtr[1];
+                int[] ids = new int[1];
+                uint count = PrivateExtractIcons(Application.ExecutablePath, 0, 256, 256, handles, ids, 1, 0);
+                if (count > 0 && handles[0] != IntPtr.Zero) return Icon.FromHandle(handles[0]);
+            }
+            catch { }
             try
             {
                 Icon ico = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
