@@ -12,7 +12,7 @@ try {
         'System.Xml.dll', 'Microsoft.VisualBasic.dll', 'Microsoft.CSharp.dll', 'System.IO.Compression.dll')
     $refs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll',
         'System.Runtime.dll', 'System.Runtime.WindowsRuntime.dll') | ForEach-Object { Join-Path $framework $_ }
-    $refs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+    $refs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Graphics.winmd', 'Windows.Storage.winmd') |
         ForEach-Object { Join-Path $env:WINDIR ('System32\WinMetadata\' + $_) }
     $refArgs = $refs | ForEach-Object { '/r:' + $_ }
     & $compiler /nologo /target:exe /platform:x64 /utf8output /main:AppManager.ViewerTests "/out:$output" @refArgs @sources (Join-Path $PSScriptRoot 'ViewerTests.cs')

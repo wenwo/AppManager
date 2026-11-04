@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
@@ -39,34 +41,63 @@ namespace AppManager
             {
                 if (stream.Length > 256L * 1024 * 1024)
                     throw new InvalidDataException("图片超过 256 MB，请使用外部查看器打开。");
-                BitmapDecoder probe = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat,
-                    BitmapCacheOption.OnDemand);
-                BitmapFrame frame = probe.Frames[0];
-                int orientation = ReadOrientation(frame);
-                int width = frame.PixelWidth;
-                int height = frame.PixelHeight;
+                BitmapDecoder probe;
+                BitmapFrame frame;
+                int orientation, width, height;
+                try
+                {
+                    probe = BitmapDecoder.Create(stream, BitmapCreateOptions.PreservePixelFormat,
+                        BitmapCacheOption.OnDemand);
+                    if (probe.Frames.Count == 0) throw new FileFormatException("图片不包含可解码的帧。");
+                    frame = probe.Frames[0];
+                    orientation = ReadOrientation(frame);
+                    width = frame.PixelWidth;
+                    height = frame.PixelHeight;
+                }
+                catch (Exception ex)
+                {
+                    ThrowRawDecodeFailure(path, ex, cancellation);
+                    throw;
+                }
                 if (width <= 0 || height <= 0 || (long)width * height > 64L * 1024 * 1024)
                     throw new InvalidDataException("图片超过内置查看器的 64M 像素限制。");
                 bool rotated = orientation >= 5 && orientation <= 8;
                 int maxSide = maxSideFor(rotated ? height : width, rotated ? width : height);
                 cancellation.ThrowIfCancellationRequested();
-                stream.Position = 0;
                 BitmapImage source = new BitmapImage();
-                source.BeginInit();
-                source.CacheOption = BitmapCacheOption.OnLoad;
-                source.CreateOptions = BitmapCreateOptions.PreservePixelFormat;
-                source.StreamSource = stream;
-                if (maxSide > 0 && Math.Max(width, height) > maxSide)
+                try
                 {
-                    if (width >= height) source.DecodePixelWidth = maxSide;
-                    else source.DecodePixelHeight = maxSide;
+                    stream.Position = 0;
+                    source.BeginInit();
+                    source.CacheOption = BitmapCacheOption.OnLoad;
+                    source.CreateOptions = BitmapCreateOptions.PreservePixelFormat;
+                    source.StreamSource = stream;
+                    if (maxSide > 0 && Math.Max(width, height) > maxSide)
+                    {
+                        if (width >= height) source.DecodePixelWidth = maxSide;
+                        else source.DecodePixelHeight = maxSide;
+                    }
+                    source.EndInit();
+                    source.Freeze();
                 }
-                source.EndInit();
-                source.Freeze();
+                catch (Exception ex)
+                {
+                    ThrowRawDecodeFailure(path, ex, cancellation);
+                    throw;
+                }
                 cancellation.ThrowIfCancellationRequested();
 
-                FormatConvertedBitmap converted = new FormatConvertedBitmap(source, PixelFormats.Pbgra32, null, 0);
-                converted.Freeze();
+                FormatConvertedBitmap converted;
+                try
+                {
+                    converted = new FormatConvertedBitmap(source, PixelFormats.Pbgra32, null, 0);
+                    converted.Freeze();
+                }
+                catch (Exception ex)
+                {
+                    ThrowRawDecodeFailure(path, ex, cancellation);
+                    throw;
+                }
                 width = converted.PixelWidth;
                 height = converted.PixelHeight;
                 if (width <= 0 || height <= 0) throw new InvalidDataException("图片尺寸无效");
@@ -83,10 +114,96 @@ namespace AppManager
                     finally { result.UnlockBits(data); }
                     cancellation.ThrowIfCancellationRequested();
                     ApplyOrientation(result, orientation);
+                    cancellation.ThrowIfCancellationRequested();
                     return result;
                 }
-                catch { result.Dispose(); throw; }
+                catch (Exception ex)
+                {
+                    result.Dispose();
+                    ThrowRawDecodeFailure(path, ex, cancellation);
+                    throw;
+                }
             }
+        }
+
+        private static void ThrowRawDecodeFailure(string path, Exception error, CancellationToken cancellation)
+        {
+            cancellation.ThrowIfCancellationRequested();
+            if (!MediaRules.IsRawImage(path) || !IsWicDecodeFailure(error)) return;
+            throw new InvalidDataException(RawDecodeFailureMessage(IsRw2WicDecoderRegistered()), error);
+        }
+
+        private static bool IsWicDecodeFailure(Exception error)
+        {
+            // WPF 常把 WIC 错误包一层；沿 InnerException 查找有限层数，避免误判外层 IOException 等。
+            for (int depth = 0; error != null && depth < 4; depth++)
+            {
+                if (error is OperationCanceledException) return false;
+                if (error is NotSupportedException || error is FileFormatException) return true;
+                COMException com = error as COMException;
+                if (com != null)
+                {
+                    uint code = unchecked((uint)com.HResult);
+                    if (code >= 0x88982F00u && code <= 0x88982FFFu) return true;
+                }
+                error = error.InnerException;
+            }
+            return false;
+        }
+
+        internal static string RawDecodeFailureMessage(bool? decoderRegistered)
+        {
+            if (decoderRegistered == false)
+                return "当前系统未安装 RW2 WIC 解码器。请安装 Microsoft Raw Image Extension 并重启应用。";
+            if (decoderRegistered == true)
+                return "RW2 解码失败，文件可能损坏或不受当前解码器支持。";
+            return "RW2 解码失败，且无法确认系统是否注册了 RW2 解码器。";
+        }
+
+        private static readonly object RawDecoderGate = new object();
+        private static bool rawDecoderProbed;
+        private static bool? rawDecoderRegistered;
+
+        internal static bool? IsRw2WicDecoderRegistered()
+        {
+            lock (RawDecoderGate)
+            {
+                if (rawDecoderProbed) return rawDecoderRegistered;
+                bool? probed = ProbeRw2WicDecoder();
+                if (probed.HasValue)
+                {
+                    // 只缓存确定结果；探测本身失败（如 WinRT 瞬时异常）下次错误时重试。
+                    rawDecoderRegistered = probed;
+                    rawDecoderProbed = true;
+                }
+                return probed;
+            }
+        }
+
+        private static bool? ProbeRw2WicDecoder()
+        {
+            try
+            {
+                // WinRT 与 WPF 共用系统 WIC；按已注册解码器的文件扩展名判断 RAW 扩展是否可用。
+                IReadOnlyList<Windows.Graphics.Imaging.BitmapCodecInformation> decoders =
+                    Windows.Graphics.Imaging.BitmapDecoder.GetDecoderInformationEnumerator();
+                bool queried = false;
+                bool incomplete = false;
+                foreach (Windows.Graphics.Imaging.BitmapCodecInformation info in decoders)
+                {
+                    try
+                    {
+                        IReadOnlyList<string> extensions = info.FileExtensions;
+                        if (extensions == null) continue;
+                        queried = true;
+                        foreach (string extension in extensions)
+                            if (string.Equals(extension, ".rw2", StringComparison.OrdinalIgnoreCase)) return true;
+                    }
+                    catch (Exception) { incomplete = true; }   // 信息不完整时不能断言“未安装”
+                }
+                return queried && !incomplete ? (bool?)false : null;
+            }
+            catch (Exception) { return null; }
         }
 
         private static int ReadOrientation(BitmapFrame frame)

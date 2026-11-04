@@ -20,7 +20,7 @@ $perfRefs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.d
 $perfOld = Join-Path $perfRoot 'XML.exe'
 $perfRefs += '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) 'System.Runtime.dll')
 $perfRefs += '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) 'System.Runtime.WindowsRuntime.dll')
-$perfRefs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+$perfRefs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Graphics.winmd', 'Windows.Storage.winmd') |
     ForEach-Object { '/r:' + (Join-Path $env:WINDIR ('System32\WinMetadata\' + $_)) }
 $perfNew = Join-Path $perfRoot 'SQLite.exe'
 foreach ($perfBuild in @(@($perfBaseline, $perfOld, ''), @($perfProject, $perfNew, '/define:DATABASE'))) {

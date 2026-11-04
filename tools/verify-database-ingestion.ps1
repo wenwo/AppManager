@@ -11,7 +11,7 @@ $ingestRefs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml
 $ingestLog = Join-Path $ingestRoot 'results.log'
 $ingestRefs += '/r:' + (Join-Path (Split-Path -Parent $ingestCompiler) 'System.Runtime.dll')
 $ingestRefs += '/r:' + (Join-Path (Split-Path -Parent $ingestCompiler) 'System.Runtime.WindowsRuntime.dll')
-$ingestRefs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+$ingestRefs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Graphics.winmd', 'Windows.Storage.winmd') |
     ForEach-Object { '/r:' + (Join-Path $env:WINDIR ('System32\WinMetadata\' + $_)) }
 Write-Output "RESULTS=$ingestRoot"
 $ingestFailed = $false

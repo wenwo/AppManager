@@ -23,6 +23,8 @@ namespace AppManager
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return false;
             try
             {
+                // RAW 依赖 WIC；GDI+ 既不支持，也不要为列表排序触发额外解压。
+                if (MediaRules.IsRawImage(path)) return false;
                 if (MediaRules.IsImage(path)) return TryReadImageTaken(path, out taken);
                 if (MediaRules.IsVideo(path)) return TryReadVideoTaken(path, out taken);
             }

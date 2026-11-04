@@ -331,7 +331,7 @@ namespace AppManager
                 if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
                 using (Bitmap src = DecodeThumbnailSource(path, delegate(int w, int h) { return displaySize * 2; }))
                 {
-                    if (src.Width <= 0 || src.Height <= 0) return null;
+                    if (src == null || src.Width <= 0 || src.Height <= 0) return null;
                     Bitmap dst = new Bitmap(displaySize, displaySize, PixelFormat.Format32bppArgb);
                     using (Graphics g = Graphics.FromImage(dst))
                     {
@@ -360,7 +360,17 @@ namespace AppManager
         private static Bitmap DecodeThumbnailSource(string path, Func<int, int, int> longSideFor)
         {
             try { return WicImageDecoder.Load(path, longSideFor); }
-            catch { return new Bitmap(path); }
+            catch
+            {
+                // GDI+ 不支持 RAW；WIC 失败后直接走占位，避免无意义的重复解码。
+                if (!CanUseGdiFallback(path)) return null;
+                return new Bitmap(path);
+            }
+        }
+
+        internal static bool CanUseGdiFallback(string path)
+        {
+            return !MediaRules.IsRawImage(path);
         }
 
         /// <summary>
@@ -467,7 +477,7 @@ namespace AppManager
                     return (int)Math.Min(int.MaxValue / 2, Math.Ceiling(Math.Max(w, h) * fill)) * 2;
                 }))
                 {
-                    if (src.Width <= 0 || src.Height <= 0) return null;
+                    if (src == null || src.Width <= 0 || src.Height <= 0) return null;
                     double scale = Math.Max((double)width / src.Width, (double)height / src.Height);
                     int dw = Math.Max(1, (int)Math.Round(src.Width * scale));
                     int dh = Math.Max(1, (int)Math.Round(src.Height * scale));
@@ -510,7 +520,7 @@ namespace AppManager
                 if (!MediaRules.IsImage(path) || !File.Exists(path)) return null;
                 using (Bitmap src = DecodeThumbnailSource(path, delegate(int w, int h) { return maxLongEdge; }))
                 {
-                    if (src.Width <= 0 || src.Height <= 0) return null;
+                    if (src == null || src.Width <= 0 || src.Height <= 0) return null;
                     double scale = Math.Min(1.0, (double)maxLongEdge / Math.Max(src.Width, src.Height));
                     int dw = Math.Max(1, (int)Math.Round(src.Width * scale));
                     int dh = Math.Max(1, (int)Math.Round(src.Height * scale));

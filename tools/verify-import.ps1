@@ -8,7 +8,7 @@ try {
         'System.Xml.dll', 'Microsoft.VisualBasic.dll', 'Microsoft.CSharp.dll', 'System.IO.Compression.dll') | ForEach-Object { '/r:' + $_ }
     $references += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll', 'System.Runtime.dll', 'System.Runtime.WindowsRuntime.dll') |
         ForEach-Object { '/r:' + (Join-Path (Split-Path -Parent $compiler) $_) }
-    $references += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+    $references += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Graphics.winmd', 'Windows.Storage.winmd') |
         ForEach-Object { '/r:' + (Join-Path $env:WINDIR ('System32\WinMetadata\' + $_)) }
     & $compiler /nologo /target:exe /platform:x64 /utf8output /main:AppManager.FileImportTests "/out:$testExe" @references @sources (Join-Path $PSScriptRoot 'FileImportTests.cs')
     if ($LASTEXITCODE -ne 0) { throw 'Import test compilation failed.' }

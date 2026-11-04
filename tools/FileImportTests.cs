@@ -92,6 +92,17 @@ namespace AppManager
                     Check(FileImport.IsDiskFull(new System.ComponentModel.Win32Exception(39)), "Win32 disk full");
                     Check(!FileImport.IsDiskFull(new UnauthorizedAccessException()) && !FileImport.IsDiskFull(new IOException("other")), "unrelated error misclassified");
                 });
+                Test("RW2 enters photo and credential categories with uppercase extensions", delegate
+                {
+                    foreach (string path in new[] { "photo.rw2", "photo.RW2", @"C:\album\photo.Rw2" })
+                    {
+                        Check(MediaRules.IsImage(path) && MediaRules.IsRawImage(path), "RW2 not classified as image");
+                        Check(MediaRules.MatchCategoryExt("照片", path) && MediaRules.FitsCategory("照片", path, false), "RW2 rejected by photos");
+                        Check(MediaRules.SuggestResourceCategory(path, false) == "照片", "RW2 not suggested as photo");
+                        Check(MediaRules.MatchCategoryExt("证件", path), "RW2 not accepted by credentials");
+                    }
+                    Check(MediaRules.ResourceCategoryFilter("照片").Contains("*.rw2"), "photo filter missing RW2");
+                });
                 Test("resource store selection skips an unavailable location and keeps a folder together", delegate
                 {
                     string dir = Path.Combine(root, "multi-store-" + Guid.NewGuid().ToString("N"));

@@ -9,11 +9,17 @@ namespace AppManager
     /// </summary>
     internal static class MediaRules
     {
-        /// <summary>图片扩展名（小写、含点）。</summary>
-        public static readonly string[] ImageExt =
+        /// <summary>普通图片扩展名（小写、含点）。</summary>
+        private static readonly string[] PlainImageExt =
         {
             ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"
         };
+
+        /// <summary>需要系统 WIC RAW 解码器的图片扩展名（小写、含点）。</summary>
+        public static readonly string[] RawImageExt = { ".rw2" };
+
+        /// <summary>图片扩展名（小写、含点），包含依赖可选 WIC 解码器的 RAW 格式。</summary>
+        public static readonly string[] ImageExt = Merge(PlainImageExt, RawImageExt);
 
         /// <summary>视频扩展名（小写、含点）。</summary>
         public static readonly string[] VideoExt =
@@ -58,7 +64,7 @@ namespace AppManager
         // ImageExt / VideoExt / DocExt 分开维护：这里加格式不会让查看器去解码它不支持的文件。
         // 视频不收 .ts：它同时是 TypeScript 文本扩展名，会被文本查看器打开。
 
-        /// <summary>「照片」接收：查看器可解码的图片 + iPhone 照片（HEIC/HEIF）、扫描件（TIFF）、AVIF、SVG。</summary>
+        /// <summary>「照片」接收：查看器图片格式 + iPhone 照片（HEIC/HEIF）、扫描件（TIFF）、AVIF、SVG。</summary>
         private static readonly string[] PhotoCategoryExt =
             Merge(ImageExt, new[] { ".heic", ".heif", ".tif", ".tiff", ".avif", ".svg" });
 
@@ -84,6 +90,12 @@ namespace AppManager
         public static bool IsImage(string path)
         {
             return MatchExt(path, ImageExt);
+        }
+
+        /// <summary>是否为依赖系统 WIC RAW 解码器的图片；这些文件不走 GDI+ 解码路径。</summary>
+        public static bool IsRawImage(string path)
+        {
+            return MatchExt(path, RawImageExt);
         }
 
         /// <summary>是否为 PDF 文件；PDF 在资源查看器中按文档画布模式打开。</summary>
@@ -137,9 +149,8 @@ namespace AppManager
         private static bool MatchExt(string path, string[] exts)
         {
             if (string.IsNullOrEmpty(path)) return false;
-            string p = path.ToLowerInvariant();
             for (int i = 0; i < exts.Length; i++)
-                if (p.EndsWith(exts[i], StringComparison.Ordinal)) return true;
+                if (path.EndsWith(exts[i], StringComparison.OrdinalIgnoreCase)) return true;
             return false;
         }
 

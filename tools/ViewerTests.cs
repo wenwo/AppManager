@@ -52,6 +52,7 @@ namespace AppManager
                 Run("text bounds, binary rejection, cancellation and file release", TextBounds);
                 Run("bounded long-line text display latency", TextDisplay);
                 Run("WIC transparency, aspect ratio, cancellation and file release", Images);
+                Run("RW2 classification, WIC diagnostics, GDI+ isolation and limits", RawImages);
                 Run("PDF renders both pages through Windows API and releases file", PdfPages);
                 Run("PDF corrupt/missing/oversize/cancelled inputs recover", PdfFailures);
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
@@ -589,6 +590,91 @@ namespace AppManager
             using (Bitmap image = WicImageDecoder.Load(path, 32)) Check(image.Width == 32 && image.Height == 16, "downsampling");
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None)) { }
             Expect<OperationCanceledException>(delegate { WicImageDecoder.Load(path, 128, new CancellationToken(true)); });
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle handle,
+            uint code, IntPtr input, uint inputSize, IntPtr output, uint outputSize, out uint returned, IntPtr overlapped);
+
+        private static string MakeExifJpeg(string name)
+        {
+            string path = Path.Combine(root, name);
+            using (Bitmap bitmap = new Bitmap(4, 2))
+            {
+                PropertyItem item = (PropertyItem)FormatterServices.GetUninitializedObject(typeof(PropertyItem));
+                item.Id = 0x9003; item.Type = 2; item.Value = Encoding.ASCII.GetBytes("2020:01:02 03:04:05\0");
+                item.Len = item.Value.Length;
+                bitmap.SetPropertyItem(item);
+                bitmap.Save(path, ImageFormat.Jpeg);
+            }
+            return path;
+        }
+
+        private static void MakeSparse(FileStream stream, long length)
+        {
+            uint returned;
+            if (!DeviceIoControl(stream.SafeFileHandle, 0x900C4u, IntPtr.Zero, 0, IntPtr.Zero, 0, out returned, IntPtr.Zero))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            stream.SetLength(length);
+        }
+
+        private static void RawImages()
+        {
+            Check(MediaRules.IsImage(@"C:\a\photo.RW2") && MediaRules.IsRawImage(@"C:\a\photo.rw2")
+                && MediaRules.IsImageDocument(@"C:\a\photo.rw2"), "RW2 image classification");
+            Check(MediaRules.MatchCategoryExt("照片", "photo.rw2") && MediaRules.MatchCategoryExt("证件", "photo.RW2"),
+                "RW2 category inheritance");
+            Check(MediaRules.ResourceCategoryFilter("照片").Contains("*.rw2")
+                && MediaRules.DecodableImageFilter().Contains("*.rw2"), "RW2 filters");
+            Check(!MediaRules.IsRawImage("photo.jpg") && MediaRules.IsImage("photo.jpg"), "JPEG affected by raw rule");
+
+            string disguised = MakeExifJpeg("disguised.rw2");
+            DateTime taken;
+            Check(!MediaInfo.TryGetTakenDate(disguised, out taken), "RW2 entered GDI+ EXIF path");
+            MethodInfo details = typeof(PropertiesDialog).GetMethod("ReadImageInfo", BindingFlags.NonPublic | BindingFlags.Static);
+            object[] args = { disguised, 0, 0, null, null, null };
+            details.Invoke(null, args);
+            Bitmap preview = args[5] as Bitmap;
+            try { Check((int)args[1] == 0 && args[3] == null && preview == null, "RW2 entered Dialog GDI+ path"); }
+            finally { if (preview != null) preview.Dispose(); }
+            Check(!Icons.CanUseGdiFallback(@"C:\a\photo.RW2") && Icons.CanUseGdiFallback(@"C:\a\photo.jpg"),
+                "GDI+ fallback isolation");
+
+            bool? registered = WicImageDecoder.IsRw2WicDecoderRegistered();
+            Check(registered.HasValue, "RW2 WIC decoder probe failed");
+            Console.WriteLine("  RW2 WIC decoder registered: " + registered.Value);
+            Check(WicImageDecoder.RawDecodeFailureMessage(false).Contains("Microsoft Raw Image Extension"), "missing decoder text");
+            Check(WicImageDecoder.RawDecodeFailureMessage(true).Contains("损坏"), "failed decoder text");
+            Check(WicImageDecoder.RawDecodeFailureMessage(null).Contains("无法确认"), "unknown decoder text");
+
+            string empty = Path.Combine(root, "empty.rw2"); File.WriteAllBytes(empty, new byte[0]);
+            try
+            {
+                using (Bitmap ignored = WicImageDecoder.Load(empty, 128)) { throw new Exception("empty RW2 decoded"); }
+            }
+            catch (InvalidDataException ex)
+            {
+                Check(ex.Message == WicImageDecoder.RawDecodeFailureMessage(registered), "empty RW2 message: " + ex.Message);
+            }
+            using (Bitmap thumb = Icons.LoadCoverSource(empty, 32)) Check(thumb == null, "empty RW2 reached GDI+ fallback");
+
+            string oversized = Path.Combine(root, "oversized.rw2");
+            using (FileStream stream = new FileStream(oversized, FileMode.Create, FileAccess.Write, FileShare.None))
+                MakeSparse(stream, 256L * 1024 * 1024 + 1);
+            try
+            {
+                using (Bitmap ignored = WicImageDecoder.Load(oversized, 128)) { throw new Exception("oversized RW2 decoded"); }
+            }
+            catch (InvalidDataException ex) { Check(ex.Message.Contains("256 MB"), "256 MB boundary: " + ex.Message); }
+
+            string huge = Path.Combine(root, "huge.rw2");
+            using (Bitmap bitmap = new Bitmap(8193, 8192, PixelFormat.Format1bppIndexed))
+                bitmap.Save(huge, ImageFormat.Png);
+            try
+            {
+                using (Bitmap ignored = WicImageDecoder.Load(huge, 128)) { throw new Exception("oversized pixel RW2 decoded"); }
+            }
+            catch (InvalidDataException ex) { Check(ex.Message.Contains("64M"), "64M pixel boundary: " + ex.Message); }
         }
 
         private static void TextDisplay()

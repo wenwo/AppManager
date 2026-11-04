@@ -69,7 +69,7 @@ if ($wpfRefs.Count -ne 3) {
 }
 $refs += $wpfRefs
 $refs += @('System.Runtime.dll', 'System.Runtime.WindowsRuntime.dll') | ForEach-Object { Join-Path $frameworkDir $_ }
-$refs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Storage.winmd') |
+$refs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Graphics.winmd', 'Windows.Storage.winmd') |
   ForEach-Object { Join-Path $env:WINDIR ('System32\WinMetadata\' + $_) }
 
 $ico = Join-Path $base "AppManager.ico"
