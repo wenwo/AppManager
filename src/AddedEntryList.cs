@@ -73,40 +73,44 @@ namespace AppManager
         /// <summary>批量查询路径归属：批量导入时只开少量只读连接，避免每个路径各开一次数据库。</summary>
         internal Dictionary<string, List<AddedEntry>> LookupMany(IEnumerable<string> paths)
         {
-            Dictionary<string, List<AddedEntry>> result =
-                new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
             List<string> distinct = new List<string>();
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string path in paths)
             {
                 if (string.IsNullOrEmpty(path) || !seen.Add(path)) continue;
                 distinct.Add(path);
-                result[path] = new List<AddedEntry>();
             }
-            if (distinct.Count == 0) return result;
+            if (distinct.Count == 0) return new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
+            if (Store == null) return LoadMany(null, distinct);
+            using (Sqlite db = new Sqlite(Store.FilePath, true)) return LoadMany(db, distinct);
+        }
 
-            if (Store != null)
+        /// <summary>按路径批量读取数据库行并合并未保存改动；共用一条连接和分块 IN 查询。</summary>
+        private Dictionary<string, List<AddedEntry>> LoadMany(Sqlite db, List<string> paths)
+        {
+            Dictionary<string, List<AddedEntry>> result =
+                new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
+            if (paths == null || paths.Count == 0) return result;
+            foreach (string path in paths) result[path] = new List<AddedEntry>();
+            if (db != null)
             {
-                using (Sqlite db = new Sqlite(Store.FilePath, true))
+                for (int offset = 0; offset < paths.Count; offset += 256)
                 {
-                    for (int offset = 0; offset < distinct.Count; offset += 256)
+                    int count = Math.Min(256, paths.Count - offset);
+                    List<string> chunk = paths.GetRange(offset, count);
+                    List<string> marks = chunk.ConvertAll(delegate(string value) { return "?"; });
+                    object[] args = new object[count];
+                    for (int i = 0; i < count; i++) args[i] = chunk[i].ToUpperInvariant();
+                    foreach (string[] row in db.Query(Columns + " WHERE a.path_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY a.id", args))
                     {
-                        int count = Math.Min(256, distinct.Count - offset);
-                        List<string> chunk = distinct.GetRange(offset, count);
-                        List<string> marks = chunk.ConvertAll(delegate(string value) { return "?"; });
-                        object[] args = new object[count];
-                        for (int i = 0; i < count; i++) args[i] = chunk[i].ToUpperInvariant();
-                        foreach (string[] row in db.Query(Columns + " WHERE a.path_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY a.id", args))
-                        {
-                            if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
-                            AddedEntry entry = Hydrate(row);
-                            List<AddedEntry> list;
-                            if (result.TryGetValue(entry.Path, out list) && !list.Contains(entry)) list.Add(entry);
-                        }
+                        if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
+                        AddedEntry entry = Hydrate(row);
+                        List<AddedEntry> list;
+                        if (result.TryGetValue(entry.Path, out list) && !list.Contains(entry)) list.Add(entry);
                     }
                 }
             }
-            foreach (string path in distinct)
+            foreach (string path in paths)
             {
                 List<AddedEntry> staged;
                 if (!changedPaths.TryGetValue(path, out staged)) continue;
@@ -128,8 +132,9 @@ namespace AppManager
             if (missing.Count == 0) return;
             // 缓存满 512 会整体清空：放不下时先腾空并整批重读，避免预读中途把自己刚读到的结果清掉
             if (pathCache.Count + missing.Count >= 512) { pathCache.Clear(); missing = distinct; }
-            using (Sqlite db = new Sqlite(Store.FilePath, true))
-                foreach (string path in missing) LoadPath(db, path);
+            Dictionary<string, List<AddedEntry>> loaded;
+            using (Sqlite db = new Sqlite(Store.FilePath, true)) loaded = LoadMany(db, missing);
+            foreach (KeyValuePair<string, List<AddedEntry>> item in loaded) pathCache[item.Key] = item.Value;
         }
         private List<AddedEntry> LoadPath(Sqlite db, string path)
         {

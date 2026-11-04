@@ -94,6 +94,7 @@ namespace AppManager
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
                 Run("grid measures only visible rows; column width grows while scrolling to wider rows", GridVisibleMeasurement);
                 Run("list header paints before rows for empty and populated lists with bounded measurement", GridHeaderFirstPaint);
+                Run("main grid paint failures render a fallback instead of throwing", GridPaintFailureFallback);
                 Run("list header survives filtering to empty, refill, view switches and sorting", GridHeaderRefresh);
                 Run("stash scan reads root shortcuts and legacy records only, never stashed folder trees", StashScanTopLevel);
                 Run("background scan uses the UI snapshot and leaves UI-owned settings to the UI thread", ScanUsesUiSnapshot);
@@ -2537,6 +2538,33 @@ namespace AppManager
                         if (color.R < 200 && color.G < 200 && color.B < 200) textPixels++;
                     }
                 Check(textPixels > 20, "header column labels were not rendered");
+            }
+        }
+
+        private static void GridPaintFailureFallback()
+        {
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Size = new Size(640, 360), GridMode = false })
+            {
+                grid.CreateControl();
+                List<AppInfo> apps = (List<AppInfo>)typeof(Controls.AppGridControl)
+                    .GetField("apps", Private).GetValue(grid);
+                apps.Add(null);
+                using (Bitmap bitmap = new Bitmap(grid.Width, grid.Height))
+                using (Graphics graphics = Graphics.FromImage(bitmap))
+                {
+                    try
+                    {
+                        typeof(Controls.AppGridControl).GetMethod("OnPaint", Private, null,
+                            new Type[] { typeof(PaintEventArgs) }, null)
+                            .Invoke(grid, new object[] { new PaintEventArgs(graphics, new Rectangle(Point.Empty, grid.Size)) });
+                    }
+                    catch (TargetInvocationException ex)
+                    {
+                        throw ex.InnerException ?? ex;
+                    }
+                }
+                Check((bool)typeof(Controls.AppGridControl).GetField("paintFailureLogged", Private).GetValue(grid),
+                    "paint failure was not handled by the fallback");
             }
         }
 

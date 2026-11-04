@@ -19,6 +19,7 @@ namespace AppManager.Controls
         private readonly List<AppInfo> apps = new List<AppInfo>();
         private bool grid = true;
         private int hoverIndex = -1;
+        private bool paintFailureLogged;
 
         // 多选（Ctrl 点选 / Shift 连选）：仅记录当前列表下标，换列表即清空
         private readonly List<int> selected = new List<int>();
@@ -675,6 +676,13 @@ namespace AppManager.Controls
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            try { PaintContent(e); paintFailureLogged = false; }
+            catch (Exception ex) { PaintFailure(e.Graphics, ex); }
+        }
+
+        /// <summary>主列表绘制主体；异常由 OnPaint 统一兜底，避免 WinForms 将整个控件画成红叉。</summary>
+        private void PaintContent(PaintEventArgs e)
+        {
             // 跨显示器拖动等 DPI 变化不一定伴随尺寸变化：绘制前补查一次，避免沿用旧 DPI 的卡片路径与列宽
             if (DpiHelper.ForControl(this) != lastDpi) RefreshLayoutCaches();
             Graphics g = e.Graphics;
@@ -698,6 +706,27 @@ namespace AppManager.Controls
 
             if (dragging && dragGap >= 0) PaintDropIndicator(g);
             if (dragging && dropTarget >= 0) PaintFolderDropHighlight(g);
+        }
+
+        /// <summary>绘制失败时的可读占位；只记录一次异常，避免重绘时反复写日志。</summary>
+        private void PaintFailure(Graphics g, Exception error)
+        {
+            if (!paintFailureLogged)
+            {
+                paintFailureLogged = true;
+                Paths.LogError(error);
+            }
+            try
+            {
+                GraphicsState state = g.Save();
+                g.ResetTransform();
+                g.Clear(BackColor);
+                using (SolidBrush brush = new SolidBrush(Theme.TextSecondary))
+                    Draw.DrawStringCenter(g, "列表显示异常", Theme.BodyFont, brush,
+                        new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
+                g.Restore(state);
+            }
+            catch { }
         }
 
         /// <summary>空态提示：主内容区居中显示浅灰文案（网格/列表通用）。</summary>

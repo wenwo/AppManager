@@ -665,6 +665,11 @@ namespace AppManager
             Dictionary<string, List<AddedEntry>> found = c.AddedItems.LookupMany(new string[] { "C:\\FILE.TXT", staged.ToUpperInvariant(), staged.ToUpperInvariant() });
             Check(found["C:\\FILE.TXT"].Count == 1, "stored path lookup failed");
             Check(found[staged.ToUpperInvariant()].Count == 1, "staged path lookup failed or duplicated");
+            c.AddedItems.Prefetch(new string[] { "C:\\FILE.TXT", staged.ToUpperInvariant() });
+            Dictionary<string, List<AddedEntry>> cache = (Dictionary<string, List<AddedEntry>>)typeof(AddedEntryList)
+                .GetField("pathCache", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(c.AddedItems);
+            Check(cache.ContainsKey("C:\\FILE.TXT") && cache["C:\\FILE.TXT"].Count == 1, "stored path was not cached by batch prefetch");
+            Check(cache.ContainsKey(staged.ToUpperInvariant()) && cache[staged.ToUpperInvariant()].Count == 1, "staged path was not cached by batch prefetch");
         }
 
         // 导入预处理在后台直接读库：文件夹内收录项用 path_key 范围查询，已登记路径批量查询。
