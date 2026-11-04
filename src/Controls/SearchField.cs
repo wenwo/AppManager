@@ -8,11 +8,13 @@ namespace AppManager.Controls
 {
     /// <summary>
     /// 搜索框：中性灰圆角底 + 放大镜图标 + 占位文本；内嵌无框 TextBox 复用输入能力。
+    /// 有输入时在尾部显示一键清空按钮。
     /// </summary>
     public class SearchField : UserControl
     {
         private readonly TextBox box = new TextBox();
         private readonly Label placeholderLabel = new Label();
+        private readonly ClearButton clearButton = new ClearButton();
         private string placeholder = "搜索应用…";
 
         public SearchField()
@@ -29,6 +31,7 @@ namespace AppManager.Controls
             box.TextChanged += delegate(object s, EventArgs e)
             {
                 UpdatePlaceholder();
+                UpdateClearButton();
                 Invalidate();
                 EventHandler h = TextChanged;
                 if (h != null) h(this, e);
@@ -45,6 +48,17 @@ namespace AppManager.Controls
             placeholderLabel.Click += delegate { box.Focus(); };
             Controls.Add(placeholderLabel);
             placeholderLabel.BringToFront();
+            clearButton.AccessibleName = "清空搜索";
+            clearButton.AccessibleRole = AccessibleRole.PushButton;
+            clearButton.Click += delegate
+            {
+                if (box.TextLength == 0) return;
+                box.Clear();
+                box.Focus();
+            };
+            Controls.Add(clearButton);
+            clearButton.BringToFront();
+            UpdateClearButton();
             UpdatePlaceholder();
         }
 
@@ -63,16 +77,26 @@ namespace AppManager.Controls
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            int pad = DpiHelper.Scale(10, DpiHelper.ForControl(this));
-            int iconArea = DpiHelper.Scale(24, DpiHelper.ForControl(this));
+            int dpi = DpiHelper.ForControl(this);
+            int pad = DpiHelper.Scale(10, dpi);
+            int iconArea = DpiHelper.Scale(24, dpi);
+            int clearGap = DpiHelper.Scale(5, dpi);
+            int clearSize = DpiHelper.Scale(24, dpi);
+            int clearReserve = DpiHelper.Scale(31, dpi);
             box.Location = new Point(pad + iconArea, (Height - box.PreferredHeight) / 2);
-            box.Width = Math.Max(10, Width - box.Left - pad);
+            box.Width = Math.Max(10, Width - box.Left - clearReserve);
             placeholderLabel.SetBounds(box.Left, 0, Math.Max(0, box.Width), Height);
+            clearButton.SetBounds(Width - clearGap - clearSize, (Height - clearSize) / 2, clearSize, clearSize);
         }
 
         private void UpdatePlaceholder()
         {
             placeholderLabel.Visible = string.IsNullOrEmpty(box.Text) && !box.Focused;
+        }
+
+        private void UpdateClearButton()
+        {
+            clearButton.Visible = box.TextLength > 0;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -87,6 +111,54 @@ namespace AppManager.Controls
             using (Pen p = new Pen(box.Focused ? Theme.Accent : Theme.ControlBorder, box.Focused ? 1.4F : 1F))
                 Draw.DrawRoundedRect(g, p, r, 6);
             Draw.DrawIcon(g, UiIconKind.Search, new Rectangle(6, (Height - 20) / 2, 20, 20), Theme.IconColor);
+        }
+
+        private sealed class ClearButton : Control
+        {
+            private bool hover;
+            private bool pressed;
+
+            public ClearButton()
+            {
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                    | ControlStyles.ResizeRedraw | ControlStyles.UserPaint
+                    | ControlStyles.SupportsTransparentBackColor, true);
+                BackColor = Color.Transparent;
+                Cursor = Cursors.Hand;
+                TabStop = false;
+            }
+
+            protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
+            protected override void OnMouseLeave(EventArgs e) { hover = false; pressed = false; Invalidate(); base.OnMouseLeave(e); }
+            protected override void OnMouseDown(MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Left) { pressed = true; Invalidate(); }
+                base.OnMouseDown(e);
+            }
+            protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                if (hover || pressed)
+                {
+                    Rectangle r = ClientRectangle;
+                    r.Inflate(-1, -1);
+                    Color fill = pressed ? Color.FromArgb(32, 0, 0, 0) : Color.FromArgb(18, 0, 0, 0);
+                    using (SolidBrush b = new SolidBrush(fill)) Draw.FillRoundedRect(g, b, r, 5);
+                }
+                float cx = Width / 2F;
+                float cy = Height / 2F;
+                float extent = Math.Max(3F, Width * 0.18F);
+                using (Pen p = new Pen(Theme.TextSecondary, 1.5F))
+                {
+                    p.StartCap = System.Drawing.Drawing2D.LineCap.Round;
+                    p.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                    g.DrawLine(p, cx - extent, cy - extent, cx + extent, cy + extent);
+                    g.DrawLine(p, cx + extent, cy - extent, cx - extent, cy + extent);
+                }
+            }
         }
     }
 }

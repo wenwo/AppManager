@@ -89,6 +89,7 @@ namespace AppManager
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
+                Run("search field clear button follows input and clears it", SearchFieldClearButton);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
                 Run("scanner merges duplicate launch targets only when arguments also match", ScannerLaunchIdentityMerge);
                 Run("newer desktop shortcut replaces launch target while keeping identity", NewerShortcutKeepsIdentity);
@@ -2978,6 +2979,46 @@ namespace AppManager
                 ClickConfirmation(delegate { Invoke(form, "DeleteAddedEntry", inside); }, true);
                 Check(!config.Favorites.Contains(inside.Key) && !config.Hidden.Contains(inside.Key), "record delete left favorite/hidden behind");
                 Check(File.Exists(path), "record delete touched the disk file");
+            }
+        }
+
+        private static void SearchFieldClearButton()
+        {
+            using (Form host = new Form())
+            using (Controls.SearchField search = new Controls.SearchField())
+            using (TextBox other = new TextBox())
+            {
+                host.ShowInTaskbar = false;
+                host.FormBorderStyle = FormBorderStyle.None;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-32000, -32000);
+                host.Size = new Size(320, 80);
+                search.SetBounds(12, 12, 240, 34);
+                other.SetBounds(12, 50, 100, 23);
+                host.Controls.Add(other);
+                host.Controls.Add(search);
+                Control clear = (Control)typeof(Controls.SearchField).GetField("clearButton", Private).GetValue(search);
+                Check(clear.AccessibleName == "清空搜索", "clear button accessible name changed");
+                Check(clear.AccessibleRole == AccessibleRole.PushButton, "clear button accessible role changed");
+                Check(!clear.Visible, "clear button visible without input");
+                host.Show();
+                try
+                {
+                    host.Activate();
+                    other.Focus();
+                    Application.DoEvents();
+                    Check(other.Focused, "test host did not receive focus");
+                    search.Text = "idea";
+                    Check(clear.Visible, "clear button hidden with input");
+                    typeof(Control).GetMethod("OnClick", Private).Invoke(clear, new object[] { EventArgs.Empty });
+                    Application.DoEvents();
+                    Check(search.Text.Length == 0 && !clear.Visible, "clear button did not clear and hide");
+                    Check(search.ContainsFocus, "search input did not regain focus after clear");
+                }
+                finally
+                {
+                    host.Close();
+                }
             }
         }
 
