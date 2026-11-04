@@ -58,6 +58,7 @@ namespace AppManager
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
                 Run("music players advance to the next track when a song ends", MusicAutoAdvance);
                 Run("music keeps playing while its full view is hidden", MusicHiddenPlayback);
+                Run("mini player commits a seek only when dragging ends", MiniSeekCommitsOnce);
                 Run("music stops on a missing track and the hidden mini player pauses", MusicSilencedWhenUnreachable);
                 Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
@@ -282,6 +283,31 @@ namespace AppManager
                 Check(player.Position + 0.05 >= resumed, "showing the player reset its position");
                 player.StopPlayback();
                 Check(Field(player, "engine") == null, "StopPlayback kept the engine");
+                host.Hide();
+            }
+        }
+
+        private static void MiniSeekCommitsOnce()
+        {
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(480, 120), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+            {
+                host.Controls.Add(mini);
+                host.Show();
+                Set(mini, "duration", 100.0);
+                Set(mini, "seekRect", new Rectangle(0, 0, 200, 18));
+                Set(mini, "externalPlayerActive", true);
+                int seeks = 0;
+                double last = -1;
+                mini.SeekRequested += delegate(double seconds) { seeks++; last = seconds; };
+                Call(mini, "UpdateSeek", 20);
+                Call(mini, "UpdateSeek", 80);
+                Call(mini, "UpdateSeek", 160);
+                Check(seeks == 0, "dragging submitted a seek before mouse up");
+                Set(mini, "seeking", true);
+                Call(mini, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, 160, 9, 0));
+                Check(seeks == 1, "mouse up submitted " + seeks + " seeks");
+                Check(last > 50 && last < 100, "mouse up submitted an unexpected position: " + last);
                 host.Hide();
             }
         }

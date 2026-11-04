@@ -404,10 +404,10 @@ namespace AppManager.Controls
             base.OnMouseUp(e);
             if (e.Button != MouseButtons.Left) return;
             bool dragged = seeking || volumeDrag;
-            if (seeking) UpdateSeek(e.X);
+            if (seeking) { UpdateSeek(e.X); seeking = false; CommitSeek(); }
             if (volumeDrag) UpdateVolume(e.X);
-            Capture = seeking = volumeDrag = false;
-            if (dragged) return;
+            Capture = volumeDrag = false;
+            if (dragged) { Invalidate(); return; }
             int action = HitTest(e.Location);
             if (action == 0) RequestCollection();
             else if (action == 1) PlayPrevious();
@@ -441,9 +441,14 @@ namespace AppManager.Controls
         {
             if (duration <= 0 || seekRect.IsEmpty) return;
             position = duration * SliderRatio(seekRect, x);
+            Invalidate();
+        }
+
+        private void CommitSeek()
+        {
+            if (duration <= 0) return;
             if (externalPlayerActive) { if (SeekRequested != null) SeekRequested(position); }
             else if (engine != null) engine.Seek(position);
-            Invalidate();
         }
 
         private double SliderRatio(Rectangle rect, int x)
