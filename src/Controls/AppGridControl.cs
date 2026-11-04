@@ -128,6 +128,8 @@ namespace AppManager.Controls
         public event Action<AppInfo> DeleteRequested;
         /// <summary>键盘 Delete：把当前全部选中项交给上层批量处理。</summary>
         public event Action<List<AppInfo>> DeleteSelectionRequested;
+        /// <summary>选中集合发生变化；底栏据此重绘，不复制选中列表。</summary>
+        public event Action SelectionChanged;
 
         /// <summary>是否允许拖动排序（仅在可排序分类下由外部开启）。</summary>
         public bool AllowReorder
@@ -316,12 +318,12 @@ namespace AppManager.Controls
         public void SetApps(List<AppInfo> list)
         {
             // 记录旧选中条目的稳定键，替换后按键恢复：后台重扫/刷新不应打断用户的多选
-            List<string> oldKeys = new List<string>();
+            HashSet<string> oldKeys = new HashSet<string>(StringComparer.Ordinal);
             foreach (AppInfo a in SelectedApps)
             {
                 if (a == null) continue;
                 string k = a.DisplayKey();
-                if (!string.IsNullOrEmpty(k) && !oldKeys.Contains(k)) oldKeys.Add(k);
+                if (!string.IsNullOrEmpty(k)) oldKeys.Add(k);
             }
             ResetDrag();   // 列表被替换后旧下标立即失效，拖动状态必须作废，避免松手时把错误条目搬进错误目录
             apps.Clear();
@@ -345,6 +347,7 @@ namespace AppManager.Controls
             UpdateScroll();
             StartMetaLoad();
             Invalidate();
+            NotifySelectionChanged();
         }
 
         /// <summary>当前条目按“可视区域优先、其余随后”排列，供图标与元数据加载共用。</summary>
@@ -410,6 +413,23 @@ namespace AppManager.Controls
             }
         }
 
+        /// <summary>当前选中项数量；供底栏按 O(1) 读取，不需要复制选择列表。</summary>
+        public int SelectedCount
+        {
+            get { return selected.Count; }
+        }
+
+        /// <summary>仅当恰好选中 1 项时返回该项，否则返回 null。</summary>
+        public AppInfo SingleSelectedApp
+        {
+            get
+            {
+                if (selected.Count != 1) return null;
+                int index = selected[0];
+                return index >= 0 && index < apps.Count ? apps[index] : null;
+            }
+        }
+
         /// <summary>设置表头排序指示（null 清除）；排序本身由主窗体在 RefreshGrid 中应用。</summary>
         public void SetSortIndicator(string column, bool asc)
         {
@@ -443,6 +463,13 @@ namespace AppManager.Controls
             selected.Clear();
             selectedSet.Clear();
             Invalidate();
+            NotifySelectionChanged();
+        }
+
+        private void NotifySelectionChanged()
+        {
+            Action handler = SelectionChanged;
+            if (handler != null) handler();
         }
 
         private bool IsSelected(int index)
@@ -1531,6 +1558,7 @@ namespace AppManager.Controls
             AddSelected(index);
             selectAnchor = index;
             Invalidate();
+            NotifySelectionChanged();
         }
 
         /// <summary>Ctrl 点击：切换单项选中。</summary>
@@ -1539,6 +1567,7 @@ namespace AppManager.Controls
             if (selectedSet.Remove(index)) selected.Remove(index);
             else AddSelected(index);
             Invalidate();
+            NotifySelectionChanged();
         }
 
         /// <summary>Shift 点击：从锚点到当前条目连选。</summary>
@@ -1551,6 +1580,7 @@ namespace AppManager.Controls
             selectedSet.Clear();
             for (int i = from; i <= to; i++) AddSelected(i);
             Invalidate();
+            NotifySelectionChanged();
         }
 
         private void AddSelected(int index)

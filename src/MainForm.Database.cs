@@ -255,23 +255,34 @@ namespace AppManager
             databaseSummaryOwned.Clear();
         }
 
-        private bool PaintDatabasePaging(Graphics graphics, Rectangle footer)
+        private bool LayoutDatabasePaging(Rectangle footer)
         {
             databasePrevious = databaseNext = Rectangle.Empty;
             if (config.Database == null || databasePage == null || settingsOpen || !grid.Visible || categoryTotal <= DatabasePageSize) return false;
             databaseNext = new Rectangle(footer.Right - Dpi(90), footer.Top + Dpi(6), Dpi(76), footer.Height - Dpi(12));
             databasePrevious = new Rectangle(databaseNext.Left - Dpi(90), databaseNext.Top, Dpi(76), databaseNext.Height);
+            return true;
+        }
+
+        private void PaintDatabasePagingSummary(Graphics graphics, Rectangle footer)
+        {
+            if (databasePrevious.IsEmpty) return;
+            using (Brush disabled = new SolidBrush(Theme.TextSecondary))
+                Draw.DrawStringLeft(graphics, "第 " + (databasePageNumber + 1) + " 页 · 共 " + categoryTotal + " 项", Theme.CaptionFont,
+                    disabled, new Rectangle(footer.Left + Dpi(16), footer.Top, Math.Max(0, databasePrevious.Left - footer.Left - Dpi(24)), footer.Height));
+        }
+
+        private void PaintDatabasePagingButtons(Graphics graphics)
+        {
+            if (databasePrevious.IsEmpty || databaseNext.IsEmpty) return;
             bool hasPrevious = databasePageNumber > 0;
             bool hasNext = (databasePageNumber + 1L) * DatabasePageSize < categoryTotal;
             using (Brush enabled = new SolidBrush(Theme.TextPrimary))
             using (Brush disabled = new SolidBrush(Theme.TextSecondary))
             {
-                Draw.DrawStringLeft(graphics, "第 " + (databasePageNumber + 1) + " 页 · 共 " + categoryTotal + " 项", Theme.CaptionFont,
-                    disabled, new Rectangle(footer.Left + Dpi(16), footer.Top, Math.Max(0, databasePrevious.Left - footer.Left - Dpi(24)), footer.Height));
                 Draw.DrawStringLeft(graphics, "上一页", Theme.ButtonFont, hasPrevious ? enabled : disabled, databasePrevious);
                 Draw.DrawStringLeft(graphics, "下一页", Theme.ButtonFont, hasNext ? enabled : disabled, databaseNext);
             }
-            return true;
         }
 
         private bool HandleDatabasePaging(MouseEventArgs e)

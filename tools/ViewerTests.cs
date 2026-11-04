@@ -58,7 +58,9 @@ namespace AppManager
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
                 Run("music players advance to the next track when a song ends", MusicAutoAdvance);
                 Run("music keeps playing while its full view is hidden", MusicHiddenPlayback);
+                Run("expanded and mini views share one engine without reloading", MusicSharedSession);
                 Run("mini player commits a seek only when dragging ends", MiniSeekCommitsOnce);
+                Run("video player previews a seek while dragging and commits it once", VideoSeekCommitsOnce);
                 Run("music stops on a missing track and the hidden mini player pauses", MusicSilencedWhenUnreachable);
                 Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
@@ -271,18 +273,60 @@ namespace AppManager
                 player.Open(new List<string> { song }, 0);
                 Check(PumpUntil(delegate { return player.HasPlaybackSession && player.Position >= 0.2; }, 10000),
                     "full player never started");
-                object engine = Field(player, "engine");
+                object engine = EngineOf(player);
                 player.Visible = false;
                 double hiddenStart = player.Position;
                 Check(PumpUntil(delegate { return player.Position >= hiddenStart + 0.2; }, 5000),
                     "playback stopped while the full view was hidden");
-                Check(ReferenceEquals(engine, Field(player, "engine")), "hidden player recreated its engine");
+                Check(ReferenceEquals(engine, EngineOf(player)), "hidden player recreated its engine");
                 double resumed = player.Position;
                 player.Visible = true;
-                Check(ReferenceEquals(engine, Field(player, "engine")), "showing the player recreated its engine");
+                Check(ReferenceEquals(engine, EngineOf(player)), "showing the player recreated its engine");
                 Check(player.Position + 0.05 >= resumed, "showing the player reset its position");
                 player.StopPlayback();
-                Check(Field(player, "engine") == null, "StopPlayback kept the engine");
+                Check(EngineOf(player) == null, "StopPlayback kept the engine");
+                host.Hide();
+            }
+        }
+
+        private static void MusicSharedSession()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string song = WriteSilence("shared-session.wav", 8);
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+            {
+                player.AttachSession(session);
+                mini.AttachSession(session);
+                host.Controls.Add(mini);
+                host.Controls.Add(player);
+                host.Show();
+                player.Open(new List<string> { song }, 0);
+                Check(PumpUntil(delegate { return session.HasSession && session.Position >= 0.2; }, 10000),
+                    "shared session never started");
+                object engine = EngineOf(player);
+                Check(engine != null && ReferenceEquals(engine, EngineOf(mini)), "views did not share one engine");
+
+                player.Visible = false;
+                double hiddenStart = session.Position;
+                Check(PumpUntil(delegate { return session.Position >= hiddenStart + 0.2 && mini.Position > hiddenStart; }, 5000),
+                    "hidden full view stopped the shared session");
+                Check(ReferenceEquals(engine, EngineOf(player)), "hiding the full view rebuilt its engine");
+
+                double resumed = session.Position;
+                player.Visible = true;
+                Check(ReferenceEquals(engine, EngineOf(player)), "showing the full view rebuilt its engine");
+                Check(session.Position + 0.05 >= resumed && resumed > 0.2, "showing the full view reset its position");
+
+                mini.LoadPlaylist(new List<string> { song }, "回归", "regression", 0);
+                Check(ReferenceEquals(engine, EngineOf(player)), "switching playlists rebuilt the engine");
+                Check(PumpUntil(delegate { return session.Position >= 0.2; }, 10000), "shared session did not restart");
+                player.StopPlayback();
+                Check(!session.HasSession && EngineOf(player) == null, "StopPlayback kept the shared engine");
                 host.Hide();
             }
         }
@@ -296,7 +340,6 @@ namespace AppManager
                 host.Show();
                 Set(mini, "duration", 100.0);
                 Set(mini, "seekRect", new Rectangle(0, 0, 200, 18));
-                Set(mini, "externalPlayerActive", true);
                 int seeks = 0;
                 double last = -1;
                 mini.SeekRequested += delegate(double seconds) { seeks++; last = seconds; };
@@ -312,6 +355,40 @@ namespace AppManager
             }
         }
 
+        private static void VideoSeekCommitsOnce()
+        {
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(480, 120), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (VideoPlayerControl video = new VideoPlayerControl { Size = new Size(320, 48) })
+            {
+                host.Controls.Add(video);
+                host.Show();
+                Set(video, "duration", 100.0);
+                Set(video, "pillRect", new Rectangle(0, 0, 300, 40));
+                Set(video, "seekRect", new Rectangle(10, 20, 200, 4));
+                int seeks = 0;
+                double last = -1;
+                Set(video, "seekSink", (Action<double>)delegate(double seconds) { seeks++; last = seconds; });
+
+                Call(video, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, 60, 21, 0));
+                Check(seeks == 0, "mouse down submitted a seek immediately");
+                Check((double)Field(video, "position") == 25, "mouse down did not update the preview position");
+                Call(video, "OnMouseMove", new MouseEventArgs(MouseButtons.Left, 0, 110, 21, 0));
+                Check(seeks == 0, "dragging submitted a seek before mouse up");
+                Check((double)Field(video, "position") == 50, "dragging did not update the preview position");
+                Call(video, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, 170, 21, 0));
+                Check(seeks == 1, "mouse up submitted " + seeks + " seeks");
+                Check(Math.Abs(last - 80) < 0.001, "mouse up submitted an unexpected position: " + last);
+                Check(!(bool)Field(video, "seeking"), "mouse up left the player in the seeking state");
+
+                Call(video, "UpdateSeekPreview", -1000);
+                Check((double)Field(video, "position") == 0, "negative preview was not clamped to the start");
+                Call(video, "UpdateSeekPreview", 1000);
+                Check((double)Field(video, "position") == 100, "oversized preview was not clamped to the end");
+                Check(seeks == 1, "preview updates submitted extra seeks");
+                host.Hide();
+            }
+        }
+
         // 随机播放只有一首时重播这一首；顺序播放到末尾停下且状态落到“未在播放”，不会卡在播放中。
         private static void MusicSingleTrackModes()
         {
@@ -319,8 +396,6 @@ namespace AppManager
             if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
             SetDllDirectory(runtime);
             string song = WriteSilence("single-track.wav", 0.4);
-            FieldInfo modeField = typeof(MusicPlayerControl).GetField("mode", BindingFlags.Instance | BindingFlags.NonPublic);
-            FieldInfo playingField = typeof(MusicPlayerControl).GetField("playing", BindingFlags.Instance | BindingFlags.NonPublic);
             foreach (string mode in new[] { "Shuffle", "Sequential" })
             {
                 using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
@@ -330,13 +405,13 @@ namespace AppManager
                     host.Show();
                     int starts = 0;
                     player.PlaybackStarting += delegate { starts++; };
-                    modeField.SetValue(player, Enum.Parse(modeField.FieldType, mode));
+                    player.Session.SetMode((PlaybackMode)Enum.Parse(typeof(PlaybackMode), mode));
                     player.Open(new List<string> { song }, 0);
                     if (mode == "Shuffle")
                         Check(PumpUntil(delegate { return starts >= 2; }, 10000), "shuffle with a single track did not replay it (starts: " + starts + ")");
                     else
                     {
-                        Check(PumpUntil(delegate { return starts >= 1 && !(bool)playingField.GetValue(player); }, 10000),
+                        Check(PumpUntil(delegate { return starts >= 1 && !player.Session.IsPlaying; }, 10000),
                             "sequential single track stayed in the playing state after it ended");
                         Check(starts == 1, "sequential single track restarted");
                     }
@@ -395,11 +470,19 @@ namespace AppManager
 
         private static bool EngineFlag(object control, string property)
         {
-            object engine = control.GetType().GetField("engine", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(control);
+            object engine = EngineOf(control);
             if (engine == null) return false;
             object[] args = { property, false };
             bool ok = (bool)engine.GetType().GetMethod("TryGetFlag").Invoke(engine, args);
             return ok && (bool)args[1];
+        }
+
+        private static object EngineOf(object control)
+        {
+            object session = control.GetType().GetProperty("Session").GetValue(control, null);
+            if (session == null) return null;
+            PropertyInfo engine = session.GetType().GetProperty("Engine", BindingFlags.Instance | BindingFlags.NonPublic);
+            return engine == null ? null : engine.GetValue(session, null);
         }
 
         private static void MusicSilencedWhenUnreachable()
@@ -423,7 +506,7 @@ namespace AppManager
                 player.StopPlayback();
                 mini.LoadPlaylist(new List<string> { song }, "回归", "regression", 0);
                 Check(PumpUntil(delegate { return !EngineFlag(mini, "pause") && !EngineFlag(mini, "idle-active"); }, 10000), "mini player never started");
-                mini.PauseOwnPlayback();
+                mini.Session.Pause();
                 Check(PumpUntil(delegate { return EngineFlag(mini, "pause"); }, 5000), "hidden mini player kept playing");
                 mini.Stop();
                 host.Hide();

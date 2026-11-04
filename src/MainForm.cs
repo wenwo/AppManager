@@ -37,6 +37,7 @@ namespace AppManager
         private bool collectionEntered;     // 是否已进入集合内容（false = 停留集合信息页）
         private SearchField search;
         private MiniMusicPlayerControl miniMusic;
+        private MusicPlaybackSession musicSession;   // 音乐播放唯一会话：完整/迷你播放器共享
         private System.Windows.Forms.Timer searchDebounce;   // 搜索输入防抖计时器
         private ToggleSwitch viewToggle;
         private Label toggleLabel;
@@ -490,7 +491,7 @@ namespace AppManager
             // 否则（尤其“关闭到托盘”时直接点×退出）终止发生在句柄销毁之后，能否顺利退出取决于 mpv 自身容错。
             try { if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { StopMusicPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
-            try { if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.Stop(); } catch (Exception ex) { Paths.LogError(ex); }
+            try { if (musicSession != null) musicSession.Dispose(); } catch (Exception ex) { Paths.LogError(ex); }
             importTip.Dispose();
             if (importStatusTimer != null) importStatusTimer.Dispose();
             StopAutoScan();
@@ -671,7 +672,6 @@ namespace AppManager
             if (!_ready) { Hide(); return; }
             if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer();   // 窗体隐藏不触发子控件 VisibleChanged，先收起播放器，避免托盘后台继续出声
             StopMusicPlayer();
-            if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.Stop();
             if (WindowState != FormWindowState.Minimized) preTrayWindowState = WindowState;   // 记录最大化等状态
             Hide();
             if (!trayTipShown && tray != null)
@@ -783,6 +783,7 @@ namespace AppManager
             grid.BlankRightClicked += OnGridBlankRightClicked;
             grid.SortRequested += OnGridSortRequested;   // 列表表头点击排序（名称/大小/时间）
             grid.MetadataReady += OnGridMetadataReady;
+            grid.SelectionChanged += OnGridSelectionChanged;
             Controls.Add(grid);
 
             // 列表栏位表头：盖在网格顶部的固定条（独立 HWND 不参与滚动），根治滚动时列名晃动/穿模
@@ -839,17 +840,19 @@ namespace AppManager
             archiveViewer.CloseRequested += HideArchiveViewer;
             Controls.Add(archiveViewer);
 
+            musicSession = new MusicPlaybackSession();
+            musicSession.PlaybackStarting += delegate { HideVideoPlayer(); };
+
             // 视频播放器：默认隐藏，双击视频时替换列表区域（尺寸/位置与 grid 一致）
             videoPlayer = new VideoPlayerControl();
             videoPlayer.CloseRequested += OnVideoCloseRequested;     // 全屏时先退全屏再退播放器
             videoPlayer.FullscreenRequested += ToggleVideoFullscreen;
-            videoPlayer.PlaybackStarting += delegate { miniMusic.Stop(); StopMusicPlayer(); };
+            videoPlayer.PlaybackStarting += delegate { StopMusicPlayer(); };
             Controls.Add(videoPlayer);
 
             musicPlayer = new MusicPlayerControl();
+            musicPlayer.AttachSession(musicSession);
             musicPlayer.CloseRequested += HideMusicPlayer;
-            musicPlayer.PlaybackStarting += delegate { miniMusic.Stop(); HideVideoPlayer(); };
-            musicPlayer.PlaybackStateChanged += SyncMiniMusicState;
             Controls.Add(musicPlayer);
 
             search = new SearchField();
@@ -877,15 +880,10 @@ namespace AppManager
             Controls.Add(search);
 
             miniMusic = new MiniMusicPlayerControl();
+            miniMusic.AttachSession(musicSession);
             miniMusic.CollectionRequested += ShowMiniMusicCollections;
             miniMusic.DefaultPlayRequested += PlayDefaultMiniMusic;
             miniMusic.ExpandRequested += ExpandMiniMusicPlayer;
-            miniMusic.ToggleRequested += delegate { if (musicPlayer.HasPlaybackSession) musicPlayer.ToggleFromMiniPlayer(); };
-            miniMusic.TrackStepRequested += delegate(int step) { if (musicPlayer.HasPlaybackSession) musicPlayer.StepFromMiniPlayer(step); };
-            miniMusic.SeekRequested += delegate(double seconds) { if (musicPlayer.HasPlaybackSession) musicPlayer.SeekFromMiniPlayer(seconds); };
-            miniMusic.VolumeRequested += delegate(int volume) { if (musicPlayer.HasPlaybackSession) musicPlayer.SetVolumeFromMiniPlayer(volume); };
-            miniMusic.MuteRequested += delegate { if (musicPlayer.HasPlaybackSession) musicPlayer.ToggleMuteFromMiniPlayer(); };
-            miniMusic.PlaybackStarting += delegate { HideVideoPlayer(); StopMusicPlayer(); };
             Controls.Add(miniMusic);
 
             countLabel = new Label();
@@ -3756,7 +3754,6 @@ namespace AppManager
         /// <summary>双击视频：在当前列表的视频序列中打开内置播放器。</summary>
         private void ShowVideoPlayer(AppInfo app)
         {
-            miniMusic.Stop();
             StopMusicPlayer();
             List<string> vids = MediaSequence(MediaRules.IsVideo);
             if (vids.Count == 0) { Launcher.Launch(app); return; }
@@ -3958,15 +3955,10 @@ namespace AppManager
             return items;
         }
 
-        private void SyncMiniMusicState(string songPath, bool playing)
-        {
-            if (musicPlayer.HasPlaybackSession) miniMusic.SyncExternalState(songPath, playing,
-                musicPlayer.Position, musicPlayer.Duration, musicPlayer.Volume, musicPlayer.Muted);
-        }
-
         private void ExpandMiniMusicPlayer(int songIndex)
         {
-            if (musicPlayer.HasPlaybackSession)
+            if (musicSession == null) return;
+            if (musicSession.HasTracks)
             {
                 HideOtherViewers(musicPlayer);
                 grid.Visible = false;
@@ -3975,35 +3967,23 @@ namespace AppManager
                 musicPlayer.Focus();
                 return;
             }
-            // 沿用迷你播放器当前列表、进度和暂停态：重新查询可能改变排序，导致标题与下标对不上
-            List<string> songs = miniMusic.SongPaths;
-            if (songs.Count == 0)
+            // 还没有播放会话：后台查询集合后再展开，界面线程不逐个检查文件
+            int generation = ++miniMusicLoadGeneration;
+            QueryMiniMusicSongs(new List<string> { miniMusic.CollectionKey }, delegate(string key, List<string> found)
             {
-                // 迷你播放器还没有列表：后台查询后再展开，界面线程不逐个检查文件
-                int generation = ++miniMusicLoadGeneration;
-                QueryMiniMusicSongs(new List<string> { miniMusic.CollectionKey }, delegate(string key, List<string> found)
-                {
-                    if (generation != miniMusicLoadGeneration || found.Count == 0 || miniMusic.SongPaths.Count > 0) return;
-                    HideOtherViewers(musicPlayer);
-                    grid.Visible = false;
-                    musicPlayer.BringToFront();
-                    musicPlayer.Open(found, Math.Max(0, Math.Min(songIndex, found.Count - 1)), 0, false);
-                });
-                return;
-            }
-            songIndex = Math.Max(0, Math.Min(songIndex, songs.Count - 1));
-            double position = miniMusic.Position;
-            bool paused = !miniMusic.IsPlaying;
-            miniMusic.Stop();
-            HideOtherViewers(musicPlayer);
-            grid.Visible = false;
-            musicPlayer.BringToFront();
-            musicPlayer.Open(songs, songIndex, position, paused);
+                if (generation != miniMusicLoadGeneration || found.Count == 0 || musicSession == null
+                    || musicSession.HasTracks) return;
+                HideOtherViewers(musicPlayer);
+                grid.Visible = false;
+                musicPlayer.Visible = true;
+                musicPlayer.BringToFront();
+                musicPlayer.Focus();
+                musicSession.Open(found, Math.Max(0, Math.Min(songIndex, found.Count - 1)), 0, false);
+            });
         }
 
         private void ShowMusicPlayer(AppInfo app)
         {
-            miniMusic.Stop();
             List<string> songs = MediaSequence(MediaRules.IsAudio);
             if (songs.Count == 0) { Launcher.Launch(app); return; }
             int songIndex = songs.FindIndex(delegate(string path)
@@ -4013,8 +3993,10 @@ namespace AppManager
             if (songIndex < 0) { songs.Insert(0, app.TargetPath); songIndex = 0; }
             HideOtherViewers(musicPlayer);
             grid.Visible = false;
+            musicPlayer.Visible = true;
             musicPlayer.BringToFront();
-            musicPlayer.Open(songs, songIndex);
+            musicPlayer.Focus();
+            musicSession.Open(songs, songIndex);
         }
 
         private void HideMusicPlayer()
@@ -4033,10 +4015,9 @@ namespace AppManager
         /// <summary>停止完整播放器并隐藏界面；即使播放器已经隐藏也必须释放后台会话。</summary>
         private void StopMusicPlayer()
         {
-            if (musicPlayer == null || musicPlayer.IsDisposed) return;
-            musicPlayer.StopPlayback();
-            if (musicPlayer.Visible) musicPlayer.Visible = false;
-            if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.ClearExternalState();
+            if (musicSession == null) return;
+            musicSession.Stop();
+            if (musicPlayer != null && !musicPlayer.IsDisposed && musicPlayer.Visible) musicPlayer.Visible = false;
             SyncContentVisibility();
             if (grid != null && !grid.IsDisposed) grid.Invalidate();
         }
@@ -4046,9 +4027,7 @@ namespace AppManager
         {
             if (WindowState == FormWindowState.Minimized) return;
             if (miniMusic == null || miniMusic.IsDisposed || miniMusic.Width >= Dpi(190)) return;
-            miniMusic.PauseOwnPlayback();
-            if (musicPlayer != null && !musicPlayer.IsDisposed && !musicPlayer.Visible
-                && musicPlayer.HasPlaybackSession) musicPlayer.PausePlayback();
+            if (musicSession != null && !musicPlayer.Visible) musicSession.Pause();
         }
 
         /// <summary>退出播放器：先恢复全屏状态，再恢复列表展示并停止播放；未打开时为空操作。</summary>
@@ -6185,7 +6164,6 @@ namespace AppManager
             HideArchiveViewer();
             HideVideoPlayer();
             StopMusicPlayer();
-            miniMusic.Stop();
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                 config.CloseToTray, ResourceStoreSummary());
             SetMainContentVisible(false);
@@ -6615,7 +6593,18 @@ namespace AppManager
             // ===== 内容区底部留白：与左右侧栏底部按钮栏同高，并显示当前集合名称与数量 =====
             Rectangle footer = ContentFooterRect();
             if (footer.IsEmpty) return;
-            if (PaintDatabasePaging(g, footer)) return;
+            bool databasePaging = LayoutDatabasePaging(footer);
+            if (PaintSelectionFooter(g, footer))
+            {
+                if (databasePaging) PaintDatabasePagingButtons(g);
+                return;
+            }
+            if (databasePaging)
+            {
+                PaintDatabasePagingSummary(g, footer);
+                PaintDatabasePagingButtons(g);
+                return;
+            }
             if (collectionSidebar == null || !collectionSidebar.Visible
                 || !collectionEntered || SearchActive) return;
             string name = "全部";

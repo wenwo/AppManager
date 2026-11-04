@@ -42,6 +42,7 @@ namespace AppManager.Controls
         // 播放状态
         private bool playing;
         private bool seeking;           // 拖动进度条中，暂停轮询回写位置
+        private Action<double> seekSink; // 实际提交 seek 的入口；拖动期间只更新预览，松开后调用一次
         private bool fileLoaded;        // 已收到 MPV_EVENT_FILE_LOADED
         private bool eofReached;        // 播放到结尾（keep-open 停在最后一帧）
         private double duration;        // 当前媒体时长（秒），0 表示未知
@@ -100,6 +101,11 @@ namespace AppManager.Controls
             BackColor = Bg;
             TabStop = true;
             Visible = false;
+            seekSink = delegate(double seconds)
+            {
+                MpvEngine p = mpv;
+                if (p != null) { try { p.Seek(seconds); } catch { } }
+            };
             pollTimer.Tick += OnPoll;
             clickTimer.Interval = SystemInformation.DoubleClickTime;
             clickTimer.Tick += delegate { clickTimer.Stop(); TogglePlay(); };   // 间隔内无第二击：按单击处理（暂停/播放）
@@ -308,17 +314,23 @@ namespace AppManager.Controls
             Invalidate();
         }
 
-        /// <summary>按 X 坐标定位进度条并跳转。</summary>
-        private void SeekTo(int x)
+        /// <summary>按 X 坐标更新进度条预览位置；拖动期间不提交 seek，避免连续打断解码。</summary>
+        private void UpdateSeekPreview(int x)
         {
             if (duration <= 0) return;
             double t = (x - seekRect.X) / (double)Math.Max(1, seekRect.Width) * duration;
             if (t < 0) t = 0;
             if (t > duration) t = duration;
             position = t;
-            MpvEngine p = mpv;
-            if (p != null) { try { p.Seek(t); } catch { } }
             Invalidate();
+        }
+
+        /// <summary>拖动结束或单击进度条时提交一次定位，避免高频 seek 造成解码花屏和卡顿。</summary>
+        private void CommitSeek()
+        {
+            if (duration <= 0) return;
+            Action<double> sink = seekSink;
+            if (sink != null) sink(position);
         }
 
         private void Prev()
@@ -448,7 +460,7 @@ namespace AppManager.Controls
             if (HitSeek(e.Location))
             {
                 seeking = true;
-                SeekTo(e.X);
+                UpdateSeekPreview(e.X);
             }
         }
 
@@ -456,7 +468,7 @@ namespace AppManager.Controls
         {
             base.OnMouseMove(e);
             if (volDrag) { SetVolumeByX(e.X); return; }
-            if (seeking) { SeekTo(e.X); return; }
+            if (seeking) { UpdateSeekPreview(e.X); return; }
             int h = HitButton(e.Location);
             if (h != hover) { hover = h; Invalidate(); }
             Cursor = Cursors.Default;
@@ -467,7 +479,7 @@ namespace AppManager.Controls
             base.OnMouseUp(e);
             bool dragged = volDrag || seeking;
             if (volDrag) { SetVolumeByX(e.X); volDrag = false; }
-            else if (seeking) { SeekTo(e.X); seeking = false; }
+            else if (seeking) { UpdateSeekPreview(e.X); seeking = false; CommitSeek(); }
             if (dragged) { Capture = false; return; }
             if (e.Button == MouseButtons.Left && press >= 0)
             {

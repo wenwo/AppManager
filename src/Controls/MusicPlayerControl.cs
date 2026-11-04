@@ -1,13 +1,9 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
-using System.Globalization;
 using System.IO;
-using System.Runtime.InteropServices;
-using System.Text;
 using System.Windows.Forms;
 
 namespace AppManager.Controls
@@ -16,12 +12,8 @@ namespace AppManager.Controls
     {
         public event Action CloseRequested;
         public event Action PlaybackStarting;
-        public event Action<string, bool> PlaybackStateChanged;
-        private enum PlayMode { Sequential, RepeatAll, RepeatOne, Shuffle }
-        private const int PlayingPollMs = 150;
-        private const int PausedPollMs = 600;
-        private readonly Timer pollTimer = new Timer { Interval = PlayingPollMs };
-        private readonly Random random = new Random();
+        private MusicPlaybackSession session;
+        private bool ownsSession;
         private List<string> paths = new List<string>();
         private int index, volume = 60, queueFirst, hover = -1, pressed = -1;
         private MusicTrackInfo track;
@@ -29,17 +21,13 @@ namespace AppManager.Controls
         private Image scaledCoverSource;
         private int scaledCoverWidth, scaledCoverHeight;
         private List<LyricLine> lyrics = new List<LyricLine>();
-        private MpvAudioEngine engine;
-        private bool engineUnavailable, fileLoaded, seeking, volumeDrag;
-        private bool endedHandled, playing, queueVisible, muted;
+        private bool seeking, volumeDrag;
+        private bool playing, queueVisible, muted;
         private string failure = "";
         private double duration, position;
-        private double pendingSeek = -1;   // 从迷你播放器展开时，等文件加载完成后再跳转
-        private bool pendingPause;
         private float titleScroll;
-        private DateTime loadDeadline;
         private int metadataGeneration;
-        private PlayMode mode = PlayMode.Sequential;
+        private PlaybackMode mode = PlaybackMode.Sequential;
         private Rectangle mainCard, playerCard, backRect, coverRect;
         private Rectangle lyricTabRect, queueTabRect, contentRect, seekRect;
         private Rectangle songRect, modeRect, previousRect, playRect, nextRect, muteRect, volumeRect;
@@ -51,42 +39,124 @@ namespace AppManager.Controls
             BackColor = Theme.Background;
             Visible = false;
             TabStop = true;
-            pollTimer.Tick += PollTimer_Tick;
         }
 
-        public string CurrentPath
-        {
-            get { return index >= 0 && index < paths.Count ? paths[index] : null; }
-        }
+        public string CurrentPath { get { return session == null ? null : session.CurrentPath; } }
+        public MusicPlaybackSession Session { get { return EnsureSession(); } }
 
-        public void ToggleFromMiniPlayer() { TogglePlay(); }
+        public void ToggleFromMiniPlayer() { Session.TogglePause(); }
 
-        public double Position { get { return position; } }
-        public double Duration { get { return duration; } }
-        public int Volume { get { return volume; } }
-        public bool Muted { get { return muted; } }
-        public bool HasPlaybackSession { get { return engine != null && paths.Count > 0; } }
+        public double Position { get { return session == null ? 0 : session.Position; } }
+        public double Duration { get { return session == null ? 0 : session.Duration; } }
+        public int Volume { get { return session == null ? volume : session.Volume; } }
+        public bool Muted { get { return session == null ? muted : session.Muted; } }
+        public bool HasPlaybackSession { get { return session != null && session.HasSession; } }
 
-        public void SeekFromMiniPlayer(double seconds) { SeekTo(seconds); NotifyPlaybackState(); }
-        public void SetVolumeFromMiniPlayer(int value) { SetVolume(value); }
-        public void ToggleMuteFromMiniPlayer()
-        {
-            muted = !muted;
-            if (engine != null) engine.SetMute(muted);
-            NotifyPlaybackState();
-            Invalidate();
-        }
+        public void SeekFromMiniPlayer(double seconds) { Session.Seek(seconds); }
+        public void SetVolumeFromMiniPlayer(int value) { Session.SetVolume(value); }
+        public void ToggleMuteFromMiniPlayer() { Session.ToggleMute(); }
 
         public void StepFromMiniPlayer(int step)
         {
-            if (step > 0) PlayNext(false);
-            else PlayPrevious();
+            if (step > 0) Session.Next();
+            else Session.Previous();
         }
 
         /// <summary>文件改名或移动后更新播放列表里的路径；不打断正在播放的曲目。</summary>
         public void RebasePath(string oldPath, string newPath)
         {
-            for (int i = 0; i < paths.Count; i++) paths[i] = EntryPaths.Rebase(paths[i], oldPath, newPath);
+            if (session != null) session.RebasePath(oldPath, newPath);
+        }
+
+        internal void AttachSession(MusicPlaybackSession value)
+        {
+            if (object.ReferenceEquals(session, value)) { SyncFromSession(true); return; }
+            DetachSession();
+            session = value;
+            ownsSession = false;
+            SubscribeSession();
+            SyncFromSession(true);
+        }
+
+        private MusicPlaybackSession EnsureSession()
+        {
+            if (session != null) return session;
+            session = new MusicPlaybackSession();
+            ownsSession = true;
+            SubscribeSession();
+            SyncFromSession(true);
+            return session;
+        }
+
+        private void SubscribeSession()
+        {
+            if (session == null) return;
+            session.StateChanged += Session_StateChanged;
+            session.TrackChanged += Session_TrackChanged;
+            session.PlaybackStarting += Session_PlaybackStarting;
+        }
+
+        private void DetachSession()
+        {
+            if (session == null) return;
+            session.StateChanged -= Session_StateChanged;
+            session.TrackChanged -= Session_TrackChanged;
+            session.PlaybackStarting -= Session_PlaybackStarting;
+            if (ownsSession) session.Dispose();
+            session = null;
+            ownsSession = false;
+        }
+
+        private void Session_StateChanged()
+        {
+            string oldFailure = failure;
+            bool oldPlaying = playing;
+            SyncFromSession(false);
+            if (playing) titleScroll += 3F;
+            if (!string.Equals(oldFailure, failure, StringComparison.Ordinal) || oldPlaying != playing)
+            {
+                Invalidate();
+                return;
+            }
+            Rectangle dirty = Rectangle.Union(playerCard, contentRect);
+            dirty.Inflate(4, 4);
+            Invalidate(dirty);
+        }
+
+        private void Session_TrackChanged()
+        {
+            SyncFromSession(true);
+            Invalidate();
+        }
+
+        private void Session_PlaybackStarting()
+        {
+            Action handler = PlaybackStarting;
+            if (handler != null) handler();
+        }
+
+        private void SyncFromSession(bool trackChanged)
+        {
+            if (session == null) return;
+            bool changed = trackChanged || paths.Count != session.PathCount || index != session.Index;
+            if (changed)
+            {
+                paths = session.PathsSnapshot();
+                index = session.Index;
+                titleScroll = 0;
+                if (trackChanged) queueFirst = Math.Max(0, index - 4);
+                else EnsureQueueCurrentVisible();
+                ClearTrack();
+                string path = session.CurrentPath;
+                if (!string.IsNullOrEmpty(path)) LoadMetadataAsync(path);
+            }
+            if (!seeking) position = session.Position;
+            duration = session.Duration;
+            volume = session.Volume;
+            muted = session.Muted;
+            playing = session.IsPlaying;
+            failure = session.Failure;
+            mode = session.Mode;
         }
 
         public void Open(List<string> audioPaths, int startIndex)
@@ -94,94 +164,16 @@ namespace AppManager.Controls
             Open(audioPaths, startIndex, 0, false);
         }
 
-        /// <summary>展开迷你播放器时沿用其进度与暂停状态，避免从 0 秒重新播放。</summary>
+        /// <summary>打开一份新列表；共享会话下仅切换会话内容，不重建内核。</summary>
         public void Open(List<string> audioPaths, int startIndex, double startPosition, bool startPaused)
         {
-            paths = audioPaths ?? new List<string>();
-            if (paths.Count == 0) { RequestClose(); return; }
-            index = Math.Max(0, Math.Min(startIndex, paths.Count - 1));
-            pendingSeek = Math.Max(0, startPosition);
-            pendingPause = startPaused;
+            List<string> songs = audioPaths ?? new List<string>();
+            if (songs.Count == 0) { RequestClose(); return; }
             queueVisible = false;
-            queueFirst = Math.Max(0, index - 4);
+            queueFirst = Math.Max(0, Math.Min(startIndex, songs.Count - 1) - 4);
             Visible = true;
-            EnsureEngine();
             Focus();
-            LoadCurrent();
-        }
-
-        private void NotifyPlaybackState()
-        {
-            Action<string, bool> handler = PlaybackStateChanged;
-            if (handler != null) handler(CurrentPath, playing);
-        }
-
-        private bool EnsureEngine()
-        {
-            if (engine != null) return true;
-            if (engineUnavailable) return false;
-            try
-            {
-                engine = new MpvAudioEngine();
-                engine.SetVolume(volume);
-                engine.SetMute(muted);
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine("音乐播放内核初始化失败: " + ex.Message);
-                engineUnavailable = true;
-                engine = null;
-                return false;
-            }
-        }
-
-        private void LoadCurrent()
-        {
-            pollTimer.Stop();
-            ClearTrack();
-            duration = position = 0;
-            fileLoaded = endedHandled = playing = seeking = false;
-            failure = "";
-            if (index < 0 || index >= paths.Count) return;
-            titleScroll = 0;
-            if (!File.Exists(paths[index]))
-            {
-                failure = "文件不存在";
-                // 切到已删除的曲目：上一首必须停下，否则界面显示“文件不存在”而声音还在继续
-                if (engine != null) engine.Stop();
-                NotifyPlaybackState();
-                Invalidate();
-                return;
-            }
-            LoadMetadataAsync(paths[index]);
-            if (engine == null)
-            {
-                failure = "播放组件不可用（缺少 libmpv-2.dll）";
-                NotifyPlaybackState();
-                Invalidate();
-                return;
-            }
-            try
-            {
-                Action starting = PlaybackStarting;
-                if (starting != null) starting();
-                engine.LoadFile(paths[index]);
-                engine.SetPause(false);
-                loadDeadline = DateTime.UtcNow.AddSeconds(12);
-                playing = true;
-                pollTimer.Start();
-                NotifyPlaybackState();
-            }
-            catch (Exception ex)
-            {
-                Debug.WriteLine("加载音乐失败: " + ex.Message);
-                failure = "无法播放此音乐";
-                playing = false;
-                try { engine.Stop(); } catch { }
-                NotifyPlaybackState();
-            }
-            Invalidate();
+            EnsureSession().Open(songs, startIndex, startPosition, startPaused);
         }
 
         private void LoadMetadataAsync(string path)
@@ -227,163 +219,15 @@ namespace AppManager.Controls
             });
         }
 
-        private void PollTimer_Tick(object sender, EventArgs e)
-        {
-            if (engine == null || index < 0 || index >= paths.Count) return;
-            bool loaded = false, error = false, ended = false;
-            engine.DrainEvents(ref loaded, ref error, ref ended);
-            if (loaded && !fileLoaded)
-            {
-                fileLoaded = true;
-                if (pendingSeek > 0)
-                {
-                    engine.Seek(pendingSeek);
-                    position = pendingSeek;
-                }
-                pendingSeek = -1;
-                if (pendingPause)
-                {
-                    engine.SetPause(true);
-                    playing = false;
-                }
-                pendingPause = false;
-            }
-            if (!fileLoaded && DateTime.UtcNow > loadDeadline)
-            {
-                failure = "加载音乐超时";
-                playing = false;
-                pendingSeek = -1;
-                pendingPause = false;
-                engine.Stop();
-                pollTimer.Stop();
-                NotifyPlaybackState();
-                Invalidate();
-                return;
-            }
-            if (error)
-            {
-                failure = "无法播放此音乐";
-                playing = false;
-                pendingSeek = -1;
-                pendingPause = false;
-                pollTimer.Stop();
-                NotifyPlaybackState();
-                Invalidate();
-                return;
-            }
-            // keep-open=yes 且播放列表只有一项时，mpv 播到结尾只会暂停并置 eof-reached，不发 END_FILE(EOF)；
-            // 只等结束事件的话，自动下一首、列表循环、随机、单曲循环都不会生效。
-            bool eof;
-            if (!ended && fileLoaded && !endedHandled && engine.TryGetFlag("eof-reached", out eof) && eof) ended = true;
-            if (ended && fileLoaded && !endedHandled)
-            {
-                endedHandled = true;
-                HandleEnded();
-                return;
-            }
-            double previousPosition = position;
-            double value;
-            bool flag;
-            if (engine.TryGetDouble("duration", out value) && value >= 0) duration = value;
-            if (!seeking && engine.TryGetDouble("time-pos", out value) && value >= 0) position = value;
-            if (engine.TryGetFlag("pause", out flag)) playing = !flag;
-            NotifyPlaybackState();
-            int interval = playing ? PlayingPollMs : PausedPollMs;
-            if (pollTimer.Interval != interval) pollTimer.Interval = interval;
-            if (playing) titleScroll += 3F;
-            if (playing || Math.Abs(position - previousPosition) > 0.0001)
-            {
-                Rectangle dirty = Rectangle.Union(playerCard, contentRect);
-                dirty.Inflate(4, 4);
-                Invalidate(dirty);
-            }
-        }
+        private void TogglePlay() { Session.TogglePause(); }
 
-        private void HandleEnded()
-        {
-            if (mode == PlayMode.RepeatOne)
-            {
-                position = 0;
-                endedHandled = false;
-                engine.Seek(0);
-                engine.SetPause(false);
-                return;
-            }
-            // 没切到下一首（例如列表只剩当前一首）时必须落到“已播完”状态，不能停在“播放中”
-            if (PlayNext(true)) return;
-            playing = false;
-            position = duration;
-            pollTimer.Stop();
-            NotifyPlaybackState();
-            Invalidate();
-        }
+        private void PlayNext() { Session.Next(); }
 
-        private void TogglePlay()
-        {
-            if (engine == null) return;
-            if (failure != "") { LoadCurrent(); return; }
-            if (endedHandled || (duration > 0 && position >= duration - 0.05)) { LoadCurrent(); return; }
-            playing = !playing;
-            if (playing)
-            {
-                Action starting = PlaybackStarting;
-                if (starting != null) starting();
-            }
-            engine.SetPause(!playing);
-            pollTimer.Interval = playing ? PlayingPollMs : PausedPollMs;
-            pollTimer.Start();
-            NotifyPlaybackState();
-            Invalidate();
-        }
+        private void PlayPrevious() { Session.Previous(); }
 
-        /// <summary>切到下一首并开始加载；顺序播放到列表末尾自动结束时返回 false（不加载）。</summary>
-        private bool PlayNext(bool automatic)
-        {
-            if (paths.Count == 0) return false;
-            if (mode == PlayMode.Shuffle)
-            {
-                // 随机播放是连续播放：多首时随机换一首（不重复当前），只有一首时重播这一首。
-                if (paths.Count > 1)
-                {
-                    int next = index;
-                    while (next == index) next = random.Next(paths.Count);
-                    index = next;
-                }
-            }
-            else if (index + 1 < paths.Count) index++;
-            else if (mode == PlayMode.RepeatAll || !automatic) index = 0;
-            else return false;
-            EnsureQueueCurrentVisible();
-            LoadCurrent();
-            return true;
-        }
+        private void SeekTo(double value) { Session.Seek(value); }
 
-        private void PlayPrevious()
-        {
-            if (position > 4) { SeekTo(0); return; }
-            if (paths.Count == 0) return;
-            index = index > 0 ? index - 1 : paths.Count - 1;
-            EnsureQueueCurrentVisible();
-            LoadCurrent();
-        }
-
-        private void SeekTo(double value)
-        {
-            if (engine == null || duration <= 0) return;
-            position = Math.Max(0, Math.Min(value, duration));
-            engine.Seek(position);
-            endedHandled = false;
-            Invalidate();
-        }
-
-        private void SetVolume(int value)
-        {
-            volume = Math.Max(0, Math.Min(100, value));
-            if (volume > 0) muted = false;
-            if (engine != null) { engine.SetVolume(volume); engine.SetMute(muted); }
-            NotifyPlaybackState();
-            Invalidate();
-        }
+        private void SetVolume(int value) { Session.SetVolume(value); }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -442,7 +286,7 @@ namespace AppManager.Controls
                 Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
             TextRenderer.DrawText(g, "正在播放", Theme.SectionTitleFont, new Rectangle(116, 8, 180, 34),
                 Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
-            TextRenderer.DrawText(g, (index + 1) + " / " + paths.Count, Theme.CaptionFont,
+            TextRenderer.DrawText(g, (Math.Max(0, index) + 1) + " / " + paths.Count, Theme.CaptionFont,
                 new Rectangle(Width - 116, 8, 100, 34), Theme.TextSecondary,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
         }
@@ -453,7 +297,7 @@ namespace AppManager.Controls
             int left = mainCard.X + 24;
             int right = contentRect.Left - 24;
             int top = coverRect.Bottom + 14;
-            string title = track == null ? Path.GetFileNameWithoutExtension(paths[index]) : track.Title;
+            string title = track == null ? (session == null ? "" : session.CurrentTitle) : track.Title;
             string artist = track == null ? "未知艺术家" : track.Artist + "  ·  " + track.Album;
             TextRenderer.DrawText(g, title, Theme.FontOf(13F, FontStyle.Bold), new Rectangle(left, top, right - left, 28),
                 Theme.TextPrimary, TextFormatFlags.HorizontalCenter | TextFormatFlags.EndEllipsis);
@@ -660,7 +504,7 @@ namespace AppManager.Controls
 
         private void DrawCurrentSong(Graphics g)
         {
-            string title = track == null ? Path.GetFileNameWithoutExtension(paths[index]) : track.Title;
+            string title = track == null ? (session == null ? "" : session.CurrentTitle) : track.Title;
             Font font = Theme.BodyFont;
             Size measured = TextRenderer.MeasureText(g, title, font, new Size(int.MaxValue, songRect.Height),
                 TextFormatFlags.NoPadding | TextFormatFlags.SingleLine);
@@ -727,7 +571,7 @@ namespace AppManager.Controls
         {
             using (Pen pen = new Pen(Theme.IconColor, 1.7F) { StartCap = LineCap.Round, EndCap = LineCap.Round })
             {
-                if (mode == PlayMode.Shuffle)
+                if (mode == PlaybackMode.Shuffle)
                 {
                     g.DrawLines(pen, new Point[] { new Point(rect.X + 2, rect.Y + 5), new Point(rect.X + 6, rect.Y + 5),
                         new Point(rect.X + 14, rect.Y + 15), new Point(rect.Right - 4, rect.Y + 15) });
@@ -737,7 +581,7 @@ namespace AppManager.Controls
                 else
                 {
                     g.DrawArc(pen, rect.X + 2, rect.Y + 2, 16, 14, 35, 270);
-                    if (mode == PlayMode.RepeatOne)
+                    if (mode == PlaybackMode.RepeatOne)
                     {
                         using (Brush brush = new SolidBrush(Theme.AccentText))
                         using (StringFormat format = new StringFormat())
@@ -788,9 +632,9 @@ namespace AppManager.Controls
 
         private string ModeText()
         {
-            if (mode == PlayMode.RepeatAll) return "列表循环";
-            if (mode == PlayMode.RepeatOne) return "单曲循环";
-            if (mode == PlayMode.Shuffle) return "随机播放";
+            if (mode == PlaybackMode.RepeatAll) return "列表循环";
+            if (mode == PlaybackMode.RepeatOne) return "单曲循环";
+            if (mode == PlaybackMode.Shuffle) return "随机播放";
             return "顺序播放";
         }
 
@@ -852,11 +696,11 @@ namespace AppManager.Controls
             if (seeking) { seeking = false; UpdateSeek(e.X); SeekTo(position); Invalidate(); return; }
             if (volumeDrag) { volumeDrag = false; UpdateVolume(e.X); return; }
             if (action < 0 || action != HitTest(e.Location)) { Invalidate(); return; }
-            if (action == 0) { mode = (PlayMode)(((int)mode + 1) % 4); Invalidate(); }
+            if (action == 0) { Session.CycleMode(); Invalidate(); }
             else if (action == 1) PlayPrevious();
             else if (action == 2) TogglePlay();
             else if (action == 3) RequestClose();
-            else if (action == 4) PlayNext(false);
+            else if (action == 4) PlayNext();
             else if (action == 5) ToggleMuteFromMiniPlayer();
             else if (action == 6 || action == 7) { queueVisible = action == 7; EnsureQueueCurrentVisible(); Invalidate(); }
         }
@@ -872,8 +716,7 @@ namespace AppManager.Controls
             base.OnMouseDoubleClick(e);
             int action = HitTest(e.Location);
             if (action < 100) return;
-            index = action - 100;
-            LoadCurrent();
+            Session.PlayAt(action - 100);
         }
 
         private void UpdateSeek(int x)
@@ -912,38 +755,23 @@ namespace AppManager.Controls
             if (keyData == Keys.Up) { SetVolume(volume + 5); return true; }
             if (keyData == Keys.Down) { SetVolume(volume - 5); return true; }
             if (keyData == (Keys.Control | Keys.Left)) { PlayPrevious(); return true; }
-            if (keyData == (Keys.Control | Keys.Right)) { PlayNext(false); return true; }
+            if (keyData == (Keys.Control | Keys.Right)) { PlayNext(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
-        public void PausePlayback()
-        {
-            if (engine == null || !playing) return;
-            playing = false;
-            engine.SetPause(true);
-            pollTimer.Interval = PausedPollMs;
-            pollTimer.Start();
-            NotifyPlaybackState();
-            Invalidate();
-        }
+        public void PausePlayback() { Session.Pause(); }
 
         public void StopPlayback()
         {
-            pollTimer.Stop();
+            if (session != null) session.Stop();
             playing = false;
-            if (engine != null)
-            {
-                // 先静音式暂停（同步、很快），再交给后台销毁：避免与紧接着创建的新内核声音重叠，也不卡界面线程。
-                MpvAudioEngine old = engine;
-                engine = null;
-                try { old.SetPause(true); } catch { }
-                MpvShutdown.Destroy(old, null);
-            }
             position = duration = 0;
-            fileLoaded = endedHandled = seeking = volumeDrag = false;
-            pendingSeek = -1;
-            pendingPause = false;
+            seeking = volumeDrag = false;
+            paths = new List<string>();
+            index = -1;
+            failure = "";
             ClearTrack();
+            Invalidate();
         }
 
         private void ClearTrack()
@@ -971,179 +799,10 @@ namespace AppManager.Controls
         {
             if (disposing)
             {
-                StopPlayback();
-                pollTimer.Dispose();
-                MpvShutdown.WaitAll(3000);   // 退出时让音频设备干净关闭，但不无限等待
+                DetachSession();
             }
             base.Dispose(disposing);
         }
 
-        private sealed class MpvAudioEngine : IDisposable
-        {
-            private const string Dll = "libmpv-2.dll";
-            private const int FormatFlag = 3, FormatDouble = 5;
-            private const int EventStartFile = 6, EventEndFile = 7, EventFileLoaded = 8;
-            private IntPtr context;
-            private bool awaitingStart;   // loadfile 之后、START_FILE 之前到达的事件属于上一首
-
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-            private static extern IntPtr mpv_create();
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-            private static extern int mpv_initialize(IntPtr context);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-            private static extern int mpv_set_option_string(IntPtr context, string name, string value);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
-            private static extern int mpv_set_property_string(IntPtr context, string name, string value);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
-            private static extern int mpv_get_property_double(IntPtr context, string name, int format, ref double data);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
-            private static extern int mpv_get_property_flag(IntPtr context, string name, int format, ref int data);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-            private static extern int mpv_command(IntPtr context, IntPtr args);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-            private static extern IntPtr mpv_wait_event(IntPtr context, double timeout);
-            [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
-            private static extern void mpv_terminate_destroy(IntPtr context);
-
-            [StructLayout(LayoutKind.Sequential)]
-            private struct MpvEvent
-            {
-                public int EventId;
-                public int Error;
-                public ulong ReplyUserdata;
-                public IntPtr Data;
-            }
-
-            [StructLayout(LayoutKind.Sequential)]
-            private struct MpvEventEndFile
-            {
-                public int Reason;
-                public int Error;
-                public long PlaylistEntryId;
-                public long PlaylistInsertId;
-                public int PlaylistInsertNumEntries;
-            }
-
-            public MpvAudioEngine()
-            {
-                context = mpv_create();
-                if (context == IntPtr.Zero) throw new InvalidOperationException("无法创建 mpv 实例");
-                try
-                {
-                    SetOption("vo", "null");
-                    SetOption("video", "no");
-                    SetOption("keep-open", "yes");
-                    SetOption("idle", "yes");
-                    SetOption("terminal", "no");
-                    SetOption("config", "no");
-                    SetOption("osc", "no");
-                    SetOption("osd-level", "0");
-                    SetOption("input-default-bindings", "no");
-                    SetOption("input-media-keys", "no");
-                    if (mpv_initialize(context) < 0) throw new InvalidOperationException("mpv 初始化失败");
-                }
-                catch
-                {
-                    mpv_terminate_destroy(context);
-                    context = IntPtr.Zero;
-                    throw;
-                }
-            }
-
-            public void LoadFile(string path)
-            {
-                awaitingStart = true;
-                Command("loadfile", path);
-            }
-            public void SetPause(bool paused) { SetString("pause", paused ? "yes" : "no"); }
-            public void SetVolume(int value) { SetString("volume", value.ToString(CultureInfo.InvariantCulture)); }
-            public void SetMute(bool mute) { SetString("mute", mute ? "yes" : "no"); }
-            public void Seek(double seconds) { Command("seek", seconds.ToString("0.###", CultureInfo.InvariantCulture), "absolute"); }
-            public void Stop() { Command("stop"); }
-
-            public bool TryGetDouble(string name, out double value)
-            {
-                value = 0;
-                return context != IntPtr.Zero && mpv_get_property_double(context, name, FormatDouble, ref value) >= 0;
-            }
-
-            public bool TryGetFlag(string name, out bool value)
-            {
-                value = false;
-                int raw = 0;
-                if (context == IntPtr.Zero || mpv_get_property_flag(context, name, FormatFlag, ref raw) < 0) return false;
-                value = raw != 0;
-                return true;
-            }
-
-            public void DrainEvents(ref bool loaded, ref bool error, ref bool ended)
-            {
-                if (context == IntPtr.Zero) return;
-                for (int i = 0; i < 128; i++)
-                {
-                    IntPtr eventPointer = mpv_wait_event(context, 0);
-                    if (eventPointer == IntPtr.Zero) return;
-                    MpvEvent mediaEvent = (MpvEvent)Marshal.PtrToStructure(eventPointer, typeof(MpvEvent));
-                    if (mediaEvent.EventId == 0) return;
-                    if (mediaEvent.EventId == EventStartFile) { awaitingStart = false; continue; }
-                    if (awaitingStart) continue;   // 上一首遗留的事件不能算到新曲目上
-                    if (mediaEvent.EventId == EventFileLoaded) loaded = true;
-                    else if (mediaEvent.EventId == EventEndFile && mediaEvent.Data != IntPtr.Zero)
-                    {
-                        MpvEventEndFile end = (MpvEventEndFile)Marshal.PtrToStructure(mediaEvent.Data, typeof(MpvEventEndFile));
-                        if (end.Reason == 4) error = true;
-                        else if (end.Reason == 0) ended = true;
-                    }
-                }
-            }
-
-            private int SetOption(string name, string value)
-            {
-                return mpv_set_option_string(context, name, value);
-            }
-
-            private void SetString(string name, string value)
-            {
-                if (context != IntPtr.Zero) mpv_set_property_string(context, name, value);
-            }
-
-            private int Command(params string[] args)
-            {
-                if (context == IntPtr.Zero) return -1;
-                IntPtr[] pointers = new IntPtr[args.Length + 1];
-                try
-                {
-                    for (int i = 0; i < args.Length; i++) pointers[i] = AllocUtf8(args[i]);
-                    IntPtr argv = Marshal.AllocHGlobal(IntPtr.Size * pointers.Length);
-                    try
-                    {
-                        Marshal.Copy(pointers, 0, argv, pointers.Length);
-                        return mpv_command(context, argv);
-                    }
-                    finally { Marshal.FreeHGlobal(argv); }
-                }
-                finally
-                {
-                    for (int i = 0; i < pointers.Length; i++)
-                        if (pointers[i] != IntPtr.Zero) Marshal.FreeHGlobal(pointers[i]);
-                }
-            }
-
-            private static IntPtr AllocUtf8(string text)
-            {
-                byte[] bytes = Encoding.UTF8.GetBytes(text);
-                IntPtr pointer = Marshal.AllocHGlobal(bytes.Length + 1);
-                Marshal.Copy(bytes, 0, pointer, bytes.Length);
-                Marshal.WriteByte(pointer, bytes.Length, 0);
-                return pointer;
-            }
-
-            public void Dispose()
-            {
-                if (context == IntPtr.Zero) return;
-                mpv_terminate_destroy(context);
-                context = IntPtr.Zero;
-            }
-        }
     }
 }

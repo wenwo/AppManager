@@ -397,8 +397,7 @@ namespace AppManager
             // 集合封面与播放列表存的是文件路径而不是条目键，需要单独跟随
             foreach (ResourceCollection collection in config.Collections)
                 collection.Cover = EntryPaths.Rebase(collection.Cover, oldPath, newPath);
-            if (miniMusic != null && !miniMusic.IsDisposed) miniMusic.RebasePath(oldPath, newPath);
-            if (musicPlayer != null && !musicPlayer.IsDisposed) musicPlayer.RebasePath(oldPath, newPath);
+            if (musicSession != null) musicSession.RebasePath(oldPath, newPath);
             InvalidateAddedIndex();   // 上文改写了 AddedEntry.Path，按旧路径建的索引必须失效
             return moved;
         }

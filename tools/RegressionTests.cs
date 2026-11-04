@@ -102,6 +102,8 @@ namespace AppManager
                 Run("background scan uses the UI snapshot and leaves UI-owned settings to the UI thread", ScanUsesUiSnapshot);
                 Run("apps folder known-folder ids resolve to real paths; app ids stay unchanged", KnownFolderIds);
                 Run("grid caches category text and falls back when the provider fails", GridCategoryTextCache);
+                Run("selection footer resolves names, locations, sources and packaged ids", SelectionFooterText);
+                Run("grid selection fires once per change and restores a ten-thousand item selection", GridSelectionNotifications);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("grid delete handles every selected item; arrow starts at the first item", GridBatchDeleteAndArrow);
                 Run("icon cache evicts by bytes and LRU instead of clearing everything", IconCacheLru);
@@ -397,9 +399,9 @@ namespace AppManager
             using (MainForm form = ResourceForm(config, "压缩包", app))
             {
                 Check((bool)Invoke(form, "RenamesOnDisk", app, app.TargetPath), "managed resource treated as display-name rename");
-                object mini = typeof(MainForm).GetField("miniMusic", Private).GetValue(form);
-                FieldInfo playlist = mini.GetType().GetField("paths", Private);
-                playlist.SetValue(mini, new List<string> { path, Path.Combine(dir, "other.mp3") });
+                AppManager.Controls.MusicPlaybackSession session = (AppManager.Controls.MusicPlaybackSession)typeof(MainForm).GetField("musicSession", Private).GetValue(form);
+                FieldInfo playlist = typeof(AppManager.Controls.MusicPlaybackSession).GetField("paths", Private);
+                playlist.SetValue(session, new List<string> { path, Path.Combine(dir, "other.mp3") });
                 string seen; int start, length;
                 // 对话框打开期间发生一次无关的保存（后台导入完成等）：会清空记录缓存，改名不能再改到旧对象上
                 bool stayedOpen = AnswerInput(delegate { Invoke(form, "RenameAddedEntry", app); }, "改名后.zip",
@@ -412,7 +414,7 @@ namespace AppManager
                 Check(config.Favorites.Contains(newKey) && !config.Favorites.Contains(key), "favorite not migrated");
                 Check(config.Hidden.Contains(newKey) && !config.Hidden.Contains(key), "hidden not migrated");
                 Check(config.ItemOrder["压缩包"].Contains(newKey) && !config.ItemOrder["压缩包"].Contains(key), "order not migrated");
-                List<string> songs = (List<string>)playlist.GetValue(mini);
+                List<string> songs = (List<string>)playlist.GetValue(session);
                 Check(songs[0] == renamed && songs[1] == Path.Combine(dir, "other.mp3"), "mini player playlist kept the old path");
             }
             AppConfig loaded = AppConfig.Load();
@@ -2496,6 +2498,92 @@ namespace AppManager
                 Check(first.Count == 2 && first[0] == "甲" && first[1] == "乙", "provider text was not split");
                 Check(second.Count == 2, "cached provider text was lost");
                 Check(calls == 1, "category provider ran again after SetApps");
+            }
+        }
+
+        private static void SelectionFooterText()
+        {
+            AppInfo navicat = new AppInfo { Name = "Navicat Premium 17", Source = "Desktop",
+                TargetPath = "D:\\Program Files\\PremiumSoft\\Navicat Premium 17\\navicat.exe" };
+            Check(MainForm.SelectionNameText(navicat) == "Navicat Premium 17", "selection name was changed");
+            Check(MainForm.SelectionLocationText(navicat) == navicat.TargetPath, "selection target path was lost");
+            Check(MainForm.SelectionSourceText(navicat) == "桌面快捷方式", "desktop source was not labelled");
+
+            AppInfo file = new AppInfo { Name = "report", TargetPath = "C:\\Docs\\report.pdf", IsFile = true };
+            Check(MainForm.SelectionNameText(file) == "report.pdf", "file display name lost its extension");
+
+            string web = "http" + "s" + ":" + "//example.com/docs";
+            AppInfo url = new AppInfo { Name = "Docs", TargetPath = web, Source = "Added" };
+            Check(MainForm.SelectionLocationText(url) == web, "url was not shown verbatim");
+            Check(MainForm.SelectionSourceText(url) == "手动添加", "manual source was not labelled");
+
+            AppInfo packaged = new AppInfo { Name = "Calculator", IsUwp = true, Source = "AppsFolder",
+                TargetPath = "shell:AppsFolder\\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App" };
+            Check(MainForm.SelectionLocationText(packaged) == "打包应用 · Microsoft.WindowsCalculator_8wekyb3d8bbwe!App",
+                "packaged app id was not shown");
+            Check(MainForm.SelectionSourceText(packaged) == "开始菜单", "apps-folder source was not labelled");
+
+            AppInfo installed = new AppInfo { Name = "Installed", IsUwp = true,
+                TargetPath = "shell:AppsFolder\\Installed.App_123!App", InstallLocation = "C:\\Program Files\\WindowsApps\\Installed" };
+            Check(MainForm.SelectionLocationText(installed) == installed.InstallLocation,
+                "packaged install location took priority over the app id");
+
+            AppInfo shortcutUwp = new AppInfo { Name = "Shortcut Package", IsUwp = true,
+                TargetPath = "C:\\Windows\\explorer.exe", LaunchArguments = "shell:AppsFolder\\Shortcut.Package_456!App" };
+            Check(MainForm.SelectionLocationText(shortcutUwp) == "打包应用 · Shortcut.Package_456!App",
+                "start-menu packaged shortcut did not recover the app id");
+
+            AppInfo installOnly = new AppInfo { Name = "InstallOnly", InstallLocation = "D:\\Apps\\InstallOnly" };
+            Check(MainForm.SelectionLocationText(installOnly) == installOnly.InstallLocation,
+                "install location fallback was ignored");
+            Check(MainForm.SelectionLocationText(new AppInfo { Name = "Empty" }) == "—",
+                "empty location did not use the placeholder");
+
+            AppInfo start = new AppInfo { Name = "Start", Source = "StartMenu" };
+            Check(MainForm.SelectionSourceText(start) == "开始菜单", "start-menu source was not labelled");
+            AppInfo desktopFallback = new AppInfo { Name = "Desk", IsDesktop = true };
+            Check(MainForm.SelectionSourceText(desktopFallback) == "桌面快捷方式", "desktop flag fallback was ignored");
+            Check(MainForm.SelectionCountText(3) == "已选 3 项", "multi-selection text changed");
+        }
+
+        private static void GridSelectionNotifications()
+        {
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Size = new Size(960, 420) })
+            {
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int i = 0; i < 10000; i++)
+                    apps.Add(new AppInfo { Key = "selection:" + i, Name = "Selection " + i });
+
+                int events = 0;
+                grid.SelectionChanged += delegate { events++; };
+                grid.SetApps(apps);
+                Check(events == 1 && grid.SelectedCount == 0, "SetApps did not publish the empty selection");
+
+                MethodInfo selectSingle = typeof(Controls.AppGridControl).GetMethod("SelectSingle", Private);
+                MethodInfo selectRange = typeof(Controls.AppGridControl).GetMethod("SelectRange", Private);
+                MethodInfo toggle = typeof(Controls.AppGridControl).GetMethod("ToggleSelected", Private);
+                selectSingle.Invoke(grid, new object[] { 0 });
+                Check(events == 2 && grid.SelectedCount == 1 && ReferenceEquals(grid.SingleSelectedApp, apps[0]),
+                    "single selection was not exposed");
+
+                events = 0;
+                selectRange.Invoke(grid, new object[] { 9999 });
+                Check(events == 1 && grid.SelectedCount == 10000 && grid.SingleSelectedApp == null,
+                    "range selection did not fire exactly once or expose the wrong count");
+
+                events = 0;
+                grid.SetApps(apps);
+                Check(events == 1 && grid.SelectedCount == 10000,
+                    "large selection was not restored after reloading the list");
+
+                events = 0;
+                grid.ClearSelection();
+                Check(events == 1 && grid.SelectedCount == 0, "clear selection did not fire exactly once");
+
+                events = 0;
+                toggle.Invoke(grid, new object[] { 2 });
+                Check(events == 1 && grid.SelectedCount == 1 && ReferenceEquals(grid.SingleSelectedApp, apps[2]),
+                    "toggle selection did not publish the changed item");
             }
         }
 
