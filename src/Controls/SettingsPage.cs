@@ -57,8 +57,6 @@ namespace AppManager.Controls
         private readonly List<Section> sections = new List<Section>();
         private readonly List<Row> rows = new List<Row>();
         private Rectangle headerRect;
-        private string folderPath = string.Empty;
-        private string filePath = string.Empty;
         private string resourcePath = string.Empty;
         private int hoverRow = -1;
         /// <summary>绑定期间抑制开关事件，避免回填状态时触发「已改动」回调。</summary>
@@ -104,8 +102,7 @@ namespace AppManager.Controls
         public bool CloseToTray { get { return closeToTrayToggle.Checked; } }
 
         /// <summary>回填页面状态（开关与存储路径）。绑定过程中不触发变更事件。</summary>
-        public void Bind(bool showHidden, bool autoScan, bool autoOrganizeDesktop, bool closeToTray,
-            string folderStorePath, string fileStorePath, string resourceStorePath)
+        public void Bind(bool showHidden, bool autoScan, bool autoOrganizeDesktop, bool closeToTray, string resourceStorePath)
         {
             syncing = true;
             showHiddenToggle.Checked = showHidden;
@@ -113,8 +110,6 @@ namespace AppManager.Controls
             autoOrganizeDesktopToggle.Checked = autoOrganizeDesktop;
             closeToTrayToggle.Checked = closeToTray;
             syncing = false;
-            folderPath = folderStorePath ?? string.Empty;
-            filePath = fileStorePath ?? string.Empty;
             resourcePath = resourceStorePath ?? string.Empty;
             Relayout();   // 路径文本参与行布局，重新生成行以刷新展示内容
             Invalidate();
@@ -180,9 +175,6 @@ namespace AppManager.Controls
             int y2 = top + 30 + LabelH;
             y2 = AddSection("存储位置", rightX, colW, y2, new Row[]
             {
-                // 新导入只进资源存储位置；前两项是旧版软件页面文件的所在位置，用于识别已迁到资源页面的这些文件
-                MakeInfoRow("旧版文件夹位置", folderPath),
-                MakeInfoRow("旧版文件位置", filePath),
                 MakeInfoRow("资源存储位置", resourcePath),
                 MakeActionRow("修改存储位置…", delegate { Raise(StorageLocationRequested); }, ActionRowH)
             });

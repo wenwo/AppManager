@@ -329,7 +329,8 @@ namespace AppManager
         public Dictionary<string, string> CategoryIconNames = new Dictionary<string, string>();
         // 管理根路径：文件夹/文件搬入时的目标根目录（默认 H:\Manage，不可用时回退本地收纳目录）
         public string ManageRootPath = string.Empty;
-        // 文件/文件夹各自的存储位置（留空时按 ManageRootPath 与 ManageRootPath\Files 兜底）
+        // 旧版软件页面的文件/文件夹存储位置（留空时按 ManageRootPath 与 ManageRootPath\Files 兜底）。
+        // 界面不再提供修改，只用于启动时把其中的资源条目整理进资源存储位置，以及识别留在原处的旧条目。
         public string FolderStorePath = string.Empty;
         public string FileStorePath = string.Empty;
         // 资源模式本地文件的存储根目录（留空时按 ManageRootPath\Resources 兜底；各分类在其下建子目录）

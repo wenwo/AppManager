@@ -59,7 +59,7 @@ namespace AppManager
             SyncHeaderStrip();
             if (settingsPage != null)
                 settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                    config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
+                    config.CloseToTray, ResourceStoreRoot());
             StartAutoScan();
             RebuildSidebar();
             StartScan();

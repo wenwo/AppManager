@@ -101,25 +101,9 @@ namespace AppManager
                 if (ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException) return false;
                 throw;
             }
-            List<string> manageRoots = new List<string>();
-            if (!string.IsNullOrEmpty(config.ManageRootPath)) manageRoots.Add(DesktopOrganizer.NormalizeRoot(config.ManageRootPath));
-            else { manageRoots.Add(@"H:\Manage"); manageRoots.Add(DesktopOrganizer.QuickCenterDir); }   // 与 ResolveManageRoot 的回退顺序一致
-
             List<string> resourceRoots = new List<string>(), stores = new List<string>(), structural = new List<string>();
-            if (!string.IsNullOrEmpty(config.ResourceStorePath)) resourceRoots.Add(DesktopOrganizer.NormalizeRoot(config.ResourceStorePath));
-            if (!string.IsNullOrEmpty(config.FileStorePath)) stores.Add(DesktopOrganizer.NormalizeRoot(config.FileStorePath));
-            if (!string.IsNullOrEmpty(config.FolderStorePath)) stores.Add(DesktopOrganizer.NormalizeRoot(config.FolderStorePath));
-            foreach (string manage in manageRoots)
-            {
-                if (string.IsNullOrEmpty(config.ResourceStorePath)) resourceRoots.Add(Path.Combine(manage, "Resources"));
-                if (string.IsNullOrEmpty(config.FileStorePath)) stores.Add(Path.Combine(manage, "Files"));
-                if (string.IsNullOrEmpty(config.FolderStorePath)) stores.Add(manage);   // 文件夹默认直接存放在管理根下
-                structural.Add(manage);
-                structural.Add(Path.Combine(manage, "Files"));
-                structural.Add(Path.Combine(manage, "Resources"));
-            }
+            StoreRoots(resourceRoots, stores, structural);
             stores.AddRange(resourceRoots);
-            structural.AddRange(stores);
 
             foreach (string dir in structural)
                 if (SamePath(dir, full)) return false;
@@ -130,6 +114,32 @@ namespace AppManager
             foreach (string store in stores)
                 if (IsUnder(store, full)) return true;
             return false;
+        }
+
+        /// <summary>
+        /// 按配置推算存储目录，不创建目录、不改配置。legacyStores 是旧版软件页面的文件/文件夹存储位置
+        /// （未配置时为管理根\Files 与管理根本身），structural 是存储结构本身（管理根、Files、Resources 与上述各根）。
+        /// </summary>
+        private void StoreRoots(List<string> resourceRoots, List<string> legacyStores, List<string> structural)
+        {
+            List<string> manageRoots = new List<string>();
+            if (!string.IsNullOrEmpty(config.ManageRootPath)) manageRoots.Add(DesktopOrganizer.NormalizeRoot(config.ManageRootPath));
+            else { manageRoots.Add(@"H:\Manage"); manageRoots.Add(DesktopOrganizer.QuickCenterDir); }   // 与 ResolveManageRoot 的回退顺序一致
+
+            if (!string.IsNullOrEmpty(config.ResourceStorePath)) resourceRoots.Add(DesktopOrganizer.NormalizeRoot(config.ResourceStorePath));
+            if (!string.IsNullOrEmpty(config.FileStorePath)) legacyStores.Add(DesktopOrganizer.NormalizeRoot(config.FileStorePath));
+            if (!string.IsNullOrEmpty(config.FolderStorePath)) legacyStores.Add(DesktopOrganizer.NormalizeRoot(config.FolderStorePath));
+            foreach (string manage in manageRoots)
+            {
+                if (string.IsNullOrEmpty(config.ResourceStorePath)) resourceRoots.Add(Path.Combine(manage, "Resources"));
+                if (string.IsNullOrEmpty(config.FileStorePath)) legacyStores.Add(Path.Combine(manage, "Files"));
+                if (string.IsNullOrEmpty(config.FolderStorePath)) legacyStores.Add(manage);   // 文件夹默认直接存放在管理根下
+                structural.Add(manage);
+                structural.Add(Path.Combine(manage, "Files"));
+                structural.Add(Path.Combine(manage, "Resources"));
+            }
+            structural.AddRange(legacyStores);
+            structural.AddRange(resourceRoots);
         }
 
         private static bool SamePath(string a, string b)

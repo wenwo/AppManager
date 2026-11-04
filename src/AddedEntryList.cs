@@ -188,6 +188,20 @@ namespace AppManager
                 return db.Scalar("SELECT 1 FROM added_items WHERE path_key>=? AND path_key<? LIMIT 1", range[0], range[1]) != null;
         }
 
+        /// <summary>
+        /// 后台线程用：直接读库、不经过实例缓存。文件夹下一层（不含自身和更深层）的收录行，按 id 升序：
+        /// { 路径, 是否文件夹, 是否资源, 分类键 }。范围条件走 path_key 索引，余下部分不含“\”即为下一层。
+        /// </summary>
+        internal static List<string[]> DirectChildren(string databaseFile, string folder)
+        {
+            if (string.IsNullOrEmpty(folder)) return new List<string[]>();
+            string[] range = PrefixRange(folder);
+            using (Sqlite db = new Sqlite(databaseFile, true))
+                return db.Query("SELECT a.path,a.folder,a.resource,g.key FROM added_items a LEFT JOIN groups g ON g.id=a.group_id"
+                    + " WHERE a.path_key>=? AND a.path_key<? AND instr(substr(a.path_key,?),'\\')=0 ORDER BY a.id",
+                    range[0], range[1], range[0].Length + 1);
+        }
+
         /// <summary>后台线程用：直接读库、不经过实例缓存。返回 输入路径 → 已登记的路径（最早一条，保留登记时的大小写）。</summary>
         internal static Dictionary<string, string> RegisteredPaths(string databaseFile, IEnumerable<string> paths)
         {

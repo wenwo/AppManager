@@ -213,6 +213,7 @@ namespace AppManager
             UpdateRegion();
             SeparateCrossModeCategories();
             MigrateSoftwareFiles();
+            StartLegacyStoreMigration();   // 旧版存储位置里的资源条目：询问后后台搬进资源存储位置
             RebuildSidebar();
             // 先展示上次扫描的磁盘缓存（启动即有内容可看），随后统一走后台异步扫描补最新结果；
             // 不再在 UI 线程同步 ScanAll（冷启动 shell:AppsFolder 枚举可达数百毫秒）
@@ -983,7 +984,7 @@ namespace AppManager
                 ShowStorageLocationDialog();
                 // 对话框可能改了存储目录，回到页面后刷新展示的路径
                 settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                    config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
+                    config.CloseToTray, ResourceStoreRoot());
             };
             settingsPage.RescanRequested += delegate { StartScan(); };
             settingsPage.LayoutBackupRequested += delegate { ShowLayoutBackups(); };
@@ -5033,47 +5034,11 @@ namespace AppManager
             return DesktopOrganizer.QuickCenterDir;
         }
 
-        /// <summary>设置页展示用的三个存储位置：只解析配置，不产生目录或配置写入。</summary>
-        private string ConfiguredFolderStorePath()
-        {
-            return string.IsNullOrEmpty(config.FolderStorePath)
-                ? ConfiguredManageRoot() : DesktopOrganizer.NormalizeRoot(config.FolderStorePath);
-        }
-
-        private string ConfiguredFileStorePath()
-        {
-            return string.IsNullOrEmpty(config.FileStorePath)
-                ? Path.Combine(ConfiguredManageRoot(), "Files") : DesktopOrganizer.NormalizeRoot(config.FileStorePath);
-        }
-
+        /// <summary>资源存储位置：只解析配置，不产生目录或配置写入（设置页展示、对话框占位提示与旧文件整理用）。</summary>
         private string ConfiguredResourceStorePath()
         {
             return string.IsNullOrEmpty(config.ResourceStorePath)
                 ? Path.Combine(ConfiguredManageRoot(), "Resources") : DesktopOrganizer.NormalizeRoot(config.ResourceStorePath);
-        }
-
-        /// <summary>统一存储位置：文件夹一律收入配置的「文件夹存储位置」，不再按分类细分二级目录。</summary>
-        private string FolderStoreOf()
-        {
-            if (!string.IsNullOrEmpty(config.FolderStorePath))
-            {
-                string p = DesktopOrganizer.NormalizeRoot(config.FolderStorePath);
-                try { Directory.CreateDirectory(p); return p; }
-                catch { }
-            }
-            return ResolveManageRoot();
-        }
-
-        /// <summary>统一存储位置：文件一律收入配置的「文件存储位置」，不再按分类细分二级目录。</summary>
-        private string FileStoreOf()
-        {
-            if (!string.IsNullOrEmpty(config.FileStorePath))
-            {
-                string p = DesktopOrganizer.NormalizeRoot(config.FileStorePath);
-                try { Directory.CreateDirectory(p); return p; }
-                catch { }
-            }
-            return Path.Combine(ResolveManageRoot(), "Files");
         }
 
         /// <summary>资源存储根目录：配置了「资源存储位置」则用之，否则回退 ManageRoot\Resources。</summary>
@@ -5856,7 +5821,7 @@ namespace AppManager
             grid.GridMode = GetCategoryGridMode(currentCategory);
             SyncHeaderStrip();
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
+                config.CloseToTray, ResourceStoreRoot());
             StartAutoScan();
             SeparateCrossModeCategories();   // 布局备份等旧快照可能带回同名分类
             MigrateSoftwareFiles();          // 旧快照也可能带回软件页面里的文件条目
@@ -6125,7 +6090,7 @@ namespace AppManager
             HideMusicPlayer();
             miniMusic.Stop();
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
+                config.CloseToTray, ResourceStoreRoot());
             SetMainContentVisible(false);
             settingsBtn.Visible = false;
             settingsPage.Visible = true;
@@ -6167,21 +6132,19 @@ namespace AppManager
             SyncHeaderStrip();
         }
 
-        /// <summary>存储位置设置：分别设定文件夹、文件与资源的入库目标目录（iOS 风格对话框）。</summary>
+        /// <summary>存储位置设置：设定资源导入的存储根目录（iOS 风格对话框）。</summary>
         private void ShowStorageLocationDialog()
         {
-            // 输入框只显示配置里的原始值；留空的字段用占位提示显示当前会用到的默认位置。
-            // 打开对话框不创建目录、不探测并写回 H:\Manage；保存时只写回用户改动过的字段，
+            // 输入框只显示配置里的原始值；留空时用占位提示显示当前会用到的默认位置。
+            // 打开对话框不创建目录、不探测并写回 H:\Manage；没有改动时不写回，
             // 不能把解析出的默认路径固化进配置（否则以后插上 H 盘、改了收纳根都不再跟随）。
-            string folderPath = config.FolderStorePath ?? string.Empty;
-            string filePath = config.FileStorePath ?? string.Empty;
             string resourcePath = config.ResourceStorePath ?? string.Empty;
 
             using (Form f = new BufferedDialogForm())
             {
                 f.FormBorderStyle = FormBorderStyle.None;
                 f.StartPosition = FormStartPosition.CenterParent;
-                f.ClientSize = new Size(520, 358);
+                f.ClientSize = new Size(520, 218);
                 f.BackColor = Theme.Background;
                 f.ShowInTaskbar = false;
                 ApplyRoundedCorners(f);
@@ -6196,7 +6159,7 @@ namespace AppManager
                 f.Controls.Add(title);
 
                 Label desc = new Label();
-                desc.Text = "资源导入存放在「资源存储位置」；前两项为旧版软件页面文件位置。";
+                desc.Text = "资源导入按分类存放在「资源存储位置」。";
                 desc.Font = Theme.CaptionFont;
                 desc.ForeColor = Theme.TextSecondary;
                 desc.BackColor = Color.Transparent;
@@ -6204,15 +6167,11 @@ namespace AppManager
                 desc.AutoSize = true;
                 f.Controls.Add(desc);
 
-                TextBox folderBox = MakePathRow(f, "旧版文件夹位置（用于识别已迁到资源页面的文件夹）", folderPath, 82, "默认：" + ConfiguredFolderStorePath());
-                TextBox fileBox = MakePathRow(f, "旧版文件位置（用于识别已迁到资源页面的文件）", filePath, 152, "默认：" + ConfiguredFileStorePath());
-                TextBox resourceBox = MakePathRow(f, "资源存储位置（按分类建子目录）", resourcePath, 222, "默认：" + ConfiguredResourceStorePath());
-                // 避免首个输入框获得焦点后被整体选中（观感突兀）
+                TextBox resourceBox = MakePathRow(f, "资源存储位置（按分类建子目录）", resourcePath, 82, "默认：" + ConfiguredResourceStorePath());
+                // 避免输入框获得焦点后被整体选中（观感突兀）
                 f.Shown += delegate
                 {
-                    folderBox.SelectionStart = folderBox.TextLength;
-                    folderBox.SelectionLength = 0;
-                    fileBox.SelectionLength = 0;
+                    resourceBox.SelectionStart = resourceBox.TextLength;
                     resourceBox.SelectionLength = 0;
                 };
 
@@ -6224,7 +6183,7 @@ namespace AppManager
                 ok.Click += delegate
                 {
                     string error;
-                    bool changed = ApplyStoreEdits(config, folderBox.Text, fileBox.Text, resourceBox.Text, out error);
+                    bool changed = ApplyStoreEdits(config, resourceBox.Text, out error);
                     if (error != null)
                     {
                         MessageBox.Show(this, error, "存储位置设置", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -6285,23 +6244,17 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 存储位置对话框的保存逻辑：校验后只写回规范化后确实变化的字段，空值表示沿用默认。
-        /// 返回是否有字段被修改；校验失败时 error 非空，配置保持不变。
+        /// 存储位置对话框的保存逻辑：校验后只在规范化后确实变化时写回，空值表示沿用默认。
+        /// 返回是否被修改；校验失败时 error 非空，配置保持不变。旧版文件/文件夹位置不再提供修改。
         /// </summary>
-        private static bool ApplyStoreEdits(AppConfig cfg, string folderText, string fileText, string resourceText, out string error)
+        private static bool ApplyStoreEdits(AppConfig cfg, string resourceText, out string error)
         {
-            string folder = NormalizeStoreInput(folderText);
-            string file = NormalizeStoreInput(fileText);
             string resource = NormalizeStoreInput(resourceText);
-            error = ValidateStorePath(folder, "文件夹存储位置");
-            if (error == null) error = ValidateStorePath(file, "文件存储位置");
-            if (error == null) error = ValidateStorePath(resource, "资源存储位置");
+            error = ValidateStorePath(resource, "资源存储位置");
             if (error != null) return false;
-            bool changed = false;
-            if (!string.Equals(NormalizeStoreInput(cfg.FolderStorePath), folder, StringComparison.OrdinalIgnoreCase)) { cfg.FolderStorePath = folder; changed = true; }
-            if (!string.Equals(NormalizeStoreInput(cfg.FileStorePath), file, StringComparison.OrdinalIgnoreCase)) { cfg.FileStorePath = file; changed = true; }
-            if (!string.Equals(NormalizeStoreInput(cfg.ResourceStorePath), resource, StringComparison.OrdinalIgnoreCase)) { cfg.ResourceStorePath = resource; changed = true; }
-            return changed;
+            if (string.Equals(NormalizeStoreInput(cfg.ResourceStorePath), resource, StringComparison.OrdinalIgnoreCase)) return false;
+            cfg.ResourceStorePath = resource;
+            return true;
         }
 
         private TextBox MakePathRow(Form f, string label, string value, int y, string cue)

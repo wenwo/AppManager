@@ -72,6 +72,11 @@ namespace AppManager
                 Run("rename: invalid names, conflicts, extension rule/confirm, case-only, locked file, save-failure rollback", RenameValidation);
                 Run("rename: folders rebase covers and refuse nested entries; software/referenced items keep display-name rename", RenameFoldersAndSoftware);
                 Run("move into folder keeps favorite, hidden, order, membership and cover", MoveIntoFolderKeepsRecords);
+                Run("legacy stores: resource entries move into typed resource folders; software, nested, deep and loose items stay", LegacyStoreMoves);
+                Run("legacy stores: save failure moves the batch back; entries removed meanwhile go back unregistered", LegacyStoreMoveFailures);
+                Run("legacy stores: interrupted batch is re-registered from the journal without deleting files", LegacyStoreMoveResume);
+                Run("legacy stores: default locations under the manage root skip the store structure", LegacyStoreDefaultRoots);
+                Run("legacy stores: startup prompt leaves files on decline and moves them on accept", LegacyStoreStartupPrompt);
                 Run("resource page creates entries in the resource store", ResourceCreateEntries);
                 Run("software page files migrate to typed resource categories; executables and resource relations stay", SoftwareFilesMigrate);
                 Run("scanner keeps programs, protocols and packaged apps; drops folder and document targets", SoftwareScanTargets);
@@ -574,6 +579,263 @@ namespace AppManager
             Check(loaded.Collections.Find(delegate(ResourceCollection c) { return c.Name == "精选"; }).Cover == dest, "cover lost by move");
         }
 
+        // ===== 旧版存储位置整理 =====
+
+        private static Func<List<MainForm.LegacyMove>, List<MainForm.LegacyMove>, bool> LegacyCommit(MainForm form)
+        {
+            return delegate(List<MainForm.LegacyMove> done, List<MainForm.LegacyMove> stale) { return (bool)Invoke(form, "CommitLegacyMoves", done, stale); };
+        }
+
+        private static List<MainForm.LegacyMove> FindLegacy(MainForm form, List<string> skipped)
+        {
+            return MainForm.FindLegacyMoves((MainForm.LegacyStoreScan)Invoke(form, "SnapshotLegacyStores"), skipped);
+        }
+
+        private static string LegacyTarget(List<MainForm.LegacyMove> moves, string source)
+        {
+            MainForm.LegacyMove move = moves.FirstOrDefault(m => string.Equals(m.Source, source, StringComparison.OrdinalIgnoreCase));
+            return move == null ? null : move.Target;
+        }
+
+        private static List<AddedEntry> LegacyEntries(MainForm form, string path)
+        {
+            return (List<AddedEntry>)Invoke(form, "EntriesAt", path);
+        }
+
+        private static void WriteLegacyJournal(List<MainForm.LegacyMove> moves)
+        {
+            Check((bool)typeof(MainForm).GetMethod("WriteLegacyJournal", BindingFlags.Static | BindingFlags.NonPublic).Invoke(null, new object[] { moves }),
+                "legacy journal not written");
+        }
+
+        private static void LegacyStoreMoves()
+        {
+            AppConfig config = RenameConfig("legacy-store");
+            string files = config.FileStorePath, folders = config.FolderStorePath, res = config.ResourceStorePath;
+            AppInfo photo = AddEntry(config, "照片", Path.Combine(files, "a.png"), false, true, "a");
+            AppInfo album = AddEntry(config, "文件", Path.Combine(folders, "相册"), true, true, "相册");
+            string cover = Path.Combine(album.TargetPath, "cover.png");
+            File.WriteAllText(cover, "png");                                                    // 未单独收录：随文件夹一起搬
+            AppInfo dotted = AddEntry(config, "文件", Path.Combine(folders, "2026.10"), true, true, "2026.10");
+            Directory.CreateDirectory(Path.Combine(res, "文件", "2026.10"));                     // 目标已有同名文件夹
+            AppInfo doc = AddEntry(config, "文档", Path.Combine(files, "note.txt"), false, true, "note");
+            config.AddedItems.Add(new AddedEntry { Path = Path.Combine(res, "文档", "note.txt"), Category = "文档", IsResource = true });   // 目标路径已收录
+            AppInfo twin = AddEntry(config, "文档", Path.Combine(folders, "note.txt"), false, true, "note");   // 另一个旧版位置的同名文件
+            // 留在原处：软件条目、内有单独收录项的文件夹、更深层的条目、已失效的条目、未收录的文件、已在资源存储位置的条目
+            AppInfo exe = AddEntry(config, "开发工具", Path.Combine(files, "tool.exe"), false, false, "tool");
+            AppInfo nested = AddEntry(config, "文件", Path.Combine(folders, "嵌套"), true, true, "嵌套");
+            AppInfo inside = AddEntry(config, "文档", Path.Combine(nested.TargetPath, "inside.txt"), false, true, "inside");
+            AppInfo deep = AddEntry(config, "文档", Path.Combine(files, "sub", "deep.txt"), false, true, "deep");
+            AppInfo missing = AddEntry(config, "文档", Path.Combine(files, "missing.txt"), false, true, "missing");
+            File.Delete(missing.TargetPath);
+            string loose = Path.Combine(files, "未收录.txt");
+            File.WriteAllText(loose, "x");
+            AppInfo stored = AddEntry(config, "照片", Path.Combine(res, "照片", "b.png"), false, true, "b");
+            config.Favorites.Add(photo.Key);
+            config.Collections.Add(new ResourceCollection { Parent = "文件", Name = "精选", Cover = cover });
+            string photoTarget = Path.Combine(res, "照片", "a.png");
+            using (MainForm form = ResourceForm(config, "照片", photo, album, dotted, doc, twin, exe, nested, inside, deep, missing, stored))
+            {
+                Check(form.Handle != IntPtr.Zero, "form handle not created");
+                List<string> skipped = new List<string>();
+                List<MainForm.LegacyMove> moves = FindLegacy(form, skipped);
+                Check(moves.Count == 5, "movable legacy entries: " + string.Join(", ", moves.Select(m => m.Source).ToArray()));
+                Check(LegacyTarget(moves, photo.TargetPath) == photoTarget
+                    && LegacyTarget(moves, album.TargetPath) == Path.Combine(res, "文件", "相册")
+                    && LegacyTarget(moves, dotted.TargetPath) == Path.Combine(res, "文件", "2026.10_1")
+                    && LegacyTarget(moves, doc.TargetPath) == Path.Combine(res, "文档", "note_1.txt")
+                    && LegacyTarget(moves, twin.TargetPath) == Path.Combine(res, "文档", "note_2.txt"),
+                    "legacy targets: " + string.Join(", ", moves.Select(m => m.Target).ToArray()));
+                Check(skipped.Count == 2 && skipped.Any(s => s.StartsWith("tool.exe：")) && skipped.Any(s => s.StartsWith("嵌套：")),
+                    "skipped: " + string.Join(" | ", skipped.ToArray()));
+
+                MainForm.LegacyMoveResult result = new MainForm.LegacyMoveResult();
+                List<string> progress = new List<string>();
+                MainForm.RunLegacyMoves(moves, LegacyCommit(form), delegate(int index, int total, string name) { progress.Add(name); },
+                    CancellationToken.None, result);
+                Check(result.Moved == 5 && result.Failed.Count == 0 && result.Kept.Count == 0 && result.Error == null && progress.Count == 5,
+                    "legacy move result: " + result.Moved + " " + result.Error + " " + string.Join(" | ", result.Failed.ToArray()));
+                foreach (MainForm.LegacyMove m in moves)
+                {
+                    Check((m.Folder ? Directory.Exists(m.Target) : File.Exists(m.Target)) && !File.Exists(m.Source) && !Directory.Exists(m.Source),
+                        "not moved: " + m.Source);
+                    Check(LegacyEntries(form, m.Source).Count == 0 && LegacyEntries(form, m.Target).Count == 1, "records not rewritten: " + m.Source);
+                }
+                string movedCover = Path.Combine(res, "文件", "相册", "cover.png");
+                Check(File.Exists(movedCover) && config.Collections[0].Cover == movedCover, "cover did not follow the folder");
+                Check(config.Favorites.Contains("add:" + photoTarget) && !config.Favorites.Contains(photo.Key), "favorite did not follow");
+                Check(File.Exists(exe.TargetPath) && Directory.Exists(nested.TargetPath) && File.Exists(inside.TargetPath) && File.Exists(deep.TargetPath)
+                    && File.Exists(loose) && File.Exists(stored.TargetPath), "items that should stay were moved");
+                Check(!File.Exists(MainForm.LegacyMoveJournal), "journal left after a committed batch");
+                Check(FindLegacy(form, new List<string>()).Count == 0, "second scan found work again");
+            }
+            AppConfig loaded = AppConfig.Load();
+            Check(loaded.AddedItems.ByPath(photoTarget).Count == 1 && loaded.AddedItems.ByPath(photo.TargetPath).Count == 0, "move not persisted");
+            Check(loaded.Favorites.Contains("add:" + photoTarget), "favorite not persisted");
+            Check(loaded.AddedItems.ByPath(exe.TargetPath).Count == 1 && loaded.AddedItems.ByPath(missing.TargetPath).Count == 1
+                && loaded.AddedItems.ByPath(deep.TargetPath).Count == 1, "entries that should stay changed");
+        }
+
+        private static void LegacyStoreMoveFailures()
+        {
+            AppConfig config = RenameConfig("legacy-store-fail");
+            config.FolderStorePath = config.FileStorePath;   // 两个旧版位置相同（常见配置）：每项只处理一次
+            string store = config.FileStorePath, res = config.ResourceStorePath;
+            AppInfo photo = AddEntry(config, "照片", Path.Combine(store, "c.png"), false, true, "c");
+            AppInfo folder = AddEntry(config, "文件", Path.Combine(store, "夹"), true, true, "夹");
+            AppInfo gone = AddEntry(config, "文档", Path.Combine(store, "gone.txt"), false, true, "gone");
+            AppInfo locked = AddEntry(config, "文档", Path.Combine(store, "locked.txt"), false, true, "locked");
+            using (MainForm form = ResourceForm(config, "照片", photo, folder, gone, locked))
+            {
+                Check(form.Handle != IntPtr.Zero, "form handle not created");
+                List<MainForm.LegacyMove> moves = FindLegacy(form, new List<string>());
+                Check(moves.Count == 4, "same legacy root handled twice: " + moves.Count);
+
+                // 保存失败：整批搬回原处，记录不变，日志清除
+                MainForm.LegacyMoveResult result = new MainForm.LegacyMoveResult();
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                {
+                    db.Execute("BEGIN IMMEDIATE");
+                    MainForm.RunLegacyMoves(moves, LegacyCommit(form), null, CancellationToken.None, result);
+                    db.Execute("ROLLBACK");
+                }
+                Check(result.Error != null && result.Error.StartsWith("资源库未能保存") && result.Moved == 0, "save failure not reported: " + result.Error);
+                foreach (MainForm.LegacyMove m in moves)
+                    Check((m.Folder ? Directory.Exists(m.Source) : File.Exists(m.Source)) && !File.Exists(m.Target) && !Directory.Exists(m.Target)
+                        && LegacyEntries(form, m.Source).Count == 1, "save failure did not move back: " + m.Source);
+                Check(!File.Exists(MainForm.LegacyMoveJournal), "journal left after a full rollback");
+
+                // 重试：被占用的文件单独失败；搬运期间被删除的条目文件搬回原处、不登记；其余照常
+                moves = FindLegacy(form, new List<string>());
+                result = new MainForm.LegacyMoveResult();
+                Func<List<MainForm.LegacyMove>, List<MainForm.LegacyMove>, bool> commit = LegacyCommit(form);
+                using (new FileStream(locked.TargetPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    MainForm.RunLegacyMoves(moves, delegate(List<MainForm.LegacyMove> done, List<MainForm.LegacyMove> stale)
+                    {
+                        foreach (AddedEntry e in LegacyEntries(form, gone.TargetPath)) config.AddedItems.Remove(e);
+                        return commit(done, stale);
+                    }, null, CancellationToken.None, result);
+                Check(result.Moved == 2 && result.Error == null && result.Failed.Count == 1 && result.Failed[0].StartsWith("locked.txt："),
+                    "retry result: " + result.Moved + " " + result.Error + " " + string.Join(" | ", result.Failed.ToArray()));
+                Check(File.Exists(locked.TargetPath) && LegacyEntries(form, locked.TargetPath).Count == 1, "locked file changed");
+                string goneTarget = Path.Combine(res, "文档", "gone.txt");
+                Check(File.Exists(gone.TargetPath) && !File.Exists(goneTarget) && LegacyEntries(form, goneTarget).Count == 0,
+                    "entry removed during the move was registered or not moved back");
+                Check(File.Exists(Path.Combine(res, "照片", "c.png")) && Directory.Exists(Path.Combine(res, "文件", "夹")), "retry did not move");
+                Check(!File.Exists(MainForm.LegacyMoveJournal), "journal left after the retry");
+            }
+        }
+
+        private static void LegacyStoreMoveResume()
+        {
+            AppConfig config = RenameConfig("legacy-store-resume");
+            string files = config.FileStorePath, res = config.ResourceStorePath;
+            AppInfo moved = AddEntry(config, "文档", Path.Combine(files, "moved.txt"), false, true, "moved");           // 已搬，日志已标记
+            AppInfo unmarked = AddEntry(config, "文档", Path.Combine(files, "unmarked.txt"), false, true, "unmarked"); // 已搬，标记未写入
+            AppInfo copied = AddEntry(config, "文件", Path.Combine(files, "copied"), true, true, "copied");            // 跨卷：副本就位、源未删完
+            AppInfo pending = AddEntry(config, "文档", Path.Combine(files, "pending.txt"), false, true, "pending");     // 还没搬
+            string docs = Path.Combine(res, "文档");
+            string movedTarget = Path.Combine(docs, "moved.txt"), unmarkedTarget = Path.Combine(docs, "unmarked.txt");
+            string copiedTarget = Path.Combine(res, "文件", "copied"), pendingTarget = Path.Combine(docs, "pending.txt");
+            Directory.CreateDirectory(docs);
+            File.Move(moved.TargetPath, movedTarget);
+            File.Move(unmarked.TargetPath, unmarkedTarget);
+            Directory.CreateDirectory(copiedTarget);
+            File.WriteAllText(Path.Combine(copiedTarget, "x.txt"), "x");
+            WriteLegacyJournal(new List<MainForm.LegacyMove>
+            {
+                new MainForm.LegacyMove { Source = moved.TargetPath, Target = movedTarget, Moved = true },
+                new MainForm.LegacyMove { Source = unmarked.TargetPath, Target = unmarkedTarget },
+                new MainForm.LegacyMove { Source = copied.TargetPath, Target = copiedTarget, Folder = true, Moved = true },
+                new MainForm.LegacyMove { Source = pending.TargetPath, Target = pendingTarget }
+            });
+            File.AppendAllText(MainForm.LegacyMoveJournal, "garbage\r\n1\t0\trelative\tpath\r\n");
+            using (MainForm form = ResourceForm(config, "文档", moved, unmarked, copied, pending))
+            {
+                Check(MainForm.ResumeLegacyMoves(LegacyCommit(form)), "journal did not resume");
+                Check(LegacyEntries(form, movedTarget).Count == 1 && LegacyEntries(form, moved.TargetPath).Count == 0, "moved entry not re-registered");
+                Check(LegacyEntries(form, unmarkedTarget).Count == 1 && LegacyEntries(form, unmarked.TargetPath).Count == 0, "unmarked entry not re-registered");
+                Check(LegacyEntries(form, copiedTarget).Count == 1 && Directory.Exists(copied.TargetPath) && File.Exists(Path.Combine(copiedTarget, "x.txt")),
+                    "cross-volume copy not re-registered, or a copy was deleted");
+                Check(LegacyEntries(form, pending.TargetPath).Count == 1 && File.Exists(pending.TargetPath) && !File.Exists(pendingTarget), "unmoved entry changed");
+                Check(!File.Exists(MainForm.LegacyMoveJournal), "journal not removed after resume");
+
+                // 已提交后才中断（记录已在新位置）：重放不改动任何东西
+                WriteLegacyJournal(new List<MainForm.LegacyMove> { new MainForm.LegacyMove { Source = moved.TargetPath, Target = movedTarget, Moved = true } });
+                Check(!MainForm.ResumeLegacyMoves(LegacyCommit(form)) && LegacyEntries(form, movedTarget).Count == 1 && File.Exists(movedTarget)
+                    && !File.Exists(MainForm.LegacyMoveJournal), "committed journal replay changed records");
+            }
+            Check(AppConfig.Load().AddedItems.ByPath(movedTarget).Count == 1, "resume not persisted");
+        }
+
+        /// <summary>启动入口：后台线程查找、界面线程询问，「以后再说」不动文件，「移动」后搬完并登记。</summary>
+        private static void LegacyStoreStartupPrompt()
+        {
+            AppConfig config = RenameConfig("legacy-store-startup");
+            AppInfo photo = AddEntry(config, "照片", Path.Combine(config.FileStorePath, "s.png"), false, true, "s");
+            string target = Path.Combine(config.ResourceStorePath, "照片", "s.png");
+            using (MainForm form = ResourceForm(config, "照片", photo))
+            {
+                Check(form.Handle != IntPtr.Zero, "form handle not created");
+                AnswerLegacyPrompt(form, "以后再说");
+                Check(File.Exists(photo.TargetPath) && !File.Exists(target) && LegacyEntries(form, photo.TargetPath).Count == 1, "declined prompt moved files");
+                AnswerLegacyPrompt(form, "移动");
+                Check(!File.Exists(photo.TargetPath) && File.Exists(target) && LegacyEntries(form, target).Count == 1
+                    && LegacyEntries(form, photo.TargetPath).Count == 0, "accepted prompt did not move and register");
+                Check(!File.Exists(MainForm.LegacyMoveJournal), "journal left after the startup flow");
+            }
+        }
+
+        private static void AnswerLegacyPrompt(MainForm form, string answer)
+        {
+            bool answered = false;
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    foreach (Form open in Application.OpenForms)
+                    {
+                        if (!open.Modal) continue;
+                        open.Opacity = 0;
+                        foreach (Control button in open.Controls)
+                            if (button.Text == answer)
+                            {
+                                timer.Stop();
+                                typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });
+                                answered = true;
+                                return;
+                            }
+                    }
+                };
+                timer.Start();
+                Invoke(form, "StartLegacyStoreMigration");
+                FieldInfo running = typeof(MainForm).GetField("importRunning", Private);
+                PumpUntil(() => answered && !(bool)running.GetValue(form));
+            }
+            Check(answered, "legacy prompt was not shown");
+        }
+
+        private static void LegacyStoreDefaultRoots()
+        {
+            string manage = Path.Combine(root, "legacy-store-default", "manage");
+            AppConfig config = new AppConfig { ManageRootPath = manage };
+            AppInfo file = AddEntry(config, "文档", Path.Combine(manage, "Files", "x.txt"), false, true, "x");
+            AppInfo folder = AddEntry(config, "文件", Path.Combine(manage, "相册"), true, true, "相册");
+            AppInfo stored = AddEntry(config, "照片", Path.Combine(manage, "Resources", "照片", "y.png"), false, true, "y");
+            AppInfo filesRoot = AddEntry(config, "文件", Path.Combine(manage, "Files"), true, true, "Files");          // 存储结构本身
+            AppInfo resourcesRoot = AddEntry(config, "文件", Path.Combine(manage, "Resources"), true, true, "Resources");
+            using (MainForm form = ResourceForm(config, "文档", file, folder, stored, filesRoot, resourcesRoot))
+            {
+                List<string> skipped = new List<string>();
+                List<MainForm.LegacyMove> moves = FindLegacy(form, skipped);
+                Check(moves.Count == 2 && skipped.Count == 0
+                    && LegacyTarget(moves, file.TargetPath) == Path.Combine(manage, "Resources", "文档", "x.txt")
+                    && LegacyTarget(moves, folder.TargetPath) == Path.Combine(manage, "Resources", "文件", "相册"),
+                    "default legacy roots: " + string.Join(", ", moves.Select(m => m.Source + " => " + m.Target).ToArray())
+                    + " | " + string.Join(" | ", skipped.ToArray()));
+            }
+        }
+
         private static void CrossVolumeMoves()
         {
             string tempRoot = Path.GetPathRoot(Path.GetTempPath());
@@ -920,21 +1182,23 @@ namespace AppManager
         private static void StoreDialogSavesOnlyEdits()
         {
             MethodInfo apply = typeof(MainForm).GetMethod("ApplyStoreEdits", BindingFlags.Static | BindingFlags.NonPublic);
-            AppConfig cfg = new AppConfig { FolderStorePath = "", FileStorePath = "D:\\Custom\\Files\\", ResourceStorePath = "" };
-            // 打开后什么都不改：不能把默认路径写进配置，也不能重写已有值的格式
-            object[] args = { cfg, "", "D:\\Custom\\Files", "", null };
-            Check(!(bool)apply.Invoke(null, args) && args[4] == null, "untouched dialog reported a change");
-            Check(cfg.FolderStorePath == "" && cfg.FileStorePath == "D:\\Custom\\Files\\" && cfg.ResourceStorePath == "", "untouched dialog rewrote storage paths");
-            // 只改一个字段
-            args = new object[] { cfg, "  ", "D:\\Custom\\Files", "E:\\Res\\", null };
-            Check((bool)apply.Invoke(null, args) && cfg.ResourceStorePath == "E:\\Res", "edited field was not saved");
-            Check(cfg.FolderStorePath == "" && cfg.FileStorePath == "D:\\Custom\\Files\\", "untouched fields changed");
+            AppConfig cfg = new AppConfig { FolderStorePath = "D:\\Old\\Folders", FileStorePath = "D:\\Custom\\Files\\", ResourceStorePath = "" };
+            // 打开后什么都不改：不能把默认路径写进配置
+            object[] args = { cfg, "", null };
+            Check(!(bool)apply.Invoke(null, args) && args[2] == null && cfg.ResourceStorePath == "", "untouched dialog reported a change");
+            args = new object[] { cfg, "  E:\\Res\\ ", null };
+            Check((bool)apply.Invoke(null, args) && cfg.ResourceStorePath == "E:\\Res", "edited path was not saved");
+            // 规范化后相同：不重写已有值
+            args = new object[] { cfg, "E:\\Res\\", null };
+            Check(!(bool)apply.Invoke(null, args) && cfg.ResourceStorePath == "E:\\Res", "equivalent path reported a change");
             // 相对路径被拒绝，配置不变
-            args = new object[] { cfg, "relative\\dir", "D:\\Custom\\Files", "E:\\Res", null };
-            Check(!(bool)apply.Invoke(null, args) && args[4] != null && cfg.FolderStorePath == "", "relative path was accepted");
-            // 清空字段 = 恢复默认
-            args = new object[] { cfg, "", "", "", null };
-            Check((bool)apply.Invoke(null, args) && cfg.FileStorePath == "" && cfg.ResourceStorePath == "", "clearing a field did not restore the default");
+            args = new object[] { cfg, "relative\\dir", null };
+            Check(!(bool)apply.Invoke(null, args) && args[2] != null && cfg.ResourceStorePath == "E:\\Res", "relative path was accepted");
+            // 清空 = 恢复默认
+            args = new object[] { cfg, "", null };
+            Check((bool)apply.Invoke(null, args) && cfg.ResourceStorePath == "", "clearing did not restore the default");
+            // 旧版文件/文件夹位置不再经由对话框修改
+            Check(cfg.FolderStorePath == "D:\\Old\\Folders" && cfg.FileStorePath == "D:\\Custom\\Files\\", "dialog changed the legacy store paths");
         }
 
         private static void DisposedFormMessageFilter()
