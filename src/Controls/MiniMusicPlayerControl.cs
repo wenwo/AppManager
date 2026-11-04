@@ -384,7 +384,7 @@ namespace AppManager.Controls
         {
             base.OnMouseDoubleClick(e);
             if (e.Button == MouseButtons.Left && titleRect.Contains(e.Location)
-                && index >= 0 && index < paths.Count)
+                && (externalPlayerActive || (index >= 0 && index < paths.Count)))
             {
                 Action<int> handler = ExpandRequested;
                 if (handler != null) handler(index);

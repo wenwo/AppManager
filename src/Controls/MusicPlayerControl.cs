@@ -65,6 +65,7 @@ namespace AppManager.Controls
         public double Duration { get { return duration; } }
         public int Volume { get { return volume; } }
         public bool Muted { get { return muted; } }
+        public bool HasPlaybackSession { get { return engine != null && paths.Count > 0; } }
 
         public void SeekFromMiniPlayer(double seconds) { SeekTo(seconds); NotifyPlaybackState(); }
         public void SetVolumeFromMiniPlayer(int value) { SetVolume(value); }
@@ -80,6 +81,12 @@ namespace AppManager.Controls
         {
             if (step > 0) PlayNext(false);
             else PlayPrevious();
+        }
+
+        /// <summary>文件改名或移动后更新播放列表里的路径；不打断正在播放的曲目。</summary>
+        public void RebasePath(string oldPath, string newPath)
+        {
+            for (int i = 0; i < paths.Count; i++) paths[i] = EntryPaths.Rebase(paths[i], oldPath, newPath);
         }
 
         public void Open(List<string> audioPaths, int startIndex)
@@ -909,13 +916,18 @@ namespace AppManager.Controls
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
-        protected override void OnVisibleChanged(EventArgs e)
+        public void PausePlayback()
         {
-            base.OnVisibleChanged(e);
-            if (!Visible) StopPlayback();
+            if (engine == null || !playing) return;
+            playing = false;
+            engine.SetPause(true);
+            pollTimer.Interval = PausedPollMs;
+            pollTimer.Start();
+            NotifyPlaybackState();
+            Invalidate();
         }
 
-        private void StopPlayback()
+        public void StopPlayback()
         {
             pollTimer.Stop();
             playing = false;
@@ -927,6 +939,10 @@ namespace AppManager.Controls
                 try { old.SetPause(true); } catch { }
                 MpvShutdown.Destroy(old, null);
             }
+            position = duration = 0;
+            fileLoaded = endedHandled = seeking = volumeDrag = false;
+            pendingSeek = -1;
+            pendingPause = false;
             ClearTrack();
         }
 
@@ -955,8 +971,8 @@ namespace AppManager.Controls
         {
             if (disposing)
             {
-                pollTimer.Dispose();
                 StopPlayback();
+                pollTimer.Dispose();
                 MpvShutdown.WaitAll(3000);   // 退出时让音频设备干净关闭，但不无限等待
             }
             base.Dispose(disposing);

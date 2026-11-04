@@ -57,6 +57,7 @@ namespace AppManager
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
                 Run("music players advance to the next track when a song ends", MusicAutoAdvance);
+                Run("music keeps playing while its full view is hidden", MusicHiddenPlayback);
                 Run("music stops on a missing track and the hidden mini player pauses", MusicSilencedWhenUnreachable);
                 Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
@@ -247,10 +248,40 @@ namespace AppManager
                     "expanded player did not restore the paused state");
                 Check(PumpUntil(delegate { return player.Position >= 1.0; }, 5000),
                     "expanded player restarted from zero (position: " + player.Position + ")");
-                player.Visible = false;
+                player.StopPlayback();
                 mini.LoadPlaylist(new List<string> { first, second }, "回归", "regression", 0);
                 Check(PumpUntil(delegate { return mini.CurrentIndex == 1; }, 15000), "mini player did not advance after the song ended");
                 mini.Stop();
+                host.Hide();
+            }
+        }
+
+        private static void MusicHiddenPlayback()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string song = WriteSilence("hidden-session.wav", 8);
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            {
+                host.Controls.Add(player);
+                host.Show();
+                player.Open(new List<string> { song }, 0);
+                Check(PumpUntil(delegate { return player.HasPlaybackSession && player.Position >= 0.2; }, 10000),
+                    "full player never started");
+                object engine = Field(player, "engine");
+                player.Visible = false;
+                double hiddenStart = player.Position;
+                Check(PumpUntil(delegate { return player.Position >= hiddenStart + 0.2; }, 5000),
+                    "playback stopped while the full view was hidden");
+                Check(ReferenceEquals(engine, Field(player, "engine")), "hidden player recreated its engine");
+                double resumed = player.Position;
+                player.Visible = true;
+                Check(ReferenceEquals(engine, Field(player, "engine")), "showing the player recreated its engine");
+                Check(player.Position + 0.05 >= resumed, "showing the player reset its position");
+                player.StopPlayback();
+                Check(Field(player, "engine") == null, "StopPlayback kept the engine");
                 host.Hide();
             }
         }
@@ -363,7 +394,7 @@ namespace AppManager
                 Check(PumpUntil(delegate { return !EngineFlag(player, "idle-active") && !EngineFlag(player, "pause"); }, 10000), "full player never started");
                 player.StepFromMiniPlayer(1);   // 下一首已被删除
                 Check(PumpUntil(delegate { return EngineFlag(player, "idle-active"); }, 5000), "previous song kept playing after switching to a missing file");
-                player.Visible = false;
+                player.StopPlayback();
                 mini.LoadPlaylist(new List<string> { song }, "回归", "regression", 0);
                 Check(PumpUntil(delegate { return !EngineFlag(mini, "pause") && !EngineFlag(mini, "idle-active"); }, 10000), "mini player never started");
                 mini.PauseOwnPlayback();
