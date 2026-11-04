@@ -6,7 +6,7 @@ Windows 桌面应用管理器：应用列表、资源分类与集合、图片查
 
 ## 目录分离
 
-- 开发目录：`D:\OWN\AppManager`，存放源码、Git 仓库、构建脚本和开发文档。
+- 开发目录：`D:\OWN Work\AppManager`，存放源码、Git 仓库、构建脚本和开发文档。
 - 运行目录：`%LOCALAPPDATA%\AppManager`，存放 `AppManager.exe`、`libmpv-2.dll`、数据库、缓存、备份和日志。
 
 `build.ps1` 默认将新构建发布到运行目录：先写入同目录暂存文件，自测和数据库回归通过后再原子替换。应用运行中会拒绝覆盖，构建前请先从托盘菜单退出。
