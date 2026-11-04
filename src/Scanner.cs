@@ -79,6 +79,7 @@ namespace AppManager
 
         // 按名称去重的索引（NormalizeEntryName → 条目）：MergeByName 由 O(n²) 遍历改为 O(1) 查找
         private Dictionary<string, AppInfo> nameIndex;
+        private Dictionary<string, AppInfo> launchIndex;
         private Sqlite registeredItems;
         private List<AddedEntry> addedSnapshot;   // 本次扫描使用的收录快照（界面线程拷贝）
 
@@ -99,6 +100,7 @@ namespace AppManager
             try
             {
             nameIndex = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+            launchIndex = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
             Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
             ScanDesktop(dict);          // 桌面快捷方式（快捷中心来源）
             ScanDesktopBackup(dict);    // 已收纳备份（快捷中心来源）
@@ -580,7 +582,7 @@ namespace AppManager
             MergeByName(dict, app);
         }
 
-        private AppInfo ResolveShortcut(string path, string source)
+        internal static AppInfo ResolveShortcut(string path, string source)
         {
             IShellLinkW link = null;
             try
@@ -603,6 +605,7 @@ namespace AppManager
                 string iconPath = iconLoc.ToString();
 
                 AppInfo app = new AppInfo();
+                app.LaunchArguments = a.Trim();
                 app.ShortcutPath = path;
                 app.Name = Path.GetFileNameWithoutExtension(path);
                 app.Source = source;
@@ -741,19 +744,25 @@ namespace AppManager
             AppInfo exist;
             if (dict.TryGetValue(k, out exist))
             {
-                if (string.IsNullOrEmpty(exist.UninstallString) && !string.IsNullOrEmpty(app.UninstallString))
-                    exist.UninstallString = app.UninstallString;
-                if (string.IsNullOrEmpty(exist.InstallLocation) && !string.IsNullOrEmpty(app.InstallLocation))
-                    exist.InstallLocation = app.InstallLocation;
-                if (string.IsNullOrEmpty(exist.DisplayIcon) && !string.IsNullOrEmpty(app.DisplayIcon))
-                    exist.DisplayIcon = app.DisplayIcon;
-                if (app.IsDesktop) exist.IsDesktop = true;
+                MergeDetails(exist, app);
             }
             else
             {
                 dict[k] = app;
                 RegisterNameIndex(app);
+                RegisterLaunchIndex(app);
             }
+        }
+
+        private static void MergeDetails(AppInfo exist, AppInfo app)
+        {
+            if (string.IsNullOrEmpty(exist.UninstallString) && !string.IsNullOrEmpty(app.UninstallString))
+                exist.UninstallString = app.UninstallString;
+            if (string.IsNullOrEmpty(exist.InstallLocation) && !string.IsNullOrEmpty(app.InstallLocation))
+                exist.InstallLocation = app.InstallLocation;
+            if (string.IsNullOrEmpty(exist.DisplayIcon) && !string.IsNullOrEmpty(app.DisplayIcon))
+                exist.DisplayIcon = app.DisplayIcon;
+            if (app.IsDesktop) exist.IsDesktop = true;
         }
 
         /// <summary>
@@ -763,6 +772,13 @@ namespace AppManager
         private void MergeByName(Dictionary<string, AppInfo> dict, AppInfo app)
         {
             if (IsSelfTarget(app.TargetPath)) return;
+            string launch = LaunchIdentity(app);
+            AppInfo sameLaunch;
+            if (launch != null && launchIndex != null && launchIndex.TryGetValue(launch, out sameLaunch))
+            {
+                MergeDetails(sameLaunch, app);
+                return;
+            }
             string name = NormalizeEntryName(app.Name);
             // 只在软件/快捷方式之间按名称去重：文件、文件夹（含指向文档的快捷方式）同名不代表同一个程序
             if (name.Length > 0 && !app.IsFile)
@@ -770,14 +786,7 @@ namespace AppManager
                 AppInfo exist;
                 if (nameIndex != null && nameIndex.TryGetValue(name, out exist))
                 {
-                    if (string.IsNullOrEmpty(exist.UninstallString) && !string.IsNullOrEmpty(app.UninstallString))
-                        exist.UninstallString = app.UninstallString;
-                    if (string.IsNullOrEmpty(exist.InstallLocation) && !string.IsNullOrEmpty(app.InstallLocation))
-                        exist.InstallLocation = app.InstallLocation;
-                    if (string.IsNullOrEmpty(exist.DisplayIcon) && !string.IsNullOrEmpty(app.DisplayIcon))
-                        exist.DisplayIcon = app.DisplayIcon;
-                    // 收纳项仍应能在「快捷中心」分类中看到
-                    if (app.IsDesktop) exist.IsDesktop = true;
+                    MergeDetails(exist, app);
                     return;
                 }
             }
@@ -792,6 +801,25 @@ namespace AppManager
             if (nameIndex == null || app == null || app.IsFile) return;
             string name = NormalizeEntryName(app.Name);
             if (name.Length > 0 && !nameIndex.ContainsKey(name)) nameIndex[name] = app;
+        }
+
+        private void RegisterLaunchIndex(AppInfo app)
+        {
+            string identity = LaunchIdentity(app);
+            if (launchIndex != null && identity != null && !launchIndex.ContainsKey(identity)) launchIndex[identity] = app;
+        }
+
+        private static string LaunchIdentity(AppInfo app)
+        {
+            if (app == null || app.IsFile || string.IsNullOrEmpty(app.TargetPath)) return null;
+            string target = app.TargetPath.Trim();
+            if (target.Length == 0) return null;
+            try
+            {
+                if (!IsAppsFolderTarget(target)) target = Path.GetFullPath(target);
+            }
+            catch { return null; }
+            return target.ToUpperInvariant() + "\0" + (app.LaunchArguments ?? string.Empty).Trim();
         }
 
         /// <summary>条目名称归一化（去重比较用）：先剔除重名后缀，再转小写去符号。</summary>

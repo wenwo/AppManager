@@ -76,14 +76,13 @@ namespace AppManager
             get { return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory); }
         }
 
-        /// <summary>本程序入口名称：桌面上的这个快捷方式不收纳（避免把唯一入口收走）。</summary>
-        private const string AppDisplayName = "应用中心";
-
-        /// <summary>判断是否为本程序自身的快捷方式。</summary>
+        /// <summary>按真实启动目标判断是否为本程序自身的快捷方式，与显示名称无关。</summary>
         public static bool IsSelfShortcut(string shortcutPath)
         {
-            string name = Path.GetFileNameWithoutExtension(shortcutPath);
-            return string.Equals(name, AppDisplayName, StringComparison.OrdinalIgnoreCase);
+            if (string.IsNullOrEmpty(shortcutPath)
+                || !string.Equals(Path.GetExtension(shortcutPath), ".lnk", StringComparison.OrdinalIgnoreCase)) return false;
+            AppInfo app = Scanner.ResolveShortcut(shortcutPath, "Desktop");
+            return app != null && Scanner.IsSelfTarget(app.TargetPath);
         }
 
         /// <summary>
@@ -403,11 +402,11 @@ namespace AppManager
             return ext == ".lnk" || ext == ".url";
         }
 
-        /// <summary>是否跳过：应用中心入口、desktop.ini/缩略图缓存、隐藏或系统属性项。</summary>
+        /// <summary>是否跳过：本程序入口、desktop.ini/缩略图缓存、隐藏或系统属性项。</summary>
         private static bool IsSkippable(string name, string fullPath)
         {
             if (string.IsNullOrEmpty(name)) return true;
-            if (name.IndexOf("应用中心", StringComparison.Ordinal) >= 0) return true;
+            if (IsShortcutFile(fullPath) && IsSelfShortcut(fullPath)) return true;
             string lower = name.ToLowerInvariant();
             if (lower == "desktop.ini" || lower == "thumbs.db") return true;
             try

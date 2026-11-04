@@ -37,6 +37,7 @@ namespace AppManager
                 Run("auto stash quiet period starts when the whole restore batch ends", RestoreSuppressionStartsAtEnd);
                 Run("collection thumbnails do not stay loading when the completion post is lost", CollectionThumbsLostPost);
                 Run("desktop copy mode keeps same-name files and rolls back failed save", DesktopCopySafety);
+                Run("self shortcuts are identified by target instead of display name", SelfShortcutTarget);
                 Run("copy: complete tree and file contents", CopyComplete);
                 Run("copy limits: entries / bytes / timeout / depth", CopyLimits);
                 Run("organizer copy failure leaves no partial target; retry succeeds", CopyRetry);
@@ -75,6 +76,7 @@ namespace AppManager
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
+                Run("scanner merges duplicate launch targets only when arguments also match", ScannerLaunchIdentityMerge);
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
                 Run("grid measures only visible rows; column width grows while scrolling to wider rows", GridVisibleMeasurement);
@@ -1370,6 +1372,28 @@ namespace AppManager
             Check(File.Exists(source2) && !File.Exists(Path.Combine(destDir, "rollback.txt")), "failed save left an orphan copy");
         }
 
+        private static void SelfShortcutTarget()
+        {
+            MethodInfo create = typeof(DesktopOrganizer).GetMethod("CreateShortcut", BindingFlags.Static | BindingFlags.NonPublic);
+            MethodInfo skippable = typeof(DesktopOrganizer).GetMethod("IsSkippable", BindingFlags.Static | BindingFlags.NonPublic);
+            string dir = Path.Combine(root, "self-shortcut");
+            Directory.CreateDirectory(dir);
+            string renamed = Path.Combine(dir, "addManager.lnk");
+            string misleading = Path.Combine(dir, "应用中心.lnk");
+            string broken = Path.Combine(dir, "broken.lnk");
+            string self = Process.GetCurrentProcess().MainModule.FileName;
+            string other = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe");
+            create.Invoke(null, new object[] { renamed, self.ToUpperInvariant(), "regression" });
+            create.Invoke(null, new object[] { misleading, other, "regression" });
+            File.WriteAllText(broken, "not a shortcut");
+            Check(File.Exists(renamed) && File.Exists(misleading), "shortcut fixtures were not created");
+            Check(DesktopOrganizer.IsSelfShortcut(renamed), "renamed shortcut to the current executable was not protected");
+            Check((bool)skippable.Invoke(null, new object[] { Path.GetFileName(renamed), renamed }), "full organize did not protect the renamed self shortcut");
+            Check(!DesktopOrganizer.IsSelfShortcut(misleading), "same-name shortcut to another executable was protected");
+            Check(!(bool)skippable.Invoke(null, new object[] { Path.GetFileName(misleading), misleading }), "full organize protected a same-name shortcut to another executable");
+            Check(!DesktopOrganizer.IsSelfShortcut(broken), "broken shortcut was treated as self");
+        }
+
         private static void ResourceCreateEntries()
         {
             AppConfig config = RenameConfig("resource-create");
@@ -2077,6 +2101,41 @@ namespace AppManager
                 TargetPath = "C:\\Program Files\\Chrome\\chrome.exe", IsDesktop = true } });
             Check(dict.Values.Count(a => a.Name == "Chrome") == 2 && dict.Values.Any(a => a.Key == "af:chrome" && a.IsDesktop),
                 "software shortcuts are no longer deduplicated by name");
+        }
+
+        private static void ScannerLaunchIdentityMerge()
+        {
+            Scanner scanner = new Scanner(new AppConfig());
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            FieldInfo launchIndex = typeof(Scanner).GetField("launchIndex", Private);
+            if (launchIndex != null) launchIndex.SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            FieldInfo arguments = typeof(AppInfo).GetField("LaunchArguments", Private);
+            Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            MethodInfo byName = typeof(Scanner).GetMethod("MergeByName", Private);
+            AppInfo ideaDesktop = new AppInfo { Key = "lnk:idea-old", Name = "IDEA2025", ShortcutPath = "D:\\Desktop\\IDEA2025.lnk",
+                TargetPath = "D:\\APP\\IDEA\\bin\\idea64.exe", IsDesktop = true };
+            AppInfo ideaSystem = new AppInfo { Key = "af:idea-release", Name = "IntelliJ IDEA Release",
+                TargetPath = "d:\\app\\idea\\bin\\IDEA64.EXE" };
+            byName.Invoke(scanner, new object[] { dict, ideaDesktop });
+            byName.Invoke(scanner, new object[] { dict, ideaSystem });
+            Check(dict.Count == 1 && dict.Values.Single() == ideaDesktop, "same executable and arguments were kept as duplicate software");
+
+            AppInfo wps = new AppInfo { Key = "lnk:wps", Name = "WPS Office", ShortcutPath = "D:\\Desktop\\WPS Office.lnk",
+                TargetPath = "D:\\APP\\WPS\\ksolaunch.exe", IsDesktop = true };
+            AppInfo wpsPhoto = new AppInfo { Key = "lnk:wps-photo", Name = "WPS图片", ShortcutPath = "D:\\Desktop\\WPS图片.lnk",
+                TargetPath = "D:\\APP\\WPS\\ksolaunch.exe", IsDesktop = true };
+            if (arguments != null)
+            {
+                arguments.SetValue(wps, "/prometheus /fromksolaunch");
+                arguments.SetValue(wpsPhoto, "/photolaunch /photo");
+            }
+            byName.Invoke(scanner, new object[] { dict, wps });
+            byName.Invoke(scanner, new object[] { dict, wpsPhoto });
+            Check(dict.Count == 3, "same executable with different launch arguments was merged");
+
+            byName.Invoke(scanner, new object[] { dict, new AppInfo { Key = "add:wps-file", Name = "WPS document",
+                TargetPath = "D:\\APP\\WPS\\ksolaunch.exe", IsFile = true } });
+            Check(dict.Count == 4, "file entry was merged into a software launch target");
         }
 
         private static void SearchContextRemoval()

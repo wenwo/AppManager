@@ -13,6 +13,7 @@ namespace AppManager
         public string Name = string.Empty;
         public string TargetPath = string.Empty;   // 启动目标：exe/文件夹/网址；打包应用为 shell:AppsFolder\<AUMID>
         public string ShortcutPath = string.Empty; // 来源快捷方式路径，非快捷方式为空
+        internal string LaunchArguments = string.Empty; // 快捷方式启动参数，仅用于扫描期识别同一入口
         public string InstallLocation = string.Empty;
         public string UninstallString = string.Empty;
         public string DisplayIcon = string.Empty;  // 注册表 DisplayIcon 或快捷方式图标定位
