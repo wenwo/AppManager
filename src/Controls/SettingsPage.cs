@@ -180,8 +180,9 @@ namespace AppManager.Controls
             int y2 = top + 30 + LabelH;
             y2 = AddSection("存储位置", rightX, colW, y2, new Row[]
             {
-                MakeInfoRow("文件夹存储位置", folderPath),
-                MakeInfoRow("文件存储位置", filePath),
+                // 新导入只进资源存储位置；前两项是旧版软件页面文件的所在位置，用于识别已迁到资源页面的这些文件
+                MakeInfoRow("旧版文件夹位置", folderPath),
+                MakeInfoRow("旧版文件位置", filePath),
                 MakeInfoRow("资源存储位置", resourcePath),
                 MakeActionRow("修改存储位置…", delegate { Raise(StorageLocationRequested); }, ActionRowH)
             });

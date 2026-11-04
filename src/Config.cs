@@ -970,6 +970,90 @@ namespace AppManager
             }
         }
 
+        /// <summary>
+        /// 软件页面只收录软件：把软件侧收录的文件夹和非启动文件（启动文件见 Scanner.IsLauncherPath：exe/lnk/url/appref-ms）
+        /// 转为资源条目，按类型进照片/视频/音乐/文档/压缩包，其余进「文件」。
+        /// 同一路径已登记为资源时只删除软件侧记录；同一路径登记在多个软件分类时只保留一条转换。
+        /// 同时清掉这些条目在软件分类上的主分类覆盖、额外归属、排除和排序；资源侧状态（资源分类、集合、排除、
+        /// 两个页面共用的「常用」排序、收藏、隐藏）保持不变，只有新转换的条目撤销对目标分类的排除。
+        /// 先读后改：读库全部在修改前完成，读取失败时内存不留半截改动。只改记录、不动磁盘文件；
+        /// 只改内存，调用方负责保存。没有需要迁移的条目时不改动任何数据（可重复调用）。返回每项 { 路径, 资源分类 }。
+        /// </summary>
+        internal List<string[]> MigrateSoftwareFilesToResources()
+        {
+            List<AddedEntry> files = new List<AddedEntry>();
+            List<string> paths = new List<string>();
+            foreach (AddedEntry e in AddedItems.SoftwareEntries())
+                if (e.IsFolder || !Scanner.IsLauncherPath(e.Path)) { files.Add(e); paths.Add(e.Path); }
+            List<string[]> migrated = new List<string[]>();
+            if (files.Count == 0) return migrated;
+            // 一次批量查出同路径的全部记录（含资源记录），避免逐条查询各开一次数据库连接。
+            Dictionary<string, List<AddedEntry>> rows = AddedItems.LookupMany(paths);
+
+            // 条目键按路径不区分大小写匹配：历史大小写合并后，收录路径与关系键的大小写可能不同。
+            Dictionary<string, string> targets = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> converted = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (AddedEntry e in files)
+            {
+                string key = "add:" + e.Path;
+                if (targets.ContainsKey(key)) { AddedItems.Remove(e); continue; }
+                AddedEntry resource = null;
+                List<AddedEntry> same;
+                if (rows.TryGetValue(e.Path, out same))
+                    foreach (AddedEntry row in same)
+                        if (row.IsResource) { resource = row; break; }
+                if (resource != null)
+                {
+                    AddedItems.Remove(e);
+                    targets[key] = resource.Category;
+                }
+                else
+                {
+                    e.Category = MediaRules.SuggestResourceCategory(e.Path, e.IsFolder);
+                    e.IsResource = true;
+                    targets[key] = e.Category;
+                    converted.Add(key);
+                }
+                migrated.Add(new string[] { e.Path, targets[key] });
+            }
+
+            foreach (string key in new List<string>(CategoryOverride.Keys))
+                if (targets.ContainsKey(key) && !IsResourceSide(CategoryOverride[key])) CategoryOverride.Remove(key);
+            DropSoftwareRelations(ItemCategories, targets, null);
+            DropSoftwareRelations(ExcludedCategories, targets, converted);
+            foreach (string category in new List<string>(ItemOrder.Keys))
+            {
+                if (category == "常用" || IsResourceSide(category)) continue;   // 「常用」排序两个页面共用，不动
+                List<string> order = ItemOrder[category];
+                if (order == null) continue;
+                if (order.RemoveAll(k => k != null && targets.ContainsKey(k)) > 0 && order.Count == 0) ItemOrder.Remove(category);
+            }
+            return migrated;
+        }
+
+        /// <summary>资源侧分类：资源内置/保留名、用户资源分类与集合键。</summary>
+        private bool IsResourceSide(string category)
+        {
+            return CollectionKeys.IsCollectionKey(category) || IsResourceSystemName(category) || ResourceCategories.Contains(category);
+        }
+
+        /// <summary>
+        /// 删除迁移条目在软件分类上的归属；revokeTarget 中的条目（新转换为资源的）同时撤销对目标资源分类的排除，
+        /// 否则新收录记录会被旧排除挡住而看不到。已有资源记录的条目不撤销用户在资源页面设的排除。
+        /// </summary>
+        private void DropSoftwareRelations(Dictionary<string, List<string>> map, Dictionary<string, string> targets, HashSet<string> revokeTarget)
+        {
+            foreach (string key in new List<string>(map.Keys))
+            {
+                string target;
+                if (!targets.TryGetValue(key, out target)) continue;
+                bool revoke = revokeTarget != null && revokeTarget.Contains(key);
+                List<string> list = map[key];
+                if (list != null) list.RemoveAll(c => !IsResourceSide(c) || (revoke && c == target));
+                if (list == null || list.Count == 0) map.Remove(key);
+            }
+        }
+
         /// <summary>校验导入内容中会参与键结构或磁盘还原的名称；返回 null 表示通过。</summary>
         internal string ValidateImportedContent(bool rejectCrossModeDuplicates)
         {

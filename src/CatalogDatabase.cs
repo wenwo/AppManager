@@ -177,7 +177,8 @@ namespace AppManager
                     }
                     foreach (string cat in invalid) categories.Remove(cat);
                     if (resourceMember) AddCategory(categories, "全部资源", 2);
-                    if (softwareMember) AddCategory(categories, kind == 0 ? "全部软件" : "全部文件", 0);
+                    // 软件页面只收录软件：「全部软件」覆盖软件侧全部条目（含手动登记的程序）；旧版「全部文件」不再投影。
+                    if (softwareMember) AddCategory(categories, "全部软件", 0);
                     if (favorite) AddCategory(categories, "常用", kind == 2 ? 2 : 0);
                     foreach (KeyValuePair<string, int> entry in categories)
                     {
@@ -192,7 +193,8 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 修复历史数据：同一路径在软件分类与资源分类各有归属时，旧投影只保留了优先的一条。
+        /// 修复历史数据：同一路径在软件分类与资源分类各有归属时，旧投影只保留了优先的一条；
+        /// 旧投影把手动登记的程序放在已停用的「全部文件」里，「全部软件」中缺少它们。
         /// 按 added_items 的实际归属补齐缺失的列表行，启动时只处理确实缺失的条目。
         /// </summary>
         internal void RepairMembershipProjections()
@@ -207,6 +209,11 @@ namespace AppManager
                         + " AND NOT EXISTS (SELECT 1 FROM listing l WHERE l.item_id=a.item_id AND l.group_id=a.group_id)"
                         + " AND NOT EXISTS (SELECT 1 FROM records r WHERE r.section='CategoryOverrides' AND r.item_id=a.item_id)"
                         + " AND NOT EXISTS (SELECT 1 FROM records r WHERE r.section='ExcludedCategories' AND r.item_id=a.item_id AND r.group_id=a.group_id)"))
+                        affected.Add(Number(row[0]));
+                    // 只看仍有效的纯软件侧条目（kind<>2）：重建后必然投影到「全部软件」，之后不再命中，不会每次启动重复修复。
+                    foreach (string[] row in db.Query("SELECT DISTINCT a.item_id FROM added_items a JOIN catalog c ON c.item_id=a.item_id"
+                        + " WHERE a.resource=0 AND c.active=1 AND c.kind<>2"
+                        + " AND NOT EXISTS (SELECT 1 FROM listing l JOIN groups g ON g.id=l.group_id WHERE l.item_id=a.item_id AND g.key='全部软件')"))
                         affected.Add(Number(row[0]));
                     if (affected.Count == 0) return;
                     db.Execute("BEGIN IMMEDIATE");

@@ -73,6 +73,11 @@ namespace AppManager
                 Run("rename: folders rebase covers and refuse nested entries; software/referenced items keep display-name rename", RenameFoldersAndSoftware);
                 Run("move into folder keeps favorite, hidden, order, membership and cover", MoveIntoFolderKeepsRecords);
                 Run("resource page creates entries in the resource store", ResourceCreateEntries);
+                Run("software page files migrate to typed resource categories; executables and resource relations stay", SoftwareFilesMigrate);
+                Run("scanner keeps programs, protocols and packaged apps; drops folder and document targets", SoftwareScanTargets);
+                Run("software page refuses external drops, file imports, new files and the all-files view", SoftwarePageRefusesFiles);
+                Run("desktop stash moves software shortcuts only; folder and document shortcuts stay on the desktop", StashOnlySoftwareShortcuts);
+                Run("import recovery and history still recognise old software batches after migration", ImportRecoveryAfterMigration);
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
@@ -1066,7 +1071,7 @@ namespace AppManager
                 Check(!config.CategoryOverride.ContainsKey(moved.Key) && !config.CategoryOverride.ContainsKey(legacyKey), "override was not revoked");
                 Check((bool)Invoke(form, "InCategory", extra, "其他") && (bool)Invoke(form, "InCategory", extra, "我的工具"), "extra removal affected other categories");
                 Check(config.AddedItems.Count == 1 && File.ReadAllText(path) == "keep", "category removal deleted library record or file");
-                Check((bool)Invoke(form, "InCategory", file, "全部文件"), "file disappeared from all files");
+                Check((bool)Invoke(form, "InCategory", file, "全部软件"), "software-side entry disappeared from 全部软件");
             }
         }
 
@@ -1465,6 +1470,199 @@ namespace AppManager
             List<AddedEntry> created = config.AddedItems.Where(e => string.Equals(Path.GetDirectoryName(e.Path), dir, StringComparison.OrdinalIgnoreCase)).ToList();
             Check(created.Count == 2 && created.All(e => e.IsResource), "resource page created entries outside the resource store");
             Check(created.Any(e => !e.IsFolder) && created.Any(e => e.IsFolder), "resource page did not create both file and folder");
+        }
+
+        private static void SoftwareFilesMigrate()
+        {
+            AppConfig config = new AppConfig();
+            config.CustomCategories.Add("我的工具");
+            config.ResourceCategories.Add("旅行资料");
+            Func<string, string> p = delegate(string name) { return "C:\\SoftwareMigrate\\" + name; };
+            config.AddedItems.Add(new AddedEntry { Path = p("tool.exe"), Category = "开发工具" });
+            config.AddedItems.Add(new AddedEntry { Path = p("photo.JPG"), Category = "开发工具" });
+            config.AddedItems.Add(new AddedEntry { Path = p("notes.txt"), Category = "快捷中心" });
+            config.AddedItems.Add(new AddedEntry { Path = p("Project"), Category = "我的工具", IsFolder = true });
+            config.AddedItems.Add(new AddedEntry { Path = p("data.bin"), Category = "其他" });
+            config.AddedItems.Add(new AddedEntry { Path = p("odd.exe"), Category = "其他", IsFolder = true });   // 名字像程序的文件夹
+            config.AddedItems.Add(new AddedEntry { Path = p("clip.mp4"), Category = "开发工具" });
+            config.AddedItems.Add(new AddedEntry { Path = p("clip.mp4"), Category = "我的工具" });
+            config.AddedItems.Add(new AddedEntry { Path = p("both.pdf"), Category = "开发工具" });
+            config.AddedItems.Add(new AddedEntry { Path = p("both.pdf"), Category = "旅行资料", IsResource = true });
+            config.AddedItems.Add(new AddedEntry { Path = p("Game.url"), Category = "其他" });     // 启动文件按软件保留
+            config.AddedItems.Add(new AddedEntry { Path = p("App.LNK"), Category = "开发工具" });
+            string photo = "add:" + p("photo.JPG"), notes = "add:" + p("notes.txt"), tool = "add:" + p("tool.exe"), both = "add:" + p("both.pdf");
+            config.Favorites.Add(photo);
+            config.CategoryOverride[photo] = "开发工具";
+            config.CategoryOverride[notes] = "文档";   // 资源侧的分类覆盖保留
+            config.ItemCategories[photo] = new List<string> { "我的工具", "col:照片/旅行" };
+            config.ExcludedCategories[photo] = new List<string> { "其他", "照片" };
+            config.ExcludedCategories[both] = new List<string> { "开发工具", "旅行资料" };   // 用户在资源页面设的排除不能被撤销
+            config.ItemOrder["开发工具"] = new List<string> { tool, "add:" + p("PHOTO.jpg") };   // 关系键与收录路径大小写不同
+            config.ItemOrder["我的工具"] = new List<string> { "add:" + p("Project") };
+            config.ItemOrder["照片"] = new List<string> { photo };
+            config.ItemOrder["常用"] = new List<string> { tool, photo };   // 两个页面共用的常用排序不动
+
+            List<string[]> migrated = config.MigrateSoftwareFilesToResources();
+            Func<string, string> resourceOf = delegate(string name)
+            {
+                List<AddedEntry> rows = config.AddedItems.ByPath(p(name));
+                return rows.Count == 1 && rows[0].IsResource ? rows[0].Category : null;
+            };
+            Check(migrated.Count == 7, "migrated count " + migrated.Count);
+            List<string> software = config.AddedItems.SoftwareEntries().Select(e => Path.GetFileName(e.Path)).OrderBy(n => n, StringComparer.Ordinal).ToList();
+            Check(software.SequenceEqual(new[] { "App.LNK", "Game.url", "tool.exe" }), "launchers left the software page or files stayed: " + string.Join("|", software.ToArray()));
+            Check(resourceOf("photo.JPG") == "照片" && resourceOf("notes.txt") == "文档" && resourceOf("clip.mp4") == "视频",
+                "typed files went to the wrong resource category");
+            Check(resourceOf("Project") == "文件" && resourceOf("data.bin") == "文件" && resourceOf("odd.exe") == "文件", "folders and other files not sent to 文件");
+            Check(resourceOf("both.pdf") == "旅行资料" && config.AddedItems.Count == 10, "existing resource row replaced or duplicate rows kept");
+            Check(!config.CategoryOverride.ContainsKey(photo) && config.CategoryOverride[notes] == "文档", "software override kept or resource override lost");
+            Check(config.ItemCategories[photo].SequenceEqual(new[] { "col:照片/旅行" }), "software membership kept or collection lost");
+            Check(!config.ExcludedCategories.ContainsKey(photo), "exclusion from a software category or the new target category kept");
+            Check(config.ExcludedCategories[both].SequenceEqual(new[] { "旅行资料" }), "resource-page exclusion revoked or software exclusion kept");
+            Check(config.ItemOrder["开发工具"].SequenceEqual(new[] { tool }) && !config.ItemOrder.ContainsKey("我的工具"), "software order kept migrated entries");
+            Check(config.ItemOrder["照片"].SequenceEqual(new[] { photo }) && config.Favorites.Contains(photo), "resource order or favorite lost");
+            Check(config.ItemOrder["常用"].SequenceEqual(new[] { tool, photo }), "shared 常用 order changed");
+            Check(config.MigrateSoftwareFilesToResources().Count == 0 && config.AddedItems.Count == 10, "migration is not idempotent");
+        }
+
+        private static void SoftwareScanTargets()
+        {
+            Func<AppInfo, bool> keep = Scanner.IsSoftwareTarget;
+            Check(keep(new AppInfo { TargetPath = "C:\\Apps\\tool.exe" }) && keep(new AppInfo { IsUwp = true, IsFile = true }), "software dropped");
+            foreach (string program in new[] { "C:\\Windows\\System32\\compmgmt.msc", "C:\\Tools\\start.BAT", "C:\\Start\\App.appref-ms", "C:\\Start\\Game.url",
+                "C:\\Tools\\hotkeys.ahk", "C:\\Tools\\task.vbs", "C:\\Tools\\tool.jar", "steam://rungameid/730" })
+                Check(keep(new AppInfo { TargetPath = program, IsFile = true }), "program entry dropped: " + program);
+            // 启动文件（手动登记里按软件保留、不当普通文件改名删除）：只认 exe/lnk/url/appref-ms，非法字符不抛异常
+            Check(Scanner.IsLauncherPath("C:\\A\\b.EXE") && Scanner.IsLauncherPath("C:\\A\\b.lnk") && Scanner.IsLauncherPath("C:\\A|b.url")
+                && !Scanner.IsLauncherPath("C:\\A\\run.bat") && !Scanner.IsLauncherPath("C:\\A.lnk\\file") && !Scanner.IsLauncherPath(null),
+                "launcher path rule wrong");
+            foreach (string document in new[] { "C:\\Docs\\readme.txt", "C:\\Docs\\report.PDF", "C:\\Docs\\a.b\\noext", "" })
+                Check(!keep(new AppInfo { TargetPath = document, IsFile = true }), "document entry kept: " + document);
+            Check(!keep(new AppInfo { TargetPath = "C:\\Projects\\tool.exe", IsFile = true, IsFolder = true }) && !keep(null), "folder entry kept");
+
+            // 真实快捷方式走扫描入口：文件夹、文档快捷方式不收录，程序快捷方式照常收录
+            string dir = Path.Combine(root, "scan-targets");
+            Directory.CreateDirectory(dir);
+            string doc = Path.Combine(dir, "readme.txt");
+            File.WriteAllText(doc, "doc");
+            string notepad = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe");
+            MethodInfo create = typeof(DesktopOrganizer).GetMethod("CreateShortcut", BindingFlags.Static | BindingFlags.NonPublic);
+            string[][] links = { new[] { "Folder Link", dir }, new[] { "Doc Link", doc }, new[] { "App Link", notepad } };
+            Scanner scanner = new Scanner(new AppConfig());
+            typeof(Scanner).GetField("nameIndex", Private).SetValue(scanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+            Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            MethodInfo add = typeof(Scanner).GetMethod("AddShortcut", Private);
+            foreach (string[] link in links)
+            {
+                string file = Path.Combine(dir, link[0] + ".lnk");
+                create.Invoke(null, new object[] { file, link[1], "regression" });
+                add.Invoke(scanner, new object[] { dict, file, "Desktop", false });
+            }
+            Check(dict.Values.Select(a => a.Name).SequenceEqual(new[] { "App Link" }),
+                "scanned shortcuts: " + string.Join("|", dict.Values.Select(a => a.Name).ToArray()));
+        }
+
+        private static void StashOnlySoftwareShortcuts()
+        {
+            MethodInfo create = typeof(DesktopOrganizer).GetMethod("CreateShortcut", BindingFlags.Static | BindingFlags.NonPublic);
+            string desk = Path.Combine(root, "stash-only-software");
+            string project = Path.Combine(desk, "Project"), doc = Path.Combine(desk, "plan.txt");
+            Directory.CreateDirectory(project);
+            File.WriteAllText(doc, "plan");
+            string tag = Guid.NewGuid().ToString("N");
+            string folderLink = Path.Combine(desk, "Folder-" + tag + ".lnk"), docLink = Path.Combine(desk, "Doc-" + tag + ".lnk");
+            string appLink = Path.Combine(desk, "App-" + tag + ".lnk");
+            create.Invoke(null, new object[] { folderLink, project, "regression" });
+            create.Invoke(null, new object[] { docLink, doc, "regression" });
+            create.Invoke(null, new object[] { appLink, Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe"), "regression" });
+            Check(!DesktopOrganizer.IsSoftwareShortcut(folderLink) && !DesktopOrganizer.IsSoftwareShortcut(docLink)
+                && DesktopOrganizer.IsSoftwareShortcut(appLink), "shortcut target classification wrong");
+            AppConfig config = new AppConfig();
+            string stashed = Path.Combine(Paths.DesktopBackupDir, Path.GetFileName(appLink));
+            try
+            {
+                int failed;
+                int moved = DesktopOrganizer.AutoStashShortcuts(config, new List<string> { folderLink, docLink, appLink }, out failed);
+                Check(moved == 1 && failed == 0 && File.Exists(stashed) && !File.Exists(appLink), "software shortcut was not stashed");
+                Check(File.Exists(folderLink) && File.Exists(docLink), "folder or document shortcut was taken off the desktop");
+                Check(config.DesktopBackup.Count == 1 && string.Equals(config.DesktopBackup[0].OriginalPath, appLink, StringComparison.OrdinalIgnoreCase),
+                    "stash records include skipped shortcuts");
+            }
+            finally { try { if (File.Exists(stashed)) File.Delete(stashed); } catch { } }
+        }
+
+        private static void ImportRecoveryAfterMigration()
+        {
+            AppConfig config = RenameConfig("recovery-after-migration");
+            string target = Path.Combine(root, "recovery-after-migration", "files", "moved.txt");
+            // 旧的软件页面批次：入库路径已随迁移改为资源「文档」记录
+            config.AddedItems.Add(new AddedEntry { Path = target, Category = "文档", IsResource = true });
+            using (MainForm form = CategoryForm(config))
+            {
+                MethodInfo registered = typeof(MainForm).GetMethod("IsBatchTargetRegistered", Private);
+                Func<bool, string, string, bool> check = delegate(bool resource, string category, string path)
+                {
+                    return (bool)registered.Invoke(form, new object[] { new ImportBatch { Resource = resource, Category = category }, path });
+                };
+                Check(check(false, "开发工具", target), "migrated software batch target not recognised; recovery would withdraw a library copy");
+                Check(check(true, "文档", target) && !check(true, "照片", target), "resource batch matching changed");
+                Check(!check(false, "开发工具", target + ".missing"), "unregistered target treated as registered");
+            }
+        }
+
+        private static void SoftwarePageRefusesFiles()
+        {
+            AppConfig config = RenameConfig("software-refuses");
+            string dir = Path.Combine(root, "software-refuses-source");
+            string exe = Path.Combine(dir, "tool.exe"), doc = Path.Combine(dir, "notes.txt"), folder = Path.Combine(dir, "Folder");
+            Directory.CreateDirectory(folder);
+            File.WriteAllText(exe, "exe");
+            File.WriteAllText(doc, "doc");
+            using (MainForm form = CategoryForm(config))
+            {
+                IntPtr handle = form.Handle;
+                Check(handle != IntPtr.Zero, "form handle not created");
+                int before = config.AddedItems.Count;
+
+                Invoke(form, "RebuildSidebar");
+                List<Controls.SidebarControl.SidebarItem> items = (List<Controls.SidebarControl.SidebarItem>)typeof(MainForm).GetField("sidebarItems", Private).GetValue(form);
+                Check(items.Any(i => i.Key == "全部软件") && !items.Any(i => i.Key == "全部文件"), "software sidebar still offers 全部文件");
+
+                // 外部拖入：空白区、当前分类与侧栏分类行，经过和松手都拒绝（单独拖 exe 也一样）
+                MethodInfo handleDrop = typeof(MainForm).GetMethod("HandleExternalImport", Private);
+                Func<string[], string, bool, DragDropEffects> drag = delegate(string[] paths, string category, bool drop)
+                {
+                    DataObject data = new DataObject();
+                    System.Collections.Specialized.StringCollection list = new System.Collections.Specialized.StringCollection();
+                    list.AddRange(paths);
+                    data.SetFileDropList(list);
+                    typeof(MainForm).GetField("dragProbe", Private).SetValue(form, null);
+                    return (DragDropEffects)handleDrop.Invoke(form, new object[] { category, null,
+                        new DragEventArgs(data, 0, 0, 0, DragDropEffects.Copy | DragDropEffects.Move, DragDropEffects.None), drop });
+                };
+                foreach (string[] paths in new[] { new[] { exe }, new[] { exe, doc, folder } })
+                    foreach (bool drop in new[] { false, true })
+                        Check(drag(paths, null, drop) == DragDropEffects.None && drag(paths, "开发工具", drop) == DragDropEffects.None,
+                            "software page accepted an external drop (" + paths.Length + " items, drop=" + drop + ")");
+
+                // 新建文件/文件夹：软件页面不创建任何文件
+                Invoke(form, "CreateManagedEntry", false);
+                Invoke(form, "CreateManagedEntry", true);
+
+                // 导入批次：软件页面只原位登记 exe，文件与文件夹跳过，不复制不移动
+                MethodInfo prepare = typeof(MainForm).GetMethod("PrepareImportBatch", Private);
+                ImportBatch batch = (ImportBatch)prepare.Invoke(form, new object[] { new[] { exe, doc, folder }, ImportOperation.Move, "开发工具", null, false, (uint)0,
+                    Path.Combine(root, "software-refuses", "folders"), Path.Combine(root, "software-refuses", "files"),
+                    new Func<List<string>, Dictionary<string, string>>(delegate { return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); }),
+                    new Func<string, bool>(delegate { return false; }) });
+                Func<string, ImportItem> item = delegate(string path) { return batch.Items.Single(i => string.Equals(i.Source, path, StringComparison.OrdinalIgnoreCase)); };
+                Check(item(exe).Reference && item(exe).State == FileImport.Waiting, "software executable not registered in place");
+                Check(item(doc).State == FileImport.Skipped && item(folder).State == FileImport.Skipped, "software page would import a file or folder");
+
+                Check(config.AddedItems.Count == before && File.Exists(doc) && Directory.Exists(folder) && File.Exists(exe), "software page created, moved or registered files");
+                Check(!Directory.Exists(config.ManageRootPath) && !Directory.Exists(config.FileStorePath) && !Directory.Exists(config.FolderStorePath)
+                    && !Directory.Exists(config.ResourceStorePath), "software page created a storage directory");
+            }
         }
 
         private static void PrerestoreListing()

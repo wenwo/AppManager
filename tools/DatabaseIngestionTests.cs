@@ -38,6 +38,7 @@ namespace AppManager
             Run("cross-mode copy keeps the original software category", CrossModeCopy);
             Run("failed physical move keeps source bytes and does not register a phantom item", FailedMove);
             Run("software registration, new file/folder and scanner publish preserve manual rows", SoftwareAndScan);
+            Run("software-side files migrate to resources atomically; old projections gain 全部软件 rows", SoftwareFileMigration);
             Run("same content in multiple categories has complete listing projections", MultipleCategories);
             Run("case variants of the same Windows path resolve to one content identity", CaseVariants);
             Run("XML import replaces intended state and preserves prior audit chain", Import);
@@ -171,14 +172,79 @@ namespace AppManager
             using (MainForm form = Form(c, false))
             {
                 Invoke(form, "AddPaths", new string[] { executable }, "软件测试", null); PumpUntil(() => c.AddedItems.Count == 1);
+                // 软件页面只收录软件：新建文件/文件夹不生效
                 Invoke(form, "CreateManagedEntry", false); Invoke(form, "CreateManagedEntry", true);
             }
             Check(File.Exists(executable), "software EXE unexpectedly moved");
+            Check(c.AddedItems.Count == 1 && !Directory.Exists(c.FileStorePath) && !Directory.Exists(c.FolderStorePath)
+                && !Directory.Exists(c.ResourceStorePath), "software page created files or folders");
             string before = Fingerprint(c);
             c.Database.PublishCatalog(c, new List<AppInfo> { new AppInfo { Key = "af:synthetic", Name = "synthetic", Category = "软件测试" } });
             c.Database.PublishCatalog(c, new List<AppInfo>());
-            AppConfig read = Reload(); Check(read.AddedItems.Count == 3 && Fingerprint(read) == before, "scanner removed manual content");
-            Check(read.Database.Page("全部文件", false, true, "", 10, null, true, false).Total == 3, "manual catalog lost to scanner"); Integrity(read.Database);
+            AppConfig read = Reload(); Check(read.AddedItems.Count == 1 && Fingerprint(read) == before, "scanner removed manual content");
+            // 手动登记的程序在「全部软件」里，旧版「全部文件」不再投影
+            Check(read.Database.Page("全部软件", false, true, "", 10, null, true, false).Total == 1
+                && read.Database.Page("全部文件", false, true, "", 10, null, true, false).Total == 0, "manual software missing from 全部软件"); Integrity(read.Database);
+        }
+        // 软件页面只收录软件：旧投影里的手动内容补齐「全部软件」；软件侧文件迁为资源，失败整体回滚，成功后不动磁盘、不能逐项撤销。
+        private static void SoftwareFileMigration()
+        {
+            AppConfig c = Fixture();
+            string tool = Source("apps\\tool.exe", "exe"), notes = Source("docs\\notes.txt", "doc"), album = Path.Combine(scope, "source", "album");
+            string game = Source("apps\\game.lnk", "shortcut");   // 启动文件按软件保留
+            Directory.CreateDirectory(album);
+            c.AddedItems.Add(new AddedEntry { Path = tool, Category = "软件测试" });
+            c.AddedItems.Add(new AddedEntry { Path = game, Category = "软件测试" });
+            c.AddedItems.Add(new AddedEntry { Path = notes, Category = "软件测试" });
+            c.AddedItems.Add(new AddedEntry { Path = album, Category = "软件测试", IsFolder = true });
+            string toolKey = "add:" + tool, notesKey = "add:" + notes, albumKey = "add:" + album;
+            c.Favorites.Add(notesKey); c.ItemOrder["软件测试"] = new List<string> { toolKey, notesKey };
+            c.ItemCategories[notesKey] = new List<string> { "其他" };          // 软件分类上的额外归属、覆盖、排除都要随迁移落库清除
+            c.CategoryOverride[albumKey] = "软件测试";
+            c.ExcludedCategories[albumKey] = new List<string> { "办公软件" };
+            Save(c);
+            Func<AppConfig, string, bool, int> total = delegate(AppConfig cfg, string category, bool resources)
+            { return cfg.Database.Page(category, resources, true, "", 50, null, true, false).Total; };
+            Check(total(c, "软件测试", false) == 4 && total(c, "其他", false) == 1, "fixture listing");
+
+            // 旧版投影：手动内容不在「全部软件」里，重新加载时补齐，且只补一次
+            using (Sqlite db = new Sqlite(c.Database.FilePath, false))
+                db.Execute("DELETE FROM listing WHERE group_id=(SELECT id FROM groups WHERE key='全部软件')");
+            AppConfig read = Reload();
+            Check(total(read, "全部软件", false) == 4, "old projection not repaired: " + total(read, "全部软件", false));
+            long repaired = read.Database.Revision;
+            Check(Reload().Database.Revision == repaired, "projection repair ran again");
+
+            // 保存失败：整体回滚，内存从库重载，下次可重试
+            using (Sqlite db = new Sqlite(read.Database.FilePath, false))
+                db.Execute("CREATE TRIGGER test_failure BEFORE UPDATE ON added_items WHEN NEW.resource=1 BEGIN SELECT RAISE(ABORT,'injected test failure'); END");
+            Check(read.MigrateSoftwareFilesToResources().Count == 2, "migration candidates");
+            Check(!read.Save("migration.software.files"), "injected failure accepted");
+            Check(read.AddedItems.SoftwareEntries().Count() == 4, "failed migration left in-memory changes");
+            AppConfig failedRead = Reload();
+            Check(failedRead.AddedItems.SoftwareEntries().Count() == 4 && total(failedRead, "软件测试", false) == 4, "failed migration was committed");
+            using (Sqlite db = new Sqlite(read.Database.FilePath, false)) db.Execute("DROP TRIGGER test_failure");
+
+            AppConfig m = Reload();
+            Check(m.MigrateSoftwareFilesToResources().Count == 2 && m.Save("migration.software.files"), m.DatabaseError);
+            AppConfig after = Reload();
+            List<AddedEntry> doc = after.AddedItems.ByPath(notes), folder = after.AddedItems.ByPath(album);
+            Check(doc.Count == 1 && doc[0].IsResource && doc[0].Category == "文档", "document not migrated to 文档");
+            Check(folder.Count == 1 && folder[0].IsResource && folder[0].Category == "文件", "folder not migrated to 文件");
+            Check(after.AddedItems.SoftwareEntries().Select(e => e.Path).OrderBy(x => x, StringComparer.Ordinal)
+                .SequenceEqual(new[] { tool, game }.OrderBy(x => x, StringComparer.Ordinal)), "executable or shortcut left the software page");
+            Check(total(after, "软件测试", false) == 2 && total(after, "全部软件", false) == 2, "software page still lists files");
+            Check(total(after, "文档", true) == 1 && total(after, "文件", true) == 1 && total(after, "全部资源", true) == 2, "resource page missing migrated items");
+            Check(after.Favorites.Contains(notesKey) && after.ItemOrder["软件测试"].SequenceEqual(new[] { toolKey }), "favorite lost or software order kept");
+            Check(!after.ItemCategories.ContainsKey(notesKey) && !after.CategoryOverride.ContainsKey(albumKey) && !after.ExcludedCategories.ContainsKey(albumKey)
+                && total(after, "其他", false) == 0, "software-side relations survived the saved migration");
+            Check(File.Exists(notes) && Directory.Exists(album) && File.Exists(tool), "migration touched files on disk");
+            Check(after.MigrateSoftwareFilesToResources().Count == 0, "migration is not idempotent");
+            long operation = after.Database.History(20).Where(h => h[2] == "migration.software.files").Select(h => Convert.ToInt64(h[0])).First();
+            string undoError = null;
+            try { after.Database.Undo(operation); } catch (IOException ex) { undoError = ex.Message; }
+            Check(undoError != null && undoError.Contains("迁移"), "migration transaction could be undone: " + undoError);
+            Integrity(after.Database);
         }
         private static void ExternalCopyQueue()
         {

@@ -727,7 +727,7 @@ namespace AppManager
                 {
                     if (Number(db.Scalar("SELECT max(id) FROM operations WHERE action NOT IN('catalog.discover','catalog.rebuild')")) != operation) throw new IOException("只允许撤销最新业务事务；请先检查操作记录。");
                     string action = db.Scalar("SELECT action FROM operations WHERE id=?", operation);
-                    // 迁移类事务（XML 迁入、大小写条目合并、同名分类拆分）带有不受审计的完成标记或会在启动时重做，
+                    // 迁移类事务（XML 迁入、大小写条目合并、同名分类拆分、软件侧文件转资源）带有不受审计的完成标记或会在启动时重做，
                     // 逐项撤销会让数据与标记不一致或来回反复，只能用完整备份恢复。
                     if ((action != null && action.StartsWith("migration.", StringComparison.Ordinal)) || action == "restore.snapshot")
                         throw new IOException("初始化、数据迁移或整库恢复请使用完整备份恢复，不能逐项撤销。");

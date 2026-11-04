@@ -212,6 +212,7 @@ namespace AppManager
             MinimumSize = new Size(Dpi(960), Dpi(560));
             UpdateRegion();
             SeparateCrossModeCategories();
+            MigrateSoftwareFiles();
             RebuildSidebar();
             // 先展示上次扫描的磁盘缓存（启动即有内容可看），随后统一走后台异步扫描补最新结果；
             // 不再在 UI 线程同步 ScanAll（冷启动 shell:AppsFolder 枚举可达数百毫秒）
@@ -1277,7 +1278,7 @@ namespace AppManager
             else
             {
                 list.Add(MkItem("常用", "常用"));
-                // 「快捷中心」常驻显示（为空也在），并作为文件/文件夹的投放目标
+                // 「快捷中心」常驻显示（为空也在），并作为窗口内拖动条目的加入目标
                 list.Add(MkItem(QuickCenter, QuickCenter, true));
                 list.Add(Sep());
                 // 中间区块（可拖动排序）：自定义分类在前、内置分类在后，中间以分隔线断开
@@ -1289,13 +1290,12 @@ namespace AppManager
                 {
                     if (i == customCount && customCount > 0 && customCount < mid.Count)
                         list.Add(Sep());
-                    // 中间区块均为可编辑分类：既是拖拽排序对象，也是文件/目录投放目标
+                    // 中间区块均为可编辑分类：既是拖拽排序对象，也是窗口内拖动条目的加入目标
                     list.Add(MkItem(mid[i], mid[i], true, true, i < customCount ? 1 : 2));
                 }
                 list.Add(Sep());
-                // 只读全集分类：全部软件 / 全部文件（资源条目统一在资源模式「全部资源」查看）
+                // 只读全集分类：全部软件（软件页面只收录软件；文件统一在资源模式「全部资源」查看）
                 list.Add(MkItem("全部软件", "全部软件"));
-                list.Add(MkItem("全部文件", "全部文件"));
             }
             sidebarItems = list;
             sidebar.SetItems(list);
@@ -1481,7 +1481,7 @@ namespace AppManager
 
         /// <summary>
         /// 允许添加/移除条目的分类：内置分类、自定义分类、资源分类与「快捷中心」；
-        /// 常用与只读全集分类（全部软件/全部文件/全部资源）不可编辑。
+        /// 常用与只读全集分类（全部软件/全部资源）不可编辑。
         /// </summary>
         private bool CanEditCategory(string cat)
         {
@@ -1496,10 +1496,10 @@ namespace AppManager
             return false;
         }
 
-        /// <summary>只读全集分类：全部软件 / 全部文件（软件模式）与全部资源（资源模式），不参与编辑与分类移动。</summary>
+        /// <summary>只读全集分类：全部软件（软件模式）与全部资源（资源模式），不参与编辑与分类移动。</summary>
         private static bool IsReadOnlyCategory(string cat)
         {
-            return cat == "全部软件" || cat == "全部文件" || cat == "全部资源";
+            return cat == "全部软件" || cat == "全部资源";
         }
 
         /// <summary>
@@ -2177,9 +2177,13 @@ namespace AppManager
             return dest;
         }
 
-        /// <summary>网格空白处右键：新建文件夹 / 文本文档（存入配置的存储位置，收录进当前分类）；资源分类附「新建集合…」。</summary>
+        /// <summary>
+        /// 网格空白处右键（仅资源页面）：粘贴文件、导入记录、新建文件夹 / 文本文档（存入资源存储目录，收录进当前分类）、新建集合。
+        /// 软件页面只收录软件，没有这些文件操作，不弹菜单。
+        /// </summary>
         private void OnGridBlankRightClicked(Point screen)
         {
+            if (contentMode != SidebarControl.ContentMode.Website) return;
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             MenuWindow.MenuItem paste = MkMenu("粘贴文件  Ctrl+V", delegate { grid.Focus(); PasteImportFiles(); });
             paste.Disabled = !CanImportHere || !ClipboardHasFiles();
@@ -2190,9 +2194,6 @@ namespace AppManager
                 items.Add(MkSep());
                 items.Add(MkMenu("新建文件夹", delegate { CreateManagedEntry(true); }));
                 items.Add(MkMenu("新建文本文档", delegate { CreateManagedEntry(false); }));
-            }
-            if (CanEditCategory(currentCategory) && contentMode == SidebarControl.ContentMode.Website)
-            {
                 items.Add(MkSep());
                 items.Add(MkMenu("新建集合…", delegate { OnCreateCollection(null); }));
             }
@@ -2202,14 +2203,13 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 在配置的存储位置新建文件夹/文本文档（文件夹入「文件夹存储位置」、文档入「文件存储位置」，
-        /// 未配置时按入库规则兜底），重名自动追加 _1，并收录进当前分类。
+        /// 资源页面在当前分类的资源存储目录新建文件夹/文本文档，重名自动追加 _1，并收录进当前分类。
+        /// 软件页面只收录软件，不新建任何文件。
         /// </summary>
         private void CreateManagedEntry(bool folder)
         {
-            bool resource = contentMode == SidebarControl.ContentMode.Website;
-            string dir = resource ? StoreDirectory(currentCategory, true, folder)
-                : folder ? FolderStoreOf() : FileStoreOf();
+            if (contentMode != SidebarControl.ContentMode.Website || !CanEditCategory(currentCategory)) return;
+            string dir = StoreDirectory(currentCategory, true, folder);
             string name = folder ? "新建文件夹" : "新建文本文档.txt";
             string path;
             try
@@ -2228,7 +2228,7 @@ namespace AppManager
             e.Path = path;
             e.Category = currentCategory;
             e.IsFolder = folder;
-            e.IsResource = resource;
+            e.IsResource = true;
             config.AddedItems.Add(e);
             InvalidateAddedIndex();
             if (!config.Save("physical.files.create"))
@@ -2463,9 +2463,8 @@ namespace AppManager
 
         private bool InCategory(AppInfo a, string category)
         {
-            // 只读全集分类：全部软件=软件（不含文件/文件夹），全部文件=软件存储中的文件/文件夹，全部资源=资源条目
-            if (category == "全部软件") return !a.IsFile;
-            if (category == "全部文件") return a.IsFile && !IsResourceEntry(a);
+            // 只读全集分类：全部软件=软件页面的全部条目（含手动登记的程序），全部资源=资源条目
+            if (category == "全部软件") return !IsResourceEntry(a);
             if (category == "全部资源") return IsResourceEntry(a);
             if (category == "常用") return a.IsFavorite;
 
@@ -3876,7 +3875,7 @@ namespace AppManager
                     CatalogPage page = null;
                     do
                     {
-                        page = database.Page(key.Length == 0 ? (resources ? "全部资源" : "全部文件") : key,
+                        page = database.Page(key.Length == 0 ? (resources ? "全部资源" : "全部软件") : key,
                             resources, showHidden, "", 500, page, true, false, null, MediaRules.AudioExt);
                         foreach (AppInfo app in page.Items)
                             if (!app.IsFolder && MediaRules.IsAudio(app.TargetPath) && File.Exists(app.TargetPath) && seen.Add(app.TargetPath)) songs.Add(app.TargetPath);
@@ -4805,29 +4804,25 @@ namespace AppManager
         // ===== 添加 / 移除条目 =====
 
         /// <summary>
-        /// 点击「+ 添加」：软件模式弹出"添加软件/文件/文件夹"菜单；
-        /// 资源模式按当前分类自适应——照片/视频/音乐等分类分别添加对应类型。
+        /// 点击「+ 添加」：软件模式只能添加软件，直接打开软件选择；
+        /// 资源模式弹出菜单，按当前分类自适应——照片/视频/音乐等分类分别添加对应类型。
         /// </summary>
         private void OnAdd(object sender, EventArgs e)
         {
+            if (contentMode != SidebarControl.ContentMode.Website)
+            {
+                PickSoftware();
+                return;
+            }
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             MenuWindow.MenuItem paste = MkMenu("粘贴文件  Ctrl+V", delegate { grid.Focus(); PasteImportFiles(); });
             paste.Disabled = !CanImportHere || !ClipboardHasFiles();
             items.Add(paste);
             items.Add(MkMenu("导入记录…", ShowImportHistory));
             items.Add(MkSep());
-            if (contentMode == SidebarControl.ContentMode.Website)
-            {
-                string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
-                items.Add(MkMenu("添加" + typeName + "…", delegate { PickFiles(); }));
-                items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
-            }
-            else
-            {
-                items.Add(MkMenu("添加软件…", delegate { PickSoftware(); }));
-                items.Add(MkMenu("添加文件…", delegate { PickFiles(); }));
-                items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
-            }
+            string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
+            items.Add(MkMenu("添加" + typeName + "…", delegate { PickFiles(); }));
+            items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
             MenuWindow mw = new MenuWindow(items, 180);
             mw.Location = FixLocation(addBtn.PointToScreen(new Point(0, addBtn.Height)), mw.Size);
             mw.Show(this);
@@ -4854,8 +4849,8 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 弹出全量应用列表供勾选添加。返回 true 表示用户操作完毕（无论是否选中），
-        /// false 表示用户取消并希望回退到文件浏览器方式。
+        /// 弹出全量应用列表供勾选添加。返回 true 表示用户操作完毕（勾选添加或取消），
+        /// false 表示用户点了「浏览其它程序…」，回退到文件浏览器选择 exe。
         /// </summary>
         private bool PickFromAppList()
         {
@@ -4894,7 +4889,7 @@ namespace AppManager
             // 只列能登记的软件（目标是 .exe）：UWP、网址、指向文件夹或文档的快捷方式勾了也不会添加，不再出现在列表里。
             // 已登记判断只查候选路径，不遍历整张收录表；文件是否存在留到确定时再查，避免列表打开时逐个访问磁盘/网络路径。
             List<AppInfo> candidates = PickableSoftware(allApps);
-            if (candidates.Count == 0) hint.Text = "没有可添加的软件（只列出指向 .exe 的应用）。";
+            if (candidates.Count == 0) hint.Text = "列表中没有可添加的软件，可点「浏览其它程序…」选择 .exe。";
             foreach (AppInfo a in candidates) list.Items.Add(a);
             list.DisplayMember = "Name";
             f.Controls.Add(list);
@@ -4911,6 +4906,15 @@ namespace AppManager
             cancel.Size = new Size(100, 32);
             cancel.Location = new Point(f.Width - 110, f.Height - 52);
             f.Controls.Add(cancel);
+            // 便携程序等不在扫描列表里的 exe：改用文件浏览器选择（软件页面已不接受拖入/粘贴，这是唯一入口）
+            bool browse = false;
+            RoundButton other = new RoundButton();
+            other.Text = "浏览其它程序…";
+            other.Accent = false;
+            other.Size = new Size(130, 32);
+            other.Location = new Point(20, f.Height - 52);
+            other.Click += delegate { browse = true; f.Close(); };
+            f.Controls.Add(other);
 
             list.ItemCheck += delegate(object s, ItemCheckEventArgs e)
             {
@@ -4940,7 +4944,7 @@ namespace AppManager
 
             ConfirmDialog.ShowModal(f);   // 模态 + 遮罩层
             f.Dispose();
-            return true;   // 无论是否选中，已提供列表选择，不再回退文件浏览器
+            return !browse;   // 点了「浏览其它程序…」才回退文件浏览器；勾选添加或取消都算操作完毕
         }
 
         /// <summary>“添加软件”候选：目标为 .exe、尚未登记的条目，同一目标只列一次，按名称排序。internal 供回归测试。</summary>
@@ -4960,22 +4964,13 @@ namespace AppManager
             return candidates;
         }
 
-        /// <summary>多选文件加入当前分类：资源模式下按分类限定文件类型（对话框过滤 + 入库前二次校验）。</summary>
+        /// <summary>资源页面多选文件加入当前分类：按分类限定文件类型（对话框过滤 + 入库前二次校验）。</summary>
         private void PickFiles()
         {
-            bool resource = contentMode == SidebarControl.ContentMode.Website;
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
-                if (resource)
-                {
-                    dlg.Title = "添加" + MediaRules.ResourceCategoryTypeName(currentCategory) + "到「" + currentCategory + "」";
-                    dlg.Filter = MediaRules.ResourceCategoryFilter(currentCategory);
-                }
-                else
-                {
-                    dlg.Title = "添加文件到「" + currentCategory + "」";
-                    dlg.Filter = "所有文件 (*.*)|*.*";
-                }
+                dlg.Title = "添加" + MediaRules.ResourceCategoryTypeName(currentCategory) + "到「" + currentCategory + "」";
+                dlg.Filter = MediaRules.ResourceCategoryFilter(currentCategory);
                 dlg.Multiselect = true;
                 if (dlg.ShowDialog(this) == DialogResult.OK)
                     AddPaths(dlg.FileNames, currentCategory, ActiveCollectionKey);   // 集合视图内：入库后自动加入集合
@@ -5011,7 +5006,8 @@ namespace AppManager
                 }
                 catch { crossVolume = true; break; }
             }
-            if (crossVolume) ShowStatusBar("跨磁盘添加：将复制到存储位置并保留源文件…", 0, 0);
+            // 软件页面只原位登记程序，不复制文件：跨磁盘提示只对资源导入有意义
+            if (crossVolume && resource) ShowStatusBar("跨磁盘添加：将复制到存储位置并保留源文件…", 0, 0);
             QueueImport(paths, crossVolume ? ImportOperation.Copy : ImportOperation.Move, category, collectionKey, resource, 0);
         }
 
@@ -5863,6 +5859,7 @@ namespace AppManager
                 config.CloseToTray, FolderStoreOf(), FileStoreOf(), ResourceStoreRoot());
             StartAutoScan();
             SeparateCrossModeCategories();   // 布局备份等旧快照可能带回同名分类
+            MigrateSoftwareFiles();          // 旧快照也可能带回软件页面里的文件条目
             RebuildSidebar();
             StartScan();
             Invalidate();
@@ -5880,6 +5877,35 @@ namespace AppManager
             foreach (string[] r in renamed)
                 parts.Add((r[2] == "resource" ? "资源" : "软件") + "分类「" + r[0] + "」改名为「" + r[1] + "」");
             ShowNotice("同名分类已拆分：" + string.Join("；", parts.ToArray()));
+        }
+
+        /// <summary>
+        /// 启动或整库替换后：软件页面只收录软件，把软件侧收录的文件/文件夹迁到资源页面（只改记录，磁盘文件不动），
+        /// 保存成功后提示一次。保存失败时已整体回滚并重载，下次启动重新执行。
+        /// </summary>
+        private void MigrateSoftwareFiles()
+        {
+            if (config == null || config.LoadFailed) return;
+            List<string[]> migrated;
+            // 迁移先读后改：读库失败时内存未改动，记日志后照常启动，下次启动重试
+            try { migrated = config.MigrateSoftwareFilesToResources(); }
+            catch (Exception ex) { Paths.LogError(new IOException("软件页面文件迁移读取失败，下次启动重试。", ex)); return; }
+            if (migrated.Count == 0) return;
+            bool saved = config.Save("migration.software.files");
+            InvalidateAddedIndex();   // 成功或失败（内存已从数据库重载）都要按新记录重建路径索引
+            if (!saved) return;
+            Dictionary<string, int> counts = new Dictionary<string, int>();
+            List<string> order = new List<string>();
+            foreach (string[] m in migrated)
+            {
+                int n;
+                if (!counts.TryGetValue(m[1], out n)) order.Add(m[1]);
+                counts[m[1]] = n + 1;
+            }
+            List<string> parts = new List<string>();
+            foreach (string category in order) parts.Add("「" + category + "」" + counts[category] + " 项");
+            ShowNotice("软件页面不再收录文件：已将 " + migrated.Count + " 个文件/文件夹移到资源页面（"
+                + string.Join("、", parts.ToArray()) + "），磁盘位置不变");
         }
 
         /// <summary>导出备份包（.ambak，仅记录与设置，不含物理文件）。</summary>
@@ -5983,6 +6009,8 @@ namespace AppManager
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
+                    // 旧备份包可能带回软件页面里的文件条目：随导入同一事务迁到资源页面，失败一起回滚
+                    int migratedFiles = imported.MigrateSoftwareFilesToResources().Count;
                     if (!imported.Save("import.ambak"))
                     {
                         MessageBox.Show(this, "导入未保存：" + imported.DatabaseError, "导入备份包", MessageBoxButtons.OK, MessageBoxIcon.Warning);
@@ -6002,7 +6030,9 @@ namespace AppManager
                     addBtn.Visible = CanEditCategory(currentCategory);
                     LayoutControls();
                     ReloadLibrary();
-                    MessageBox.Show("导入完成，已还原至备份包状态。\n原配置已备份至：\n" + bak, "导入备份包",
+                    MessageBox.Show("导入完成，已还原至备份包状态。"
+                        + (migratedFiles > 0 ? "\n软件页面只收录软件：备份包中 " + migratedFiles + " 个文件/文件夹已放到资源页面（磁盘位置不变）。" : "")
+                        + "\n原配置已备份至：\n" + bak, "导入备份包",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 });
             });
@@ -6166,7 +6196,7 @@ namespace AppManager
                 f.Controls.Add(title);
 
                 Label desc = new Label();
-                desc.Text = "拖入分类的文件夹与文件，实体均移动到以下位置（原文件不再保留）。";
+                desc.Text = "资源导入存放在「资源存储位置」；前两项为旧版软件页面文件位置。";
                 desc.Font = Theme.CaptionFont;
                 desc.ForeColor = Theme.TextSecondary;
                 desc.BackColor = Color.Transparent;
@@ -6174,8 +6204,8 @@ namespace AppManager
                 desc.AutoSize = true;
                 f.Controls.Add(desc);
 
-                TextBox folderBox = MakePathRow(f, "文件夹存储位置", folderPath, 82, "默认：" + ConfiguredFolderStorePath());
-                TextBox fileBox = MakePathRow(f, "文件存储位置", filePath, 152, "默认：" + ConfiguredFileStorePath());
+                TextBox folderBox = MakePathRow(f, "旧版文件夹位置（用于识别已迁到资源页面的文件夹）", folderPath, 82, "默认：" + ConfiguredFolderStorePath());
+                TextBox fileBox = MakePathRow(f, "旧版文件位置（用于识别已迁到资源页面的文件）", filePath, 152, "默认：" + ConfiguredFileStorePath());
                 TextBox resourceBox = MakePathRow(f, "资源存储位置（按分类建子目录）", resourcePath, 222, "默认：" + ConfiguredResourceStorePath());
                 // 避免首个输入框获得焦点后被整体选中（观感突兀）
                 f.Shown += delegate

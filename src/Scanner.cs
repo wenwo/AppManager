@@ -80,7 +80,6 @@ namespace AppManager
         // 按名称去重的索引（NormalizeEntryName → 条目）：MergeByName 由 O(n²) 遍历改为 O(1) 查找
         private Dictionary<string, AppInfo> nameIndex;
         private Dictionary<string, AppInfo> launchIndex;
-        private Sqlite registeredItems;
         private List<AddedEntry> addedSnapshot;   // 本次扫描使用的收录快照（界面线程拷贝）
 
         /// <summary>执行全量扫描，返回去重后的应用列表（在调用线程套用收藏/隐藏/分类覆盖）。</summary>
@@ -96,16 +95,15 @@ namespace AppManager
         internal List<AppInfo> ScanAll(bool applyConfig, List<AddedEntry> added)
         {
             addedSnapshot = added;
-            registeredItems = config.Database == null ? null : new Sqlite(config.Database.FilePath, true);
             try
             {
             nameIndex = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
             launchIndex = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
             Dictionary<string, AppInfo> dict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+            // 软件页面只收录软件：以下系统来源中指向文件夹或文档等非程序文件的条目不收录（见 IsSoftwareTarget）
             ScanDesktop(dict);          // 桌面快捷方式（快捷中心来源）
             ScanDesktopBackup(dict);    // 已收纳备份（快捷中心来源）
             ScanAdded(dict);            // 用户手动添加
-            ScanManagedFiles(dict);     // 收纳主目录里实际存在的文件/文件夹（「全部文件」视图）
             int appsFolder = ScanAppsFolder(dict);      // 系统「全部应用」列表（权威来源）
             if (appsFolder == 0) ScanStartMenu(dict);   // 枚举失败时兜底开始菜单
             EnrichFromRegistry(dict);   // 注册表仅补充卸载/安装/图标信息，不新增条目
@@ -118,106 +116,7 @@ namespace AppManager
             finally
             {
                 addedSnapshot = null;
-                if (registeredItems != null) { registeredItems.Dispose(); registeredItems = null; }
             }
-        }
-
-        /// <summary>
-        /// 扫描「收纳主目录」（ManageRoot，默认 H:\Manage）里实际存在的文件夹与文件，供「全部文件」视图使用。
-        /// 只做登记展示，不写配置、不移动磁盘内容；结构与入库规则一致：文件夹在根下，文件在文件存储目录。
-        /// </summary>
-        private void ScanManagedFiles(Dictionary<string, AppInfo> dict)
-        {
-            string root = ResolveManageRoot();
-            if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) return;
-
-            string foldersDir = string.IsNullOrEmpty(config.FolderStorePath)
-                ? root : SafeFullPath(config.FolderStorePath);
-            string filesDir = string.IsNullOrEmpty(config.FileStorePath)
-                ? Path.Combine(root, "Files") : SafeFullPath(config.FileStorePath);
-            // 资源模式的存储目录不参与「全部文件」展示，避免把资源库本身当成一个文件夹条目
-            string resourceDir = string.IsNullOrEmpty(config.ResourceStorePath)
-                ? Path.Combine(root, "Resources") : SafeFullPath(config.ResourceStorePath);
-
-            try
-            {
-                if (Directory.Exists(foldersDir))
-                {
-                    foreach (string dir in Directory.GetDirectories(foldersDir))
-                    {
-                        if (IsSameDirectory(dir, filesDir)) continue;
-                        if (IsSameDirectory(dir, resourceDir)) continue;
-                        AddManaged(dict, dir, true);
-                    }
-                }
-            }
-            catch (Exception ex) { Paths.LogError(ex); }
-
-            try
-            {
-                if (Directory.Exists(filesDir))
-                {
-                    foreach (string file in Directory.GetFiles(filesDir))
-                    {
-                        if (IsStoreMetadata(file)) continue;
-                        AddManaged(dict, file, false);
-                    }
-                }
-            }
-            catch (Exception ex) { Paths.LogError(ex); }
-        }
-
-        private void AddManaged(Dictionary<string, AppInfo> dict, string path, bool isFolder)
-        {
-            if (registeredItems != null && registeredItems.Scalar("SELECT 1 FROM added_items WHERE path_key=? LIMIT 1", path.ToUpperInvariant()) != null) return;
-            AppInfo a = new AppInfo();
-            a.Name = isFolder ? Path.GetFileName(path) : Path.GetFileNameWithoutExtension(path);
-            if (string.IsNullOrEmpty(a.Name)) a.Name = path;
-            a.TargetPath = path;
-            a.DisplayIcon = path;
-            a.Source = "Managed";
-            a.Key = "add:" + path;
-            a.IsFile = true;
-            a.IsFolder = isFolder;
-            // 收纳库条目只属于「全部文件」视图，不参与软件分类
-            a.Category = "全部文件";
-            Merge(dict, a);
-        }
-
-        /// <summary>收纳库里的元数据文件（网址记录等）不作为条目展示。</summary>
-        private static bool IsStoreMetadata(string path)
-        {
-            string name = Path.GetFileName(path);
-            return string.Equals(name, "nets.md", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, "desktop.ini", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(name, "thumbs.db", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static string SafeFullPath(string path)
-        {
-            try { return DesktopOrganizer.NormalizeRoot(path); }
-            catch { return path; }
-        }
-
-        private static bool IsSameDirectory(string a, string b)
-        {
-            try
-            {
-                string fa = Path.GetFullPath(a).TrimEnd('\\');
-                string fb = Path.GetFullPath(b).TrimEnd('\\');
-                return string.Equals(fa, fb, StringComparison.OrdinalIgnoreCase);
-            }
-            catch { return false; }
-        }
-
-        /// <summary>收纳根路径：配置值可用则用，其次默认 H:\Manage，都不可用时返回空（不主动建目录）。</summary>
-        private string ResolveManageRoot()
-        {
-            string configured = SafeFullPath(config.ManageRootPath);
-            if (!string.IsNullOrEmpty(configured) && Directory.Exists(configured)) return configured;
-            string fallback = @"H:\Manage";
-            if (Directory.Exists(fallback)) return fallback;
-            return string.Empty;
         }
 
         /// <summary>注入用户手动添加的软件/文件/文件夹条目（来源 AddedItems）；路径失效则跳过。</summary>
@@ -306,9 +205,48 @@ namespace AppManager
                 {
                     continue;   // 无解析路径，无法启动
                 }
+                if (!IsSoftwareTarget(app)) continue;
                 MergeByName(dict, app);
             }
             return complete ? items.Count : 0;
+        }
+
+        /// <summary>程序类入口：可执行文件、脚本、管理工具、ClickOnce 与快捷方式（含 Steam 等协议游戏的 .url）。</summary>
+        private static readonly string[] ProgramExt =
+            { ".exe", ".com", ".bat", ".cmd", ".vbs", ".jar", ".ahk", ".lnk", ".url", ".appref-ms", ".msc", ".cpl" };
+
+        /// <summary>启动文件：程序与快捷方式。手动登记里按软件对待，不当作可删除、可剪切、可改磁盘名的普通文件。</summary>
+        private static readonly string[] LauncherExt = { ".exe", ".lnk", ".url", ".appref-ms" };
+
+        /// <summary>路径是否为启动文件（exe/lnk/url/appref-ms）；按扩展名判断，非法路径字符不抛异常。</summary>
+        internal static bool IsLauncherPath(string path)
+        {
+            return HasExtension(path, LauncherExt);
+        }
+
+        private static bool HasExtension(string path, string[] extensions)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            int dot = path.LastIndexOf('.'), slash = path.LastIndexOfAny(new char[] { '\\', '/' });
+            if (dot <= slash) return false;
+            string ext = path.Substring(dot);
+            foreach (string candidate in extensions)
+                if (string.Equals(ext, candidate, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// 扫描只收录软件：程序、协议地址与打包应用照常收录；目标为文件夹或文档等非程序文件的条目（文件夹/文档快捷方式等）不收录。
+        /// 文件与文件夹统一在资源页面管理。internal 供回归测试。
+        /// </summary>
+        internal static bool IsSoftwareTarget(AppInfo app)
+        {
+            if (app == null) return false;
+            if (app.IsUwp || !app.IsFile) return true;
+            string target = app.TargetPath;
+            if (app.IsFolder || string.IsNullOrEmpty(target)) return false;
+            if (target.IndexOf("://", StringComparison.Ordinal) >= 0) return true;
+            return HasExtension(target, ProgramExt);
         }
 
         [DllImport("shell32.dll")]
@@ -579,6 +517,7 @@ namespace AppManager
             app.IsCurrentDesktopShortcut = currentDesktop;
             // 失效剔除：目标不存在则剔除；UWP 恒有效，协议定位串（如 steam://）恒有效
             if (!IsAliveTarget(app.TargetPath, app.IsUwp)) return;
+            if (!IsSoftwareTarget(app)) return;   // 文件夹/文档快捷方式不收录，文件统一在资源页面管理
             if (string.IsNullOrEmpty(app.Category)) app.Category = CategoryRules.Classify(app.Name);
             MergeByName(dict, app);
         }

@@ -33,7 +33,7 @@ namespace AppManager
             public object Data;
             public string[] Paths, Volumes;
             public bool[] Folders;
-            public bool Mixed, Executables;
+            public bool Mixed;
             public readonly Dictionary<string, bool> Same = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
             public readonly Dictionary<string, int> Mismatched = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         }
@@ -111,7 +111,6 @@ namespace AppManager
                 probe.Volumes[i] = FileImport.Volume(paths[i]);
             }
             probe.Mixed = probe.Volumes.Any(v => v == null || !string.Equals(v, probe.Volumes[0], StringComparison.OrdinalIgnoreCase));
-            probe.Executables = !probe.Folders.Any(f => f) && paths.All(IsSoftwareFile);
             return dragProbe = probe;
         }
 
@@ -153,6 +152,12 @@ namespace AppManager
                     if (drop) HideImportTip(); else ShowImportTip("已在库中，请在窗口内直接拖到分类", e);
                     return DragDropEffects.None;
                 }
+                // 软件页面只收录软件：外部拖入（含 exe）一律不接收，文件导入只在资源页面进行。
+                if (contentMode != SidebarControl.ContentMode.Website)
+                {
+                    if (drop) HideImportTip(); else ShowImportTip("软件页面不支持拖入，请到「资源」页面导入文件", e);
+                    return DragDropEffects.None;
+                }
                 if (!e.Data.GetDataPresent(DataFormats.FileDrop))
                 {
                     if (e.Data.GetDataPresent("FileGroupDescriptorW") || e.Data.GetDataPresent("FileGroupDescriptor"))
@@ -168,7 +173,6 @@ namespace AppManager
                 // e.KeyState 是本次 OLE 事件的键盘快照（8=Ctrl，4=Shift）。
                 Keys modifiers = ((e.KeyState & 8) != 0 ? Keys.Control : Keys.None) | ((e.KeyState & 4) != 0 ? Keys.Shift : Keys.None);
                 bool choose = string.IsNullOrEmpty(category) || !CanEditCategory(category);
-                bool references = !resource && probe.Executables;
                 // 有类型限制的资源分类：拖动经过时就提示类型不符，而不是松手后才跳过（对齐资源管理器的禁止光标）。
                 int mismatched = resource && !choose ? MismatchedFiles(probe, category) : 0;
                 if (mismatched == probe.Paths.Length)
@@ -179,11 +183,9 @@ namespace AppManager
                 }
                 bool same = !choose && ProbeSameVolume(probe, category, resource);
                 DragDropEffects effect = FileImport.ResolveEffect(same, modifiers, e.AllowedEffect);
-                if (references) effect = (e.AllowedEffect & DragDropEffects.Copy) != 0 ? DragDropEffects.Copy : DragDropEffects.None;
                 if (effect == DragDropEffects.None) { ShowImportTip("来源不允许此操作", e); return effect; }
-                string text = choose ? "选择导入位置…" : references ? "添加入口到「" + category + "」"
-                    : (effect == DragDropEffects.Move ? "移动到「" : "复制到「") + category + "」";
-                if (!references && (e.AllowedEffect & DragDropEffects.Move) == 0) text += "（来源仅可复制）";
+                string text = choose ? "选择导入位置…" : (effect == DragDropEffects.Move ? "移动到「" : "复制到「") + category + "」";
+                if ((e.AllowedEffect & DragDropEffects.Move) == 0) text += "（来源仅可复制）";
                 else if (probe.Mixed && (modifiers & (Keys.Control | Keys.Shift)) == 0) text += "（多来源文件，默认复制）";
                 if (mismatched > 0) text += "（" + mismatched + " 个类型不符的文件将跳过）";
                 if (!drop) { ShowImportTip(text, e); return effect; }
@@ -201,7 +203,7 @@ namespace AppManager
                     {
                         BeginInvoke((Action)delegate
                         {
-                            CompleteDrop(paths, target, targetCollection, choose, navigate, references, mixed, modifiers, allowed, operation, resource, transfer.Complete);
+                            CompleteDrop(paths, target, targetCollection, choose, navigate, mixed, modifiers, allowed, operation, resource, transfer.Complete);
                         });
                     }
                     catch { transfer.Complete(null); throw; }
@@ -221,7 +223,7 @@ namespace AppManager
                         waiting.Controls.Add(cancelReceive);
                         waiting.Shown += delegate
                         {
-                            CompleteDrop(paths, target, targetCollection, choose, navigate, references, mixed, modifiers, allowed, operation, resource,
+                            CompleteDrop(paths, target, targetCollection, choose, navigate, mixed, modifiers, allowed, operation, resource,
                                 delegate(ImportBatch batch) { transfer.Complete(batch); waiting.Close(); }, receiveCancel.Token);
                         };
                         try { waiting.ShowDialog(this); } finally { transfer.Complete(null); }
@@ -238,7 +240,7 @@ namespace AppManager
             }
         }
 
-        private void CompleteDrop(string[] paths, string category, string collection, bool choose, bool navigate, bool references,
+        private void CompleteDrop(string[] paths, string category, string collection, bool choose, bool navigate,
             bool mixed, Keys modifiers, DragDropEffects allowed, ImportOperation operation, bool resource, Action<ImportBatch> completed,
             CancellationToken? cancel = null)
         {
@@ -250,14 +252,11 @@ namespace AppManager
                     category = PickImportCategory(resource, paths);
                     if (category == null) return;
                     collection = null;
-                    if (!references)
-                    {
-                        bool same = !mixed && paths.All(p => FileImport.SameVolume(p, ImportDirectory(category, resource, Directory.Exists(p))));
-                        DragDropEffects effect = FileImport.ResolveEffect(same, modifiers, allowed);
-                        if (effect == DragDropEffects.None) return;
-                        operation = effect == DragDropEffects.Move ? ImportOperation.Move : ImportOperation.Copy;
-                    }
-                    string action = references ? "添加入口" : operation == ImportOperation.Move ? "移动" : "复制";
+                    bool same = !mixed && paths.All(p => FileImport.SameVolume(p, ImportDirectory(category, resource, Directory.Exists(p))));
+                    DragDropEffects effect = FileImport.ResolveEffect(same, modifiers, allowed);
+                    if (effect == DragDropEffects.None) return;
+                    operation = effect == DragDropEffects.Move ? ImportOperation.Move : ImportOperation.Copy;
+                    string action = operation == ImportOperation.Move ? "移动" : "复制";
                     if (MessageBox.Show(this, action + " " + paths.Length + " 项到「" + category + "」？", "导入文件",
                         MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
                 }
@@ -276,16 +275,13 @@ namespace AppManager
             finally { if (!queued) completed(null); }
         }
 
-        // 选择导入分类时可自动选中的类型分类：「证件」同时收图片和文档、「文件」不限类型，都不作为自动推荐。
-        private static readonly string[] SuggestedResourceCategories = { "照片", "视频", "音乐", "文档", "压缩包" };
-
         /// <summary>按待导入内容过滤资源分类：只保留至少能收下一项的分类；全部为同一类型的文件时推荐对应分类。</summary>
         internal static List<string> ResourceImportChoices(IEnumerable<string> categories, IList<string> paths, bool[] folders, ref string preferred)
         {
             Func<string, int, bool> fits = (c, i) => MediaRules.FitsCategory(c, paths[i], folders[i]);
             List<string> result = categories.Where(c => Enumerable.Range(0, paths.Count).Any(i => fits(c, i))).ToList();
             if (folders.Any(f => f)) return result;
-            foreach (string suggested in SuggestedResourceCategories)
+            foreach (string suggested in MediaRules.SuggestedResourceCategories)
                 if (Enumerable.Range(0, paths.Count).All(i => fits(suggested, i))) { preferred = suggested; break; }
             return result;
         }
@@ -333,9 +329,11 @@ namespace AppManager
                 if (data == null || !data.GetDataPresent(DataFormats.FileDrop)) return false;
                 string[] paths = data.GetData(DataFormats.FileDrop) as string[];
                 if (paths == null || paths.Length == 0) return false;
+                bool resource = contentMode == SidebarControl.ContentMode.Website;
+                // 软件页面只收录软件：剪贴板里的文件（含 exe）不导入，提示到资源页面粘贴。
+                if (!resource) { ShowNotice("软件页面不支持粘贴文件，请到「资源」页面粘贴导入"); return true; }
                 ImportOperation operation = FileImport.ClipboardOperation(data.GetData("Preferred DropEffect"));
                 if (sequence != GetClipboardSequenceNumber()) throw new IOException("剪贴板已变化，请重新粘贴。");
-                bool resource = contentMode == SidebarControl.ContentMode.Website;
                 bool choose = SearchActive || !CanEditCategory(currentCategory);
                 bool[] folders = resource ? paths.Select(p => Directory.Exists(p)).ToArray() : null;
                 string category = choose ? PickImportCategory(resource, paths, folders) : currentCategory;
@@ -510,7 +508,10 @@ namespace AppManager
                     string dir = folder ? folderDir : fileDir;
                     bool reference = (!resource && !folder && IsSoftwareFile(source)) || known || FileImport.Within(dir, source);
                     ImportItem item = new ImportItem { Source = source, Target = dir, Folder = folder, Reference = reference };
-                    if (folder && FileImport.Within(source, dir)) { item.State = FileImport.Failed; item.Error = "不能将文件夹导入自身内部。"; }
+                    // 软件页面只登记程序（原位引用），不复制、不移动任何文件或文件夹。
+                    if (!resource && (folder || !IsSoftwareFile(source)))
+                    { item.State = FileImport.Skipped; item.Error = "软件页面只登记程序（.exe），文件和文件夹请到资源页面导入。"; }
+                    else if (folder && FileImport.Within(source, dir)) { item.State = FileImport.Failed; item.Error = "不能将文件夹导入自身内部。"; }
                     // 移动会让文件夹内已收录的项目全部指向旧路径而失效；复制不影响它们。
                     else if (folder && !reference && operation == ImportOperation.Move && hasEntriesUnder(source))
                     { item.State = FileImport.Failed; item.Error = "文件夹内包含已收录的项目，不能移动；请改用复制（拖放时按住 Ctrl）。"; }
@@ -745,7 +746,7 @@ namespace AppManager
                         bool registered = (bool)Invoke(new Func<bool>(delegate
                         {
                             return batch.Items.Where(i => !i.Reference && (i.State == FileImport.Copied || i.State == FileImport.DeleteFailed))
-                                .All(i => FindAddedEntry(i.Target, batch.Category) >= 0);
+                                .All(i => IsBatchTargetRegistered(batch, i.Target));
                         }));
                         if (!registered) throw new IOException("入库记录已变化，保留源文件。");
                         FileImport.DeleteSources(batch, cancel); FileImport.Finish(batch); RunOnUi(delegate { FinishImport(batch); });
@@ -755,6 +756,15 @@ namespace AppManager
                 dialog.Controls.Add(details); dialog.Controls.Add(list); dialog.Controls.Add(retry);
                 dialog.ShowDialog(this);
             }
+        }
+
+        /// <summary>
+        /// 批次的入库路径是否已登记。软件页面的旧批次条目已迁到资源页面、分类已变，改按路径是否仍有收录判断
+        /// （非引用项的入库路径是本批次新预留的，不会与其它条目重合）；否则会把已入库的副本当成未入库撤回。
+        /// </summary>
+        private bool IsBatchTargetRegistered(ImportBatch batch, string target)
+        {
+            return FindAddedEntry(target, batch.Category) >= 0 || (!batch.Resource && IsAddedAnywhere(target));
         }
 
         // 启动时处理上次中断的导入：清理临时落点、撤回未入库副本；同时限制日志数量。
@@ -774,7 +784,7 @@ namespace AppManager
                         bool registered = !batch.Committed && (bool)Invoke(new Func<bool>(delegate
                         {
                             return batch.Items.Any(i => !i.Reference && i.State != FileImport.Failed && i.State != FileImport.Skipped
-                                && !string.IsNullOrEmpty(i.Target) && FindAddedEntry(i.Target, batch.Category) >= 0);
+                                && !string.IsNullOrEmpty(i.Target) && IsBatchTargetRegistered(batch, i.Target));
                         }));
                         FileImport.Recover(batch, registered);
                     }

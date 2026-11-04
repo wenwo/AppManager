@@ -60,7 +60,7 @@ namespace AppManager.Controls
         private bool scrollbarHot;             // 滚动条悬停（加深显示）
 
         // 区块划分（按 Orderable 标记）：中间区块（自定义/内置分类）滚动，其前的常用/快捷中心固定顶部，
-        // 其后的全部软件/全部文件/全部资源固定底部
+        // 其后的全部软件/全部资源固定底部
         private int scrollStart = -1;          // 中间区块起始下标
         private int scrollEnd = -1;            // 中间区块结束下标（含）
         private bool hasScrollBlock;           // 是否存在中间滚动区块
@@ -139,7 +139,7 @@ namespace AppManager.Controls
             get { return hasScrollBlock ? scrollStart : items.Count; }
         }
 
-        /// <summary>底部固定条目数（中间区块之后：全部软件/全部文件/全部资源及分隔线）。</summary>
+        /// <summary>底部固定条目数（中间区块之后：全部软件/全部资源及分隔线）。</summary>
         private int BottomCount
         {
             get { return hasScrollBlock ? items.Count - 1 - scrollEnd : 0; }

@@ -196,6 +196,18 @@ namespace AppManager
             return folder || MatchCategoryExt(category, path);
         }
 
+        /// <summary>可按文件类型自动推荐的资源分类：「证件」同时收图片和文档、「文件」不限类型，都不作为推荐。</summary>
+        public static readonly string[] SuggestedResourceCategories = { "照片", "视频", "音乐", "文档", "压缩包" };
+
+        /// <summary>单个条目按类型推荐的资源分类：文件匹配第一个类型分类，文件夹与其余文件归「文件」。</summary>
+        public static string SuggestResourceCategory(string path, bool folder)
+        {
+            if (!folder)
+                foreach (string category in SuggestedResourceCategories)
+                    if (MatchCategoryExt(category, path)) return category;
+            return "文件";
+        }
+
         /// <summary>类型不符时的统一提示：「照片」只接收照片类型的文件。</summary>
         public static string CategoryTypeHint(string category)
         {

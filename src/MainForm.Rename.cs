@@ -28,9 +28,6 @@ namespace AppManager
     /// </summary>
     public partial class MainForm
     {
-        /// <summary>软件启动文件：改名只改显示名，改磁盘名会让程序或快捷方式失效。</summary>
-        private static readonly string[] LauncherExt = { ".exe", ".lnk", ".url", ".appref-ms" };
-
         private static readonly string[] ReservedNames =
         {
             "CON", "PRN", "AUX", "NUL",
@@ -85,12 +82,10 @@ namespace AppManager
             return IsManagedPath(path);
         }
 
+        /// <summary>软件启动文件：改名只改显示名，改磁盘名会让程序或快捷方式失效（规则见 Scanner.IsLauncherPath）。</summary>
         internal static bool IsLauncherFile(string path)
         {
-            string ext = Path.GetExtension(path ?? string.Empty);
-            foreach (string launcher in LauncherExt)
-                if (string.Equals(ext, launcher, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
+            return Scanner.IsLauncherPath(path);
         }
 
         /// <summary>

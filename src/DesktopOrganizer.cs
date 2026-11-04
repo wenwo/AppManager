@@ -87,7 +87,7 @@ namespace AppManager
 
         /// <summary>
         /// 自动收纳一批桌面快捷方式到收纳目录根并登记还原清单（自动监听触发时使用）。
-        /// 已消失、非快捷方式、本程序自身的入口都会被跳过，返回成功收纳数。
+        /// 已消失、非快捷方式、本程序自身的入口、指向文件夹或文档的快捷方式都会被跳过，返回成功收纳数。
         /// </summary>
         public static int AutoStashShortcuts(AppConfig cfg, List<string> paths, out int failed)
         {
@@ -99,7 +99,7 @@ namespace AppManager
                 foreach (string path in paths)
                 {
                     if (string.IsNullOrEmpty(path) || !File.Exists(path) || IsAutoStashSuppressed(path)) continue;
-                    if (!IsShortcutFile(path) || IsSelfShortcut(path)) continue;
+                    if (!IsShortcutFile(path) || IsSelfShortcut(path) || !IsSoftwareShortcut(path)) continue;
                     string dest = null;
                     bool sourceRemoved = false;
                     bool reused = false;
@@ -378,7 +378,7 @@ namespace AppManager
                 if (IsSkippable(name, f)) continue;
                 if (IsShortcutFile(f))
                 {
-                    if (!config.OrganizeShortcut) continue;
+                    if (!config.OrganizeShortcut || !IsSoftwareShortcut(f)) continue;
                     count += BackupItem(f, ShortcutDestDir, name, false, true);
                 }
                 else
@@ -467,6 +467,17 @@ namespace AppManager
         {
             string ext = Path.GetExtension(path).ToLowerInvariant();
             return ext == ".lnk" || ext == ".url";
+        }
+
+        /// <summary>
+        /// 只收纳软件快捷方式：指向文件夹或文档的 .lnk 留在桌面原地——快捷中心只展示软件，收走后就找不到了。
+        /// 无法解析的 .lnk 与 .url 沿用原规则照常收纳。internal 供回归测试。
+        /// </summary>
+        internal static bool IsSoftwareShortcut(string path)
+        {
+            if (!string.Equals(Path.GetExtension(path), ".lnk", StringComparison.OrdinalIgnoreCase)) return true;
+            AppInfo app = Scanner.ResolveShortcut(path, "Desktop");
+            return app == null || Scanner.IsSoftwareTarget(app);
         }
 
         /// <summary>是否跳过：本程序入口、desktop.ini/缩略图缓存、隐藏或系统属性项。</summary>
