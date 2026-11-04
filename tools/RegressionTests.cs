@@ -106,6 +106,7 @@ namespace AppManager
                 Run("selection footer resolves names, locations, sources and packaged ids", SelectionFooterText);
                 Run("grid selection fires once per change and restores a ten-thousand item selection", GridSelectionNotifications);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
+                Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
                 Run("grid delete handles every selected item; arrow starts at the first item", GridBatchDeleteAndArrow);
                 Run("icon cache evicts by bytes and LRU instead of clearing everything", IconCacheLru);
                 Run("auto scan pause keeps pending and paused changes, resume fires once", AutoScanPauseResume);
@@ -2186,6 +2187,137 @@ namespace AppManager
                 Control strip = (Control)typeof(MainForm).GetField("headerStrip", Private).GetValue(form);
                 Check(grid.ClientSize.Width < grid.Width, "fixture did not show a vertical scrollbar");
                 Check(strip.Width == grid.ClientSize.Width, "header strip width " + strip.Width + " differs from grid client width " + grid.ClientSize.Width);
+            }
+        }
+
+        private static void CollectionSidebarTrayRestore()
+        {
+            AppConfig config = RenameConfig("collection-sidebar-tray");
+            config.AutoScan = false;
+            config.CloseToTray = true;
+            string collectionKey = CollectionKeys.Make("照片", "旅行");
+            AppInfo image = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "照片", "trip.png"),
+                false, true, "trip");
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            CollectionOps.AddMember(config, image.Key, collectionKey);
+            Check(config.Save(), "database fixture save failed");
+            config.Database.PublishCatalog(config, new List<AppInfo> { image });
+
+            using (MainForm form = new MainForm(config))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1200, 720);
+                form.Show();
+                Application.DoEvents();
+
+                typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo> { image });
+                Invoke(form, "OnModeChanged", Controls.SidebarControl.ContentMode.Website);
+                Application.DoEvents();
+
+                Controls.SidebarControl sidebar = (Controls.SidebarControl)typeof(MainForm).GetField("sidebar", Private).GetValue(form);
+                Controls.CollectionSidebar collection = (Controls.CollectionSidebar)typeof(MainForm).GetField("collectionSidebar", Private).GetValue(form);
+                Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                Controls.CollectionInfoPanel info = (Controls.CollectionInfoPanel)typeof(MainForm).GetField("collectionInfo", Private).GetValue(form);
+                Control settings = (Control)typeof(MainForm).GetField("settingsPage", Private).GetValue(form);
+
+                // 夹具必须真正进入可编辑资源分类并显示出集合栏，否则后续断言没有意义。
+                Check(collection.Visible, "fixture did not show the collection sidebar");
+                Check(collection.Width > 0, "fixture collection sidebar has no width");
+                Check(collection.Left == sidebar.Width, "fixture collection sidebar is not beside the main sidebar");
+                Check(grid.Left == collection.Right, "fixture grid did not start at the collection sidebar's right edge");
+                int expandedWidth = collection.Width;
+
+                Invoke(form, "MaximizeOnCurrentScreen");
+                Application.DoEvents();
+                Check(collection.Width == expandedWidth && grid.Left == collection.Right,
+                    "maximized layout lost the collection sidebar alignment");
+                Invoke(form, "RestoreFromMaximized");
+                Application.DoEvents();
+                Check(collection.Width == expandedWidth && grid.Left == collection.Right,
+                    "restoring from maximized lost the collection sidebar alignment");
+
+                Invoke(form, "HideToTray");
+                Application.DoEvents();
+                Check(!form.Visible, "HideToTray did not hide the form");
+                // 模拟隐藏期间的自动扫描/封面回调：刷新集合 UI 后再布局。
+                Invoke(form, "UpdateCollectionUi");
+                Invoke(form, "LayoutControls");
+                Application.DoEvents();
+                Check(collection.Width == expandedWidth, "hidden relayout collapsed the collection sidebar: " + collection.Width);
+                Check(collection.Left == sidebar.Width, "hidden collection sidebar moved left: " + collection.Left + " / " + sidebar.Width);
+                Check(grid.Left == collection.Right, "hidden grid moved away from the collection sidebar: " + grid.Left + " / " + collection.Right);
+
+                Invoke(form, "ShowFromTray");
+                Application.DoEvents();
+                Check(form.Visible, "ShowFromTray did not show the form");
+                Check(collection.Visible, "collection sidebar stayed hidden after ShowFromTray");
+                Check(collection.Width == expandedWidth, "restored collection sidebar width changed: " + collection.Width);
+                Check(collection.Left == sidebar.Width, "restored collection sidebar moved left");
+                Check(grid.Left == collection.Right, "restored grid moved away from the collection sidebar");
+
+                // 收起/展开集合栏后，再隐藏和恢复，宽度与网格起点仍须一致。
+                typeof(Controls.CollectionSidebar).GetMethod("ToggleCollapsed", Private).Invoke(collection, null);
+                Application.DoEvents();
+                int collapsedWidth = collection.Width;
+                Check(collection.Collapsed && collapsedWidth > 0 && collapsedWidth < expandedWidth, "collection sidebar did not collapse");
+                Check(grid.Left == collection.Right, "grid did not follow a collapsed collection sidebar");
+                Invoke(form, "HideToTray");
+                Application.DoEvents();
+                Invoke(form, "UpdateCollectionUi");
+                Invoke(form, "LayoutControls");
+                Application.DoEvents();
+                Check(collection.Width == collapsedWidth, "hidden relayout lost the collapsed width");
+                Invoke(form, "ShowFromTray");
+                Application.DoEvents();
+                Check(collection.Width == collapsedWidth && grid.Left == collection.Right, "collapsed collection state changed after restore");
+                typeof(Controls.CollectionSidebar).GetMethod("ToggleCollapsed", Private).Invoke(collection, null);
+                Application.DoEvents();
+                Check(collection.Width == expandedWidth && grid.Left == collection.Right, "collection sidebar did not expand again");
+
+                // 集合信息页：隐藏/恢复后保持原内容区左边界，不被集合栏宽度覆盖。
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, collectionKey);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, false);
+                Invoke(form, "UpdateCollectionUi");
+                Application.DoEvents();
+                Check(info.Visible, "fixture collection info page did not open");
+                Check(info.Left == collection.Right, "collection info did not start at the collection sidebar's right edge");
+                Invoke(form, "HideToTray");
+                Application.DoEvents();
+                Invoke(form, "UpdateCollectionUi");
+                Invoke(form, "LayoutControls");
+                Application.DoEvents();
+                Check(info.Left == collection.Right, "hidden collection info left edge drifted");
+                Invoke(form, "ShowFromTray");
+                Application.DoEvents();
+                Check(info.Visible && info.Left == collection.Right, "collection info moved or stayed hidden after restore");
+
+                // 设置页打开期间集合栏不得出现；关闭设置后集合栏和网格必须恢复对齐。
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, null);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, true);
+                Invoke(form, "RefreshGrid");
+                Application.DoEvents();
+                Check(grid.Visible && !info.Visible, "fixture did not return to the grid before opening settings");
+                Invoke(form, "OpenSettings");
+                Application.DoEvents();
+                Check(settings.Visible, "settings page did not open");
+                Check(!collection.Visible, "collection sidebar remained visible in settings");
+                Invoke(form, "HideToTray");
+                Application.DoEvents();
+                Invoke(form, "UpdateCollectionUi");
+                Invoke(form, "LayoutControls");
+                Application.DoEvents();
+                Invoke(form, "ShowFromTray");
+                Application.DoEvents();
+                Check(settings.Visible, "settings page did not survive tray restore");
+                Check(!collection.Visible, "collection sidebar appeared after restoring settings from tray");
+                Invoke(form, "CloseSettings");
+                Application.DoEvents();
+                Check(!settings.Visible, "settings page did not close");
+                Check(collection.Visible && collection.Width == expandedWidth, "collection sidebar did not return after closing settings");
+                Check(collection.Left == sidebar.Width && grid.Left == collection.Right, "grid and collection sidebar are misaligned after closing settings");
             }
         }
 

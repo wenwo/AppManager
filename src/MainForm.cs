@@ -32,6 +32,7 @@ namespace AppManager
         private AppGridControl grid;
         private ListHeaderStrip headerStrip;   // 列表栏位表头（固定条，不参与网格滚动）
         private CollectionSidebar collectionSidebar;   // 资源分类的第二级集合侧边栏（全部 + 自定义集合）
+        private bool collectionSidebarShown;   // 集合侧边栏的期望显示状态；父窗体隐藏时 Visible 会失真
         private CollectionInfoPanel collectionInfo;    // 选中集合后的信息页（封面/名称/简介/进入）
         private string currentCollection;   // 当前选中的集合键（col:父分类/集合名）；空 = 「全部」
         private bool collectionEntered;     // 是否已进入集合内容（false = 停留集合信息页）
@@ -704,6 +705,13 @@ namespace AppManager
         {
             Show();
             WindowState = preTrayWindowState == FormWindowState.Minimized ? FormWindowState.Normal : preTrayWindowState;
+            if (_ready)
+            {
+                // 隐藏期间布局可能执行过；恢复后只校正可见性和几何，不重建集合上下文。
+                SyncCollectionSidebarVisibility();
+                LayoutControls();
+                Invalidate();
+            }
             Activate();
             BringToFront();
         }
@@ -816,6 +824,7 @@ namespace AppManager
             // 集合侧边栏：资源分类的第二级内嵌栏（全部 + 自定义集合 + 新建），单击选中/双击进入/右键编辑删除
             collectionSidebar = new CollectionSidebar();
             collectionSidebar.Visible = false;
+            collectionSidebarShown = false;
             collectionSidebar.ItemSelected += OnCollectionSelected;
             collectionSidebar.ItemActivated += EnterCollection;
             collectionSidebar.ContextRequested += ShowCollectionMenu;
@@ -1111,7 +1120,7 @@ namespace AppManager
             int colW = 0;
             if (collectionSidebar != null)
             {
-                colW = collectionSidebar.Visible ? Dpi(collectionSidebar.CurrentWidth) : 0;
+                colW = collectionSidebarShown ? Dpi(collectionSidebar.CurrentWidth) : 0;
                 collectionSidebar.Location = new Point(sb, top);
                 collectionSidebar.Size = new Size(colW, gridHeight);
             }
@@ -2734,7 +2743,8 @@ namespace AppManager
         /// <summary>切换集合侧边栏可见性；变化时重排布局（内容区按侧边栏宽度让位）。</summary>
         private void SetCollectionSidebarVisible(bool visible)
         {
-            if (collectionSidebar == null || collectionSidebar.Visible == visible) return;
+            if (collectionSidebar == null || collectionSidebarShown == visible) return;
+            collectionSidebarShown = visible;
             collectionSidebar.Visible = visible;
             if (!visible)
             {
@@ -2753,7 +2763,7 @@ namespace AppManager
                 if (currentCollection != null && !collectionEntered && !SearchActive) return;
                 collectionInfo.EndEdit();
             }
-            bool show = collectionSidebar.Visible
+            bool show = collectionSidebarShown
                 && currentCollection != null
                 && !collectionEntered
                 && !SearchActive;
@@ -6220,7 +6230,10 @@ namespace AppManager
             toggleLabel.Visible = show;
             addBtn.Visible = show && CanEditCategory(currentCategory);   // 「全部资源」等只读分类不显示
             if (collectionSidebar != null)
-                collectionSidebar.Visible = show && CanShowCollectionSidebar;
+            {
+                collectionSidebarShown = show && CanShowCollectionSidebar;
+                collectionSidebar.Visible = collectionSidebarShown;
+            }
             if (!show && collectionInfo != null) collectionInfo.Visible = false;
             SyncHeaderStrip();
         }
@@ -6646,7 +6659,7 @@ namespace AppManager
         {
             int footerTop = ClientSize.Height - Dpi(ContentFooterH);
             int sb = Dpi(sidebar.CurrentWidth);
-            int colW = collectionSidebar != null && collectionSidebar.Visible ? Dpi(collectionSidebar.CurrentWidth) : 0;
+            int colW = collectionSidebar != null && collectionSidebarShown ? Dpi(collectionSidebar.CurrentWidth) : 0;
             int contentX = sb + colW;
             int contentW = ClientSize.Width - contentX;
             if (contentW <= 0 || footerTop <= Dpi(Theme.TopBarHeight)) return Rectangle.Empty;
