@@ -501,7 +501,11 @@ namespace AppManager
         /// </summary>
         protected override void Dispose(bool disposing)
         {
-            if (disposing) Application.RemoveMessageFilter(this);
+            if (disposing)
+            {
+                Application.RemoveMessageFilter(this);
+                DisposeDatabaseMetadataRetryTimer();
+            }
             base.Dispose(disposing);
         }
 
@@ -528,6 +532,7 @@ namespace AppManager
                 iconFlushTimer.Dispose();
                 iconFlushTimer = null;
             }
+            DisposeDatabaseMetadataRetryTimer();
             base.OnFormClosed(e);
             if (tray != null)
             {

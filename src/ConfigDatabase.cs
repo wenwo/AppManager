@@ -115,7 +115,34 @@ namespace AppManager
         /// </summary>
         private static void EnsureIndexes(Sqlite db)
         {
+            EnsureCatalogRetryColumns(db);
             db.Execute("CREATE INDEX IF NOT EXISTS ix_entries_key_nocase ON entries(key COLLATE NOCASE)");
+            db.Execute("CREATE INDEX IF NOT EXISTS ix_catalog_retry ON catalog(item_id) WHERE indexed=2");
+            db.Execute("CREATE INDEX IF NOT EXISTS ix_catalog_retry_due ON catalog(next_retry,item_id) WHERE indexed=2");
+        }
+
+        private static void EnsureCatalogRetryColumns(Sqlite db)
+        {
+            bool hasRetryCount = false, hasNextRetry = false;
+            foreach (string[] row in db.Query("PRAGMA table_info(catalog)"))
+            {
+                if (row.Length < 2) continue;
+                if (row[1] == "retry_count") hasRetryCount = true;
+                else if (row[1] == "next_retry") hasNextRetry = true;
+            }
+            if (hasRetryCount && hasNextRetry) return;
+            db.Execute("BEGIN IMMEDIATE");
+            try
+            {
+                if (!hasRetryCount) db.Execute("ALTER TABLE catalog ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
+                if (!hasNextRetry) db.Execute("ALTER TABLE catalog ADD COLUMN next_retry INTEGER NOT NULL DEFAULT 0");
+                db.Execute("COMMIT");
+            }
+            catch
+            {
+                db.Rollback();
+                throw;
+            }
         }
 
         /// <summary>
@@ -283,10 +310,12 @@ namespace AppManager
                     "CREATE INDEX ix_changes_operation ON changes(operation_id,id)",
                     "CREATE INDEX ix_changes_entity ON changes(entity,row_id,id)",
                     // 扫描目录与列表均为可重建投影，不把扫描噪音写进业务操作日志。
-                    "CREATE TABLE catalog(item_id INTEGER PRIMARY KEY REFERENCES entries(id),name TEXT NOT NULL,search_name TEXT NOT NULL,legacy_key TEXT NOT NULL,base_group INTEGER REFERENCES groups(id),kind INTEGER NOT NULL CHECK(kind IN(0,1,2)),hidden INTEGER NOT NULL,active INTEGER NOT NULL,metadata TEXT NOT NULL,size INTEGER NOT NULL DEFAULT -1,modified INTEGER NOT NULL DEFAULT -1,indexed INTEGER NOT NULL DEFAULT 0)",
+                    "CREATE TABLE catalog(item_id INTEGER PRIMARY KEY REFERENCES entries(id),name TEXT NOT NULL,search_name TEXT NOT NULL,legacy_key TEXT NOT NULL,base_group INTEGER REFERENCES groups(id),kind INTEGER NOT NULL CHECK(kind IN(0,1,2)),hidden INTEGER NOT NULL,active INTEGER NOT NULL,metadata TEXT NOT NULL,size INTEGER NOT NULL DEFAULT -1,modified INTEGER NOT NULL DEFAULT -1,indexed INTEGER NOT NULL DEFAULT 0,retry_count INTEGER NOT NULL DEFAULT 0,next_retry INTEGER NOT NULL DEFAULT 0)",
                     "CREATE INDEX ix_catalog_kind ON catalog(active,kind,hidden,search_name,item_id)",
                     "CREATE INDEX ix_catalog_legacy ON catalog(legacy_key,item_id)",
                     "CREATE INDEX ix_catalog_pending ON catalog(item_id) WHERE indexed=0",
+                    "CREATE INDEX ix_catalog_retry ON catalog(item_id) WHERE indexed=2",
+                    "CREATE INDEX ix_catalog_retry_due ON catalog(next_retry,item_id) WHERE indexed=2",
                     "CREATE TABLE listing(group_id INTEGER NOT NULL REFERENCES groups(id),item_id INTEGER NOT NULL REFERENCES entries(id),kind INTEGER NOT NULL,hidden INTEGER NOT NULL,rank INTEGER NOT NULL,name TEXT NOT NULL,size INTEGER NOT NULL DEFAULT -1,modified INTEGER NOT NULL DEFAULT -1,PRIMARY KEY(group_id,item_id)) WITHOUT ROWID",
                     "CREATE INDEX ix_listing_page ON listing(group_id,kind,hidden,rank,name,item_id)",
                     "CREATE INDEX ix_listing_page_all ON listing(group_id,kind,rank,name,item_id)",

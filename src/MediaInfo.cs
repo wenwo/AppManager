@@ -7,6 +7,15 @@ using System.Text;
 
 namespace AppManager
 {
+    /// <summary>拍摄时间读取结果：失败分为“文件可读但没有时间”“暂时不可读”和“格式/解码永久失败”。</summary>
+    internal enum TakenDateReadResult
+    {
+        Found,
+        NoDate,
+        Unavailable,
+        Permanent
+    }
+
     /// <summary>
     /// 媒体文件「拍摄时间」读取：列表时间列与排序共用同一口径。
     /// 照片取 EXIF DateTimeOriginal（0x9003，不存在则依次回退 0x9004/0x0132）；
@@ -20,22 +29,34 @@ namespace AppManager
         /// <summary>尝试读取拍摄/创建时间；成功返回 true，否则 false。</summary>
         public static bool TryGetTakenDate(string path, out DateTime taken)
         {
+            return ReadTakenDate(path, out taken) == TakenDateReadResult.Found;
+        }
+
+        /// <summary>
+        /// 读取拍摄时间并区分“可读但无字段”与“暂时不可读/解码失败”。
+        /// 索引重试只依赖后者；列表仍可用 TryGetTakenDate 保持原来的回退语义。
+        /// </summary>
+        internal static TakenDateReadResult ReadTakenDate(string path, out DateTime taken)
+        {
             taken = DateTime.MinValue;
-            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return false;
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) return TakenDateReadResult.Unavailable;
             try
             {
                 // RAW 依赖 WIC；只读元数据，不解码像素。
-                if (MediaRules.IsRawImage(path)) return WicImageDecoder.TryGetTakenDate(path, out taken);
+                if (MediaRules.IsRawImage(path)) return WicImageDecoder.ReadTakenDate(path, out taken);
                 if (MediaRules.IsImage(path)) return TryReadImageTaken(path, out taken);
-                if (MediaRules.IsVideo(path)) return TryReadVideoTaken(path, out taken);
+                if (MediaRules.IsVideo(path))
+                    return TryReadVideoTaken(path, out taken) ? TakenDateReadResult.Found : TakenDateReadResult.NoDate;
+                return TakenDateReadResult.NoDate;
             }
-            catch { }
-            return false;
+            catch (IOException) { return TakenDateReadResult.Unavailable; }
+            catch (UnauthorizedAccessException) { return TakenDateReadResult.Unavailable; }
+            catch { return TakenDateReadResult.NoDate; }   // 格式不支持或内容损坏：保留回退，不形成无限重试
         }
 
         // ===== 照片：EXIF =====
 
-        private static bool TryReadImageTaken(string path, out DateTime taken)
+        private static TakenDateReadResult TryReadImageTaken(string path, out DateTime taken)
         {
             taken = DateTime.MinValue;
             try
@@ -55,13 +76,15 @@ namespace AppManager
                             case 0x0132: if (!hasDt) hasDt = TryExifDate(p.Value, out dt); break;
                         }
                     }
-                    if (hasDto) { taken = dto; return true; }
-                    if (hasDtd) { taken = dtd; return true; }
-                    if (hasDt) { taken = dt; return true; }
+                    if (hasDto) { taken = dto; return TakenDateReadResult.Found; }
+                    if (hasDtd) { taken = dtd; return TakenDateReadResult.Found; }
+                    if (hasDt) { taken = dt; return TakenDateReadResult.Found; }
+                    return TakenDateReadResult.NoDate;
                 }
             }
-            catch { }
-            return false;
+            catch (IOException) { return TakenDateReadResult.Unavailable; }
+            catch (UnauthorizedAccessException) { return TakenDateReadResult.Unavailable; }
+            catch { return TakenDateReadResult.NoDate; }   // 格式不支持或内容损坏：保留回退，不形成无限重试
         }
 
         private static bool TryExifDate(byte[] value, out DateTime taken)

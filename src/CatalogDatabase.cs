@@ -16,8 +16,29 @@ namespace AppManager
         internal string LastName;
     }
 
+    internal enum MetadataIndexOutcome
+    {
+        Complete,
+        MorePending,
+        RetryPending,
+        Canceled
+    }
+
     internal sealed partial class ConfigDatabase
     {
+        private const int IndexedPending = 0;
+        private const int IndexedComplete = 1;
+        private const int IndexedRetry = 2;
+        private const long RetryCountCap = 1000;
+        private static readonly int[] TransientRetryDelaysSeconds = { 30, 120, 600, 1800, 3600 };
+        private static readonly int[] PermanentRetryDelaysSeconds = { 60, 600, 3600, 21600, 86400 };
+
+        private sealed class MetadataProbe
+        {
+            internal long ItemId, Size = -1, Modified = -1, RetryCount, NextRetry;
+            internal int State = IndexedComplete;
+        }
+
         private static string Pack(AppInfo a)
         {
             XmlDocument doc = new XmlDocument(); XmlElement n = doc.CreateElement("App"); doc.AppendChild(n);
@@ -47,7 +68,7 @@ namespace AppManager
             string legacy = "af:" + Scanner.NormalizeEntryName(app.Name);
             db.Execute("INSERT OR IGNORE INTO catalog(item_id,name,search_name,legacy_key,base_group,kind,hidden,active,metadata) VALUES(?,?,?,?,?,?,0,1,?)",
                 id, app.Name, SearchName(app.Name), legacy, Foreign(group), kind, packed);
-            db.Execute("UPDATE catalog SET name=?,search_name=?,legacy_key=?,base_group=?,kind=?,active=1,metadata=?,indexed=0 WHERE item_id=? AND (metadata<>? OR kind<>? OR active<>1)",
+            db.Execute("UPDATE catalog SET name=?,search_name=?,legacy_key=?,base_group=?,kind=?,active=1,metadata=?,indexed=0,retry_count=0,next_retry=0 WHERE item_id=? AND (metadata<>? OR kind<>? OR active<>1)",
                 app.Name, SearchName(app.Name), legacy, Foreign(group), kind, packed, id, packed, kind);
         }
         private static void ExpandLegacyAffected(Sqlite db, HashSet<long> affected)
@@ -81,7 +102,8 @@ namespace AppManager
             }
         }
 
-        private const string Rw2DateIndexMarker = "rw2_taken_date_index_v1";
+        // v1 可能已被有缺陷的版本提前写入；v2 必须独立执行一次，不能把旧标记当作完成依据。
+        private const string Rw2DateIndexMarker = "rw2_taken_date_index_v2";
 
         /// <summary>
         /// 一次性刷新旧版本已索引的 RW2 日期；只重置标记，实际读盘仍由后台 IndexMetadata 分批完成。
@@ -89,18 +111,24 @@ namespace AppManager
         /// </summary>
         private void RepairRw2TakenDateIndex()
         {
+            RepairRw2TakenDateIndex(WicImageDecoder.IsRw2WicDecoderRegistered());
+        }
+
+        // 测试注入入口：只有明确确认解码器可用才排队；false 与 null 都保留旧索引等待下次重试。
+        internal void RepairRw2TakenDateIndex(bool? decoderRegistered)
+        {
             try
             {
                 lock (gate)
                 using (Sqlite db = Open())
                 {
                     if (db.Scalar("SELECT value FROM metadata WHERE key=?", Rw2DateIndexMarker) == "1") return;
-                    // 未安装 WIC 解码器时先不写标记；安装后下次启动会自动重新排队旧 RW2。
-                    if (WicImageDecoder.IsRw2WicDecoderRegistered() == false) return;
+                    // 只有确定可用才排队；探测失败（null）同样不能提前写完成标记。
+                    if (decoderRegistered != true) return;
                     db.Execute("BEGIN IMMEDIATE");
                     try
                     {
-                        db.Execute("UPDATE catalog SET indexed=0 WHERE active=1 AND indexed=1 AND lower(metadata) LIKE ?",
+                        db.Execute("UPDATE catalog SET indexed=0,retry_count=0,next_retry=0 WHERE active=1 AND indexed IN(1,2) AND lower(metadata) LIKE ?",
                             "%target=\"%.rw2\"%");
                         db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)", Rw2DateIndexMarker, "1");
                         db.Execute("COMMIT");
@@ -452,56 +480,152 @@ namespace AppManager
         }
 
         // 文件元数据分批索引，目录切换和分页不触发全分类同步读盘。
-        internal void IndexMetadata(Func<bool> canceled)
+        // 0=待处理，1=可读完成，2=暂时不可读/解码失败；软预算用尽后由调用方继续调度。
+        internal MetadataIndexOutcome IndexMetadata(Func<bool> canceled)
         {
-            Stopwatch budget = Stopwatch.StartNew();
-            while (budget.Elapsed < TimeSpan.FromSeconds(45))
+            return IndexMetadata(canceled, TimeSpan.FromSeconds(45));
+        }
+
+        internal MetadataIndexOutcome IndexMetadata(Func<bool> canceled, TimeSpan budget)
+        {
+            Stopwatch elapsed = Stopwatch.StartNew();
+            while (elapsed.Elapsed < budget)
             {
-                if (canceled != null && canceled()) return;
+                if (canceled != null && canceled()) return MetadataIndexOutcome.Canceled;
+                long now = DateTime.UtcNow.Ticks;
                 List<string[]> batch;
-                lock (gate) using (Sqlite db = Open()) batch = db.Query("SELECT item_id,metadata FROM catalog WHERE indexed=0 AND active=1 ORDER BY item_id LIMIT 128");
-                if (batch.Count == 0) return;
-                List<long[]> values = new List<long[]>();
-                foreach (string[] row in batch)
+                lock (gate) using (Sqlite db = Open())
+                    batch = db.Query("SELECT item_id,metadata,indexed,retry_count FROM catalog WHERE active=1 AND (indexed=0 OR (indexed=2 AND next_retry<=?)) ORDER BY indexed,item_id LIMIT 128", now);
+                if (batch.Count == 0) break;
+                ProcessMetadataBatch(batch);
+            }
+
+            if (canceled != null && canceled()) return MetadataIndexOutcome.Canceled;
+            long due = DateTime.UtcNow.Ticks;
+            if (HasIndexedState(IndexedPending) || HasDueRetryItems(due)) return MetadataIndexOutcome.MorePending;
+            if (HasIndexedState(IndexedRetry)) return MetadataIndexOutcome.RetryPending;
+            return MetadataIndexOutcome.Complete;
+        }
+
+        internal long NextMetadataRetryUtcTicks()
+        {
+            lock (gate) using (Sqlite db = Open())
+            {
+                string value = db.Scalar("SELECT MIN(next_retry) FROM catalog WHERE indexed=2 AND active=1");
+                return string.IsNullOrEmpty(value) ? 0 : Number(value);
+            }
+        }
+
+        private bool HasDueRetryItems(long now)
+        {
+            lock (gate) using (Sqlite db = Open())
+                return db.Scalar("SELECT 1 FROM catalog WHERE indexed=2 AND active=1 AND next_retry<=? LIMIT 1", now) != null;
+        }
+
+        private static long NextRetryCount(string prior)
+        {
+            long count = Number(prior);
+            if (count < 0) count = 0;
+            return count >= RetryCountCap ? RetryCountCap : count + 1;
+        }
+
+        private static long NextRetryTicks(long attempt, bool permanent)
+        {
+            int[] delays = permanent ? PermanentRetryDelaysSeconds : TransientRetryDelaysSeconds;
+            long index = attempt > 0 ? attempt - 1 : 0;
+            if (index >= delays.Length) index = delays.Length - 1;
+            return DateTime.UtcNow.Ticks + TimeSpan.FromSeconds(delays[(int)index]).Ticks;
+        }
+
+        private bool HasIndexedState(int state)
+        {
+            lock (gate) using (Sqlite db = Open())
+                return db.Scalar("SELECT 1 FROM catalog WHERE indexed=? AND active=1 LIMIT 1", state) != null;
+        }
+
+        private void ProcessMetadataBatch(List<string[]> batch)
+        {
+            List<MetadataProbe> values = new List<MetadataProbe>(batch.Count);
+            for (int i = 0; i < batch.Count; i++)
+            {
+                string[] row = batch[i];
+                long size = -1, modified = -1, retryCount = 0, nextRetry = 0;
+                int state = IndexedComplete;
+                bool permanent = false;
+                try
                 {
-                    long size = -1, modified = -1;
-                    try
+                    AppInfo app = Unpack(row[1]);
+                    if (!app.IsUwp && !string.IsNullOrEmpty(app.TargetPath))
                     {
-                        AppInfo app = Unpack(row[1]);
-                        if (!app.IsUwp && !string.IsNullOrEmpty(app.TargetPath) && !app.TargetPath.StartsWith("\\\\", StringComparison.Ordinal))
+                        // 网络路径沿用旧策略，不在后台索引时主动访问；本地文件失败才进入重试队列。
+                        if (app.TargetPath.StartsWith("\\\\", StringComparison.Ordinal))
                         {
-                            if (app.IsFolder) { DirectoryInfo folder = new DirectoryInfo(app.TargetPath); if (folder.Exists) modified = folder.LastWriteTimeUtc.Ticks; }
+                        }
+                        else if (app.IsFolder)
+                        {
+                            DirectoryInfo folder = new DirectoryInfo(app.TargetPath);
+                            if (!folder.Exists) state = IndexedRetry;
+                            else modified = folder.LastWriteTimeUtc.Ticks;
+                        }
+                        else
+                        {
+                            FileInfo file = new FileInfo(app.TargetPath);
+                            if (!file.Exists) state = IndexedRetry;
                             else
                             {
-                                FileInfo file = new FileInfo(app.TargetPath);
-                                if (file.Exists)
+                                size = file.Length;
+                                DateTime taken;
+                                TakenDateReadResult result = MediaInfo.ReadTakenDate(app.TargetPath, out taken);
+                                if (result == TakenDateReadResult.Unavailable || result == TakenDateReadResult.Permanent)
                                 {
-                                    size = file.Length; DateTime taken;
-                                    modified = MediaInfo.TryGetTakenDate(app.TargetPath, out taken) ? taken.ToUniversalTime().Ticks : file.LastWriteTimeUtc.Ticks;
+                                    state = IndexedRetry;
+                                    permanent = result == TakenDateReadResult.Permanent;
                                 }
+                                else modified = result == TakenDateReadResult.Found
+                                    ? taken.ToUniversalTime().Ticks
+                                    : file.LastWriteTimeUtc.Ticks;
                             }
                         }
                     }
-                    catch { }
-                    values.Add(new long[] { Number(row[0]), size, modified });
                 }
-                lock (gate)
-                using (Sqlite db = Open())
+                catch { state = IndexedRetry; }
+                if (state == IndexedRetry)
                 {
-                    db.Execute("BEGIN IMMEDIATE");
-                    try
-                    {
-                        using (Sqlite.Statement catalog = db.Prepare("UPDATE catalog SET size=?,modified=?,indexed=1 WHERE item_id=? AND metadata=?"))
-                        using (Sqlite.Statement listing = db.Prepare("UPDATE listing SET size=?,modified=? WHERE item_id=? AND EXISTS(SELECT 1 FROM catalog c WHERE c.item_id=listing.item_id AND c.metadata=?) AND (size<>? OR modified<>?)"))
-                            for (int i = 0; i < batch.Count; i++)
-                            {
-                                long[] v = values[i]; catalog.Bind(v[1], v[2], v[0], batch[i][1]); catalog.Read();
-                                listing.Bind(v[1], v[2], v[0], batch[i][1], v[1], v[2]); listing.Read();
-                            }
-                        db.Execute("COMMIT");
-                    }
-                    catch { db.Rollback(); throw; }
+                    retryCount = NextRetryCount(row[2] == "0" ? "0" : row[3]);
+                    nextRetry = NextRetryTicks(retryCount, permanent);
                 }
+                values.Add(new MetadataProbe {
+                    ItemId = Number(row[0]), Size = size, Modified = modified,
+                    State = state, RetryCount = retryCount, NextRetry = nextRetry
+                });
+            }
+
+            lock (gate)
+            using (Sqlite db = Open())
+            {
+                db.Execute("BEGIN IMMEDIATE");
+                try
+                {
+                    using (Sqlite.Statement complete = db.Prepare("UPDATE catalog SET size=?,modified=?,indexed=1,retry_count=0,next_retry=0 WHERE item_id=? AND metadata=?"))
+                    using (Sqlite.Statement retry = db.Prepare("UPDATE catalog SET indexed=2,retry_count=?,next_retry=? WHERE item_id=? AND metadata=? AND active=1 AND indexed IN(0,2)"))
+                    using (Sqlite.Statement listing = db.Prepare("UPDATE listing SET size=?,modified=? WHERE item_id=? AND EXISTS(SELECT 1 FROM catalog c WHERE c.item_id=listing.item_id AND c.metadata=?) AND (size<>? OR modified<>?)"))
+                        for (int i = 0; i < batch.Count; i++)
+                        {
+                            MetadataProbe v = values[i];
+                            if (v.State == IndexedComplete)
+                            {
+                                complete.Bind(v.Size, v.Modified, v.ItemId, batch[i][1]); complete.Read();
+                                listing.Bind(v.Size, v.Modified, v.ItemId, batch[i][1], v.Size, v.Modified); listing.Read();
+                            }
+                            else
+                            {
+                                // 暂时失败保留旧 size/modified/listings，等待续跑，不写错误回退值。
+                                retry.Bind(v.RetryCount, v.NextRetry, v.ItemId, batch[i][1]); retry.Read();
+                            }
+                        }
+                    db.Execute("COMMIT");
+                }
+                catch { db.Rollback(); throw; }
             }
         }
 

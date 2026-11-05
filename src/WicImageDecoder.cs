@@ -48,6 +48,11 @@ namespace AppManager
         /// </summary>
         internal static bool TryGetTakenDate(string path, out DateTime taken)
         {
+            return ReadTakenDate(path, out taken) == TakenDateReadResult.Found;
+        }
+
+        internal static TakenDateReadResult ReadTakenDate(string path, out DateTime taken)
+        {
             taken = DateTime.MinValue;
             try
             {
@@ -55,22 +60,30 @@ namespace AppManager
                 {
                     BitmapDecoder decoder = BitmapDecoder.Create(stream,
                         BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnDemand);
-                    if (decoder.Frames.Count == 0) return false;
+                    if (decoder.Frames.Count == 0) return TakenDateReadResult.NoDate;
                     BitmapMetadata metadata = decoder.Frames[0].Metadata as BitmapMetadata;
-                    if (metadata == null) return false;
+                    if (metadata == null) return TakenDateReadResult.NoDate;
                     for (int i = 0; i < TakenDateQueries.Length; i++)
                     {
                         DateTime value;
                         if (TryReadExifDate(metadata, TakenDateQueries[i], out value))
                         {
                             taken = value;
-                            return true;
+                            return TakenDateReadResult.Found;
                         }
                     }
+                    return TakenDateReadResult.NoDate;
                 }
             }
-            catch { }   // 无 WIC 解码器、损坏文件或元数据缺失时由调用方回退
-            return false;
+            catch (IOException) { return TakenDateReadResult.Unavailable; }
+            catch (UnauthorizedAccessException) { return TakenDateReadResult.Unavailable; }
+            catch (Exception ex)
+            {
+                // 格式损坏/未安装解码器属于永久类，按更长退避重试；未知异常按暂时失败处理。
+                return IsWicDecodeFailure(ex)
+                    ? TakenDateReadResult.Permanent
+                    : TakenDateReadResult.Unavailable;
+            }
         }
 
         private static bool TryReadExifDate(BitmapMetadata metadata, string[] queries, out DateTime taken)

@@ -691,6 +691,7 @@ namespace AppManager
             Check(MediaInfo.TryGetTakenDate(original, out taken)
                 && taken == new DateTime(2020, 1, 2, 3, 4, 5)
                 && taken.Kind == DateTimeKind.Unspecified, "RW2 DateTimeOriginal");
+            Check(MediaInfo.ReadTakenDate(original, out taken) == TakenDateReadResult.Found, "RW2 metadata state");
 
             string fallback = MakeExifJpeg("fallback.rw2", "0000:00:00 00:00:00",
                 "2021:05:06 07:08:09", "2022:06:07 08:09:10");
@@ -704,6 +705,8 @@ namespace AppManager
 
             string noValidDate = MakeExifJpeg("invalid.rw2", "0000:00:00 00:00:00");
             Check(!MediaInfo.TryGetTakenDate(noValidDate, out taken), "invalid RW2 EXIF accepted");
+            Check(MediaInfo.ReadTakenDate(noValidDate, out taken) == TakenDateReadResult.NoDate,
+                "readable RW2 without valid EXIF was classified as retry");
 
             MethodInfo details = typeof(PropertiesDialog).GetMethod("ReadImageInfo", BindingFlags.NonPublic | BindingFlags.Static);
             object[] args = { original, 0, 0, null, null, null };
@@ -747,6 +750,8 @@ namespace AppManager
                 Check(ex.Message == WicImageDecoder.RawDecodeFailureMessage(registered), "empty RW2 message: " + ex.Message);
             }
             Check(!MediaInfo.TryGetTakenDate(empty, out taken), "empty RW2 capture time accepted");
+            Check(MediaInfo.ReadTakenDate(empty, out taken) == TakenDateReadResult.Permanent,
+                "broken RW2 was not classified as a permanent decode failure");
             using (Bitmap thumb = Icons.LoadCoverSource(empty, 32)) Check(thumb == null, "empty RW2 reached GDI+ fallback");
 
             string oversized = MakeExifJpeg("oversized.rw2", "2020:01:02 03:04:05");

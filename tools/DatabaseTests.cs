@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Imaging;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -39,6 +40,11 @@ namespace AppManager
             {
                 Run("migration, all fields, idempotence and original XML preserved", Migration);
                 Run("RW2 capture-date index refresh is targeted, idempotent and updates listings", Rw2MetadataIndexRefresh);
+                Run("RW2 v1 marker is ignored; unknown or missing decoder defers v2", Rw2MigrationDecoderGuard);
+                Run("readable RW2 without EXIF completes with modification-time fallback", Rw2WithoutExifCompletes);
+                Run("metadata index continues after budget and retries offline files", MetadataIndexContinuation);
+                Run("catalog retry columns migrate idempotently", CatalogRetryColumnsMigration);
+                Run("metadata retry backoff persists, skips early retries and recovers", MetadataRetryBackoff);
                 Run("stable category and collection ids on rename", Rename);
                 Run("nested collection keys, indexes and parent ids survive reload", CollectionTree);
                 Run("nested collection subtree rename migrates keys, references and ids", CollectionSubtreeRename);
@@ -556,7 +562,7 @@ namespace AppManager
 
         private static void Rw2MetadataIndexRefresh()
         {
-            if (WicImageDecoder.IsRw2WicDecoderRegistered() == false)
+            if (WicImageDecoder.IsRw2WicDecoderRegistered() != true)
             {
                 Console.WriteLine("  RW2 WIC decoder unavailable; migration retry is deferred until it is installed");
                 return;
@@ -593,7 +599,9 @@ namespace AppManager
                 db.Execute("UPDATE listing SET modified=111 WHERE item_id=?", rw2Id);
                 db.Execute("UPDATE catalog SET indexed=1,modified=222 WHERE item_id=?", jpgId);
                 db.Execute("UPDATE listing SET modified=222 WHERE item_id=?", jpgId);
-                db.Execute("DELETE FROM metadata WHERE key='rw2_taken_date_index_v1'");
+                // 模拟已运行过有缺陷的 v1 迁移：旧标记存在，但 RW2 仍是错误索引值。
+                db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('rw2_taken_date_index_v1','1')");
+                db.Execute("DELETE FROM metadata WHERE key='rw2_taken_date_index_v2'");
             }
 
             AppConfig refreshed = ConfigDatabase.Load(path); Check(!refreshed.LoadFailed, refreshed.DatabaseError);
@@ -601,12 +609,12 @@ namespace AppManager
             {
                 Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", rw2Id) == "0", "RW2 was not queued for reindex");
                 Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", jpgId) == "1", "non-RW2 was reindexed");
-                Check(db.Scalar("SELECT value FROM metadata WHERE key='rw2_taken_date_index_v1'") == "1", "migration marker missing");
+                Check(db.Scalar("SELECT value FROM metadata WHERE key='rw2_taken_date_index_v2'") == "1", "v2 migration marker missing");
                 Check(db.Scalar("SELECT modified FROM listing WHERE item_id=?", rw2Id) == "111", "listing changed before reindex");
             }
 
-            refreshed.Database.IndexMetadata(null);
             long expected = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified).ToUniversalTime().Ticks;
+            refreshed.Database.IndexMetadata(null);
             using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
             {
                 Check(Convert.ToInt64(db.Scalar("SELECT modified FROM catalog WHERE item_id=?", rw2Id)) == expected,
@@ -617,10 +625,255 @@ namespace AppManager
                     "non-RW2 listing date changed");
             }
 
+            // 待处理文件暂时不可读：保留旧值并进入重试状态，恢复后再次索引必须成功。
+            byte[] rw2Bytes = File.ReadAllBytes(rw2);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+            {
+                db.Execute("UPDATE catalog SET indexed=0,retry_count=0,next_retry=0,modified=111 WHERE item_id=?", rw2Id);
+                db.Execute("UPDATE listing SET modified=111 WHERE item_id=?", rw2Id);
+            }
+            File.Delete(rw2);
+            MetadataIndexOutcome offline = refreshed.Database.IndexMetadata(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(offline == MetadataIndexOutcome.RetryPending, "offline RW2 did not request retry: " + offline);
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", rw2Id) == "2", "offline RW2 was marked complete");
+                Check(db.Scalar("SELECT retry_count FROM catalog WHERE item_id=?", rw2Id) == "1", "offline RW2 retry count not recorded");
+                Check(Convert.ToInt64(db.Scalar("SELECT next_retry FROM catalog WHERE item_id=?", rw2Id)) > 0, "offline RW2 retry time not scheduled");
+                Check(Convert.ToInt64(db.Scalar("SELECT modified FROM listing WHERE item_id=?", rw2Id)) == 111,
+                    "offline RW2 overwrote the previous listing value");
+            }
+            File.WriteAllBytes(rw2, rw2Bytes);
+            File.SetLastWriteTime(rw2, new DateTime(2030, 1, 1, 0, 0, 0));
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+                db.Execute("UPDATE catalog SET next_retry=0 WHERE item_id=?", rw2Id);   // 模拟退避时间已到
+            MetadataIndexOutcome recovered = refreshed.Database.IndexMetadata(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(recovered == MetadataIndexOutcome.Complete, "recovered RW2 did not finish indexing: " + recovered);
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", rw2Id) == "1", "recovered RW2 stayed retryable");
+                Check(db.Scalar("SELECT retry_count FROM catalog WHERE item_id=?", rw2Id) == "0", "recovered RW2 kept retry count");
+                Check(db.Scalar("SELECT next_retry FROM catalog WHERE item_id=?", rw2Id) == "0", "recovered RW2 kept retry time");
+                Check(Convert.ToInt64(db.Scalar("SELECT modified FROM listing WHERE item_id=?", rw2Id)) == expected,
+                    "recovered RW2 did not refresh the listing date");
+            }
+
             AppConfig again = ConfigDatabase.Load(path); Check(!again.LoadFailed, again.DatabaseError);
             using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
                 Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", rw2Id) == "1", "migration was not idempotent");
         }
+
+        private static void Rw2MigrationDecoderGuard()
+        {
+            string folder = Folder("rw2-decoder-guard");
+            string path = Path.Combine(folder, "config.xml");
+            string rw2 = Path.Combine(folder, "photo.rw2");
+            File.WriteAllText(rw2, "fixture");
+            AppConfig source = new AppConfig();
+            source.ResourceCategories.Add("照片");
+            source.AddedItems.Add(new AddedEntry { Path = rw2, Name = "photo", Category = "照片", IsResource = true });
+            Check(source.SaveTo(path), "decoder guard fixture export");
+            AppConfig loaded = ConfigDatabase.Load(path);
+            Check(!loaded.LoadFailed, loaded.DatabaseError);
+
+            long id;
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+            {
+                id = Convert.ToInt64(db.Scalar("SELECT id FROM entries WHERE key=?", "add:" + rw2));
+                db.Execute("UPDATE catalog SET indexed=1,modified=111 WHERE item_id=?", id);
+                db.Execute("DELETE FROM metadata WHERE key IN ('rw2_taken_date_index_v1','rw2_taken_date_index_v2')");
+            }
+
+            loaded.Database.RepairRw2TakenDateIndex(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", id) == "1", "unknown decoder state queued RW2");
+                Check(db.Scalar("SELECT value FROM metadata WHERE key='rw2_taken_date_index_v2'") == null, "unknown decoder state wrote marker");
+            }
+
+            loaded.Database.RepairRw2TakenDateIndex(false);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", id) == "1", "missing decoder queued RW2");
+                Check(db.Scalar("SELECT value FROM metadata WHERE key='rw2_taken_date_index_v2'") == null, "missing decoder wrote marker");
+            }
+
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+                db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('rw2_taken_date_index_v1','1')");
+            loaded.Database.RepairRw2TakenDateIndex(true);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", id) == "0", "available decoder did not queue RW2");
+                Check(db.Scalar("SELECT value FROM metadata WHERE key='rw2_taken_date_index_v2'") == "1", "v1 marker suppressed v2 migration");
+            }
+        }
+
+        private static void MetadataIndexContinuation()
+        {
+            string folder = Folder("metadata-continuation");
+            string path = Path.Combine(folder, "config.xml");
+            AppConfig source = new AppConfig();
+            source.ResourceCategories.Add("文档");
+            for (int i = 0; i < 300; i++)
+            {
+                string file = Path.Combine(folder, "note-" + i.ToString(CultureInfo.InvariantCulture) + ".txt");
+                File.WriteAllText(file, "x");
+                source.AddedItems.Add(new AddedEntry { Path = file, Name = "note-" + i, Category = "文档", IsResource = true });
+            }
+            Check(source.SaveTo(path), "continuation fixture export");
+            AppConfig loaded = ConfigDatabase.Load(path);
+            Check(!loaded.LoadFailed, loaded.DatabaseError);
+
+            MetadataIndexOutcome first = loaded.Database.IndexMetadata(null, TimeSpan.FromMilliseconds(1));
+            Check(first == MetadataIndexOutcome.MorePending, "short metadata budget did not report pending work: " + first);
+            MetadataIndexOutcome second = loaded.Database.IndexMetadata(null);
+            Check(second == MetadataIndexOutcome.Complete, "metadata index did not continue to completion: " + second);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+                Check(db.Scalar("SELECT count(*) FROM catalog WHERE active=1 AND indexed<>1") == "0", "metadata queue was not drained");
+        }
+
+        private static void CatalogRetryColumnsMigration()
+        {
+            string folder = Folder("catalog-retry-columns");
+            string path = Path.Combine(folder, "legacy.db");
+            MethodInfo ensure = typeof(ConfigDatabase).GetMethod("EnsureIndexes", BindingFlags.Static | BindingFlags.NonPublic);
+            using (Sqlite db = new Sqlite(path, false))
+            {
+                db.Execute("CREATE TABLE entries(id INTEGER PRIMARY KEY,key TEXT NOT NULL)");
+                db.Execute("CREATE TABLE catalog(item_id INTEGER PRIMARY KEY,indexed INTEGER NOT NULL DEFAULT 0)");
+                ensure.Invoke(null, new object[] { db });
+                Check(HasColumn(db, "catalog", "retry_count"), "retry_count column was not added");
+                Check(HasColumn(db, "catalog", "next_retry"), "next_retry column was not added");
+                ensure.Invoke(null, new object[] { db });
+                Check(HasColumn(db, "catalog", "retry_count") && HasColumn(db, "catalog", "next_retry"),
+                    "retry column migration was not idempotent");
+            }
+            using (Sqlite db = new Sqlite(path, true))
+                Check(db.Scalar("PRAGMA quick_check") == "ok", "retry column migration damaged the database");
+        }
+
+        private static bool HasColumn(Sqlite db, string table, string column)
+        {
+            foreach (string[] row in db.Query("PRAGMA table_info(" + table + ")"))
+                if (row.Length > 1 && row[1] == column) return true;
+            return false;
+        }
+
+        private static void MetadataRetryBackoff()
+        {
+            string folder = Folder("metadata-retry-backoff");
+            string path = Path.Combine(folder, "config.xml");
+            string rw2 = Path.Combine(folder, "broken.rw2");
+            File.WriteAllText(rw2, "not a raw image");
+            AppConfig source = new AppConfig();
+            source.ResourceCategories.Add("照片");
+            source.AddedItems.Add(new AddedEntry { Path = rw2, Name = "broken", Category = "照片", IsResource = true });
+            Check(source.SaveTo(path), "retry fixture export");
+            AppConfig loaded = ConfigDatabase.Load(path);
+            Check(!loaded.LoadFailed, loaded.DatabaseError);
+            long id;
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+            {
+                id = Convert.ToInt64(db.Scalar("SELECT id FROM entries WHERE key=?", "add:" + rw2));
+                db.Execute("UPDATE catalog SET indexed=0,retry_count=0,next_retry=0 WHERE item_id=?", id);
+            }
+
+            long before = DateTime.UtcNow.Ticks;
+            MetadataIndexOutcome first = loaded.Database.IndexMetadata(null);
+            long firstRetry, firstNext;
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(first == MetadataIndexOutcome.RetryPending, "corrupt RW2 did not enter retry: " + first);
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", id) == "2", "corrupt RW2 was marked complete");
+                firstRetry = Convert.ToInt64(db.Scalar("SELECT retry_count FROM catalog WHERE item_id=?", id));
+                firstNext = Convert.ToInt64(db.Scalar("SELECT next_retry FROM catalog WHERE item_id=?", id));
+                Check(firstRetry == 1, "first retry count mismatch: " + firstRetry);
+                Check(firstNext > before, "first retry time was not in the future");
+                Check(firstNext <= DateTime.UtcNow.AddHours(24).Ticks + TimeSpan.FromMinutes(1).Ticks,
+                    "first retry delay exceeded the cap");
+            }
+            Check(loaded.Database.NextMetadataRetryUtcTicks() == firstNext, "next retry time was not exposed for scheduling");
+
+            MetadataIndexOutcome early = loaded.Database.IndexMetadata(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(early == MetadataIndexOutcome.RetryPending, "early retry did not stay pending: " + early);
+                Check(Convert.ToInt64(db.Scalar("SELECT retry_count FROM catalog WHERE item_id=?", id)) == firstRetry,
+                    "early retry advanced the retry count");
+                Check(Convert.ToInt64(db.Scalar("SELECT next_retry FROM catalog WHERE item_id=?", id)) == firstNext,
+                    "early retry changed the retry time");
+            }
+
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+                db.Execute("UPDATE catalog SET next_retry=0 WHERE item_id=?", id);
+            MetadataIndexOutcome second = loaded.Database.IndexMetadata(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(second == MetadataIndexOutcome.RetryPending, "second corrupt attempt did not stay pending: " + second);
+                Check(Convert.ToInt64(db.Scalar("SELECT retry_count FROM catalog WHERE item_id=?", id)) == 2,
+                    "second corrupt attempt did not advance the retry count");
+            }
+
+            long capBefore = DateTime.UtcNow.Ticks;
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+                db.Execute("UPDATE catalog SET retry_count=1000,next_retry=0 WHERE item_id=?", id);
+            MetadataIndexOutcome capped = loaded.Database.IndexMetadata(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(capped == MetadataIndexOutcome.RetryPending, "capped retry did not stay pending: " + capped);
+                long capNext = Convert.ToInt64(db.Scalar("SELECT next_retry FROM catalog WHERE item_id=?", id));
+                Check(capNext > capBefore, "capped retry time was not in the future");
+                Check(capNext <= capBefore + TimeSpan.FromHours(24).Ticks + TimeSpan.FromMinutes(1).Ticks,
+                    "retry backoff exceeded the 24 hour cap");
+                Check(Convert.ToInt64(db.Scalar("SELECT retry_count FROM catalog WHERE item_id=?", id)) == 1000,
+                    "retry count cap was not stable");
+            }
+
+            using (Bitmap bitmap = new Bitmap(4, 2)) bitmap.Save(rw2, ImageFormat.Jpeg);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+                db.Execute("UPDATE catalog SET next_retry=0 WHERE item_id=?", id);
+            MetadataIndexOutcome recovered = loaded.Database.IndexMetadata(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(recovered == MetadataIndexOutcome.Complete, "replaced RW2 did not recover: " + recovered);
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", id) == "1", "replaced RW2 stayed retryable");
+                Check(db.Scalar("SELECT retry_count FROM catalog WHERE item_id=?", id) == "0", "recovered RW2 kept retry count");
+                Check(db.Scalar("SELECT next_retry FROM catalog WHERE item_id=?", id) == "0", "recovered RW2 kept retry time");
+            }
+        }
+
+        private static void Rw2WithoutExifCompletes()
+        {
+            string folder = Folder("rw2-no-exif");
+            string path = Path.Combine(folder, "config.xml");
+            string rw2 = Path.Combine(folder, "plain.rw2");
+            using (Bitmap bitmap = new Bitmap(4, 2)) bitmap.Save(rw2, ImageFormat.Jpeg);
+            DateTime fallback = new DateTime(2019, 3, 4, 5, 6, 7, DateTimeKind.Utc);
+            File.SetLastWriteTimeUtc(rw2, fallback);
+
+            AppConfig source = new AppConfig();
+            source.ResourceCategories.Add("照片");
+            source.AddedItems.Add(new AddedEntry { Path = rw2, Name = "plain", Category = "照片", IsResource = true });
+            Check(source.SaveTo(path), "no-EXIF fixture export");
+            AppConfig loaded = ConfigDatabase.Load(path);
+            Check(!loaded.LoadFailed, loaded.DatabaseError);
+            long id;
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+            {
+                id = Convert.ToInt64(db.Scalar("SELECT id FROM entries WHERE key=?", "add:" + rw2));
+                db.Execute("UPDATE catalog SET indexed=0,modified=-1 WHERE item_id=?", id);
+            }
+
+            MetadataIndexOutcome outcome = loaded.Database.IndexMetadata(null);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(outcome == MetadataIndexOutcome.Complete, "no-EXIF RW2 requested retry: " + outcome);
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", id) == "1", "no-EXIF RW2 was not completed");
+                Check(Convert.ToInt64(db.Scalar("SELECT modified FROM catalog WHERE item_id=?", id)) == fallback.Ticks,
+                    "no-EXIF RW2 did not fall back to file modification time");
+            }
+        }
+
         private static void UiPaging()
         {
             AppConfig c = ConfigDatabase.Load(Path.Combine(root, "paging", "config.xml"));

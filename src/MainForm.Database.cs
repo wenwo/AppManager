@@ -34,6 +34,9 @@ namespace AppManager
         private const int DatabaseRetainedLimit = 1000;
         private Rectangle databasePrevious, databaseNext;
         private bool databaseMetadataRunning;
+        private System.Windows.Forms.Timer databaseMetadataRetryTimer;
+        private const int DatabaseMetadataRetryDelayMs = 30000;
+        private const int DatabaseMetadataRetryMaxDelayMs = 24 * 60 * 60 * 1000;
 
         private void BindDatabaseErrors()
         {
@@ -69,19 +72,62 @@ namespace AppManager
         private void ScheduleDatabaseMetadata()
         {
             if (databaseMetadataRunning || config.Database == null) return;
+            if (databaseMetadataRetryTimer != null) databaseMetadataRetryTimer.Stop();
             databaseMetadataRunning = true;
             ConfigDatabase store = config.Database;
             ThreadPool.QueueUserWorkItem(delegate
             {
-                try { store.IndexMetadata(delegate { return IsDisposed || Disposing || config.Database != store; }); }
+                MetadataIndexOutcome outcome = MetadataIndexOutcome.Canceled;
+                long nextRetryUtcTicks = 0;
+                try
+                {
+                    outcome = store.IndexMetadata(delegate { return IsDisposed || Disposing || config.Database != store; });
+                    if (outcome == MetadataIndexOutcome.RetryPending) nextRetryUtcTicks = store.NextMetadataRetryUtcTicks();
+                }
                 catch (Exception ex) { Paths.LogError(ex); }
                 RunOnUi(delegate
                 {
                     databaseMetadataRunning = false;
-                    if (config.Database != store) return;
+                    if (IsDisposed || Disposing || config.Database != store) return;
                     if (listSortColumn == "size" || listSortColumn == "time") { databaseContext = null; RefreshGrid(true); }
+                    if (outcome == MetadataIndexOutcome.MorePending) ScheduleDatabaseMetadata();
+                    else if (outcome == MetadataIndexOutcome.RetryPending) ScheduleDatabaseMetadataRetry(nextRetryUtcTicks);
                 });
             });
+        }
+
+        private void ScheduleDatabaseMetadataRetry(long nextRetryUtcTicks)
+        {
+            if (IsDisposed || Disposing || config.Database == null) return;
+            int delay = DatabaseMetadataRetryDelayMs;
+            if (nextRetryUtcTicks > 0)
+            {
+                long remaining = nextRetryUtcTicks - DateTime.UtcNow.Ticks;
+                delay = remaining <= 0
+                    ? 1000
+                    : (int)Math.Min((long)DatabaseMetadataRetryMaxDelayMs,
+                        Math.Max(1000L, remaining / TimeSpan.TicksPerMillisecond));
+            }
+            if (databaseMetadataRetryTimer == null)
+            {
+                databaseMetadataRetryTimer = new System.Windows.Forms.Timer();
+                databaseMetadataRetryTimer.Tick += delegate
+                {
+                    databaseMetadataRetryTimer.Stop();
+                    ScheduleDatabaseMetadata();
+                };
+            }
+            databaseMetadataRetryTimer.Stop();
+            databaseMetadataRetryTimer.Interval = delay;
+            databaseMetadataRetryTimer.Start();
+        }
+
+        private void DisposeDatabaseMetadataRetryTimer()
+        {
+            if (databaseMetadataRetryTimer == null) return;
+            databaseMetadataRetryTimer.Stop();
+            databaseMetadataRetryTimer.Dispose();
+            databaseMetadataRetryTimer = null;
         }
 
         private List<AppInfo> ReadDatabasePage(string keyword)
