@@ -415,13 +415,13 @@ namespace AppManager
         }
 
         private void QueueImport(string[] paths, ImportOperation operation, string category, string collection, bool resource, uint sequence,
-            Action<ImportBatch> completed = null)
+            Action<ImportBatch> completed = null, int copyBytesPerSecond = 0)
         {
-            QueueImportWithCancellation(paths, operation, category, collection, resource, sequence, completed, importCancel.Token);
+            QueueImportWithCancellation(paths, operation, category, collection, resource, sequence, completed, importCancel.Token, copyBytesPerSecond);
         }
 
         private void QueueImportWithCancellation(string[] paths, ImportOperation operation, string category, string collection, bool resource,
-            uint sequence, Action<ImportBatch> completed, CancellationToken cancel)
+            uint sequence, Action<ImportBatch> completed, CancellationToken cancel, int copyBytesPerSecond = 0)
         {
             // 目标与动作均在投放/粘贴时冻结；存储目录也在此算好（只读配置、不建目录）。
             // 路径归属、文件夹内收录检查等预处理放进导入队列在后台执行，批量拖入几千个文件时不卡界面；
@@ -437,6 +437,7 @@ namespace AppManager
                         RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; }, knownRoots)
                     : PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
                         RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
+                prepared.CopyBytesPerSecond = copyBytesPerSecond;
                 if (prepared.Items.Count == 0) { if (completed != null) completed(prepared); return; }
                 EnqueueImport(delegate { RunPreparedImport(prepared, activeRoots, completed, cancel); });
                 return;
@@ -469,6 +470,7 @@ namespace AppManager
                     });
                     return;
                 }
+                prepared.CopyBytesPerSecond = copyBytesPerSecond;
                 if (prepared.Items.Count == 0) { RunOnUi(delegate { if (completed != null) completed(prepared); }); return; }
                 RunPreparedImport(prepared, activeRoots, completed, cancel);
             });
@@ -677,11 +679,12 @@ namespace AppManager
             foreach (ImportItem item in committed)
             {
                 if (SetCategoryExcluded(new AppInfo { Key = "add:" + item.Target }, batch.Category, false)) exclusions.Add(item.Target);
-                if (FindAddedEntry(item.Target, batch.Category) < 0)
+                List<AddedEntry> known;
+                knownTargets.TryGetValue(item.Target, out known);
+                if (known != null && known.Count == 0) known = null;
+                bool alreadyInCategory = known != null && known.Any(entry => entry.Category == batch.Category);
+                if (!alreadyInCategory)
                 {
-                    List<AddedEntry> known;
-                    knownTargets.TryGetValue(item.Target, out known);
-                    if (known != null && known.Count == 0) known = null;
                     if (known != null && known.Any(entry => entry.IsResource == batch.Resource))
                     {
                         if (CollectionOps.AddMember(config, "add:" + item.Target, batch.Category)) categories.Add("add:" + item.Target);

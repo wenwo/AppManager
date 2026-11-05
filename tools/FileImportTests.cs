@@ -183,6 +183,28 @@ namespace AppManager
                     Check(batch.Items.All(i => File.Exists(i.Source) && File.ReadAllText(i.Source) == File.ReadAllText(i.Target) && i.State == FileImport.Copied), "copy");
                     Check(Reload(batch).Committed, "journal");
                 });
+                Test("optional copy rate limit preserves data and cancellation", delegate
+                {
+                    ImportBatch batch = Batch(ImportOperation.Copy, "large-photo.bin");
+                    File.WriteAllBytes(batch.Items[0].Source, new byte[256 * 1024]);
+                    batch.CopyBytesPerSecond = 1024 * 1024;
+                    System.Diagnostics.Stopwatch elapsed = System.Diagnostics.Stopwatch.StartNew();
+                    Run(batch);
+                    elapsed.Stop();
+                    Check(elapsed.ElapsedMilliseconds >= 180, "copy was not rate limited: " + elapsed.ElapsedMilliseconds);
+                    Check(batch.Items[0].State == FileImport.Copied && File.Exists(batch.Items[0].Source)
+                        && new FileInfo(batch.Items[0].Target).Length == 256 * 1024, "rate-limited copy changed data or source");
+                    Check(Reload(batch).CopyBytesPerSecond == batch.CopyBytesPerSecond, "rate limit not persisted for recovery");
+                    FileImport.CopyRateLimiter limiter = new FileImport.CopyRateLimiter(1);
+                    using (CancellationTokenSource cancel = new CancellationTokenSource())
+                    {
+                        cancel.Cancel();
+                        bool canceled = false;
+                        try { limiter.Throttle(1, cancel.Token); }
+                        catch (OperationCanceledException) { canceled = true; }
+                        Check(canceled, "rate limit wait ignored cancellation");
+                    }
+                });
                 Test("batch move commits while every source is still present", delegate
                 {
                     ImportBatch batch = Batch(ImportOperation.Move, "a.txt", "b.txt");

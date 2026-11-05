@@ -516,6 +516,7 @@ namespace AppManager
             try { if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { StopMusicPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { if (musicSession != null) musicSession.Dispose(); } catch (Exception ex) { Paths.LogError(ex); }
+            try { if (localPhotoScanCancel != null) localPhotoScanCancel.Cancel(); } catch (Exception ex) { Paths.LogError(ex); }
             importTip.Dispose();
             if (importStatusTimer != null) importStatusTimer.Dispose();
             StopAutoScan();
@@ -5484,6 +5485,7 @@ namespace AppManager
             items.Add(paste);
             items.Add(MkMenu("导入记录…", ShowImportHistory));
             items.Add(MkSep());
+            if (currentCategory == "照片") items.Add(MkMenu("整理本机照片…", OrganizeLocalPhotos));
             string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
             items.Add(MkMenu("添加" + typeName + "…", delegate { PickFiles(); }));
             items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));

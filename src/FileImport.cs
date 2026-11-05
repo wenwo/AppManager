@@ -55,6 +55,7 @@ namespace AppManager
         public string Id = Guid.NewGuid().ToString("N"), Category, Collection, Error;
         public bool Resource, Committed, DeleteAuthorized, Finished, SpaceLimited, Stopped;
         public ImportOperation Operation;
+        public int CopyBytesPerSecond;
         public List<ImportItem> Items = new List<ImportItem>();
         [XmlIgnore] public string JournalDirectory;
         [XmlIgnore] public uint ClipboardSequence;
@@ -66,6 +67,28 @@ namespace AppManager
     // 日志用于中断恢复：启动时清理临时落点、撤回未入库副本，不自动重试删源。
     internal static class FileImport
     {
+        internal sealed class CopyRateLimiter
+        {
+            private readonly int bytesPerSecond;
+
+            internal CopyRateLimiter(int limit)
+            {
+                if (limit <= 0) throw new ArgumentOutOfRangeException("limit");
+                bytesPerSecond = limit;
+            }
+
+            internal void Throttle(int count, CancellationToken cancel)
+            {
+                long remaining = (long)count * 1000 / bytesPerSecond;
+                while (remaining > 0)
+                {
+                    int wait = (int)Math.Min(100, remaining);
+                    if (cancel.WaitHandle.WaitOne(wait)) cancel.ThrowIfCancellationRequested();
+                    remaining -= wait;
+                }
+            }
+        }
+
         internal const string Waiting = "等待", Copied = "已复制", Linked = "已收录", Skipped = "已跳过", Failed = "失败",
             Moved = "已移动", DeleteFailed = "源文件删除失败", RolledBack = "已撤回";
         internal const string SpaceMessage = "磁盘空间不足，已停止后续操作。尚未删除的源文件已保留，请释放空间后再处理。";
@@ -558,7 +581,8 @@ namespace AppManager
         // ===== 落地 =====
 
         // 落地单个文件，返回后续文件是否继续尝试硬链接。
-        private static bool Place(string source, string target, ImportFileStamp stamp, bool link, CancellationToken cancel)
+        private static bool Place(string source, string target, ImportFileStamp stamp, bool link, CancellationToken cancel,
+            CopyRateLimiter limiter = null)
         {
             // 共享读打开：其他进程正在写入的文件直接失败，避免搬走写了一半的数据。
             using (FileStream input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 1 << 16, FileOptions.SequentialScan))
@@ -584,6 +608,7 @@ namespace AppManager
                         cancel.ThrowIfCancellationRequested();
                         output.Write(buffer, 0, read);
                         sha.TransformBlock(buffer, 0, read, null, 0);
+                        if (limiter != null) limiter.Throttle(read, cancel);
                     }
                     sha.TransformFinalBlock(buffer, 0, 0);
                     output.Flush(true);
@@ -591,7 +616,7 @@ namespace AppManager
                     stamp.Hash = Convert.ToBase64String(sha.Hash);
                 }
             }
-            stamp.Streams = CopyStreams(source, target, cancel);
+            stamp.Streams = CopyStreams(source, target, cancel, limiter);
             FileInfo from = new FileInfo(source);
             File.SetCreationTimeUtc(target, from.CreationTimeUtc);
             File.SetLastWriteTimeUtc(target, new DateTime(stamp.Modified, DateTimeKind.Utc));
@@ -626,7 +651,7 @@ namespace AppManager
             return result;
         }
 
-        private static List<ImportStreamStamp> CopyStreams(string source, string target, CancellationToken cancel)
+        private static List<ImportStreamStamp> CopyStreams(string source, string target, CancellationToken cancel, CopyRateLimiter limiter)
         {
             List<ImportStreamStamp> streams = Streams(source);
             if (streams.Count == 0) return streams;
@@ -645,6 +670,7 @@ namespace AppManager
                         while ((read = input.Read(buffer, 0, buffer.Length)) != 0)
                         {
                             cancel.ThrowIfCancellationRequested(); output.Write(buffer, 0, read); sha.TransformBlock(buffer, 0, read, null, 0);
+                            if (limiter != null) limiter.Throttle(read, cancel);
                         }
                         sha.TransformFinalBlock(buffer, 0, 0); output.Flush(true);
                         if (output.Length != stream.Length) throw new IOException("数据流长度已变化：" + stream.Name);
@@ -679,14 +705,14 @@ namespace AppManager
             catch { foreach (FileStream stream in held) stream.Dispose(); throw; }
         }
 
-        private static void CopyDirectoryInfo(ImportItem item, string staging, CancellationToken cancel)
+        private static void CopyDirectoryInfo(ImportItem item, string staging, CancellationToken cancel, CopyRateLimiter limiter)
         {
             foreach (string dir in item.Directories.OrderByDescending(d => d.Length))
             {
                 cancel.ThrowIfCancellationRequested();
                 DirectoryInfo from = new DirectoryInfo(At(item, item.Source, dir)), to = new DirectoryInfo(At(item, staging, dir));
                 item.TargetDirectories.Add(new ImportDirectoryStamp { Relative = dir, TargetId = Identity(to.FullName),
-                    Streams = CopyStreams(from.FullName, to.FullName, cancel) });
+                    Streams = CopyStreams(from.FullName, to.FullName, cancel, limiter) });
                 to.CreationTimeUtc = from.CreationTimeUtc;
                 to.LastWriteTimeUtc = from.LastWriteTimeUtc;
                 FileAttributes keep = from.Attributes & (FileAttributes.Hidden | FileAttributes.System);
@@ -717,6 +743,7 @@ namespace AppManager
 
         private static void CopyAll(ImportBatch batch, Action<int, string> progress, CancellationToken cancel)
         {
+            CopyRateLimiter limiter = batch.CopyBytesPerSecond > 0 ? new CopyRateLimiter(batch.CopyBytesPerSecond) : null;
             for (int i = 0; i < batch.Items.Count; i++)
             {
                 ImportItem item = batch.Items[i];
@@ -780,10 +807,10 @@ namespace AppManager
                         foreach (ImportFileStamp stamp in item.Files)
                         {
                             cancel.ThrowIfCancellationRequested();
-                            link = Place(At(item, item.Source, stamp.Relative), At(item, staging, stamp.Relative), stamp, link, cancel);
+                            link = Place(At(item, item.Source, stamp.Relative), At(item, staging, stamp.Relative), stamp, link, cancel, limiter);
                         }
                         if (!item.Folder) item.StagingId = item.Files[0].TargetId;
-                        if (item.Folder) CopyDirectoryInfo(item, staging, cancel);
+                            if (item.Folder) CopyDirectoryInfo(item, staging, cancel, limiter);
                         CheckTree(item, false);
                         // CreateNew/Move 均不覆盖；其他进程占用目标名时，此项失败并保源。
                         if (item.Folder) Directory.Move(staging, item.Target); else File.Move(staging, item.Target);

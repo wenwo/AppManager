@@ -5,6 +5,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace AppManager
 {
@@ -122,6 +123,7 @@ namespace AppManager
             Case63_DpiScaling();
             Case64_SelfTargetExclusion();
             Case65_CategoryNameValidation();
+            Case66_LocalPhotoScan();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1605,6 +1607,75 @@ namespace AppManager
                     + " other=" + other + " empty=" + empty);
             }
             catch (Exception ex) { Assert(false, ex.Message); }
+        }
+
+        private static void Case66_LocalPhotoScan()
+        {
+            Begin("66 本机照片扫描：EXIF/修改时间归年、排除库目录、去重与取消");
+            string root = Path.Combine(Path.GetTempPath(), "AppManagerPhotos_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string nested = Path.Combine(root, "nested");
+                string store = Path.Combine(root, "store");
+                Directory.CreateDirectory(nested);
+                Directory.CreateDirectory(store);
+                string exif = Path.Combine(nested, "taken.jpg");
+                using (Bitmap bitmap = new Bitmap(1, 1))
+                {
+                    SetExifAscii(bitmap, 0x9003, "2020:01:02 03:04:05\0");
+                    bitmap.Save(exif, ImageFormat.Jpeg);
+                }
+                string fallback = Path.Combine(root, "fallback.png");
+                using (Bitmap bitmap = new Bitmap(1, 1)) bitmap.Save(fallback, ImageFormat.Png);
+                File.SetLastWriteTime(fallback, new DateTime(2024, 5, 6, 7, 8, 9));
+                string ignored = Path.Combine(root, "notes.txt");
+                File.WriteAllText(ignored, "not a photo");
+                string excluded = Path.Combine(store, "excluded.jpg");
+                File.Copy(exif, excluded);
+                string previous = Path.Combine(root, "previous.jpg");
+                File.Copy(exif, previous);
+                string previousTarget = Path.Combine(store, "registered.jpg");
+                File.Copy(exif, previousTarget);
+                string journal = Path.Combine(root, "journal");
+                Directory.CreateDirectory(journal);
+                ImportBatch batch = new ImportBatch
+                {
+                    Id = "photo-history", JournalDirectory = journal, Committed = true, Resource = true,
+                    Category = "照片", Operation = ImportOperation.Copy
+                };
+                batch.Items.Add(new ImportItem { Source = previous, Target = previousTarget, State = FileImport.Copied });
+                batch.Items.Add(new ImportItem { Source = fallback, Target = Path.Combine(store, "missing.jpg"), State = FileImport.Copied });
+                FileImport.Save(batch);
+                Func<List<string>, Dictionary<string, string>> registered = delegate(List<string> paths)
+                {
+                    Dictionary<string, string> registeredPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string path in paths)
+                        if (string.Equals(path, previousTarget, StringComparison.OrdinalIgnoreCase)) registeredPaths[path] = path;
+                    return registeredPaths;
+                };
+                Dictionary<string, string> imported = LocalPhotoScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
+
+                LocalPhotoScanResult result = LocalPhotoScanner.Scan(new[] { root, nested }, new[] { store }, imported,
+                    null, CancellationToken.None);
+                bool normal = result.Count == 3 && result.Reused == 1
+                    && result.Years[2020].Count == 2 && result.Years[2024].Count == 1
+                    && result.Years[2020].Contains(previousTarget)
+                    && File.Exists(exif) && File.Exists(fallback) && File.Exists(previous);
+
+                bool canceled = false;
+                using (CancellationTokenSource cancel = new CancellationTokenSource())
+                {
+                    cancel.Cancel();
+                    try { LocalPhotoScanner.Scan(new[] { root }, null, null, null, cancel.Token); }
+                    catch (OperationCanceledException) { canceled = true; }
+                }
+                string missing = Path.Combine(root, "missing");
+                LocalPhotoScanResult failed = LocalPhotoScanner.Scan(new[] { missing }, null, null, null, CancellationToken.None);
+                Assert(normal && canceled && failed.UnreadableDirectories == 1,
+                    "normal=" + normal + " canceled=" + canceled + " failures=" + failed.UnreadableDirectories);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(root); }
         }
 
         private static void SetExifAscii(Image image, int id, string text)
