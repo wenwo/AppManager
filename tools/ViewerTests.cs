@@ -57,6 +57,8 @@ namespace AppManager
                 Run("PDF corrupt/missing/oversize/cancelled inputs recover", PdfFailures);
                 Run("PDF repeated rendering releases GDI handles", PdfRepeated);
                 Run("viewer rapid switch/close and text selection keys", ViewerLifecycle);
+                Run("viewer resource context reports current item and preserves text body menu", ViewerResourceContext);
+                Run("viewer real mouse input at 96/144 dpi", ViewerRealMouseInput);
                 Run("music players advance to the next track when a song ends", MusicAutoAdvance);
                 Run("music keeps playing while its full view is hidden", MusicHiddenPlayback);
                 Run("expanded and mini views share one engine without reloading", MusicSharedSession);
@@ -898,6 +900,303 @@ namespace AppManager
                 image.ClosePreview();
             }
             Application.DoEvents();
+        }
+
+        private static void ViewerResourceContext()
+        {
+            using (Form form = new Form())
+            using (ImageViewerControl image = new ImageViewerControl())
+            using (TextViewerControl text = new TextViewerControl())
+            using (ArchiveViewerControl archive = new ArchiveViewerControl())
+            using (VideoPlayerControl video = new VideoPlayerControl())
+            {
+                form.Controls.Add(image); form.Controls.Add(text);
+                form.Controls.Add(archive); form.Controls.Add(video);
+                image.Size = text.Size = archive.Size = video.Size = new Size(800, 600);
+                IntPtr handle = form.Handle;
+                handle = image.Handle; handle = text.Handle; handle = archive.Handle; handle = video.Handle;
+
+                string imagePath = MakeImage(), textPath = WriteText("context.txt", "abc", Encoding.UTF8);
+                string archivePath = MakeZip("context.zip", null, new string[][] { new string[] { "a.txt", "a" } });
+                string videoPath = Path.Combine(root, "context.mp4"); File.WriteAllBytes(videoPath, new byte[0]);
+
+                string reported = null; Point point = Point.Empty;
+                image.ResourceContextRequested += delegate(string path, Point at) { reported = path; point = at; };
+                image.Open(new List<string> { imagePath }, 0);
+                Pump(delegate { return Field(image, "image") != null; });
+                Call(image, "OnMouseDown", new MouseEventArgs(MouseButtons.Right, 1, 17, 23, 0));
+                Check(reported == imagePath && image.CurrentPath == imagePath, "image context path");
+                Check(point == image.PointToScreen(new Point(17, 23)), "image context point");
+
+                int textEvents = 0;
+                text.ResourceContextRequested += delegate { textEvents++; };
+                text.Open(new List<string> { textPath }, 0);
+                Pump(delegate { return !(bool)Field(text, "loading"); });
+                Call(text, "OnMouseDown", new MouseEventArgs(MouseButtons.Right, 1, 8, 8, 0));
+                Check(textEvents == 1, "text viewer chrome did not report context");
+                RichTextBox box = (RichTextBox)Field(text, "textBox");
+                IntPtr boxHandle = box.Handle;
+                typeof(Control).GetMethod("OnMouseDown", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(box, new object[] { new MouseEventArgs(MouseButtons.Right, 1, 8, 8, 0) });
+                Check(textEvents == 1, "text body triggered resource menu");
+
+                string archiveReported = null; Point archivePoint = Point.Empty;
+                archive.ResourceContextRequested += delegate(string path, Point at) { archiveReported = path; archivePoint = at; };
+                archive.Open(new List<string> { archivePath }, 0);
+                Pump(delegate { return !(bool)Field(archive, "loading"); });
+                ListView list = (ListView)Field(archive, "list");
+                IntPtr listHandle = list.Handle;
+                Point expected = list.PointToScreen(new Point(5, 7));
+                typeof(Control).GetMethod("OnMouseDown", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(list, new object[] { new MouseEventArgs(MouseButtons.Right, 1, 5, 7, 0) });
+                Check(archiveReported == archivePath && archive.CurrentPath == archivePath, "archive context path");
+                Check(archivePoint == expected, "archive context must convert through list coordinates");
+
+                Set(video, "paths", new List<string> { videoPath });
+                Set(video, "index", 0);
+                video.Visible = true;
+                string videoReported = null;
+                video.ResourceContextRequested += delegate(string path, Point at) { videoReported = path; };
+                System.Windows.Forms.Timer pendingClick = (System.Windows.Forms.Timer)Field(video, "clickTimer");
+                pendingClick.Start();
+                Call(video, "OnMouseDown", new MouseEventArgs(MouseButtons.Right, 1, 30, 40, 0));
+                Check(videoReported == videoPath && video.CurrentPath == videoPath, "video context path");
+                Check(!pendingClick.Enabled, "right click left the delayed play/pause pending");
+                Check(!video.Capture && !(bool)Field(video, "volDrag") && !(bool)Field(video, "seeking"),
+                    "right click captured the mouse or started dragging");
+
+                image.ClosePreview(); text.ClosePreview(); archive.ClosePreview();
+            }
+        }
+
+        private static void ViewerRealMouseInput()
+        {
+            foreach (int dpi in new int[] { 96, 144 })
+            {
+                using (DpiAwareForm form = new DpiAwareForm())
+                using (TextViewerControl text = new TextViewerControl())
+                {
+                    form.FormBorderStyle = FormBorderStyle.FixedSingle;
+                    form.StartPosition = FormStartPosition.Manual;
+                    form.ShowInTaskbar = false;
+                    form.TopMost = true;
+                    form.ClientSize = new Size(800, 600);
+                    text.Dock = DockStyle.Fill;
+                    form.Controls.Add(text);
+                    IntPtr handle = form.Handle;
+                    typeof(DpiAwareForm).GetMethod("InitializeDpiScaling", BindingFlags.NonPublic | BindingFlags.Instance)
+                        .Invoke(form, null);
+                    SetTestDpi(form, dpi, new Rectangle(40, 40, DpiHelper.Scale(800, dpi), DpiHelper.Scale(600, dpi)));
+                    form.Show();
+                    form.Activate();
+                    SetForegroundWindow(form.Handle);
+                    DrainFor(200);
+
+                    string path = WriteText("real-mouse-" + dpi + ".txt", "first line\nsecond line", Encoding.UTF8);
+                    int events = 0;
+                    text.ResourceContextRequested += delegate { events++; };
+                    text.Open(new List<string> { path }, 0);
+                    Pump(delegate { return !(bool)Field(text, "loading"); });
+                    RichTextBox box = (RichTextBox)Field(text, "textBox");
+                    Check(Shown(box), "text body is not visible at " + dpi + " dpi");
+
+                    Point body = box.PointToScreen(new Point(Math.Max(2, box.ClientSize.Width / 4), 18));
+                    bool nativeMenu;
+                    Check(WindowFromPoint(body) == box.Handle,
+                        "real right click did not hit the text body at " + dpi + " dpi");
+                    // WinForms RichTextBox 默认没有菜单；若后续附加 ContextMenuStrip，正文仍由子窗口自己处理。
+                    Check(box.ContextMenuStrip == null, "text body gained an unexpected context menu in the fixture");
+                    RealRightClick(form, body, out nativeMenu);
+                    Check(events == 0, "real right click on text body triggered the resource menu at " + dpi + " dpi");
+
+                    Point chrome = text.PointToScreen(new Point(8, 8));
+                    Check(WindowFromPoint(chrome) == text.Handle,
+                        "real right click did not hit the text chrome at " + dpi + " dpi");
+                    RealRightClick(form, chrome, out nativeMenu);
+                    Check(events == 1, "real right click on text chrome did not report the resource at " + dpi + " dpi");
+                    Check(!nativeMenu, "text chrome opened the native text menu at " + dpi + " dpi");
+                    text.ClosePreview();
+                }
+
+                using (DpiAwareForm form = new DpiAwareForm())
+                using (VideoPlayerControl video = new VideoPlayerControl())
+                {
+                    form.FormBorderStyle = FormBorderStyle.FixedSingle;
+                    form.StartPosition = FormStartPosition.Manual;
+                    form.ShowInTaskbar = false;
+                    form.TopMost = true;
+                    form.ClientSize = new Size(800, 600);
+                    video.Dock = DockStyle.Fill;
+                    video.Visible = true;
+                    form.Controls.Add(video);
+                    IntPtr handle = form.Handle;
+                    typeof(DpiAwareForm).GetMethod("InitializeDpiScaling", BindingFlags.NonPublic | BindingFlags.Instance)
+                        .Invoke(form, null);
+                    SetTestDpi(form, dpi, new Rectangle(40, 40, DpiHelper.Scale(800, dpi), DpiHelper.Scale(600, dpi)));
+                    form.Show();
+                    form.Activate();
+                    SetForegroundWindow(form.Handle);
+                    DrainFor(200);
+
+                    string path = Path.Combine(root, "real-mouse-" + dpi + ".mp4");
+                    File.WriteAllBytes(path, new byte[0]);
+                    Set(video, "paths", new List<string> { path });
+                    Set(video, "index", 0);
+                    Type hostType = typeof(VideoPlayerControl).GetNestedType("VideoHost", BindingFlags.NonPublic);
+                    Control host = (Control)Activator.CreateInstance(hostType, true);
+                    video.Controls.Add(host);
+                    host.Bounds = (Rectangle)typeof(VideoPlayerControl)
+                        .GetProperty("VideoArea", BindingFlags.NonPublic | BindingFlags.Instance).GetValue(video, null);
+                    host.Visible = true;
+                    IntPtr hostHandle = host.Handle;
+                    Check((GetWindowLongPtr(hostHandle, -16).ToInt64() & 0x08000000) != 0,
+                        "video render host is not disabled at " + dpi + " dpi");
+
+                    int events = 0;
+                    video.ResourceContextRequested += delegate { events++; };
+                    System.Windows.Forms.Timer pendingClick = (System.Windows.Forms.Timer)Field(video, "clickTimer");
+                    pendingClick.Start();
+                    Point inside = host.PointToScreen(new Point(Math.Max(2, host.ClientSize.Width / 2), Math.Max(2, host.ClientSize.Height / 2)));
+                    Check(WindowFromPoint(inside) != hostHandle,
+                        "disabled video host still receives hit testing at " + dpi + " dpi");
+                    bool nativeMenu;
+                    RealRightClick(form, inside, out nativeMenu);
+                    Check(events == 1, "real right click did not pass through the disabled video host at " + dpi + " dpi");
+                    Check(!pendingClick.Enabled, "video right click left a delayed play/pause at " + dpi + " dpi");
+                    Check(!video.Capture && !(bool)Field(video, "volDrag") && !(bool)Field(video, "seeking"),
+                        "video right click captured the mouse or started dragging at " + dpi + " dpi");
+                    Check(!nativeMenu, "video host opened a native menu at " + dpi + " dpi");
+                    host.Visible = false;
+                }
+            }
+        }
+
+        private const int WM_DPICHANGED = 0x02E0;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_KEYUP = 0x0101;
+        private const int VK_ESCAPE = 0x1B;
+        private const uint INPUT_MOUSE = 0;
+        private const uint MOUSEEVENTF_RIGHTDOWN = 0x0008;
+        private const uint MOUSEEVENTF_RIGHTUP = 0x0010;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MouseInput
+        {
+            public int dx, dy;
+            public uint mouseData, flags, time;
+            public UIntPtr extraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Input
+        {
+            public uint type;
+            public MouseInput mouse;
+        }
+
+        private delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern uint SendInput(uint count, Input[] inputs, int size);
+        [DllImport("user32.dll")]
+        private static extern bool SetCursorPos(int x, int y);
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetClassName(IntPtr window, StringBuilder name, int capacity);
+        [DllImport("user32.dll")]
+        private static extern bool IsWindowVisible(IntPtr window);
+        [DllImport("user32.dll")]
+        private static extern IntPtr WindowFromPoint(Point point);
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetWindowLongPtr(IntPtr window, int index);
+        [DllImport("user32.dll")]
+        private static extern bool EndMenu();
+
+        private static void SetTestDpi(Form form, int dpi, Rectangle bounds)
+        {
+            IntPtr rect = Marshal.AllocHGlobal(16);
+            try
+            {
+                Marshal.Copy(new int[] { bounds.Left, bounds.Top, bounds.Right, bounds.Bottom }, 0, rect, 4);
+                Message message = Message.Create(form.Handle, WM_DPICHANGED, new IntPtr(dpi | (dpi << 16)), rect);
+                typeof(DpiAwareForm).GetMethod("WndProc", BindingFlags.NonPublic | BindingFlags.Instance)
+                    .Invoke(form, new object[] { message });
+            }
+            finally { Marshal.FreeHGlobal(rect); }
+        }
+
+        private static void DrainFor(int milliseconds)
+        {
+            Stopwatch watch = Stopwatch.StartNew();
+            while (watch.ElapsedMilliseconds < milliseconds)
+            {
+                Application.DoEvents();
+                Thread.Sleep(10);
+            }
+        }
+
+        private static IntPtr FindNativeMenu()
+        {
+            uint processId = (uint)Process.GetCurrentProcess().Id;
+            IntPtr found = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr window, IntPtr parameter)
+            {
+                uint owner;
+                GetWindowThreadProcessId(window, out owner);
+                if (owner != processId || !IsWindowVisible(window)) return true;
+                StringBuilder name = new StringBuilder(32);
+                GetClassName(window, name, name.Capacity);
+                if (name.ToString() != "#32768") return true;
+                found = window;
+                return false;
+            }, IntPtr.Zero);
+            return found;
+        }
+
+        private static void RealRightClick(Form form, Point screen, out bool nativeMenu)
+        {
+            Point previous = Cursor.Position;
+            bool seen = false;
+            using (System.Windows.Forms.Timer watch = new System.Windows.Forms.Timer { Interval = 20 })
+            {
+                watch.Tick += delegate
+                {
+                    IntPtr menu = FindNativeMenu();
+                    if (menu == IntPtr.Zero) return;
+                    seen = true;
+                    EndMenu();
+                };
+                watch.Start();
+                try
+                {
+                    form.TopMost = true;
+                    form.Activate();
+                    SetForegroundWindow(form.Handle);
+                    DrainFor(100);
+                    SetCursorPos(screen.X, screen.Y);
+                    Thread.Sleep(30);
+                    Input[] inputs = new Input[2];
+                    inputs[0].type = inputs[1].type = INPUT_MOUSE;
+                    inputs[0].mouse.flags = MOUSEEVENTF_RIGHTDOWN;
+                    inputs[1].mouse.flags = MOUSEEVENTF_RIGHTUP;
+                    Check(SendInput(2, inputs, Marshal.SizeOf(typeof(Input))) == 2,
+                        "SendInput did not deliver the real right click");
+                    DrainFor(800);
+                    IntPtr remaining = FindNativeMenu();
+                    if (remaining != IntPtr.Zero) { seen = true; EndMenu(); DrainFor(100); }
+                }
+                finally
+                {
+                    watch.Stop();
+                    SetCursorPos(previous.X, previous.Y);
+                }
+            }
+            nativeMenu = seen;
         }
         // 窗体未显示时 Control.Visible 恒为 false，读取控件自身的可见标志
         private static bool Shown(Control control)

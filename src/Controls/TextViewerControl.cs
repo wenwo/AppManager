@@ -16,6 +16,8 @@ namespace AppManager.Controls
     public class TextViewerControl : Control
     {
         public event Action CloseRequested;
+        /// <summary>右键查看器空白/栏位：路径 + 屏幕坐标。正文内保留原生文本菜单。</summary>
+        public event Action<string, Point> ResourceContextRequested;
 
         private readonly RichTextBox textBox;
         private readonly RichTextBox markdownBox;
@@ -50,6 +52,12 @@ namespace AppManager.Controls
         private int editVersion;
         private int renderedVersion = -1;
         private int renderedWidth;
+
+        /// <summary>当前浏览的文件；无内容时为 null。</summary>
+        public string CurrentPath
+        {
+            get { return paths.Count > 0 && index >= 0 && index < paths.Count ? paths[index] : null; }
+        }
 
         private int Dpi(int value)
         {
@@ -142,6 +150,14 @@ namespace AppManager.Controls
         {
             Action handler = CloseRequested;
             if (handler != null) handler();
+        }
+
+        private void RequestResourceContext(Point screen)
+        {
+            string path = CurrentPath;
+            if (path == null) return;
+            Action<string, Point> handler = ResourceContextRequested;
+            if (handler != null) handler(path, screen);
         }
 
         private void LoadCurrent()
@@ -659,6 +675,11 @@ namespace AppManager.Controls
         protected override void OnMouseDown(MouseEventArgs e)
         {
             base.OnMouseDown(e);
+            if (e.Button == MouseButtons.Right)
+            {
+                RequestResourceContext(PointToScreen(e.Location));
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             if (backRect.Contains(e.Location)) { if (ConfirmLeave()) RequestClose(); return; }
             if (prevRect.Contains(e.Location)) { Step(-1); return; }

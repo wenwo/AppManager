@@ -282,6 +282,7 @@ namespace AppManager
                 }
             }
 
+            if (!ConfirmTextViewerMutation(oldPath)) return string.Empty;
             Paths.LogRenameIntent("改名", oldPath, newPath);   // 先记意图再动磁盘：中断时最后一条「改名」即未完成的意图
             try { RenamePath(oldPath, newPath); }
             catch (Exception ex)

@@ -1031,7 +1031,7 @@ namespace AppManager
                     w.WriteEndElement();
                     w.WriteEndDocument();
                 }
-                if (File.Exists(path)) File.Replace(tmp, path, null);
+                if (File.Exists(path)) Paths.ReplaceFile(tmp, path);
                 else File.Move(tmp, path);
             }
             catch (Exception ex) { Paths.LogError(ex); }

@@ -14,6 +14,8 @@ namespace AppManager.Controls
     public class ArchiveViewerControl : Control
     {
         public event Action CloseRequested;
+        /// <summary>右键当前压缩包资源：路径 + 屏幕坐标，由主窗体构建资源菜单。</summary>
+        public event Action<string, Point> ResourceContextRequested;
 
         private const int MaxIconTypes = 512;      // 扩展名种类过多（构造的压缩包）时其余共用通用图标
         private const int MaxTypeNames = 256;      // 每种扩展名查一次系统类型名（约 0.6 ms）；超出后用「XXX 文件」
@@ -38,6 +40,12 @@ namespace AppManager.Controls
         private bool sortDescending;
         private int hoverCrumb = -1;
         private Rectangle backRect, prevRect, nextRect, infoBarRect;
+
+        /// <summary>当前浏览的压缩包；无内容时为 null。</summary>
+        public string CurrentPath
+        {
+            get { return paths.Count > 0 && index >= 0 && index < paths.Count ? paths[index] : null; }
+        }
 
         private sealed class Crumb
         {
@@ -108,6 +116,11 @@ namespace AppManager.Controls
             list.RetrieveVirtualItem += OnRetrieveItem;
             list.ItemActivate += delegate { ActivateSelected(); };
             list.ColumnClick += delegate(object sender, ColumnClickEventArgs e) { SortBy(e.Column); };
+            list.MouseDown += delegate(object sender, MouseEventArgs e)
+            {
+                if (e.Button == MouseButtons.Right)
+                    RequestResourceContext(list.PointToScreen(e.Location));
+            };
             list.MouseUp += delegate(object sender, MouseEventArgs e) { if (e.Button == MouseButtons.XButton1) GoUp(); };
             list.HandleCreated += delegate
             {
@@ -146,6 +159,14 @@ namespace AppManager.Controls
         {
             Action handler = CloseRequested;
             if (handler != null) handler();
+        }
+
+        private void RequestResourceContext(Point screen)
+        {
+            string path = CurrentPath;
+            if (path == null) return;
+            Action<string, Point> handler = ResourceContextRequested;
+            if (handler != null) handler(path, screen);
         }
 
         private void ResetContent()
@@ -666,6 +687,11 @@ namespace AppManager.Controls
         {
             base.OnMouseDown(e);
             if (e.Button == MouseButtons.XButton1) { GoUp(); return; }
+            if (e.Button == MouseButtons.Right)
+            {
+                RequestResourceContext(PointToScreen(e.Location));
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             if (backRect.Contains(e.Location)) { RequestClose(); return; }
             if (prevRect.Contains(e.Location)) { Step(-1); return; }

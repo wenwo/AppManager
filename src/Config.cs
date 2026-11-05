@@ -115,6 +115,23 @@ namespace AppManager
             }
             catch { }
         }
+
+        /// <summary>
+        /// 原子替换临时文件。杀毒/索引器可能短暂持有目标文件，导致 File.Replace 报“无法删除要被替换的文件”；
+        /// 仅对此类 IOException 做有限退避重试，持续失败仍抛给调用方，临时文件由调用方保留处理。
+        /// </summary>
+        internal static void ReplaceFile(string temporary, string target)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try { File.Replace(temporary, target, null); return; }
+                catch (IOException)
+                {
+                    if (attempt >= 4) throw;
+                    System.Threading.Thread.Sleep(40 * (attempt + 1));
+                }
+            }
+        }
     }
 
     /// <summary>

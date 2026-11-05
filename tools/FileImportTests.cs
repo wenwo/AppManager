@@ -310,6 +310,18 @@ namespace AppManager
                     Check(restored.Error == invalid && restored.Items[0].Error == invalid
                         && restored.Items[0].Source == invalid, "invalid XML characters were not preserved");
                 });
+                Test("journal save retries a transient replace lock", delegate
+                {
+                    ImportBatch batch = Batch(ImportOperation.Copy, "retry.txt");
+                    FileImport.Save(batch);
+                    string journal = Path.Combine(batch.JournalDirectory, batch.Id + ".xml");
+                    FileStream locked = new FileStream(journal, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+                    Thread release = new Thread(delegate() { Thread.Sleep(150); locked.Dispose(); });
+                    release.Start();
+                    try { FileImport.Save(batch); }
+                    finally { locked.Dispose(); }
+                    Check(release.Join(2000) && Reload(batch).Items.Count == 1, "transient replace lock was not retried");
+                });
                 Test("same-volume move links instead of copying and keeps metadata", delegate
                 {
                     ImportBatch batch = Batch(ImportOperation.Move, "a.txt"); File.SetAttributes(batch.Items[0].Source, FileAttributes.ReadOnly | FileAttributes.Hidden);

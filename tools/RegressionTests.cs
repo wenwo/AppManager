@@ -118,6 +118,13 @@ namespace AppManager
                 Run("grid delete handles every selected item; arrow starts at the first item", GridBatchDeleteAndArrow);
                 Run("icon cache evicts by bytes and LRU instead of clearing everything", IconCacheLru);
                 Run("auto scan pause keeps pending and paused changes, resume fires once", AutoScanPauseResume);
+                Run("viewer context menu targets the viewed item despite grid multi-selection", ViewerResourceSingleTarget);
+                Run("viewer delete/rename protects unsaved text before path changes", ViewerMutationProtectsDirtyText);
+                Run("viewer dirty text completes delete/rename after save or explicit discard", ViewerDirtyMutationSuccess);
+                Run("viewer delete cancel/failure and escape keep the viewer open", ViewerActionOutcomeKeepsViewer);
+                Run("viewer external deletion closes and removes the stale record", ViewerMissingResource);
+                Run("viewer closes without purging a valid resource outside the current list", ViewerResourceOutsideCurrentList);
+                Run("viewer lazy submenu actions are wrapped before execution", ViewerLazySubmenuAction);
                 Run("confirm dialog follows escape/enter and round buttons respond to space", DialogKeyboard);
                 Run("scan cache drops XML-invalid control characters", ScanCacheInvalidXml);
                 Run("backup list ignores update leftovers", BackupListSkipsOld);
@@ -1201,6 +1208,9 @@ namespace AppManager
 
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr FindWindow(string className, string windowName);
 
         private static void StoreDialogSavesOnlyEdits()
         {
@@ -2774,6 +2784,585 @@ namespace AppManager
                     Check(fired == 2, "idle pause/resume fired an extra scan");
                 }
             }
+        }
+
+        private static void ViewerResourceSingleTarget()
+        {
+            AppConfig config = RenameConfig("viewer-single-target");
+            AppInfo first = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "first.txt"),
+                false, true, "first");
+            AppInfo second = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "second.txt"),
+                false, true, "second");
+            using (MainForm form = ResourceForm(config, "文档", first, second))
+            {
+                ShowMain(form);
+                SelectForTest(form, first, second);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, first, first, second);
+                MenuWindow.MenuItem hide = FindMenuItem(ViewerMenu(form, viewer, first.TargetPath), "隐藏");
+                Check(hide != null && !hide.Disabled, "viewer hide menu missing");
+                hide.Action();
+                Check(first.IsHidden && !second.IsHidden, "viewer hide affected the grid selection");
+                Check(config.Hidden.Contains(first.Key) && !config.Hidden.Contains(second.Key),
+                    "viewer hide persisted the wrong targets");
+                CleanupTextViewer(form);
+            }
+
+            config = RenameConfig("viewer-single-collection");
+            first = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "first.txt"),
+                false, true, "first");
+            second = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "second.txt"),
+                false, true, "second");
+            config.Collections.Add(new ResourceCollection { Parent = "文档", Name = "回归集合" });
+            string collection = CollectionKeys.Make("文档", "回归集合");
+            CollectionOps.AddMember(config, first.Key, collection);
+            CollectionOps.AddMember(config, second.Key, collection);
+            using (MainForm form = ResourceForm(config, "文档", first, second))
+            {
+                ShowMain(form);
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, collection);
+                SelectForTest(form, first, second);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, first, first, second);
+                MenuWindow.MenuItem remove = FindMenuItem(ViewerMenu(form, viewer, first.TargetPath), "从集合移出");
+                Check(remove != null && !remove.Disabled, "viewer collection menu missing");
+                remove.Action();
+                Check(!HasCollection(config, first, collection) && HasCollection(config, second, collection),
+                    "viewer collection action used the grid selection");
+                CleanupTextViewer(form);
+            }
+        }
+
+        private static void ViewerMutationProtectsDirtyText()
+        {
+            AppConfig config = RenameConfig("viewer-dirty-text");
+            AppInfo app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "dirty.txt"),
+                false, true, "dirty");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                MakeTextDirty(viewer);
+                MenuWindow.MenuItem delete = FindMenuItem(ViewerMenu(form, viewer, app.TargetPath), "删除");
+                Check(delete != null && !delete.Disabled, "viewer delete menu missing");
+
+                bool confirm, native, unexpected;
+                RunDeleteFlow(delete.Action, false, null, 0, out confirm, out native, out unexpected);
+                Check(confirm && !native && !unexpected, "delete cancellation did not stop at confirmation");
+                Check(File.Exists(app.TargetPath) && config.AddedItems.ByPath(app.TargetPath).Count > 0,
+                    "delete cancellation removed the file or record");
+                Check(viewer.Visible && viewer.CurrentPath == app.TargetPath && (bool)ReadField(viewer, "dirty"),
+                    "delete cancellation closed the dirty viewer");
+
+                RunDeleteFlow(delete.Action, true, "文本", 2, out confirm, out native, out unexpected);
+                Check(confirm && native && !unexpected, "delete did not ask about unsaved text before the disk change");
+                Check(File.Exists(app.TargetPath) && config.AddedItems.ByPath(app.TargetPath).Count > 0,
+                    "cancelled save did not abort deletion");
+                Check(viewer.Visible && viewer.CurrentPath == app.TargetPath && (bool)ReadField(viewer, "dirty"),
+                    "cancelled save closed the dirty viewer");
+
+                string oldPath = app.TargetPath;
+                string renamedPath = Path.Combine(Path.GetDirectoryName(oldPath), "renamed.txt");
+                string result = null;
+                bool answered = AnswerNativeMessageBox("文本", 2,
+                    delegate { result = (string)Invoke(form, "TryRenameOnDisk", app, oldPath, false, "renamed.txt"); });
+                Check(answered, "disk rename did not ask about unsaved text");
+                Check(result == string.Empty && File.Exists(oldPath) && !File.Exists(renamedPath),
+                    "cancelled save did not abort the disk rename");
+                Check(app.TargetPath == oldPath && EntriesOf(form, app)[0].Path == oldPath,
+                    "cancelled save changed the renamed path");
+                Check(viewer.Visible && viewer.CurrentPath == oldPath && (bool)ReadField(viewer, "dirty"),
+                    "cancelled save closed the renamed viewer");
+                CleanupTextViewer(form);
+            }
+        }
+
+        private static void ViewerDirtyMutationSuccess()
+        {
+            AppConfig config = RenameConfig("viewer-dirty-delete-save");
+            AppInfo app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "delete-save.txt"),
+                false, true, "delete-save");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                MakeTextDirty(viewer);
+                MenuWindow.MenuItem delete = FindMenuItem(ViewerMenu(form, viewer, app.TargetPath), "删除");
+                Check(delete != null && !delete.Disabled, "viewer delete menu missing for save-success case");
+                bool confirm, native, unexpected;
+                RunDeleteFlow(delete.Action, true, "文本", 6, out confirm, out native, out unexpected);
+                Check(confirm && native && !unexpected, "save-before-delete opened an old-path dialog");
+                Check(!File.Exists(app.TargetPath) && config.AddedItems.ByPath(app.TargetPath).Count == 0,
+                    "save-before-delete did not remove the file and record");
+                Check(!viewer.Visible, "save-before-delete left the viewer open");
+                CleanupTextViewer(form);
+            }
+
+            config = RenameConfig("viewer-dirty-delete-discard");
+            app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "delete-discard.txt"),
+                false, true, "delete-discard");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                MakeTextDirty(viewer);
+                MenuWindow.MenuItem delete = FindMenuItem(ViewerMenu(form, viewer, app.TargetPath), "删除");
+                Check(delete != null && !delete.Disabled, "viewer delete menu missing for discard-success case");
+                bool confirm, native, unexpected;
+                RunDeleteFlow(delete.Action, true, "文本", 7, out confirm, out native, out unexpected);
+                Check(confirm && native && !unexpected, "discard-before-delete opened an old-path dialog");
+                Check(!File.Exists(app.TargetPath) && config.AddedItems.ByPath(app.TargetPath).Count == 0,
+                    "discard-before-delete did not remove the file and record");
+                Check(!viewer.Visible, "discard-before-delete left the viewer open");
+                CleanupTextViewer(form);
+            }
+
+            ViewerDirtyRenameSuccess(true);
+            ViewerDirtyRenameSuccess(false);
+        }
+
+        private static void ViewerDirtyRenameSuccess(bool save)
+        {
+            AppConfig config = RenameConfig(save ? "viewer-dirty-rename-save" : "viewer-dirty-rename-discard");
+            string name = save ? "rename-save.txt" : "rename-discard.txt";
+            AppInfo app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", name),
+                false, true, name);
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                MakeTextDirty(viewer);
+                string oldPath = app.TargetPath;
+                string newName = save ? "renamed-save.txt" : "renamed-discard.txt";
+                string newPath = Path.Combine(Path.GetDirectoryName(oldPath), newName);
+                string result = null;
+                Action mutation = delegate
+                {
+                    result = (string)Invoke(form, "TryRenameOnDisk", app, oldPath, false, newName);
+                };
+                Action wrapped = (Action)Invoke(form, "WrapViewerMenuAction", mutation, oldPath, (Control)viewer);
+                bool unexpected;
+                bool answered = AnswerNativeMessageBox("文本", save ? 6 : 7, wrapped, out unexpected);
+                Check(answered && !unexpected, "dirty rename opened an old-path or unexpected dialog");
+                Check(result == null, "dirty rename failed: " + result);
+                Check(!File.Exists(oldPath) && File.Exists(newPath), "dirty rename did not move the file");
+                Check(app.TargetPath == newPath && config.AddedItems.ByPath(newPath).Count == 1
+                    && config.AddedItems.ByPath(oldPath).Count == 0, "dirty rename lost the collection record");
+                string content = File.ReadAllText(newPath);
+                Check(save ? content.Contains("viewer regression edit") : !content.Contains("viewer regression edit"),
+                    save ? "saved rename lost the edited text" : "discard rename wrote unsaved text");
+                Check(!viewer.Visible, "dirty rename left the viewer open");
+                CleanupTextViewer(form);
+            }
+        }
+
+        private static void ViewerActionOutcomeKeepsViewer()
+        {
+            AppConfig config = RenameConfig("viewer-action-outcome");
+            AppInfo app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "locked.txt"),
+                false, true, "locked");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                MenuWindow.MenuItem delete = FindMenuItem(ViewerMenu(form, viewer, app.TargetPath), "删除");
+                Check(delete != null && !delete.Disabled, "viewer delete menu missing for failure case");
+                bool confirm, native, unexpected;
+                using (FileStream locked = new FileStream(app.TargetPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    RunDeleteFlow(delete.Action, true, "删除", 1, out confirm, out native, out unexpected);
+                }
+                Check(confirm, "delete confirmation was not executed");
+                Check(File.Exists(app.TargetPath) && config.AddedItems.ByPath(app.TargetPath).Count > 0,
+                    "failed delete removed the file or record");
+                Check(viewer.Visible && viewer.CurrentPath == app.TargetPath,
+                    "failed delete closed the viewer");
+
+                List<MenuWindow.MenuItem> items = ViewerMenu(form, viewer, app.TargetPath);
+                using (MenuWindow menu = new MenuWindow(items, 230))
+                {
+                    Message message = Message.Create(IntPtr.Zero, 0, IntPtr.Zero, IntPtr.Zero);
+                    object[] args = { message, Keys.Escape };
+                    bool handled = (bool)typeof(MenuWindow).GetMethod("ProcessCmdKey", Private).Invoke(menu, args);
+                    Check(handled, "escape was not handled by the viewer menu");
+                }
+                Check(viewer.Visible && !app.IsHidden && File.Exists(app.TargetPath),
+                    "escape executed a viewer menu action or closed the viewer");
+                CleanupTextViewer(form);
+            }
+        }
+
+        private static void ViewerMissingResource()
+        {
+            AppConfig config = RenameConfig("viewer-missing-resource");
+            AppInfo app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "missing.txt"),
+                false, true, "missing");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                File.Delete(app.TargetPath);
+                object result = Invoke(form, "BuildViewerResourceMenu", (Control)viewer, app.TargetPath);
+                Check(result == null, "missing viewer resource built a menu");
+                Check(!viewer.Visible && viewer.CurrentPath == null, "missing viewer resource left the viewer open");
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 1,
+                    "first missing observation purged the collection record");
+                Application.DoEvents();
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 1,
+                    "first missing observation after queueing purged the collection record");
+                System.Windows.Forms.Timer watchTimer =
+                    (System.Windows.Forms.Timer)typeof(MainForm).GetField("moveOutTimer", Private).GetValue(form);
+                Check(watchTimer != null && watchTimer.Enabled, "missing viewer resource was not watched");
+                watchTimer.Stop();
+
+                File.WriteAllText(app.TargetPath, "restored");
+                Invoke(form, "CheckMoveOuts");
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 1,
+                    "reappeared viewer resource was purged");
+                File.Delete(app.TargetPath);
+                Invoke(form, "CheckMoveOuts");
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 1,
+                    "one later missing observation purged the collection record");
+                Invoke(form, "CheckMoveOuts");
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 0,
+                    "two consecutive missing observations kept the stale record");
+                Check(config.Database.Page("文档", true, true, "", 10, null, true, false).Total == 0,
+                    "missing viewer resource remained in the database listing");
+                Check((bool)typeof(MainForm).GetField("scanPending", Private).GetValue(form),
+                    "missing viewer resource did not request a rescan");
+                CleanupTextViewer(form);
+            }
+
+            config = RenameConfig("viewer-missing-parent");
+            app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "missing-parent", "orphan.txt"),
+                false, true, "missing-parent");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                File.Delete(app.TargetPath);
+                Directory.Delete(Path.GetDirectoryName(app.TargetPath), true);
+                object result = Invoke(form, "BuildViewerResourceMenu", (Control)viewer, app.TargetPath);
+                Check(result == null && !viewer.Visible, "unreachable viewer resource left the viewer open");
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 1,
+                    "unreachable parent immediately purged the collection record");
+                IList watches = (IList)typeof(MainForm).GetField("moveOutWatches", Private).GetValue(form);
+                Check(watches.Count == 0, "unreachable parent started a destructive move-out watch");
+                Invoke(form, "CheckMoveOuts");
+                Invoke(form, "CheckMoveOuts");
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 1,
+                    "unreachable parent lost its record after missing checks");
+                CleanupTextViewer(form);
+            }
+
+            config = RenameConfig("viewer-missing-dirty");
+            app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "missing-dirty.txt"),
+                false, true, "missing-dirty");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                MakeTextDirty(viewer);
+                File.Delete(app.TargetPath);
+                object result = null;
+                bool answered = AnswerNativeMessageBox("文本", 7,
+                    delegate { result = Invoke(form, "BuildViewerResourceMenu", (Control)viewer, app.TargetPath); });
+                Check(answered, "external deletion discarded unsaved text without asking");
+                Check(result == null && !viewer.Visible, "external deletion left the dirty viewer open");
+                Check(config.AddedItems.ByPath(app.TargetPath).Count == 1,
+                    "dirty external deletion purged on the first missing observation");
+                PumpUntil(delegate { return config.AddedItems.ByPath(app.TargetPath).Count == 0; });
+                Check(config.Database.Page("文档", true, true, "", 10, null, true, false).Total == 0,
+                    "dirty external deletion kept a database ghost");
+                CleanupTextViewer(form);
+            }
+        }
+
+        private static void ViewerResourceOutsideCurrentList()
+        {
+            AppConfig config = RenameConfig("viewer-outside-list");
+            AppInfo app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "outside.txt"),
+                false, true, "outside");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                typeof(MainForm).GetField("shownApps", Private).SetValue(form, new List<AppInfo>());
+                object result = Invoke(form, "BuildViewerResourceMenu", (Control)viewer, app.TargetPath);
+                Check(result == null && !viewer.Visible,
+                    "viewer resource outside the current list left the viewer open");
+                Check(File.Exists(app.TargetPath) && config.AddedItems.ByPath(app.TargetPath).Count > 0,
+                    "viewer closed for an out-of-list path and purged its valid record");
+                CleanupTextViewer(form);
+            }
+        }
+
+        private static void ViewerLazySubmenuAction()
+        {
+            AppConfig config = RenameConfig("viewer-lazy-submenu");
+            AppInfo app = AddEntry(config, "文档", Path.Combine(config.ResourceStorePath, "文档", "lazy.txt"),
+                false, true, "lazy");
+            using (MainForm form = ResourceForm(config, "文档", app))
+            {
+                ShowMain(form);
+                Controls.TextViewerControl viewer = OpenTextViewer(form, app, app);
+                List<MenuWindow.MenuItem> top = new List<MenuWindow.MenuItem>();
+                MenuWindow.MenuItem parent = new MenuWindow.MenuItem { Text = "lazy" };
+                MenuWindow.MenuItem keep = new MenuWindow.MenuItem { Text = "keep", Action = delegate { } };
+                MenuWindow.MenuItem invalidate = new MenuWindow.MenuItem
+                {
+                    Text = "delete",
+                    Action = delegate { File.Delete(app.TargetPath); }
+                };
+                parent.SubItemsFactory = delegate
+                {
+                    return new List<MenuWindow.MenuItem> { keep, invalidate };
+                };
+                top.Add(parent);
+                Invoke(form, "WrapViewerMenuItems", top, app.TargetPath, (Control)viewer,
+                    new HashSet<MenuWindow.MenuItem>());
+
+                List<MenuWindow.MenuItem> lazy = parent.SubItemsFactory();
+                Check(lazy.Count == 2, "lazy submenu fixture changed");
+                lazy[0].Action();
+                Check(viewer.Visible && File.Exists(app.TargetPath),
+                    "lazy submenu no-op closed the viewer");
+                lazy[1].Action();
+                Check(!viewer.Visible, "lazy submenu action was not checked for resource invalidation");
+                CleanupTextViewer(form);
+            }
+        }
+
+        private static void ShowMain(MainForm form)
+        {
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(-3000, -3000);
+            form.Size = new Size(1000, 700);
+            form.Show();
+            Application.DoEvents();
+        }
+
+        private static Controls.TextViewerControl OpenTextViewer(MainForm form, AppInfo current, params AppInfo[] sequence)
+        {
+            List<AppInfo> list = new List<AppInfo>(sequence);
+            if (!list.Contains(current)) list.Insert(0, current);
+            typeof(MainForm).GetField("shownApps", Private).SetValue(form, list);
+            Invoke(form, "ShowTextViewer", current);
+            Controls.TextViewerControl viewer =
+                (Controls.TextViewerControl)typeof(MainForm).GetField("textViewer", Private).GetValue(form);
+            PumpUntil(delegate
+            {
+                return viewer.CurrentPath == current.TargetPath
+                    && !(bool)ReadField(viewer, "loading");
+            }, 5000);
+            Check(viewer.Visible && viewer.CurrentPath == current.TargetPath, "text viewer did not open");
+            return viewer;
+        }
+
+        private static void MakeTextDirty(Controls.TextViewerControl viewer)
+        {
+            RichTextBox box = (RichTextBox)ReadField(viewer, "textBox");
+            Check(!box.ReadOnly, "text fixture is read-only");
+            box.Select(box.TextLength, 0);
+            box.SelectedText = "\nviewer regression edit";
+            Application.DoEvents();
+            Check((bool)ReadField(viewer, "dirty"), "text edit was not marked dirty");
+        }
+
+        private static void SelectForTest(MainForm form, params AppInfo[] apps)
+        {
+            List<AppInfo> list = new List<AppInfo>(apps);
+            typeof(MainForm).GetField("shownApps", Private).SetValue(form, list);
+            Controls.AppGridControl grid =
+                (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+            grid.SetApps(list);
+            Type type = typeof(Controls.AppGridControl);
+            type.GetMethod("SelectSingle", Private).Invoke(grid, new object[] { 0 });
+            for (int i = 1; i < list.Count; i++)
+                type.GetMethod("ToggleSelected", Private).Invoke(grid, new object[] { i });
+            Check(grid.SelectedCount == list.Count, "grid multi-selection fixture failed");
+        }
+
+        private static List<MenuWindow.MenuItem> ViewerMenu(MainForm form, Control viewer, string path)
+        {
+            List<MenuWindow.MenuItem> items = (List<MenuWindow.MenuItem>)
+                Invoke(form, "BuildViewerResourceMenu", viewer, path);
+            Check(items != null, "viewer menu was not built");
+            return items;
+        }
+
+        private static MenuWindow.MenuItem FindMenuItem(List<MenuWindow.MenuItem> items, string text)
+        {
+            if (items == null) return null;
+            foreach (MenuWindow.MenuItem item in items)
+            {
+                if (item == null) continue;
+                if (!item.Separator && item.Text == text) return item;
+                MenuWindow.MenuItem nested = FindMenuItem(item.SubItems, text);
+                if (nested != null) return nested;
+            }
+            return null;
+        }
+
+        private static bool HasCollection(AppConfig config, AppInfo app, string collection)
+        {
+            List<string> categories;
+            return app != null && config.ItemCategories.TryGetValue(app.Key, out categories)
+                && categories.Contains(collection);
+        }
+
+        private static void CleanupTextViewer(MainForm form)
+        {
+            Controls.TextViewerControl viewer =
+                (Controls.TextViewerControl)typeof(MainForm).GetField("textViewer", Private).GetValue(form);
+            if (viewer == null || viewer.IsDisposed) return;
+            if ((bool)ReadField(viewer, "dirty"))
+                typeof(Controls.TextViewerControl).GetMethod("MarkClean", Private).Invoke(viewer, null);
+            Invoke(form, "HideTextViewer");
+            Application.DoEvents();
+        }
+
+        private static object ReadField(object target, string name)
+        {
+            return target.GetType().GetField(name, Private).GetValue(target);
+        }
+
+        private static Form FindModalForm()
+        {
+            foreach (Form form in Application.OpenForms)
+                if (form.Visible && form.Modal) return form;
+            return null;
+        }
+
+        private static Control FindControlByText(Control parent, string text)
+        {
+            if (parent == null) return null;
+            if (parent.Text == text) return parent;
+            foreach (Control child in parent.Controls)
+            {
+                Control found = FindControlByText(child, text);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static void RunDeleteFlow(Action action, bool accept, string nativeTitle, int nativeCommand,
+            out bool confirmClicked, out bool nativeClicked, out bool unexpected)
+        {
+            bool confirmed = false, answered = false, stray = false;
+            Stopwatch elapsed = Stopwatch.StartNew();
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    if (!confirmed)
+                    {
+                        Form dialog = FindModalForm();
+                        if (dialog == null) return;
+                        dialog.Opacity = 0;
+                        Control button = FindControlByText(dialog, accept ? "确定" : "取消");
+                        if (button == null)
+                        {
+                            if (elapsed.ElapsedMilliseconds > 3000) { stray = true; dialog.Close(); }
+                            return;
+                        }
+                        typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });
+                        confirmed = true;
+                        return;
+                    }
+                    if (nativeTitle != null && !answered)
+                    {
+                        IntPtr hwnd = FindWindow("#32770", nativeTitle);
+                        if (hwnd != IntPtr.Zero)
+                        {
+                            answered = true;
+                            PostMessage(hwnd, 0x0111, (IntPtr)nativeCommand, IntPtr.Zero);
+                            return;
+                        }
+                    }
+                    if (elapsed.ElapsedMilliseconds > 300 && !answered)
+                    {
+                        IntPtr other = FindWindow("#32770", null);
+                        Form modal = FindModalForm();
+                        if (other != IntPtr.Zero || modal != null)
+                        {
+                            stray = true;
+                            answered = true;
+                            if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                            if (modal != null) modal.Close();
+                            return;
+                        }
+                    }
+                    if (elapsed.ElapsedMilliseconds > 8000)
+                    {
+                        stray = true;
+                        IntPtr other = FindWindow("#32770", null);
+                        if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                        Form modal = FindModalForm();
+                        if (modal != null) modal.Close();
+                        timer.Stop();
+                    }
+                };
+                timer.Start();
+                action();
+                timer.Stop();
+            }
+            confirmClicked = confirmed;
+            nativeClicked = answered;
+            unexpected = stray;
+        }
+
+        private static bool AnswerNativeMessageBox(string title, int command, Action action)
+        {
+            bool unexpected;
+            return AnswerNativeMessageBox(title, command, action, out unexpected);
+        }
+
+        private static bool AnswerNativeMessageBox(string title, int command, Action action, out bool unexpected)
+        {
+            bool answered = false;
+            bool stray = false;
+            IntPtr answeredHwnd = IntPtr.Zero;
+            Stopwatch elapsed = Stopwatch.StartNew();
+            using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                timer.Tick += delegate
+                {
+                    IntPtr hwnd = FindWindow("#32770", title);
+                    if (!answered && hwnd != IntPtr.Zero)
+                    {
+                        answered = true;
+                        answeredHwnd = hwnd;
+                        PostMessage(hwnd, 0x0111, (IntPtr)command, IntPtr.Zero);
+                        return;
+                    }
+                    if (!answered)
+                    {
+                        Form modal = FindModalForm();
+                        if (modal != null && elapsed.ElapsedMilliseconds > 300) modal.Close();
+                    }
+                    else
+                    {
+                        IntPtr other = FindWindow("#32770", null);
+                        if (other != IntPtr.Zero && other != answeredHwnd)
+                        {
+                            stray = true;
+                            PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                        }
+                    }
+                    if (elapsed.ElapsedMilliseconds > 8000)
+                    {
+                        stray = true;
+                        IntPtr other = FindWindow("#32770", null);
+                        if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                        timer.Stop();
+                    }
+                };
+                timer.Start();
+                action();
+                timer.Stop();
+            }
+            unexpected = stray;
+            return answered;
         }
 
         private static void DialogKeyboard()

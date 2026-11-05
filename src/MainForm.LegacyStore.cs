@@ -313,7 +313,7 @@ namespace AppManager
                     text.Append(m.Moved ? '1' : '0').Append('\t').Append(m.Folder ? '1' : '0').Append('\t')
                         .Append(m.Source).Append('\t').Append(m.Target).Append("\r\n");
                 File.WriteAllText(temp, text.ToString(), Encoding.UTF8);
-                if (File.Exists(path)) File.Replace(temp, path, null);
+                if (File.Exists(path)) Paths.ReplaceFile(temp, path);
                 else File.Move(temp, path);
                 return true;
             }

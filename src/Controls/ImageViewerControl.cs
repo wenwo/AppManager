@@ -19,6 +19,8 @@ namespace AppManager.Controls
     {
         /// <summary>请求退出查看器（Esc / 返回按钮），由主窗体恢复列表。</summary>
         public event Action CloseRequested;
+        /// <summary>右键当前资源：路径 + 屏幕坐标，由主窗体构建资源菜单。</summary>
+        public event Action<string, Point> ResourceContextRequested;
 
         // 浏览状态
         private List<string> paths = new List<string>();
@@ -41,6 +43,12 @@ namespace AppManager.Controls
         private Point panStart;
         private PointF panOrigin;
         private bool zooming;          // 连续缩放期间用低质量插值，停手后再补一次高质量绘制
+
+        /// <summary>当前浏览的文件；无内容时为 null。</summary>
+        public string CurrentPath
+        {
+            get { return paths.Count > 0 && index >= 0 && index < paths.Count ? paths[index] : null; }
+        }
 
         // 界面按钮悬停/按下态：-1 无；0 上一张 1 缩小 2 比例 3 放大 4 下一张 5 返回
         private int hover = -1;
@@ -120,6 +128,14 @@ namespace AppManager.Controls
         {
             Action h = CloseRequested;
             if (h != null) h();
+        }
+
+        private void RequestResourceContext(Point screen)
+        {
+            string path = CurrentPath;
+            if (path == null) return;
+            Action<string, Point> handler = ResourceContextRequested;
+            if (handler != null) handler(path, screen);
         }
 
         // ===== 图片加载 =====
@@ -334,6 +350,11 @@ namespace AppManager.Controls
         {
             base.OnMouseDown(e);
             Focus();
+            if (e.Button == MouseButtons.Right)
+            {
+                RequestResourceContext(PointToScreen(e.Location));
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             int btn = HitButton(e.Location);
             // 捕获鼠标：拖出控件外松开也能正常结束平移/按下态

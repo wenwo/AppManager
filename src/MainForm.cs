@@ -880,14 +880,20 @@ namespace AppManager
             // 图片查看器：默认隐藏，双击照片时替换列表区域（尺寸/位置与 grid 一致）
             imageViewer = new ImageViewerControl();
             imageViewer.CloseRequested += HideImageViewer;
+            imageViewer.ResourceContextRequested += delegate(string path, Point screen)
+                { ShowViewerResourceMenu(imageViewer, path, screen); };
             Controls.Add(imageViewer);
 
             textViewer = new TextViewerControl();
             textViewer.CloseRequested += HideTextViewer;
+            textViewer.ResourceContextRequested += delegate(string path, Point screen)
+                { ShowViewerResourceMenu(textViewer, path, screen); };
             Controls.Add(textViewer);
 
             archiveViewer = new ArchiveViewerControl();
             archiveViewer.CloseRequested += HideArchiveViewer;
+            archiveViewer.ResourceContextRequested += delegate(string path, Point screen)
+                { ShowViewerResourceMenu(archiveViewer, path, screen); };
             Controls.Add(archiveViewer);
 
             musicSession = new MusicPlaybackSession();
@@ -898,6 +904,8 @@ namespace AppManager
             videoPlayer.CloseRequested += OnVideoCloseRequested;     // 全屏时先退全屏再退播放器
             videoPlayer.FullscreenRequested += ToggleVideoFullscreen;
             videoPlayer.PlaybackStarting += delegate { StopMusicPlayer(); };
+            videoPlayer.ResourceContextRequested += delegate(string path, Point screen)
+                { ShowViewerResourceMenu(videoPlayer, path, screen); };
             Controls.Add(videoPlayer);
 
             musicPlayer = new MusicPlayerControl();
@@ -2403,6 +2411,7 @@ namespace AppManager
                 ? "\n\n警告：选中的位置没有可用回收站，将继续永久删除，无法恢复。"
                 : "\n文件将移入回收站，可恢复；如系统无法放入回收站，会先再次确认。";
             if (!ConfirmDialog.Show("删除文件", msg)) return false;
+            if (!ConfirmTextViewerMutation(valid)) return false;
             DeleteEntriesDisk(valid);
             return true;
         }
@@ -4521,12 +4530,180 @@ namespace AppManager
             mw.Show(this);
         }
 
+        /// <summary>查看器右键：只允许操作当前查看的资源，不复用网格选中项。</summary>
+        private void ShowViewerResourceMenu(Control viewer, string path, Point screen)
+        {
+            List<MenuWindow.MenuItem> items = BuildViewerResourceMenu(viewer, path);
+            if (items == null) return;
+            MenuWindow mw = new MenuWindow(items, 230);
+            mw.Location = FixLocation(screen, mw.Size);
+            mw.Show(this);
+        }
+
+        /// <summary>
+        /// 为当前查看项构建菜单；只返回一个目标，网格多选不参与。
+        /// 外部删除先关闭查看器并重扫；记录清理复用移出检测，连续两次确认缺失后才执行。
+        /// </summary>
+        private List<MenuWindow.MenuItem> BuildViewerResourceMenu(Control viewer, string path)
+        {
+            if (IsDisposed || viewer == null || viewer.IsDisposed) return null;
+            AppInfo app = FindShownAppByPath(path);
+            if (app == null)
+            {
+                CloseViewer(viewer);
+                return null;
+            }
+            if (IsMissingLocalResource(path))
+            {
+                CloseViewer(viewer);
+                WatchMissingViewerResource(app);
+                StartScan(false);
+                return null;
+            }
+
+            List<AppInfo> targets = new List<AppInfo>();
+            targets.Add(app);
+            List<MenuWindow.MenuItem> items = BuildContextMenu(app, targets);
+            WrapViewerMenuItems(items, path, viewer, new HashSet<MenuWindow.MenuItem>());
+            return items;
+        }
+
+        /// <summary>
+        /// 文件已移走且父目录仍可访问时，按拖出检测的保守节奏观察；连续两次缺失才清记录。
+        /// 文件恢复、移动盘/网络断开或父目录无权限时均不清理。
+        /// </summary>
+        private void WatchMissingViewerResource(AppInfo app)
+        {
+            if (app == null || string.IsNullOrEmpty(app.TargetPath) || !SourceMovedAway(app.TargetPath)) return;
+            if (config.AddedItems.ByPath(app.TargetPath).Count == 0) return;
+            WatchMoveOut(new List<AppInfo> { app }, DateTime.Now + MoveOutWatchTime);
+            BeginInvoke((Action)CheckMoveOuts);
+        }
+
+        private AppInfo FindShownAppByPath(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            for (int i = 0; i < shownApps.Count; i++)
+            {
+                AppInfo app = shownApps[i];
+                if (app != null && string.Equals(app.TargetPath, path, StringComparison.OrdinalIgnoreCase))
+                    return app;
+            }
+            return null;
+        }
+
+        private static bool IsMissingLocalResource(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return true;
+            Uri uri;
+            if (Uri.TryCreate(path, UriKind.Absolute, out uri) && !uri.IsFile) return false;
+            return !File.Exists(path) && !Directory.Exists(path);
+        }
+
+        private void CloseViewer(Control viewer)
+        {
+            if (object.ReferenceEquals(viewer, imageViewer)) HideImageViewer();
+            else if (object.ReferenceEquals(viewer, textViewer)) HideTextViewer();
+            else if (object.ReferenceEquals(viewer, archiveViewer)) HideArchiveViewer();
+            else if (object.ReferenceEquals(viewer, videoPlayer)) HideVideoPlayer();
+        }
+
+        private static string ViewerCurrentPath(Control viewer)
+        {
+            ImageViewerControl image = viewer as ImageViewerControl;
+            if (image != null) return image.CurrentPath;
+            TextViewerControl text = viewer as TextViewerControl;
+            if (text != null) return text.CurrentPath;
+            ArchiveViewerControl archive = viewer as ArchiveViewerControl;
+            if (archive != null) return archive.CurrentPath;
+            VideoPlayerControl video = viewer as VideoPlayerControl;
+            return video == null ? null : video.CurrentPath;
+        }
+
+        /// <summary>
+        /// MenuWindow 会先关闭菜单再执行动作，因此不能用 FormClosed 做事后检查；
+        /// 这里递归包装所有静态/延迟子菜单动作，在执行后按路径与列表归属决定是否关闭查看器。
+        /// </summary>
+        private void WrapViewerMenuItems(List<MenuWindow.MenuItem> items, string path,
+            Control viewer, HashSet<MenuWindow.MenuItem> wrapped)
+        {
+            if (items == null) return;
+            for (int i = 0; i < items.Count; i++)
+            {
+                MenuWindow.MenuItem item = items[i];
+                if (item == null || !wrapped.Add(item)) continue;
+                if (item.Action != null) item.Action = WrapViewerMenuAction(item.Action, path, viewer);
+                if (item.DoubleClickAction != null)
+                    item.DoubleClickAction = WrapViewerMenuAction(item.DoubleClickAction, path, viewer);
+                if (item.SubItemsFactory != null)
+                {
+                    Func<List<MenuWindow.MenuItem>> factory = item.SubItemsFactory;
+                    item.SubItemsFactory = delegate
+                    {
+                        List<MenuWindow.MenuItem> subItems = factory();
+                        WrapViewerMenuItems(subItems, path, viewer, wrapped);
+                        return subItems;
+                    };
+                }
+                if (item.SubItems != null) WrapViewerMenuItems(item.SubItems, path, viewer, wrapped);
+            }
+        }
+
+        private Action WrapViewerMenuAction(Action action, string path, Control viewer)
+        {
+            return delegate
+            {
+                try { action(); }
+                finally
+                {
+                    if (!object.ReferenceEquals(viewer, null) && !viewer.IsDisposed && viewer.Visible
+                        && string.Equals(ViewerCurrentPath(viewer), path, StringComparison.OrdinalIgnoreCase)
+                        && (IsMissingLocalResource(path) || FindShownAppByPath(path) == null))
+                        CloseViewer(viewer);
+                }
+            };
+        }
+
+        /// <summary>
+        /// 删除/磁盘改名等会破坏当前文本路径的动作，必须在动作前完成保存或取消；
+        /// 不能等 RefreshGrid 关闭查看器时再处理，否则会在路径已失效后弹出另存为。
+        /// </summary>
+        private bool ConfirmTextViewerMutation(string path)
+        {
+            if (textViewer == null || textViewer.IsDisposed || !textViewer.Visible) return true;
+            if (!string.Equals(textViewer.CurrentPath, path, StringComparison.OrdinalIgnoreCase)) return true;
+            return textViewer.ConfirmLeave();
+        }
+
+        private bool ConfirmTextViewerMutation(List<AppInfo> apps)
+        {
+            if (textViewer == null || textViewer.IsDisposed || !textViewer.Visible) return true;
+            string current = textViewer.CurrentPath;
+            if (apps == null || string.IsNullOrEmpty(current)) return true;
+            for (int i = 0; i < apps.Count; i++)
+            {
+                AppInfo app = apps[i];
+                if (app != null && string.Equals(app.TargetPath, current, StringComparison.OrdinalIgnoreCase))
+                    return textViewer.ConfirmLeave();
+            }
+            return true;
+        }
+
         private List<MenuWindow.MenuItem> BuildContextMenu(AppInfo app)
+        {
+            return BuildContextMenu(app, MenuTargets(app));
+        }
+
+        private List<MenuWindow.MenuItem> BuildContextMenu(AppInfo app, List<AppInfo> targets)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             bool website = contentMode == SidebarControl.ContentMode.Website;
             bool readOnly = IsReadOnlyCategory(currentCategory);
-            List<AppInfo> targets = MenuTargets(app);
+            if (targets == null || targets.Count == 0)
+            {
+                targets = new List<AppInfo>();
+                if (app != null) targets.Add(app);
+            }
             bool multi = targets.Count > 1;
 
             if (multi)
@@ -4581,7 +4758,7 @@ namespace AppManager
                     items.Add(MkSubMenu("移动到分类…", BuildMoveResourceItems(app)));
                     // 加入集合：相簿式多归属分组，不搬文件（多选时整批加入）
                     if (CanEditCategory(currentCategory))
-                        items.Add(MkSubMenu("加入集合…", BuildJoinCollectionItems(MenuTargets(app))));
+                        items.Add(MkSubMenu("加入集合…", BuildJoinCollectionItems(targets)));
                 }
                 else
                 {
@@ -4599,8 +4776,7 @@ namespace AppManager
                 // 集合视图内（含当前文件夹内搜索）：移出仅解除集合归属，文件保留在父分类
                 if (currentCollection != null)
                 {
-                    List<AppInfo> removeTargets = MenuTargets(app);
-                    items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(removeTargets, currentCollection); }));
+                    items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(targets, currentCollection); }));
                 }
                 items.Add(MkSep());
                 if (app.IsHidden)

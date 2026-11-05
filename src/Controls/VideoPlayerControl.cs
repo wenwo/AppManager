@@ -27,6 +27,8 @@ namespace AppManager.Controls
         public event Action CloseRequested;
         /// <summary>双击视频区：请求切换全屏（主窗体负责窗体状态与布局）。</summary>
         public event Action FullscreenRequested;
+        /// <summary>右键当前视频资源：路径 + 屏幕坐标，由主窗体构建资源菜单。</summary>
+        public event Action<string, Point> ResourceContextRequested;
 
         // 播放序列
         private List<string> paths = new List<string>();
@@ -74,6 +76,12 @@ namespace AppManager.Controls
         // 单击视频区暂停/双击全屏：单击先挂起，超过系统双击间隔仍无第二击才触发暂停，
         // 第二击在间隔内则由 OnMouseDoubleClick 接管为全屏（避免双击时误触发一次暂停）
         private readonly Timer clickTimer = new Timer();
+
+        /// <summary>当前播放的视频；无内容时为 null。</summary>
+        public string CurrentPath
+        {
+            get { return paths.Count > 0 && index >= 0 && index < paths.Count ? paths[index] : null; }
+        }
 
         private static readonly Color Bg = Theme.Background;                    // 与主界面一致的浅色底
         private static readonly Color VideoBg = Color.FromArgb(20, 20, 22);    // 视频卡片内部黑底
@@ -139,6 +147,14 @@ namespace AppManager.Controls
         {
             Action h = CloseRequested;
             if (h != null) h();
+        }
+
+        private void RequestResourceContext(Point screen)
+        {
+            string path = CurrentPath;
+            if (path == null) return;
+            Action<string, Point> handler = ResourceContextRequested;
+            if (handler != null) handler(path, screen);
         }
 
         // ===== 播放内核 =====
@@ -446,6 +462,12 @@ namespace AppManager.Controls
         {
             base.OnMouseDown(e);
             Focus();
+            if (e.Button == MouseButtons.Right)
+            {
+                clickTimer.Stop();
+                RequestResourceContext(PointToScreen(e.Location));
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             clickTimer.Stop();   // 任何新的按下都取消挂起的单击动作（改按按钮/拖动则不触发暂停）
             Capture = true;

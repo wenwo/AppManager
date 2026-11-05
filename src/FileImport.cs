@@ -310,7 +310,7 @@ namespace AppManager
                 }
             }
             finally { UnescapeBatch(batch); }
-            if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
+            if (File.Exists(path)) Paths.ReplaceFile(temp, path); else File.Move(temp, path);
             batch.SavedAt = Environment.TickCount;
         }
 
