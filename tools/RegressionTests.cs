@@ -957,8 +957,11 @@ namespace AppManager
         {
             string photo = Path.Combine(root, "property-metadata.png");
             using (Bitmap bitmap = new Bitmap(3, 2)) bitmap.Save(photo, System.Drawing.Imaging.ImageFormat.Png);
+            string video = Path.Combine(root, "property-metadata.3gp");
+            File.WriteAllBytes(video, new byte[0]);
             AppInfo[] apps = {
                 new AppInfo { TargetPath = photo, IsFile = true },
+                new AppInfo { TargetPath = video, IsFile = true },
                 new AppInfo { TargetPath = root, IsFile = true, IsFolder = true },
                 new AppInfo { TargetPath = Path.Combine(root, "missing.txt"), IsFile = true },
                 new AppInfo { TargetPath = "shell:AppsFolder\\Fixture.App_123!App", IsUwp = true }
@@ -973,6 +976,8 @@ namespace AppManager
                     Check(rows.Exists(delegate(string[] row) { return row[0] == "路径" && row[1] == app.TargetPath; }), "metadata lost full path");
                     if (app.TargetPath == photo)
                         Check(preview != null && rows.Exists(delegate(string[] row) { return row[0] == "尺寸" && row[1] == "3 × 2"; }), "photo metadata was lost");
+                    if (app.TargetPath == video)
+                        Check(rows.Exists(delegate(string[] row) { return row[0] == "类型" && row[1] == "视频 · 3GP"; }), "3gp type row was not recognised as video");
                     if (!File.Exists(app.TargetPath) && !Directory.Exists(app.TargetPath))
                         Check(!rows.Exists(delegate(string[] row) { return row[0] == "创建时间" || row[0] == "修改时间"; }), "non-file target has fake timestamps");
                 }

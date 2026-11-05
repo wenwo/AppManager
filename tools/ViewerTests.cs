@@ -477,7 +477,7 @@ namespace AppManager
             if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
             SetDllDirectory(runtime);
 
-            string bad = Path.Combine(root, "corrupt-video.mp4");
+            string bad = Path.Combine(root, "corrupt-video.3gp");
             File.WriteAllText(bad, "this is not a video file");
             string good = Path.Combine(root, "video-after-failure.png");
             using (Bitmap frame = new Bitmap(64, 48))
