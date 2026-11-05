@@ -15,7 +15,10 @@ namespace AppManager.Controls
         private MusicPlaybackSession session;
         private bool ownsSession;
         private List<string> paths = new List<string>();
+        private readonly List<int> visibleIndices = new List<int>();
+        private readonly SearchField queueSearch = new SearchField();
         private int index, volume = 60, queueFirst, hover = -1, pressed = -1;
+        private string queueFilter = "";
         private MusicTrackInfo track;
         private Bitmap scaledCover;
         private Image scaledCoverSource;
@@ -28,9 +31,11 @@ namespace AppManager.Controls
         private float titleScroll;
         private int metadataGeneration;
         private PlaybackMode mode = PlaybackMode.Sequential;
-        private Rectangle mainCard, playerCard, backRect, coverRect;
+        private Rectangle mainCard, playerCard, backRect, coverRect, queueSearchRect;
         private Rectangle lyricTabRect, queueTabRect, contentRect, seekRect;
         private Rectangle songRect, modeRect, previousRect, playRect, nextRect, muteRect, volumeRect;
+        private bool showHeaderCount = true;
+        private bool queueSearchForceVisible;
 
         public MusicPlayerControl()
         {
@@ -39,6 +44,22 @@ namespace AppManager.Controls
             BackColor = Theme.Background;
             Visible = false;
             TabStop = true;
+            queueSearch.Placeholder = "搜索当前播放列表…";
+            queueSearch.Visible = false;
+            queueSearch.TextChanged += delegate
+            {
+                string value = queueSearch.Text ?? "";
+                if (value == queueFilter) return;
+                queueFilter = value;
+                RebuildVisibleIndices(true);
+            };
+            queueSearch.Leave += delegate
+            {
+                if (queueSearch.ContainsFocus || HasQueueFilter) return;
+                queueSearchForceVisible = false;
+                LayoutQueueSearch();
+            };
+            Controls.Add(queueSearch);
         }
 
         public string CurrentPath { get { return session == null ? null : session.CurrentPath; } }
@@ -65,7 +86,13 @@ namespace AppManager.Controls
         /// <summary>文件改名或移动后更新播放列表里的路径；不打断正在播放的曲目。</summary>
         public void RebasePath(string oldPath, string newPath)
         {
-            if (session != null) session.RebasePath(oldPath, newPath);
+            if (session == null) return;
+            session.RebasePath(oldPath, newPath);
+            // 非当前曲目改名不会触发 TrackChanged，必须主动刷新快照和匹配结果。
+            paths = session.PathsSnapshot();
+            index = session.Index;
+            RebuildVisibleIndices(false);
+            Invalidate();
         }
 
         internal void AttachSession(MusicPlaybackSession value)
@@ -144,8 +171,8 @@ namespace AppManager.Controls
                 paths = session.PathsSnapshot();
                 index = session.Index;
                 titleScroll = 0;
-                if (trackChanged) queueFirst = Math.Max(0, index - 4);
-                else EnsureQueueCurrentVisible();
+                RebuildVisibleIndices(false);
+                EnsureQueueCurrentVisible();
                 ClearTrack();
                 string path = session.CurrentPath;
                 if (!string.IsNullOrEmpty(path)) LoadMetadataAsync(path);
@@ -170,10 +197,21 @@ namespace AppManager.Controls
             List<string> songs = audioPaths ?? new List<string>();
             if (songs.Count == 0) { RequestClose(); return; }
             queueVisible = false;
-            queueFirst = Math.Max(0, Math.Min(startIndex, songs.Count - 1) - 4);
+            queueFilter = "";
+            queueSearchForceVisible = false;
+            if (!string.IsNullOrEmpty(queueSearch.Text)) queueSearch.Text = "";
+            visibleIndices.Clear();
+            queueFirst = 0;
+            hover = pressed = -1;
             Visible = true;
             Focus();
             EnsureSession().Open(songs, startIndex, startPosition, startPaused);
+            paths = session.PathsSnapshot();
+            index = session.Index;
+            RebuildVisibleIndices(true);
+            int currentRow = visibleIndices.IndexOf(index);
+            if (currentRow >= 0) queueFirst = Math.Max(0, currentRow - 4);
+            ClampQueueFirst();
         }
 
         private void LoadMetadataAsync(string path)
@@ -276,6 +314,31 @@ namespace AppManager.Controls
             muteRect = new Rectangle(playerCard.Right - 140, playerCard.Y + 49, 32, 36);
             int modeWidth = playerCard.Width < 620 ? 42 : 104;
             modeRect = new Rectangle(muteRect.Left - modeWidth - 10, playerCard.Y + 49, modeWidth, 36);
+            LayoutQueueSearch();
+        }
+
+        private void LayoutQueueSearch()
+        {
+            int width = Math.Max(320, ClientSize.Width);
+            bool show = queueVisible && (width >= 620 || HasQueueFilter || queueSearchForceVisible);
+            queueSearch.Visible = show;
+            if (!show)
+            {
+                showHeaderCount = true;
+                return;
+            }
+            if (width >= 620)
+            {
+                int searchWidth = Math.Max(140, Math.Min(280, width - 462));
+                queueSearchRect = new Rectangle(306, 8, searchWidth, 34);
+                showHeaderCount = true;
+            }
+            else
+            {
+                queueSearchRect = new Rectangle(116, 8, Math.Max(140, width - 132), 34);
+                showHeaderCount = false;
+            }
+            queueSearch.SetBounds(queueSearchRect.X, queueSearchRect.Y, queueSearchRect.Width, queueSearchRect.Height);
         }
 
         private void DrawHeader(Graphics g)
@@ -284,11 +347,18 @@ namespace AppManager.Controls
             Draw.DrawIcon(g, UiIconKind.Back, new Rectangle(backRect.X + 8, backRect.Y + 7, 20, 20), Theme.IconColor);
             TextRenderer.DrawText(g, "返回", Theme.ButtonFont, new Rectangle(backRect.X + 30, backRect.Y, 48, backRect.Height),
                 Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
-            TextRenderer.DrawText(g, "正在播放", Theme.SectionTitleFont, new Rectangle(116, 8, 180, 34),
-                Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
-            TextRenderer.DrawText(g, (Math.Max(0, index) + 1) + " / " + paths.Count, Theme.CaptionFont,
-                new Rectangle(Width - 116, 8, 100, 34), Theme.TextSecondary,
-                TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
+            if (!queueVisible || !queueSearch.Visible || showHeaderCount)
+                TextRenderer.DrawText(g, "正在播放", Theme.SectionTitleFont, new Rectangle(116, 8, 180, 34),
+                    Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+            if (showHeaderCount)
+            {
+                string count = HasQueueFilter
+                    ? "匹配 " + visibleIndices.Count + " / " + paths.Count
+                    : (Math.Max(0, index) + 1) + " / " + paths.Count;
+                TextRenderer.DrawText(g, count, Theme.CaptionFont,
+                    new Rectangle(Width - 146, 8, 130, 34), Theme.TextSecondary,
+                    TextFormatFlags.VerticalCenter | TextFormatFlags.Right);
+            }
         }
 
         private void DrawCoverAndInfo(Graphics g)
@@ -443,24 +513,33 @@ namespace AppManager.Controls
             DrawTabs(g);
             int rowHeight = 42;
             int visible = Math.Max(1, contentRect.Height / rowHeight);
-            queueFirst = Math.Max(0, Math.Min(queueFirst, Math.Max(0, paths.Count - visible)));
+            ClampQueueFirst();
             GraphicsState state = g.Save();
             g.SetClip(contentRect);
-            for (int row = 0; row < visible && queueFirst + row < paths.Count; row++)
+            if (visibleIndices.Count == 0)
             {
-                int item = queueFirst + row;
-                Rectangle rect = new Rectangle(contentRect.X + 4, contentRect.Y + row * rowHeight, contentRect.Width - 8, rowHeight - 4);
-                if (item == index) using (Brush brush = new SolidBrush(Theme.SelectionBg)) Draw.FillRoundedRect(g, brush, rect, 8);
-                else if (hover == 100 + item) using (Brush brush = new SolidBrush(Theme.CardHover)) Draw.FillRoundedRect(g, brush, rect, 8);
-                Rectangle numberRect = new Rectangle(rect.X + 4, rect.Y, 30, rect.Height);
-                if (item == index && playing) DrawEqualizer(g, numberRect);
-                else TextRenderer.DrawText(g, (item + 1).ToString("00"), Theme.CaptionFont, numberRect,
-                    item == index ? Theme.AccentText : Theme.TextTertiary, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
-                string name = item == index && track != null ? track.Title : Path.GetFileNameWithoutExtension(paths[item]);
-                TextRenderer.DrawText(g, name, item == index ? Theme.ButtonFont : Theme.BodyFont,
-                    new Rectangle(rect.X + 38, rect.Y, rect.Width - 44, rect.Height),
-                    item == index ? Theme.AccentText : Theme.TextPrimary,
-                    TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+                string message = HasQueueFilter ? "未找到匹配音乐" : "播放列表为空";
+                TextRenderer.DrawText(g, message, Theme.BodyFont, contentRect, Theme.TextTertiary,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+            }
+            else
+            {
+                for (int row = 0; row < visible && queueFirst + row < visibleIndices.Count; row++)
+                {
+                    int item = visibleIndices[queueFirst + row];
+                    Rectangle rect = new Rectangle(contentRect.X + 4, contentRect.Y + row * rowHeight, contentRect.Width - 8, rowHeight - 4);
+                    if (item == index) using (Brush brush = new SolidBrush(Theme.SelectionBg)) Draw.FillRoundedRect(g, brush, rect, 8);
+                    else if (hover == 100 + item) using (Brush brush = new SolidBrush(Theme.CardHover)) Draw.FillRoundedRect(g, brush, rect, 8);
+                    Rectangle numberRect = new Rectangle(rect.X + 4, rect.Y, 30, rect.Height);
+                    if (item == index && playing) DrawEqualizer(g, numberRect);
+                    else TextRenderer.DrawText(g, (item + 1).ToString("00"), Theme.CaptionFont, numberRect,
+                        item == index ? Theme.AccentText : Theme.TextTertiary, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                    string name = item == index && track != null ? track.Title : Path.GetFileNameWithoutExtension(paths[item]);
+                    TextRenderer.DrawText(g, name, item == index ? Theme.ButtonFont : Theme.BodyFont,
+                        new Rectangle(rect.X + 38, rect.Y, rect.Width - 44, rect.Height),
+                        item == index ? Theme.AccentText : Theme.TextPrimary,
+                        TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
+                }
             }
             g.Restore(state);
         }
@@ -652,8 +731,10 @@ namespace AppManager.Controls
             if (volumeRect.Contains(point)) return 9;
             if (queueVisible && contentRect.Contains(point))
             {
-                int item = queueFirst + (point.Y - contentRect.Y) / 42;
-                if (item >= 0 && item < paths.Count) return 100 + item;
+                int row = (point.Y - contentRect.Y) / 42;
+                int position = queueFirst + row;
+                if (row >= 0 && position >= 0 && position < visibleIndices.Count)
+                    return 100 + visibleIndices[position];
             }
             return -1;
         }
@@ -739,7 +820,7 @@ namespace AppManager.Controls
             if (queueVisible && contentRect.Contains(e.Location))
             {
                 int visible = Math.Max(1, contentRect.Height / 42);
-                queueFirst = Math.Max(0, Math.Min(Math.Max(0, paths.Count - visible), queueFirst - Math.Sign(e.Delta) * 3));
+                queueFirst = Math.Max(0, Math.Min(Math.Max(0, visibleIndices.Count - visible), queueFirst - Math.Sign(e.Delta) * 3));
             }
             else SetVolume(volume + Math.Sign(e.Delta) * 5);
             Invalidate();
@@ -748,6 +829,30 @@ namespace AppManager.Controls
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
             if (!Visible) return base.ProcessCmdKey(ref msg, keyData);
+            if (keyData == (Keys.Control | Keys.F))
+            {
+                queueVisible = true;
+                queueSearchForceVisible = true;
+                LayoutQueueSearch();
+                queueSearch.FocusInput();
+                Invalidate();
+                return true;
+            }
+            if (queueVisible && queueSearch.ContainsFocus)
+            {
+                if (keyData == Keys.Escape)
+                {
+                    if (!string.IsNullOrEmpty(queueSearch.Text)) { queueSearch.Text = ""; queueSearch.FocusInput(); }
+                    else Focus();
+                    return true;
+                }
+                if (keyData == Keys.Enter)
+                {
+                    if (HasQueueFilter && visibleIndices.Count > 0) Session.PlayAt(visibleIndices[0]);
+                    return true;
+                }
+                return base.ProcessCmdKey(ref msg, keyData);
+            }
             if (keyData == Keys.Escape) { RequestClose(); return true; }
             if (keyData == Keys.Space) { TogglePlay(); return true; }
             if (keyData == Keys.Left) { SeekTo(position - 5); return true; }
@@ -770,6 +875,13 @@ namespace AppManager.Controls
             paths = new List<string>();
             index = -1;
             failure = "";
+            queueFilter = "";
+            queueSearchForceVisible = false;
+            if (!string.IsNullOrEmpty(queueSearch.Text)) queueSearch.Text = "";
+            visibleIndices.Clear();
+            queueFirst = 0;
+            hover = pressed = -1;
+            LayoutQueueSearch();
             ClearTrack();
             Invalidate();
         }
@@ -784,9 +896,43 @@ namespace AppManager.Controls
 
         private void EnsureQueueCurrentVisible()
         {
+            int row = visibleIndices.IndexOf(index);
+            if (row < 0) return;
             int visible = Math.Max(1, contentRect.Height / 42);
-            if (index < queueFirst) queueFirst = index;
-            else if (index >= queueFirst + visible) queueFirst = index - visible + 1;
+            if (row < queueFirst) queueFirst = row;
+            else if (row >= queueFirst + visible) queueFirst = row - visible + 1;
+            ClampQueueFirst();
+        }
+
+        private bool HasQueueFilter
+        {
+            get { return !string.IsNullOrWhiteSpace(queueFilter); }
+        }
+
+        private void RebuildVisibleIndices(bool resetScroll)
+        {
+            visibleIndices.Clear();
+            string filter = (queueFilter ?? "").Trim();
+            for (int i = 0; i < paths.Count; i++)
+            {
+                string name = Path.GetFileNameWithoutExtension(paths[i] ?? "");
+                if (filter.Length == 0 || name.IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0)
+                    visibleIndices.Add(i);
+            }
+            if (resetScroll)
+            {
+                queueFirst = 0;
+                hover = pressed = -1;
+            }
+            ClampQueueFirst();
+            LayoutQueueSearch();
+            Invalidate();
+        }
+
+        private void ClampQueueFirst()
+        {
+            int visible = Math.Max(1, contentRect.Height / 42);
+            queueFirst = Math.Max(0, Math.Min(queueFirst, Math.Max(0, visibleIndices.Count - visible)));
         }
 
         private void RequestClose()

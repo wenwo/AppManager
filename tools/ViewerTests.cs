@@ -68,6 +68,7 @@ namespace AppManager
                 Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
                 Run("video failure placeholder does not block previous/next switching", VideoFailureSwitching);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
+                Run("music queue search maps filtered rows without changing playback order", MusicQueueSearch);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
@@ -421,6 +422,131 @@ namespace AppManager
                     }
                     host.Hide();
                 }
+            }
+        }
+
+        private static void MusicQueueSearch()
+        {
+            string[] songs =
+            {
+                @"D:\Music\Alpha Song.mp3",
+                @"D:\Music\Beta Track.mp3",
+                @"D:\Music\Gamma End.mp3",
+                @"D:\Music\ALPHA Reprise.flac"
+            };
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            {
+                Set(session, "paths", new List<string>(songs));
+                Set(session, "index", 2);
+                Set(session, "engineUnavailable", true);
+                player.AttachSession(session);
+                host.Controls.Add(player);
+                host.Show();
+                player.Visible = true;
+                host.Activate();
+                Application.DoEvents();
+
+                Set(player, "queueVisible", true);
+                Call(player, "LayoutPlayer");
+                Call(player, "RebuildVisibleIndices", true);
+                SearchField search = (SearchField)Field(player, "queueSearch");
+                List<int> visible = (List<int>)Field(player, "visibleIndices");
+                Check(visible.Count == 4 && visible[0] == 0 && visible[3] == 3, "unfiltered queue mapping changed");
+
+                Set(player, "contentRect", new Rectangle(200, 100, 500, 84));
+                Set(player, "queueFirst", 2);
+                Set(player, "hover", 105);
+                Set(player, "pressed", 105);
+                search.Text = "ALPHA";
+                Check(visible.Count == 2 && visible[0] == 0 && visible[1] == 3, "queue search was not case-insensitive");
+                Check((int)Field(player, "queueFirst") == 0, "queue search did not reset the visible scroll offset");
+                Check((int)Field(player, "hover") == -1 && (int)Field(player, "pressed") == -1,
+                    "queue search kept stale hover/pressed rows");
+
+                host.Size = new Size(500, 640);
+                Application.DoEvents();
+                Call(player, "LayoutPlayer");
+                Check(search.Visible, "narrow filtered queue hid both search controls");
+                search.Text = "";
+                Check(((List<int>)Field(player, "visibleIndices")).Count == 4, "clearing queue search did not restore the list");
+                Check(!search.Visible && (bool)Field(player, "showHeaderCount"), "narrow empty queue kept a hidden filter active");
+
+                host.Size = new Size(900, 640);
+                Application.DoEvents();
+                Call(player, "LayoutPlayer");
+                search.Text = "alpha";
+                Set(player, "contentRect", new Rectangle(200, 100, 500, 420));
+                Set(player, "queueFirst", 0);
+                int hit = (int)Call(player, "HitTest", new Point(210, 147));
+                Check(hit == 103, "filtered hit test did not return the original queue index: " + hit);
+                Call(player, "OnMouseDoubleClick", new MouseEventArgs(MouseButtons.Left, 2, 210, 147, 0));
+                Check(session.Index == 3, "double-click played the visible row number instead of the mapped track");
+
+                MethodInfo processKey = typeof(MusicPlayerControl).GetMethod("ProcessCmdKey", BindingFlags.NonPublic | BindingFlags.Instance);
+                Func<Keys, bool> playerKey = delegate(Keys key)
+                {
+                    object[] args = { Message.Create(IntPtr.Zero, 0, IntPtr.Zero, IntPtr.Zero), key };
+                    return (bool)processKey.Invoke(player, args);
+                };
+                search.FocusInput();
+                Application.DoEvents();
+                Check(search.ContainsFocus, "queue search did not take focus");
+                Check(playerKey(Keys.Enter), "Enter in queue search was not handled");
+                Check(session.Index == 0, "Enter did not play the first mapped queue row: " + session.Index);
+
+                search.Text = "";
+                Set(session, "index", 1);
+                Check(playerKey(Keys.Enter), "empty queue search Enter was not handled");
+                Check(session.Index == 1, "empty queue search Enter changed the current track");
+
+                search.Text = "alpha";
+                int volume = session.Volume, mappedIndex = session.Index;
+                playerKey(Keys.Up);
+                playerKey(Keys.Down);
+                playerKey(Keys.Left);
+                playerKey(Keys.Right);
+                playerKey(Keys.Control | Keys.Left);
+                playerKey(Keys.Control | Keys.Right);
+                Check(session.Volume == volume && session.Index == mappedIndex,
+                    "search-focused player shortcuts changed volume or track");
+
+                bool closed = false;
+                player.CloseRequested += delegate { closed = true; };
+                Check(playerKey(Keys.Escape) && string.IsNullOrEmpty(search.Text), "first Escape did not clear queue search");
+                Check(playerKey(Keys.Escape), "second Escape was not consumed by the search focus");
+                Check(!closed && player.Visible, "Escape closed the player while search had focus");
+
+                Set(player, "queueVisible", false);
+                Set(player, "queueSearchForceVisible", false);
+                Check(playerKey(Keys.Control | Keys.F), "Ctrl+F in the visible player was not handled");
+                Check((bool)Field(player, "queueVisible") && search.Visible, "Ctrl+F did not reveal the current queue search");
+                player.Visible = false;
+                Set(player, "queueVisible", false);
+                Set(player, "queueSearchForceVisible", false);
+                playerKey(Keys.Control | Keys.F);
+                Check(!(bool)Field(player, "queueVisible") && !(bool)Field(player, "queueSearchForceVisible"),
+                    "hidden player swallowed the main window Ctrl+F");
+                player.Visible = true;
+
+                Set(player, "queueVisible", true);
+                Call(player, "LayoutPlayer");
+                search.Text = "beta";
+                visible = (List<int>)Field(player, "visibleIndices");
+                Check(visible.Count == 1 && visible[0] == 1, "beta search did not select its queue row");
+                string renamed = @"D:\Music\Omega Track.mp3";
+                player.RebasePath(songs[1], renamed);
+                Check(((List<int>)Field(player, "visibleIndices")).Count == 0, "non-current rename left stale search matches");
+                search.Text = "omega";
+                visible = (List<int>)Field(player, "visibleIndices");
+                Check(visible.Count == 1 && visible[0] == 1, "non-current rename did not refresh the path snapshot");
+
+                search.Text = "alpha";
+                player.Open(new List<string>(songs), 1);
+                Check(string.IsNullOrEmpty(search.Text) && ((List<int>)Field(player, "visibleIndices")).Count == 4,
+                    "opening a new queue did not clear the previous filter");
+                host.Hide();
             }
         }
 

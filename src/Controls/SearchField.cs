@@ -64,6 +64,12 @@ namespace AppManager.Controls
 
         public override string Text { get { return box.Text; } set { box.Text = value; } }
 
+        public void FocusInput()
+        {
+            box.Focus();
+            box.SelectAll();
+        }
+
         [Browsable(true)]
         public new event EventHandler TextChanged;
 
