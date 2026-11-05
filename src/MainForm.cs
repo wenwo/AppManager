@@ -72,8 +72,8 @@ namespace AppManager
         private VideoPlayerControl videoPlayer;  // 视频播放器：双击视频后替换列表区域播放
         private MusicPlayerControl musicPlayer;  // 音乐播放器：双击音乐后在列表区域直接播放
         private NotifyIcon tray;          // 系统托盘图标（常驻）
-        private bool exiting;             // 真正退出标志：为真时关闭不再拦截为「最小化到托盘」
-        private bool trayTipShown;        // 首次最小化到托盘的气泡提示只弹一次
+        private bool exiting;             // 真正退出标志：为真时关闭不再拦截为「关闭时隐藏到托盘」
+        private bool trayTipShown;        // 首次关闭时隐藏到托盘的气泡提示只弹一次
         private Label countLabel;
         private Label loadingLabel;
         // 底部状态栏：显示当前处理进度（如搬运文件）
@@ -439,7 +439,7 @@ namespace AppManager
             if (maxBtn != null) maxBtn.Kind = IconKind.Maximize;
         }
 
-        /// <summary>点「×」：按设置彻底退出或最小化到系统托盘。</summary>
+        /// <summary>点「×」：按设置彻底退出或关闭时隐藏到系统托盘。</summary>
         private void OnCloseRequested()
         {
             if (config.CloseToTray)
@@ -713,7 +713,7 @@ namespace AppManager
             if (!trayTipShown && tray != null)
             {
                 trayTipShown = true;
-                tray.ShowBalloonTip(3000, "应用中心", "已最小化到托盘，双击图标可重新打开。", ToolTipIcon.Info);
+                tray.ShowBalloonTip(3000, "应用中心", "已隐藏到托盘，双击图标可重新打开。", ToolTipIcon.Info);
             }
         }
 

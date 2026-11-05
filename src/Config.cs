@@ -749,7 +749,7 @@ namespace AppManager
         public bool ShowHidden = false;
         public bool AutoScan = true;
         public bool AutoOrganizeDesktop = false;
-        // 关闭主窗口行为：false=彻底退出（默认），true=最小化到系统托盘
+        // 关闭主窗口行为：false=彻底退出（默认），true=关闭时隐藏到系统托盘
         public bool CloseToTray = false;
 
         public List<string> Favorites = new List<string>();

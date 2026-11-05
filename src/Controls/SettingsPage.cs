@@ -168,7 +168,7 @@ namespace AppManager.Controls
             y += GapY;
             y = AddSection("关闭主窗口", left, colW, y, new Row[]
             {
-                MakeSubtitleRow("最小化到托盘", "开启后关闭窗口隐藏到托盘；关闭则直接退出。", closeToTrayToggle)
+                MakeSubtitleRow("关闭时隐藏到托盘", "开启后关闭窗口隐藏到托盘；关闭则直接退出。", closeToTrayToggle)
             });
 
             // 右列：存储位置 + 维护操作

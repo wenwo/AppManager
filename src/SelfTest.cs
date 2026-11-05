@@ -747,7 +747,7 @@ namespace AppManager
 
         private static void Case39_CloseToTrayRoundtrip()
         {
-            Begin("39 关闭行为开关往返一致（退出/最小化到托盘）");
+            Begin("39 关闭行为开关往返一致（退出/关闭时隐藏到托盘）");
             string tmp = TempFile(".ambak");
             try
             {
