@@ -22,6 +22,7 @@ namespace AppManager.Controls
         private string description = string.Empty;
         private string coverPath = string.Empty;
         private int count;
+        private int childFolderCount;
         private Bitmap cover;               // 大封面位图，所有权归本控件
         private float coverFocusX = 0.5F;   // 当前封面的取景焦点（0~1，居中为 0.5）
         private float coverFocusY = 0.5F;
@@ -138,6 +139,15 @@ namespace AppManager.Controls
         public void SetInfo(string parentCategory, string collectionName, string desc, int itemCount,
             string collectionCoverPath, float focusX, float focusY, Bitmap coverBmp, List<string> memberImages)
         {
+            SetInfo(parentCategory, collectionName, desc, itemCount, 0, collectionCoverPath,
+                focusX, focusY, coverBmp, memberImages);
+        }
+
+        /// <summary>注入集合信息、直接成员数与直接子文件夹数；旧封面与成员缩略图由本控件释放。</summary>
+        public void SetInfo(string parentCategory, string collectionName, string desc, int itemCount,
+            int childFolders, string collectionCoverPath, float focusX, float focusY, Bitmap coverBmp,
+            List<string> memberImages)
+        {
             EndEdit();
             if (cover != null) { cover.Dispose(); cover = null; }
             thumbGen++;              // 使在途加载结果失效
@@ -150,6 +160,7 @@ namespace AppManager.Controls
             coverFocusX = ClampFocus(focusX);
             coverFocusY = ClampFocus(focusY);
             count = itemCount;
+            childFolderCount = Math.Max(0, childFolders);
             cover = coverBmp;
             memberPaths.Clear();
             if (memberImages != null)
@@ -175,6 +186,7 @@ namespace AppManager.Controls
             description = string.Empty;
             coverPath = string.Empty;
             count = 0;
+            childFolderCount = 0;
             memberPaths.Clear();
             layoutDirty = true;
         }
@@ -876,7 +888,8 @@ namespace AppManager.Controls
                 TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter | TextFormatFlags.Top
                 | TextFormatFlags.EndEllipsis);
 
-            string meta = (parent.Length == 0 ? string.Empty : parent + " · ") + count + " 项资源";
+            string meta = (parent.Length == 0 ? string.Empty : parent + " · ") + count + " 项资源 · "
+                + childFolderCount + " 个子文件夹";
             using (SolidBrush sb = new SolidBrush(Theme.TextSecondary))
                 Draw.DrawStringCenter(g, meta, Theme.CaptionFont, sb, metaDisplayRect);
 

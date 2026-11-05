@@ -1,9 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.Serialization;
 using System.Windows.Forms;
 using System.Xml;
 
@@ -35,6 +38,7 @@ namespace AppManager
             try
             {
                 Run("migration, all fields, idempotence and original XML preserved", Migration);
+                Run("RW2 capture-date index refresh is targeted, idempotent and updates listings", Rw2MetadataIndexRefresh);
                 Run("stable category and collection ids on rename", Rename);
                 Run("nested collection keys, indexes and parent ids survive reload", CollectionTree);
                 Run("nested collection subtree rename migrates keys, references and ids", CollectionSubtreeRename);
@@ -548,6 +552,74 @@ namespace AppManager
             Check(c.Database.Page("照片", true, true, "", 10, null, false, false).Total == 503, "hidden filter");
             Check(c.Database.Page("全部资源", true, true, "", 10, null, false, false).Total == 504, "exclusion removed physical item");
             Check(c.Database.Page("照片", true, false, "照片0002", 10, null, true, false).Total == 1, "search");
+        }
+
+        private static void Rw2MetadataIndexRefresh()
+        {
+            if (WicImageDecoder.IsRw2WicDecoderRegistered() == false)
+            {
+                Console.WriteLine("  RW2 WIC decoder unavailable; migration retry is deferred until it is installed");
+                return;
+            }
+            string folder = Folder("rw2-index");
+            string path = Path.Combine(folder, "config.xml");
+            string rw2 = Path.Combine(folder, "photo.rw2");
+            string jpg = Path.Combine(folder, "photo.jpg");
+            using (Bitmap bitmap = new Bitmap(4, 2))
+            {
+                PropertyItem item = (PropertyItem)FormatterServices.GetUninitializedObject(typeof(PropertyItem));
+                item.Id = 0x9003; item.Type = 2;
+                item.Value = System.Text.Encoding.ASCII.GetBytes("2020:01:02 03:04:05\0");
+                item.Len = item.Value.Length;
+                bitmap.SetPropertyItem(item);
+                bitmap.Save(rw2, ImageFormat.Jpeg);
+            }
+            File.WriteAllText(jpg, "not an image");
+            File.SetLastWriteTime(rw2, new DateTime(2030, 1, 1, 0, 0, 0));
+
+            AppConfig source = new AppConfig();
+            source.ResourceCategories.Add("照片");
+            source.AddedItems.Add(new AddedEntry { Path = rw2, Name = "photo", Category = "照片", IsResource = true });
+            source.AddedItems.Add(new AddedEntry { Path = jpg, Name = "plain", Category = "照片", IsResource = true });
+            Check(source.SaveTo(path), "RW2 fixture export");
+            AppConfig loaded = ConfigDatabase.Load(path); Check(!loaded.LoadFailed, loaded.DatabaseError);
+
+            long rw2Id, jpgId;
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), false))
+            {
+                rw2Id = Convert.ToInt64(db.Scalar("SELECT id FROM entries WHERE key=?", "add:" + rw2));
+                jpgId = Convert.ToInt64(db.Scalar("SELECT id FROM entries WHERE key=?", "add:" + jpg));
+                db.Execute("UPDATE catalog SET indexed=1,modified=111 WHERE item_id=?", rw2Id);
+                db.Execute("UPDATE listing SET modified=111 WHERE item_id=?", rw2Id);
+                db.Execute("UPDATE catalog SET indexed=1,modified=222 WHERE item_id=?", jpgId);
+                db.Execute("UPDATE listing SET modified=222 WHERE item_id=?", jpgId);
+                db.Execute("DELETE FROM metadata WHERE key='rw2_taken_date_index_v1'");
+            }
+
+            AppConfig refreshed = ConfigDatabase.Load(path); Check(!refreshed.LoadFailed, refreshed.DatabaseError);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", rw2Id) == "0", "RW2 was not queued for reindex");
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", jpgId) == "1", "non-RW2 was reindexed");
+                Check(db.Scalar("SELECT value FROM metadata WHERE key='rw2_taken_date_index_v1'") == "1", "migration marker missing");
+                Check(db.Scalar("SELECT modified FROM listing WHERE item_id=?", rw2Id) == "111", "listing changed before reindex");
+            }
+
+            refreshed.Database.IndexMetadata(null);
+            long expected = new DateTime(2020, 1, 2, 3, 4, 5, DateTimeKind.Unspecified).ToUniversalTime().Ticks;
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+            {
+                Check(Convert.ToInt64(db.Scalar("SELECT modified FROM catalog WHERE item_id=?", rw2Id)) == expected,
+                    "RW2 catalog date not refreshed");
+                Check(Convert.ToInt64(db.Scalar("SELECT modified FROM listing WHERE item_id=?", rw2Id)) == expected,
+                    "RW2 listing date not refreshed");
+                Check(Convert.ToInt64(db.Scalar("SELECT modified FROM listing WHERE item_id=?", jpgId)) == 222,
+                    "non-RW2 listing date changed");
+            }
+
+            AppConfig again = ConfigDatabase.Load(path); Check(!again.LoadFailed, again.DatabaseError);
+            using (Sqlite db = new Sqlite(ConfigDatabase.DatabasePath(path), true))
+                Check(db.Scalar("SELECT indexed FROM catalog WHERE item_id=?", rw2Id) == "1", "migration was not idempotent");
         }
         private static void UiPaging()
         {

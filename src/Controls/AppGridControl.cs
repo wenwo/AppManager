@@ -90,7 +90,7 @@ namespace AppManager.Controls
         private int ColGap { get { return Dpi(18); } }
         private int CatColMinW { get { return Dpi(56); } }
         private int SizeColW { get { return Dpi(76); } }
-        private int TimeColW { get { return Dpi(78); } }    // 资源列表「时间」列：yyyy-MM-dd
+        private int TimeColW { get { return Dpi(78); } }    // 资源列表「日期」列：yyyy-MM-dd
         private int LocColMinW { get { return Dpi(56); } }
         private int NameColMinW { get { return Dpi(76); } }   // 资源列表出现时间列时，名称列的最小可读宽度
         // 分类分段（胶囊）尺寸
@@ -215,7 +215,7 @@ namespace AppManager.Controls
         /// <summary>是否在列表行右侧显示操作按钮（改名/改地址/删除）。</summary>
         public bool ShowRowActions { get; set; }
 
-        /// <summary>列表是否显示「时间」列（资源模式显示创建日期，软件模式不占用列宽）。</summary>
+        /// <summary>列表是否显示「日期」列（照片优先拍摄时间，读不到回退修改时间；软件模式不占用列宽）。</summary>
         public bool ShowTimeColumn { get; set; }
 
         private string rowDeleteText = "删除";
@@ -541,7 +541,7 @@ namespace AppManager.Controls
         {
             ExtendMeasuredRange(g);
             int w2 = locTextMaxW + 2;
-            // 资源列表多出「时间」列，位置列上限相应收紧，优先保证名称列可读
+            // 资源列表多出「日期」列，位置列上限相应收紧，优先保证名称列可读
             int cap = (int)(rowWidth * (ShowTimeColumn ? 0.32f : 0.42f));
             if (w2 > cap) w2 = cap;
             if (w2 < LocColMinW) w2 = LocColMinW;
@@ -876,7 +876,7 @@ namespace AppManager.Controls
                 // 分类（左对齐，胶囊组左边缘固定 → 上下对齐）
                 DrawCategoryChips(g, a, catRect.X, catRect.Right, r);
 
-                // 大小（右对齐，数字纵向对齐）/ 时间（资源模式，创建日期）/ 实际位置（贴右边缘）
+                // 大小（右对齐，数字纵向对齐）/ 日期（资源模式，拍摄时间或修改时间回退）/ 实际位置（贴右边缘）
                 Draw.DrawStringRight(g, FormatSize(a), subFont, subTextBrush, sizeRect);
                 if (ShowTimeColumn)
                     Draw.DrawStringRight(g, FormatDate(a), subFont, subTextBrush, timeRect);
@@ -888,8 +888,8 @@ namespace AppManager.Controls
         }
 
         /// <summary>
-        /// 计算列表一行内各数据列矩形（名称/分类/大小/时间/位置），左侧为图标槽。
-        /// 行与表头共用，保证列 X 完全一致；时间列仅在资源模式占位。
+        /// 计算列表一行内各数据列矩形（名称/分类/大小/日期/位置），左侧为图标槽。
+        /// 行与表头共用，保证列 X 完全一致；日期列仅在资源模式占位。
         /// </summary>
         private void ListColumns(Graphics g, Rectangle row, int actionReserve,
             out Rectangle nameRect, out Rectangle catRect, out Rectangle sizeRect,
@@ -963,14 +963,14 @@ namespace AppManager.Controls
             Rectangle nameRect, catRect, sizeRect, timeRect, locRect;
             ListColumns(g, refRow, actionReserve, out nameRect, out catRect, out sizeRect, out timeRect, out locRect);
 
-            // 每列栏位名与对应数据的对齐方式一致（名称/分类左对齐，大小/时间/位置右对齐）
+            // 每列栏位名与对应数据的对齐方式一致（名称/分类左对齐，大小/日期/位置右对齐）
             // 排序列名追加方向箭头（▲升序/▼降序）
             string arrow = sortAsc ? " ▲" : " ▼";
             Draw.DrawStringLeft(g, "名称" + (sortColumn == "name" ? arrow : string.Empty), headerFont, subTextBrush, nameRect);
             Draw.DrawStringLeft(g, "分类", headerFont, subTextBrush, catRect);
             Draw.DrawStringRight(g, "大小" + (sortColumn == "size" ? arrow : string.Empty), headerFont, subTextBrush, sizeRect);
             if (ShowTimeColumn)
-                Draw.DrawStringRight(g, "时间" + (sortColumn == "time" ? arrow : string.Empty), headerFont, subTextBrush, timeRect);
+                Draw.DrawStringRight(g, "日期" + (sortColumn == "time" ? arrow : string.Empty), headerFont, subTextBrush, timeRect);
             Draw.DrawStringRight(g, "位置", headerFont, subTextBrush, locRect);
         }
 
@@ -1051,7 +1051,7 @@ namespace AppManager.Controls
             return MetaOf(a).Size;
         }
 
-        /// <summary>「时间」列文本：文件/文件夹的创建日期（yyyy-MM-dd）。</summary>
+        /// <summary>「日期」列文本：照片优先拍摄时间，其他或读取失败回退修改时间（yyyy-MM-dd）。</summary>
         private string FormatDate(AppInfo a)
         {
             return MetaOf(a).Date;

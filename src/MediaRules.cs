@@ -24,7 +24,7 @@ namespace AppManager
         /// <summary>视频扩展名（小写、含点）。</summary>
         public static readonly string[] VideoExt =
         {
-            ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v"
+            ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp"
         };
 
         /// <summary>音频扩展名（小写、含点）。</summary>
@@ -68,9 +68,9 @@ namespace AppManager
         private static readonly string[] PhotoCategoryExt =
             Merge(ImageExt, new[] { ".heic", ".heif", ".tif", ".tiff", ".avif", ".svg" });
 
-        /// <summary>「视频」接收：播放器常见格式 + 蓝光/DV 流、MPEG、手机 3GP、RMVB。</summary>
+        /// <summary>「视频」接收：播放器常见格式 + 蓝光/DV 流、MPEG、RMVB。</summary>
         private static readonly string[] VideoCategoryExt =
-            Merge(VideoExt, new[] { ".m2ts", ".mts", ".mpg", ".mpeg", ".3gp", ".rmvb" });
+            Merge(VideoExt, new[] { ".m2ts", ".mts", ".mpg", ".mpeg", ".rmvb" });
 
         /// <summary>「文档」接收：常见文档 + WPS（wps/et/dps）、OFD 电子发票/证照、OpenDocument、XPS。</summary>
         private static readonly string[] DocCategoryExt =

@@ -64,6 +64,7 @@ namespace AppManager
                 Run("video player previews a seek while dragging and commits it once", VideoSeekCommitsOnce);
                 Run("music stops on a missing track and the hidden mini player pauses", MusicSilencedWhenUnreachable);
                 Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
+                Run("video failure placeholder does not block previous/next switching", VideoFailureSwitching);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
@@ -469,6 +470,55 @@ namespace AppManager
             Check(MpvShutdown.WaitAll(1000), "player disposal left an engine behind");
         }
 
+        // 损坏文件进入占位态后，前后切换仍应加载后续视频；退出时也要释放内核。
+        private static void VideoFailureSwitching()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+
+            string bad = Path.Combine(root, "corrupt-video.mp4");
+            File.WriteAllText(bad, "this is not a video file");
+            string good = Path.Combine(root, "video-after-failure.png");
+            using (Bitmap frame = new Bitmap(64, 48))
+            {
+                using (Graphics g = Graphics.FromImage(frame)) g.Clear(Color.SteelBlue);
+                frame.Save(good, ImageFormat.Png);
+            }
+
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(900, 640), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            using (VideoPlayerControl video = new VideoPlayerControl { Dock = DockStyle.Fill })
+            {
+                host.Controls.Add(video);
+                host.Show();
+                video.Open(new List<string> { bad, good }, 0);
+                Check(PumpUntil(delegate { return (bool)Field(video, "loadFailed"); }, 15000),
+                    "corrupt video did not enter the failure state");
+                string failure = (string)Field(video, "failText");
+                Check(failure != null && failure.StartsWith("无法播放此视频", StringComparison.Ordinal),
+                    "unexpected failure text: " + failure);
+
+                Call(video, "Next");
+                Check(PumpUntil(delegate { return (bool)Field(video, "fileLoaded") && !(bool)Field(video, "loadFailed"); }, 15000),
+                    "next video did not load after a failure");
+
+                Call(video, "Prev");
+                Check(PumpUntil(delegate { return (bool)Field(video, "loadFailed"); }, 15000),
+                    "previous corrupt video did not fail again");
+
+                Call(video, "Next");
+                Check(PumpUntil(delegate { return (bool)Field(video, "fileLoaded") && !(bool)Field(video, "loadFailed"); }, 15000),
+                    "next video did not recover after a second failure");
+
+                FieldInfo engineField = typeof(VideoPlayerControl).GetField("mpv", BindingFlags.Instance | BindingFlags.NonPublic);
+                video.Visible = false;
+                Check(engineField.GetValue(video) == null, "engine still referenced after closing a failed video");
+                Check(PumpUntil(delegate { return MpvShutdown.Pending == 0; }, 5000), "background destroy never finished");
+                host.Hide();
+            }
+            Check(MpvShutdown.WaitAll(1000), "player disposal left an engine behind");
+        }
+
         private static bool EngineFlag(object control, string property)
         {
             object engine = EngineOf(control);
@@ -596,18 +646,26 @@ namespace AppManager
         private static extern bool DeviceIoControl(Microsoft.Win32.SafeHandles.SafeFileHandle handle,
             uint code, IntPtr input, uint inputSize, IntPtr output, uint outputSize, out uint returned, IntPtr overlapped);
 
-        private static string MakeExifJpeg(string name)
+        private static string MakeExifJpeg(string name, string original, string digitized = null, string dateTime = null)
         {
             string path = Path.Combine(root, name);
             using (Bitmap bitmap = new Bitmap(4, 2))
             {
-                PropertyItem item = (PropertyItem)FormatterServices.GetUninitializedObject(typeof(PropertyItem));
-                item.Id = 0x9003; item.Type = 2; item.Value = Encoding.ASCII.GetBytes("2020:01:02 03:04:05\0");
-                item.Len = item.Value.Length;
-                bitmap.SetPropertyItem(item);
+                SetExifValue(bitmap, 0x9003, original);
+                SetExifValue(bitmap, 0x9004, digitized);
+                SetExifValue(bitmap, 0x0132, dateTime);
                 bitmap.Save(path, ImageFormat.Jpeg);
             }
             return path;
+        }
+
+        private static void SetExifValue(Bitmap bitmap, int id, string value)
+        {
+            if (value == null) return;
+            PropertyItem item = (PropertyItem)FormatterServices.GetUninitializedObject(typeof(PropertyItem));
+            item.Id = id; item.Type = 2; item.Value = Encoding.ASCII.GetBytes(value + "\0");
+            item.Len = item.Value.Length;
+            bitmap.SetPropertyItem(item);
         }
 
         private static void MakeSparse(FileStream stream, long length)
@@ -628,14 +686,34 @@ namespace AppManager
                 && MediaRules.DecodableImageFilter().Contains("*.rw2"), "RW2 filters");
             Check(!MediaRules.IsRawImage("photo.jpg") && MediaRules.IsImage("photo.jpg"), "JPEG affected by raw rule");
 
-            string disguised = MakeExifJpeg("disguised.rw2");
             DateTime taken;
-            Check(!MediaInfo.TryGetTakenDate(disguised, out taken), "RW2 entered GDI+ EXIF path");
+            string original = MakeExifJpeg("original.rw2", "2020:01:02 03:04:05");
+            Check(MediaInfo.TryGetTakenDate(original, out taken)
+                && taken == new DateTime(2020, 1, 2, 3, 4, 5)
+                && taken.Kind == DateTimeKind.Unspecified, "RW2 DateTimeOriginal");
+
+            string fallback = MakeExifJpeg("fallback.rw2", "0000:00:00 00:00:00",
+                "2021:05:06 07:08:09", "2022:06:07 08:09:10");
+            Check(MediaInfo.TryGetTakenDate(fallback, out taken)
+                && taken == new DateTime(2021, 5, 6, 7, 8, 9), "RW2 DateTimeDigitized fallback");
+
+            string dateTimeOnly = MakeExifJpeg("datetime.rw2", "0000:00:00 00:00:00",
+                "0000:00:00 00:00:00", "2022:06:07 08:09:10");
+            Check(MediaInfo.TryGetTakenDate(dateTimeOnly, out taken)
+                && taken == new DateTime(2022, 6, 7, 8, 9, 10), "RW2 DateTime fallback");
+
+            string noValidDate = MakeExifJpeg("invalid.rw2", "0000:00:00 00:00:00");
+            Check(!MediaInfo.TryGetTakenDate(noValidDate, out taken), "invalid RW2 EXIF accepted");
+
             MethodInfo details = typeof(PropertiesDialog).GetMethod("ReadImageInfo", BindingFlags.NonPublic | BindingFlags.Static);
-            object[] args = { disguised, 0, 0, null, null, null };
+            object[] args = { original, 0, 0, null, null, null };
             details.Invoke(null, args);
             Bitmap preview = args[5] as Bitmap;
-            try { Check((int)args[1] == 0 && args[3] == null && preview == null, "RW2 entered Dialog GDI+ path"); }
+            try
+            {
+                Check((int)args[1] == 0 && (int)args[2] == 0 && "2020-01-02 03:04:05".Equals(args[3] as string)
+                    && preview == null, "RW2 dialog did not show capture time via metadata only");
+            }
             finally { if (preview != null) preview.Dispose(); }
             Check(!Icons.CanUseGdiFallback(@"C:\a\photo.RW2") && Icons.CanUseGdiFallback(@"C:\a\photo.jpg"),
                 "GDI+ fallback isolation");
@@ -647,6 +725,18 @@ namespace AppManager
             Check(WicImageDecoder.RawDecodeFailureMessage(true).Contains("损坏"), "failed decoder text");
             Check(WicImageDecoder.RawDecodeFailureMessage(null).Contains("无法确认"), "unknown decoder text");
 
+            string real = Environment.GetEnvironmentVariable("APPMANAGER_RW2_SAMPLE");
+            if (!string.IsNullOrEmpty(real) && File.Exists(real))
+            {
+                bool realOk = MediaInfo.TryGetTakenDate(real, out taken);
+                if (registered == true)
+                    Check(realOk && taken.Kind == DateTimeKind.Unspecified, "real RW2 capture time");
+                else if (registered == false)
+                    Check(!realOk, "missing RW2 decoder did not fall back");
+                Console.WriteLine("  real RW2 capture time: " + (realOk ? taken.ToString("yyyy-MM-dd HH:mm:ss") : "<none>"));
+            }
+            else Console.WriteLine("  APPMANAGER_RW2_SAMPLE not set; real RW2 check skipped");
+
             string empty = Path.Combine(root, "empty.rw2"); File.WriteAllBytes(empty, new byte[0]);
             try
             {
@@ -656,16 +746,16 @@ namespace AppManager
             {
                 Check(ex.Message == WicImageDecoder.RawDecodeFailureMessage(registered), "empty RW2 message: " + ex.Message);
             }
+            Check(!MediaInfo.TryGetTakenDate(empty, out taken), "empty RW2 capture time accepted");
             using (Bitmap thumb = Icons.LoadCoverSource(empty, 32)) Check(thumb == null, "empty RW2 reached GDI+ fallback");
 
-            string oversized = Path.Combine(root, "oversized.rw2");
-            using (FileStream stream = new FileStream(oversized, FileMode.Create, FileAccess.Write, FileShare.None))
+            string oversized = MakeExifJpeg("oversized.rw2", "2020:01:02 03:04:05");
+            using (FileStream stream = new FileStream(oversized, FileMode.Open, FileAccess.Write, FileShare.None))
                 MakeSparse(stream, 256L * 1024 * 1024 + 1);
-            try
-            {
-                using (Bitmap ignored = WicImageDecoder.Load(oversized, 128)) { throw new Exception("oversized RW2 decoded"); }
-            }
-            catch (InvalidDataException ex) { Check(ex.Message.Contains("256 MB"), "256 MB boundary: " + ex.Message); }
+            Check(MediaInfo.TryGetTakenDate(oversized, out taken)
+                && taken == new DateTime(2020, 1, 2, 3, 4, 5), "oversized RW2 metadata rejected");
+            using (Bitmap large = WicImageDecoder.Load(oversized, 128))
+                Check(large.Width == 4 && large.Height == 2, "RW2 file size limit was not removed");
 
             string huge = Path.Combine(root, "huge.rw2");
             using (Bitmap bitmap = new Bitmap(8193, 8192, PixelFormat.Format1bppIndexed))
@@ -1030,6 +1120,15 @@ namespace AppManager
                 Check(!(bool)Call(form, "IsEmbeddedViewerItem", new AppInfo { TargetPath = url, IsFile = true }), "URL captured: " + url);
             Check(MediaRules.MatchCategoryExt("证件", "note.txt") && MediaRules.MatchCategoryExt("证件", "scan.pdf")
                 && MediaRules.MatchCategoryExt("证件", "note.docx") && !MediaRules.MatchCategoryExt("证件", "movie.mp4"), "credential formats");
+            AppInfo mp4 = new AppInfo { TargetPath = @"C:\not-real\clip.mp4", IsFile = true };
+            AppInfo phone = new AppInfo { TargetPath = @"C:\not-real\phone.3gp", IsFile = true };
+            AppInfo rmvb = new AppInfo { TargetPath = @"C:\not-real\old.rmvb", IsFile = true };
+            Check((bool)Call(form, "IsEmbeddedViewerItem", phone), "3gp not previewed internally");
+            Check(!(bool)Call(form, "IsEmbeddedViewerItem", rmvb), "rmvb captured by internal viewer");
+            Set(form, "shownApps", new List<AppInfo> { mp4, phone, rmvb });
+            List<string> videos = (List<string>)Call(form, "MediaSequence", (Func<string, bool>)MediaRules.IsVideo, false);
+            Check(videos.Count == 2 && videos[0] == mp4.TargetPath && videos[1] == phone.TargetPath,
+                "mixed video sequence: " + string.Join(",", videos.ToArray()));
             Set(form, "shownApps", new List<AppInfo> { new AppInfo { TargetPath = @"\\offline-test\share\missing.png", IsFile = true } });
             List<string> sequence = (List<string>)Call(form, "MediaSequence", (Func<string, bool>)MediaRules.IsImageDocument, false);
             Check(sequence.Count == 1, "background existence checks");

@@ -7,6 +7,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Win32;
 using System.Xml;
 
@@ -22,6 +23,10 @@ namespace AppManager
         private readonly AppConfig config;
         private const int ShortcutTextCapacity = 32768;
         private static readonly string SelfExecutablePath = ResolveSelfExecutablePath();
+        private static readonly Regex RestoreAliasSuffix = new Regex(
+            @"_restored[0-9]*\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        private static readonly Regex TrailingIndexSuffix = new Regex(
+            @"_[0-9]+\z", RegexOptions.CultureInvariant);
 
         private static string ResolveSelfExecutablePath()
         {
@@ -548,7 +553,7 @@ namespace AppManager
                 app.LaunchArguments = a.Trim();
                 try { app.ShortcutLastWriteTimeUtc = File.GetLastWriteTimeUtc(path); } catch { }
                 app.ShortcutPath = path;
-                app.Name = Path.GetFileNameWithoutExtension(path);
+                app.Name = CanonicalShortcutName(Path.GetFileNameWithoutExtension(path));
                 app.Source = source;
                 app.IsDesktop = (source == "Desktop");
                 app.Key = "lnk:" + path;
@@ -841,6 +846,28 @@ namespace AppManager
         {
             string na = NormalizeEntryName(a);
             return na.Length > 0 && na == NormalizeEntryName(b);
+        }
+
+        /// <summary>
+        /// 还原快捷方式冲突时追加的显示后缀：先剥离尾部 _数字（仅当其后露出还原后缀），
+        /// 再剥离 _restored / _restored数字；如「微信_restored2_1」→「微信」。
+        /// 不使用通用 StripIndexSuffix，避免改变「Chrome_1」等正常显示名。
+        /// </summary>
+        internal static string CanonicalShortcutName(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return name;
+            string value = name;
+            for (int guard = 0; guard < 16; guard++)
+            {
+                Match trailing = TrailingIndexSuffix.Match(value);
+                if (!trailing.Success) break;
+                string stem = value.Substring(0, trailing.Index);
+                if (!RestoreAliasSuffix.IsMatch(stem)) break;
+                value = stem;
+            }
+            Match alias = RestoreAliasSuffix.Match(value);
+            if (!alias.Success || alias.Index == 0) return name;
+            return value.Substring(0, alias.Index);
         }
 
         /// <summary>

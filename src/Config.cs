@@ -181,6 +181,14 @@ namespace AppManager
             return Make(parentKey, name ?? string.Empty);
         }
 
+        /// <summary>集合完整路径的可读形式（根分类 / 父集合 / ... / 名称）。</summary>
+        public static string DisplayPath(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return string.Empty;
+            if (!IsCollectionKey(key)) return key;
+            return key.Substring(Prefix.Length).Replace("/", " / ");
+        }
+
         /// <summary>解析集合键；根分类、直接父集合键（根集合为空）和名称均须完整。</summary>
         public static bool TryParse(string key, out string parent, out string parentCollection, out string name)
         {

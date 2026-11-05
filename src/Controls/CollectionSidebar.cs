@@ -21,6 +21,11 @@ namespace AppManager.Controls
             public string Name = string.Empty;
             public Bitmap Cover;                    // 可为 null：绘制占位图形
             public bool IsAll;                      // 固定「全部」项
+            public int Depth;                       // 树形缩进层级；「全部」为 0
+            public string Path = string.Empty;      // 完整可读路径，供辅助信息/菜单复用
+            public string ParentKey = string.Empty; // 直接父集合键；根集合为空
+            public bool HasChildren;
+            public bool Expanded;
         }
 
         /// <summary>侧边栏固定宽度（外部布局按此预留）。</summary>
@@ -55,6 +60,10 @@ namespace AppManager.Controls
         private int externalDragIndex = -1;    // 主内容区拖动时的投放高亮行
         private bool collapsed;
         private bool hoverCollapse;
+        private bool createSubfolder;
+        private int arrowHoverIndex = -1;
+        private int lastArrowToggleTick;
+        private int lastArrowToggleIndex = -1;
 
         private readonly SolidBrush activeBrush = new SolidBrush(Theme.SelectionBg);
         private readonly SolidBrush hoverBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
@@ -72,6 +81,8 @@ namespace AppManager.Controls
         public event Action<string> ItemActivated;
         /// <summary>右键自定义集合：编辑/删除菜单（集合键 + 屏幕坐标）。</summary>
         public event Action<string, Point> ContextRequested;
+        /// <summary>展开/收起树节点：集合键 + 目标展开状态。</summary>
+        public event Action<string, bool> ToggleRequested;
         /// <summary>点击底部「+ 新建集合」。</summary>
         public event Action CreateRequested;
         /// <summary>集合行的外部拖放：统一计算效果，drop=true 时接收文件。</summary>
@@ -86,7 +97,8 @@ namespace AppManager.Controls
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.UserPaint | ControlStyles.ResizeRedraw, true);
-            SetStyle(ControlStyles.Selectable, false);   // 不抢网格键盘焦点
+            SetStyle(ControlStyles.Selectable, true);    // 点击侧栏后可键盘导航
+            TabStop = false;                             // 不参与 Tab 顺序，避免抢网格焦点
             BackColor = Theme.SidebarBg;
             AutoScroll = false;
             AllowDrop = true;
@@ -103,6 +115,10 @@ namespace AppManager.Controls
         /// <summary>设置集合列表并保留指定键的旧封面（避免编辑中当前集合封面被释放重建）。</summary>
         public void SetItems(List<Item> list, string preserveCoverKey)
         {
+            string anchorKey = null;
+            int anchorOffset = 0;
+            List<string> anchorChain = null;
+            CaptureScrollAnchor(out anchorKey, out anchorOffset, out anchorChain);
             Bitmap preserved = null;
             if (!string.IsNullOrEmpty(preserveCoverKey))
             {
@@ -138,7 +154,8 @@ namespace AppManager.Controls
             }
             externalDragIndex = -1;
             hoverIndex = -1;
-            ClampScroll();
+            arrowHoverIndex = -1;
+            RestoreScrollAnchor(anchorKey, anchorOffset, anchorChain);
             Invalidate();
         }
 
@@ -147,6 +164,84 @@ namespace AppManager.Controls
         {
             activeKey = key ?? string.Empty;
             Invalidate();
+        }
+
+        /// <summary>底栏新建入口是否针对当前文件夹；仅影响文案，创建目标由主窗体按有效上下文决定。</summary>
+        public void SetCreateSubfolder(bool value)
+        {
+            if (createSubfolder == value) return;
+            createSubfolder = value;
+            Invalidate();
+        }
+
+        /// <summary>显式导航后把指定集合滚入可视区；后台刷新不得调用，以免抢用户滚动位置。</summary>
+        public void ScrollToKey(string key)
+        {
+            int index = IndexOfKey(key);
+            if (index < 0 || ViewportHeight <= 0) return;
+            EnsureVisible(index);
+        }
+
+        private int IndexOfKey(string key)
+        {
+            key = key ?? string.Empty;
+            for (int i = 0; i < items.Count; i++)
+            {
+                Item item = items[i];
+                if (key.Length == 0 ? item.IsAll : string.Equals(item.Key, key, StringComparison.Ordinal))
+                    return i;
+            }
+            return -1;
+        }
+
+        private void CaptureScrollAnchor(out string key, out int offset, out List<string> chain)
+        {
+            key = null;
+            offset = 0;
+            chain = null;
+            if (items.Count == 0 || ViewportHeight <= 0) return;
+            int index = Math.Max(0, Math.Min(items.Count - 1, scrollOffset / RowH));
+            key = items[index].Key;
+            offset = scrollOffset - index * RowH;
+            chain = new List<string>();
+            Item current = items[index];
+            for (int guard = 0; current != null && guard < 64; guard++)
+            {
+                chain.Add(current.Key);
+                if (current.IsAll || string.IsNullOrEmpty(current.ParentKey)) break;
+                int parentIndex = IndexOfKey(current.ParentKey);
+                current = parentIndex < 0 ? null : items[parentIndex];
+            }
+            if (chain.Count == 0 || chain[chain.Count - 1].Length != 0) chain.Add(string.Empty);
+        }
+
+        private void RestoreScrollAnchor(string key, int offset, List<string> chain)
+        {
+            if (items.Count == 0)
+            {
+                scrollOffset = 0;
+                return;
+            }
+            int index = IndexOfKey(key);
+            bool exact = index >= 0;
+            if (!exact && chain != null)
+            {
+                for (int i = 1; i < chain.Count && index < 0; i++) index = IndexOfKey(chain[i]);
+            }
+            if (index < 0) index = 0;
+            scrollOffset = index * RowH + (exact ? Math.Max(0, offset) : 0);
+            ClampScroll();
+        }
+
+        private void EnsureVisible(int index)
+        {
+            if (index < 0 || index >= items.Count || ViewportHeight <= 0) return;
+            int top = index * RowH;
+            int bottom = top + RowH;
+            int newOffset = scrollOffset;
+            if (top < scrollOffset) newOffset = top;
+            else if (bottom > scrollOffset + ViewportHeight) newOffset = bottom - ViewportHeight;
+            SetScroll(newOffset);
         }
 
         private void DisposeCovers()
@@ -362,6 +457,7 @@ namespace AppManager.Controls
             collapsed = !collapsed;
             hoverIndex = -1;
             hoverFooter = false;
+            arrowHoverIndex = -1;
             scrollbarHot = false;
             SetExternalDropHighlight(null);
             Invalidate();
@@ -377,8 +473,17 @@ namespace AppManager.Controls
             if (index == externalDragIndex)
                 Draw.DrawRoundedRect(g, dropPen, r, Radius);
 
+            Rectangle arrow = ArrowRect(item, r);
+            if (item.HasChildren)
+            {
+                if (index == arrowHoverIndex)
+                    Draw.FillRoundedRect(g, hoverBrush, arrow, 4);
+                DrawTreeChevron(g, arrow, item.Expanded, active ? Theme.AccentText : Theme.TextSecondary);
+            }
+
             int thumbSize = Dpi(ThumbSize);
-            Rectangle cover = new Rectangle(r.X + Dpi(8), r.Y + (r.Height - thumbSize) / 2, thumbSize, thumbSize);
+            int coverX = item.IsAll ? r.X + Dpi(8) : arrow.Right + Dpi(2);
+            Rectangle cover = new Rectangle(coverX, r.Y + (r.Height - thumbSize) / 2, thumbSize, thumbSize);
             if (item.IsAll)
             {
                 PaintAllGlyph(g, cover, active);
@@ -399,6 +504,54 @@ namespace AppManager.Controls
             Rectangle textRect = new Rectangle(cover.Right + CoverGap, r.Y, r.Right - cover.Right - CoverGap - 8, r.Height);
             Draw.DrawStringLeft(g, item.Name, Theme.NavigationFont,
                 active ? accentBrush : textBrush, textRect);
+            if (Focused && active)
+                ControlPaint.DrawFocusRectangle(g, new Rectangle(r.X + 2, r.Y + 2, r.Width - 4, r.Height - 4),
+                    Theme.TextPrimary, Color.Empty);
+        }
+
+        /// <summary>树形缩进：深层的后续层级不再继续右移，避免 16 层时文字完全消失。</summary>
+        private int TreeIndent(Item item)
+        {
+            int depth = item == null ? 0 : Math.Max(0, Math.Min(4, item.Depth));
+            return depth * Dpi(12);
+        }
+
+        private Rectangle ArrowRect(Item item, Rectangle row)
+        {
+            int size = Dpi(14);
+            int x = row.X + Dpi(2) + TreeIndent(item);
+            return new Rectangle(x, row.Y + (row.Height - size) / 2, size, size);
+        }
+
+        private static void DrawTreeChevron(Graphics g, Rectangle r, bool expanded, Color color)
+        {
+            int cx = r.X + r.Width / 2;
+            int cy = r.Y + r.Height / 2;
+            int s = Math.Max(3, r.Width / 4);
+            using (Pen p = new Pen(color, 1.6f))
+            {
+                p.StartCap = LineCap.Round;
+                p.EndCap = LineCap.Round;
+                p.LineJoin = LineJoin.Round;
+                if (expanded)
+                {
+                    g.DrawLines(p, new Point[]
+                    {
+                        new Point(cx - s, cy - s / 2),
+                        new Point(cx, cy + s / 2),
+                        new Point(cx + s, cy - s / 2)
+                    });
+                }
+                else
+                {
+                    g.DrawLines(p, new Point[]
+                    {
+                        new Point(cx - s / 2, cy - s),
+                        new Point(cx + s / 2, cy),
+                        new Point(cx - s / 2, cy + s)
+                    });
+                }
+            }
         }
 
         /// <summary>「全部」图标：浅底圆角 + 2x2 网格点，选中时强调色。</summary>
@@ -475,7 +628,7 @@ namespace AppManager.Controls
             }
             Draw.DrawIcon(g, UiIconKind.Add,
                 new Rectangle(footRect.X + 7, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor);
-            Draw.DrawStringLeft(g, "新建集合", Theme.ButtonFont, textBrush,
+            Draw.DrawStringLeft(g, createSubfolder ? "新建子文件夹" : "新建集合", Theme.ButtonFont, textBrush,
                 new Rectangle(footRect.X + 32, footRect.Y, footRect.Width - 36, footRect.Height));
         }
 
@@ -491,12 +644,14 @@ namespace AppManager.Controls
             {
                 hoverIndex = -1;
                 hoverFooter = false;
+                if (arrowHoverIndex != -1) { arrowHoverIndex = -1; Invalidate(); }
                 Cursor = Cursors.Default;
                 return;
             }
             if (collapsed)
             {
                 hoverIndex = -1;
+                arrowHoverIndex = -1;
                 Cursor = Cursors.Default;
                 return;
             }
@@ -518,6 +673,7 @@ namespace AppManager.Controls
             {
                 if (!scrollbarHot) { scrollbarHot = true; Invalidate(); }
                 if (hoverIndex != -1) { hoverIndex = -1; Invalidate(); }
+                if (arrowHoverIndex != -1) { arrowHoverIndex = -1; Invalidate(); }
                 hoverFooter = false;
                 Cursor = Cursors.Default;
                 return;
@@ -528,28 +684,32 @@ namespace AppManager.Controls
             {
                 if (!hoverFooter) { hoverFooter = true; Invalidate(); }
                 if (hoverIndex != -1) { hoverIndex = -1; Invalidate(); }
+                if (arrowHoverIndex != -1) { arrowHoverIndex = -1; Invalidate(); }
                 Cursor = Cursors.Default;
                 return;
             }
             if (hoverFooter) { hoverFooter = false; Invalidate(); }
 
             int idx = IndexAt(e.Y);
+            int arrow = ArrowIndexAt(e.Location);
+            if (arrow != arrowHoverIndex) { arrowHoverIndex = arrow; Invalidate(); }
             if (idx != hoverIndex)
             {
                 hoverIndex = idx;
-                Cursor = Cursors.Default;
                 Invalidate();
             }
+            Cursor = arrow >= 0 ? Cursors.Hand : Cursors.Default;
         }
 
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            bool dirty = hoverIndex != -1 || hoverFooter || hoverCollapse || scrollbarHot;
+            bool dirty = hoverIndex != -1 || hoverFooter || hoverCollapse || scrollbarHot || arrowHoverIndex != -1;
             hoverIndex = -1;
             hoverFooter = false;
             hoverCollapse = false;
             scrollbarHot = false;
+            arrowHoverIndex = -1;
             if (dirty) Invalidate();
         }
 
@@ -558,6 +718,7 @@ namespace AppManager.Controls
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
             if (collapsed || CollapseRect.Contains(e.Location)) return;
+            if (IndexAt(e.Y) >= 0) Focus();
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location))
             {
                 Rectangle thumb = ScrollThumbRect();
@@ -608,6 +769,11 @@ namespace AppManager.Controls
             int idx = IndexAt(e.Y);
             if (idx < 0 || idx >= items.Count) return;
             Item it = items[idx];
+            if (e.Button == MouseButtons.Left && IsArrowAt(e.Location, idx))
+            {
+                ToggleIndex(idx, true);
+                return;
+            }
             if (e.Button == MouseButtons.Right)
             {
                 if (it.IsAll) return;
@@ -616,8 +782,7 @@ namespace AppManager.Controls
                 return;
             }
             if (e.Button != MouseButtons.Left) return;
-            Action<string> sel = ItemSelected;
-            if (sel != null) sel(it.Key);
+            SelectIndex(idx);
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
@@ -629,6 +794,7 @@ namespace AppManager.Controls
             if (e.Y >= ClientSize.Height - FooterH) return;
             int idx = IndexAt(e.Y);
             if (idx < 0 || idx >= items.Count) return;
+            if (IsArrowAt(e.Location, idx)) return;   // 箭头只负责展开/收起
             Action<string> h = ItemActivated;
             if (h != null) h(items[idx].Key);
         }
@@ -637,6 +803,134 @@ namespace AppManager.Controls
         {
             base.OnMouseWheel(e);
             ScrollByWheel(e.Delta);
+        }
+
+        protected override void OnGotFocus(EventArgs e)
+        {
+            base.OnGotFocus(e);
+            Invalidate();
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            base.OnLostFocus(e);
+            arrowHoverIndex = -1;
+            Invalidate();
+        }
+
+        protected override bool IsInputKey(Keys keyData)
+        {
+            Keys key = keyData & Keys.KeyCode;
+            if (key == Keys.Up || key == Keys.Down || key == Keys.Left || key == Keys.Right
+                || key == Keys.Home || key == Keys.End || key == Keys.Enter || key == Keys.Space)
+                return true;
+            return base.IsInputKey(keyData);
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (collapsed || items.Count == 0) return;
+            int index = CurrentIndex();
+            if (index < 0) index = 0;
+            switch (e.KeyCode)
+            {
+                case Keys.Up:
+                    SelectIndex(Math.Max(0, index - 1));
+                    e.Handled = true;
+                    break;
+                case Keys.Down:
+                    SelectIndex(Math.Min(items.Count - 1, index + 1));
+                    e.Handled = true;
+                    break;
+                case Keys.Home:
+                    SelectIndex(0);
+                    e.Handled = true;
+                    break;
+                case Keys.End:
+                    SelectIndex(items.Count - 1);
+                    e.Handled = true;
+                    break;
+                case Keys.Right:
+                    Item rightItem = items[index];
+                    if (rightItem.HasChildren)
+                    {
+                        if (!rightItem.Expanded) ToggleIndex(index, false);
+                        else if (index + 1 < items.Count
+                            && string.Equals(items[index + 1].ParentKey, rightItem.Key, StringComparison.Ordinal))
+                            SelectIndex(index + 1);
+                    }
+                    e.Handled = true;
+                    break;
+                case Keys.Left:
+                    Item leftItem = items[index];
+                    if (leftItem.HasChildren && leftItem.Expanded)
+                    {
+                        ToggleIndex(index, false);
+                    }
+                    else if (leftItem.Depth > 0)
+                    {
+                        int parent = IndexOfKey(leftItem.ParentKey);
+                        SelectIndex(parent >= 0 ? parent : IndexOfKey(string.Empty));
+                    }
+                    e.Handled = true;
+                    break;
+                case Keys.Space:
+                    ToggleIndex(index, false);
+                    e.Handled = true;
+                    break;
+                case Keys.Enter:
+                    Action<string> activate = ItemActivated;
+                    if (activate != null) activate(items[index].Key);
+                    e.Handled = true;
+                    break;
+            }
+        }
+
+        private int CurrentIndex()
+        {
+            int index = IndexOfKey(activeKey);
+            return index >= 0 ? index : (items.Count > 0 ? 0 : -1);
+        }
+
+        private void SelectIndex(int index)
+        {
+            if (index < 0 || index >= items.Count) return;
+            Item item = items[index];
+            SetActive(item.Key);
+            EnsureVisible(index);
+            Action<string> handler = ItemSelected;
+            if (handler != null) handler(item.Key);
+        }
+
+        private int ArrowIndexAt(Point p)
+        {
+            int index = IndexAt(p.Y);
+            return IsArrowAt(p, index) ? index : -1;
+        }
+
+        private bool IsArrowAt(Point p, int index)
+        {
+            if (index < 0 || index >= items.Count) return false;
+            Item item = items[index];
+            return item.HasChildren && ArrowRect(item, ItemRect(index)).Contains(p);
+        }
+
+        private void ToggleIndex(int index, bool fromMouse)
+        {
+            if (index < 0 || index >= items.Count) return;
+            Item item = items[index];
+            if (!item.HasChildren) return;
+            if (fromMouse)
+            {
+                int now = Environment.TickCount;
+                if (index == lastArrowToggleIndex && unchecked(now - lastArrowToggleTick) < SystemInformation.DoubleClickTime)
+                    return;
+                lastArrowToggleTick = now;
+                lastArrowToggleIndex = index;
+            }
+            Action<string, bool> handler = ToggleRequested;
+            if (handler != null) handler(item.Key, !item.Expanded);
         }
 
         /// <summary>是否为空白区（非行/非底部按钮/非滚动条），供窗体拖动判定。</summary>

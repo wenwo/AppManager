@@ -81,6 +81,43 @@ namespace AppManager
             }
         }
 
+        private const string Rw2DateIndexMarker = "rw2_taken_date_index_v1";
+
+        /// <summary>
+        /// 一次性刷新旧版本已索引的 RW2 日期；只重置标记，实际读盘仍由后台 IndexMetadata 分批完成。
+        /// 标记与重置在同一事务内提交，失败时不写标记，下次启动自动重试。
+        /// </summary>
+        private void RepairRw2TakenDateIndex()
+        {
+            try
+            {
+                lock (gate)
+                using (Sqlite db = Open())
+                {
+                    if (db.Scalar("SELECT value FROM metadata WHERE key=?", Rw2DateIndexMarker) == "1") return;
+                    // 未安装 WIC 解码器时先不写标记；安装后下次启动会自动重新排队旧 RW2。
+                    if (WicImageDecoder.IsRw2WicDecoderRegistered() == false) return;
+                    db.Execute("BEGIN IMMEDIATE");
+                    try
+                    {
+                        db.Execute("UPDATE catalog SET indexed=0 WHERE active=1 AND indexed=1 AND lower(metadata) LIKE ?",
+                            "%target=\"%.rw2\"%");
+                        db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)", Rw2DateIndexMarker, "1");
+                        db.Execute("COMMIT");
+                    }
+                    catch
+                    {
+                        db.Rollback();
+                        throw;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Paths.LogError(new IOException("刷新 RW2 拍摄时间索引失败，下次启动重试。", ex));
+            }
+        }
+
         // 扫描在后台完成，发布目录时和关系更新共用写锁；失败不会清空上次可用结果。
         internal void PublishCatalog(AppConfig config, List<AppInfo> apps)
         {
@@ -275,16 +312,17 @@ namespace AppManager
         }
 
         // 游标翻页，不使用深 OFFSET。name/id 为稳定次序，防止同名条目跨页重复或漏读。
-        internal CatalogPage Page(string category, bool resources, bool showHidden, string keyword, int limit, CatalogPage after, bool byName, bool descending, string sortColumn = null, string[] extensions = null)
+        internal CatalogPage Page(string category, bool resources, bool showHidden, string keyword, int limit, CatalogPage after, bool byName, bool descending, string sortColumn = null, string[] extensions = null, string searchGroup = null)
         {
             if (limit < 1 || limit > 500) throw new ArgumentOutOfRangeException("limit");
             bool search = !string.IsNullOrEmpty(keyword);
+            bool scopedSearch = search && !string.IsNullOrEmpty(searchGroup);
             long categoryGroup = 0;
-            if (!search)
+            if (!search || scopedSearch)
             {
                 lock (gate)
                 {
-                    if (!groups.TryGetValue(category, out categoryGroup)) return new CatalogPage();
+                    if (!groups.TryGetValue(scopedSearch ? searchGroup : category, out categoryGroup)) return new CatalogPage();
                 }
             }
             using (Sqlite db = Open())
@@ -300,6 +338,11 @@ namespace AppManager
                     where = "c.active=1 AND " + (resources ? "c.kind=2" : "c.kind<>2") + (showHidden ? "" : " AND c.hidden=0") + " AND (c.search_name LIKE ? OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?))";
                     args.Add(SearchPattern(keyword));
                     args.Add(SearchPattern(keyword));
+                    if (scopedSearch)
+                    {
+                        where += " AND EXISTS(SELECT 1 FROM listing scoped WHERE scoped.item_id=c.item_id AND scoped.group_id=?)";
+                        args.Add(categoryGroup);
+                    }
                     byName = true;
                 }
                 else

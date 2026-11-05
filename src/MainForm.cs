@@ -36,6 +36,18 @@ namespace AppManager
         private CollectionInfoPanel collectionInfo;    // 选中集合后的信息页（封面/名称/简介/进入）
         private string currentCollection;   // 当前选中的集合键（col:父分类/集合名）；空 = 「全部」
         private bool collectionEntered;     // 是否已进入集合内容（false = 停留集合信息页）
+        private readonly HashSet<string> expandedCollections = new HashSet<string>(StringComparer.Ordinal);
+        private bool revealActiveCollection;    // 仅显式选择/进入/新建时强制展开祖先并滚入视口
+        private readonly List<string> visibleCollectionKeys = new List<string>();
+        private sealed class CollectionRow
+        {
+            public ResourceCollection Collection;
+            public string Key = string.Empty;
+            public string Path = string.Empty;
+            public int Depth;
+            public bool HasChildren;
+            public bool Expanded;
+        }
         private SearchField search;
         private MiniMusicPlayerControl miniMusic;
         private MusicPlaybackSession musicSession;   // 音乐播放唯一会话：完整/迷你播放器共享
@@ -827,8 +839,14 @@ namespace AppManager
             collectionSidebarShown = false;
             collectionSidebar.ItemSelected += OnCollectionSelected;
             collectionSidebar.ItemActivated += EnterCollection;
+            collectionSidebar.ToggleRequested += OnCollectionToggleRequested;
             collectionSidebar.ContextRequested += ShowCollectionMenu;
-            collectionSidebar.CreateRequested += delegate { OnCreateCollection(null); };
+            collectionSidebar.CreateRequested += delegate
+            {
+                string active = ActiveCollectionKey;
+                if (!string.IsNullOrEmpty(active)) CreateCollectionUnder(active, null);
+                else OnCreateCollection(null);
+            };
             collectionSidebar.CollapsedChanged += delegate { LayoutControls(); Invalidate(); };
             collectionSidebar.ExternalDrop = delegate(string key, DragEventArgs e, bool drop)
             {
@@ -1452,6 +1470,7 @@ namespace AppManager
             currentCategory = key;
             currentCollection = null;   // 切换分类即退出集合，回到「全部」
             collectionEntered = true;   // 「全部」直接展示分类网格
+            revealActiveCollection = false;
             sidebar.SetActive(key);
             // 每分类独立视图模式：切换分类时恢复该分类上次选择的网格/列表
             bool gm = GetCategoryGridMode(key);
@@ -1473,7 +1492,7 @@ namespace AppManager
             contentMode = m;
             bool website = m == SidebarControl.ContentMode.Website;
             grid.ShowRowActions = website;
-            grid.ShowTimeColumn = website;   // 资源列表额外显示创建时间列
+            grid.ShowTimeColumn = website;   // 资源列表额外显示日期列
             RebuildSidebar();
             if (website)
             {
@@ -1882,17 +1901,19 @@ namespace AppManager
             }
             else if (kw.Length > 0)
             {
-                // 全局搜索：跨全部分类匹配名称，命中即显示（受内容模式过滤）
+                // 搜索：集合内只匹配当前文件夹直接成员；未进入集合时保持原有跨分类搜索。
                 foreach (AppInfo a in allApps)
                 {
                     if (!ShouldShow(a)) continue;
                     if (!MatchesContentMode(a)) continue;
+                    if (currentCollection != null
+                        && (!InCategory(a, currentCategory) || !IsInExtraCategory(a, currentCollection))) continue;
                     // 多字段匹配：名称 / 分类，任一命中即显示（归一化，故「vscode」可命中「VS Code」）
                     if (Scanner.FuzzyMatch(a.Name, kw)
                         || Scanner.FuzzyMatch(a.Category, kw))
                         shown.Add(a);
                 }
-                categoryTotal = CountVisible();
+                categoryTotal = currentCollection != null ? shown.Count : CountVisible();
             }
             else if (contentMode == SidebarControl.ContentMode.Website)
             {
@@ -1929,8 +1950,8 @@ namespace AppManager
             if (listSortColumn != null && config.Database == null) SortShown(shown, listSortColumn, listSortAsc);
             shownApps = shown;
             addedPrefetchPending = config.Database != null;   // 列表「所属」列等首次按路径查询时整页一次预读
-            // 行内第二个按钮：进入集合后为「移除」（仅从集合移出），分类/全部资源/搜索下为「删除」
-            grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website && kw.Length == 0
+            // 行内第二个按钮：集合视图（含集合内搜索）为「移除」，分类/全部资源下为「删除」
+            grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website
                 && currentCollection != null) ? "移除" : "删除";
             grid.SetApps(shown);
             StartIconLoad();
@@ -2204,8 +2225,8 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 网格空白处右键（仅资源页面）：粘贴文件、导入记录、新建文件夹 / 文本文档（存入资源存储目录，收录进当前分类）、新建集合。
-        /// 软件页面只收录软件，没有这些文件操作，不弹菜单。
+        /// 网格空白处右键（仅资源页面）：集合内只提供一个「新建子文件夹」入口；
+        /// 集合外保留磁盘文件夹、文本文档和一级集合入口。
         /// </summary>
         private void OnGridBlankRightClicked(Point screen)
         {
@@ -2218,23 +2239,48 @@ namespace AppManager
             if (CanEditCategory(currentCategory))
             {
                 items.Add(MkSep());
-                items.Add(MkMenu("新建文件夹", delegate { CreateManagedEntry(true); }));
-                items.Add(MkMenu("新建文本文档", delegate { CreateManagedEntry(false); }));
-                items.Add(MkSep());
-                items.Add(MkMenu("新建集合…", delegate { OnCreateCollection(null); }));
+                string activeCollection = ActiveCollectionKey;
+                if (!string.IsNullOrEmpty(activeCollection))
+                {
+                    items.Add(MkMenu("新建子文件夹…", delegate { CreateCollectionUnder(activeCollection, null); }));
+                    items.Add(MkMenu("新建文本文档", delegate { CreateManagedEntry(false, activeCollection); }));
+                }
+                else
+                {
+                    items.Add(MkMenu("新建文件夹", delegate { CreateManagedEntry(true); }));
+                    items.Add(MkMenu("新建文本文档", delegate { CreateManagedEntry(false); }));
+                    items.Add(MkSep());
+                    items.Add(MkMenu("新建集合…", delegate { OnCreateCollection(null); }));
+                }
             }
             MenuWindow mw = new MenuWindow(items, 180);
             mw.Location = FixLocation(screen, mw.Size);
             mw.Show(this);
         }
 
-        /// <summary>
-        /// 资源页面在当前分类的资源存储目录新建文件夹/文本文档，重名自动追加 _1，并收录进当前分类。
-        /// 软件页面只收录软件，不新建任何文件。
-        /// </summary>
+        /// <summary>集合外新建磁盘文件夹/文本文档（兼容原调用）。</summary>
         private void CreateManagedEntry(bool folder)
         {
+            CreateManagedEntry(folder, null);
+        }
+
+        /// <summary>
+        /// 资源页面在当前分类的资源存储目录新建文件夹/文本文档，重名自动追加 _1，并收录进当前分类。
+        /// collectionKey 非空时，新建文本文档同时加入该集合，避免在集合内容页创建后不可见。
+        /// </summary>
+        private void CreateManagedEntry(bool folder, string collectionKey)
+        {
             if (contentMode != SidebarControl.ContentMode.Website || !CanEditCategory(currentCategory)) return;
+            if (!folder && !string.IsNullOrEmpty(collectionKey))
+            {
+                ResourceCollection target = FindCollectionByKey(collectionKey);
+                if (target == null || !string.Equals(target.Parent, currentCategory, StringComparison.Ordinal))
+                {
+                    MessageBox.Show(this, "当前集合已不存在，请返回后重试。", "新建",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+            }
             string name = folder ? "新建文件夹" : "新建文本文档.txt";
             List<string> roots = ActiveResourceStoreRoots();
             if (roots.Count == 0)
@@ -2285,6 +2331,8 @@ namespace AppManager
             e.IsFolder = folder;
             e.IsResource = true;
             config.AddedItems.Add(e);
+            if (!folder && !string.IsNullOrEmpty(collectionKey))
+                CollectionOps.AddMember(config, "add:" + path, collectionKey);
             InvalidateAddedIndex();
             if (!config.Save("physical.files.create"))
             {
@@ -2702,7 +2750,7 @@ namespace AppManager
             }
         }
 
-        /// <summary>当前是否处于搜索态（搜索展示全局结果，不展示集合信息页）。</summary>
+        /// <summary>当前是否处于搜索态（搜索不展示集合信息页）。</summary>
         private bool SearchActive
         {
             get { return search != null && !string.IsNullOrEmpty((search.Text ?? string.Empty).Trim()); }
@@ -2711,11 +2759,16 @@ namespace AppManager
         /// <summary>刷新集合侧边栏与信息页：可见性、集合列表与封面、选中态、信息页数据。</summary>
         private void UpdateCollectionUi()
         {
+            if (search != null)
+                search.Placeholder = currentCollection != null
+                    ? "在当前文件夹中搜索…"
+                    : (contentMode == SidebarControl.ContentMode.Website ? "搜索资源…" : "搜索应用…");
             coverIconWaiters.Clear();   // 本次重建中仍缺图标的封面成员会由 BuildCover 重新登记
             if (!CanShowCollectionSidebar)
             {
                 currentCollection = null;   // 离开可编辑资源分类/进入设置页：集合上下文失效
                 collectionEntered = false;
+                revealActiveCollection = false;
                 collectionInfo.Visible = false;
                 SetCollectionSidebarVisible(false);
                 return;
@@ -2724,8 +2777,16 @@ namespace AppManager
             {
                 currentCollection = null;   // 集合已被删除等：回退「全部」
                 collectionEntered = true;
+                revealActiveCollection = false;
+            }
+            // 必须在构建可见行之前展开当前项祖先；只在显式导航时做，后台刷新不改变展开状态。
+            if (revealActiveCollection && currentCollection != null)
+            {
+                ExpandCollectionAncestors(currentCollection);
+                revealActiveCollection = false;
             }
             SetCollectionSidebarVisible(true);
+            collectionSidebar.SetCreateSubfolder(!string.IsNullOrEmpty(ActiveCollectionKey));
             // 页内编辑当前集合时保留其封面位图，避免后台刷新（自动重扫/图标回调）触发 DisposeCovers 造成闪烁
             string preserveKey = collectionInfo.IsEditing ? currentCollection : null;
             collectionSidebar.SetItems(BuildCollectionItems(), preserveKey);
@@ -2783,7 +2844,17 @@ namespace AppManager
             int count;
             List<string> images;
             AppInfo first = CollectionSummary(currentCollection, out count, out images);
-            collectionInfo.SetInfo(c.Parent, c.Name, c.Description, count, c.Cover,
+            int childFolders = 0;
+            for (int i = 0; i < config.Collections.Count; i++)
+            {
+                ResourceCollection child = config.Collections[i];
+                if (child != null && string.Equals(child.Parent, currentCategory, StringComparison.Ordinal)
+                    && string.Equals(child.ParentCollection ?? string.Empty, currentCollection, StringComparison.Ordinal))
+                    childFolders++;
+            }
+            string parentPath = string.IsNullOrEmpty(c.ParentCollection)
+                ? c.Parent : CollectionKeys.DisplayPath(c.ParentCollection);
+            collectionInfo.SetInfo(parentPath, c.Name, c.Description, count, childFolders, c.Cover,
                 c.CoverFocusX, c.CoverFocusY,
                 BuildCover(c, first, CollectionInfoCoverW, CollectionInfoCoverH),
                 images);
@@ -2800,6 +2871,7 @@ namespace AppManager
             get
             {
                 return collectionSidebar != null && collectionSidebar.Visible && collectionEntered
+                    && !SearchActive
                     ? currentCollection : null;
             }
         }
@@ -2811,29 +2883,50 @@ namespace AppManager
             return CollectionOps.FindByKey(config, key);
         }
 
-        /// <summary>构造当前分类下的集合侧边栏条目：首位固定「全部」，其后为当前分类的自定义集合（含成员数与封面）。</summary>
+        /// <summary>构造当前分类下已展开分支的集合侧边栏条目；收起分支不生成行，也不查询其封面。</summary>
         private List<CollectionSidebar.Item> BuildCollectionItems()
         {
+            CollectionIndex index = new CollectionIndex(config.Collections);
+            PruneExpandedCollections(index);
+            List<CollectionRow> rows = new List<CollectionRow>();
+            HashSet<string> visited = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < config.Collections.Count; i++)
+            {
+                ResourceCollection c = config.Collections[i];
+                if (c == null || !string.Equals(c.Parent, currentCategory, StringComparison.Ordinal)
+                    || !string.IsNullOrEmpty(c.ParentCollection)) continue;
+                AddVisibleCollectionRow(index, c, 0, currentCategory, rows, visited);
+            }
+
+            visibleCollectionKeys.Clear();
+            for (int i = 0; i < rows.Count; i++) visibleCollectionKeys.Add(rows[i].Key);
+
+            Dictionary<string, AppInfo> firstByKey = null;
+            Dictionary<string, AppInfo> firstImageByKey = null;
+            if (config.Database != null) EnsureCollectionCovers(visibleCollectionKeys);
+            else BuildLegacyCollectionCoverCandidates(rows, out firstByKey, out firstImageByKey);
+
             List<CollectionSidebar.Item> list = new List<CollectionSidebar.Item>();
-            List<AppInfo> pool = config.Database == null ? VisibleResourcePool(currentCategory) : null;
-            if (config.Database != null) EnsureCollectionCovers(currentCategory);
             CollectionSidebar.Item all = new CollectionSidebar.Item();
             all.IsAll = true;
             all.Key = string.Empty;
             all.Name = "全部";
             list.Add(all);
-            for (int i = 0; i < config.Collections.Count; i++)
+            for (int i = 0; i < rows.Count; i++)
             {
-                ResourceCollection c = config.Collections[i];
-                if (c.Parent != currentCategory) continue;
+                CollectionRow row = rows[i];
                 CollectionSidebar.Item it = new CollectionSidebar.Item();
-                it.Key = CollectionKeys.GetKey(c);
-                it.Name = c.Name;
+                it.Key = row.Key;
+                it.Name = row.Collection.Name;
+                it.Depth = row.Depth;
+                it.Path = row.Path;
+                it.ParentKey = row.Collection.ParentCollection ?? string.Empty;
+                it.HasChildren = row.HasChildren;
+                it.Expanded = row.Expanded;
                 AppInfo first = null;
                 AppInfo firstImage = null;
                 if (config.Database != null)
                 {
-                    // 批量缓存的封面候选：首个图片成员（跳过封面解码失败的），失败时回退首个成员
                     AppInfo image;
                     if (collectionCoverImages.TryGetValue(it.Key, out image)
                         && !IsCoverFailed(image.TargetPath, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize))
@@ -2842,19 +2935,116 @@ namespace AppManager
                 }
                 else
                 {
-                    for (int j = 0; j < pool.Count; j++)
-                    {
-                        if (!IsInExtraCategory(pool[j], it.Key)) continue;
-                        if (first == null) first = pool[j];   // 兜底：无可用图片成员时用首个成员版式化
-                        if (IsImageMember(pool[j]) && !IsCoverFailed(pool[j].TargetPath,
-                            CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize))
-                        { firstImage = pool[j]; break; }   // 跳过已损坏图片，尝试后续成员
-                    }
+                    firstByKey.TryGetValue(it.Key, out first);
+                    firstImageByKey.TryGetValue(it.Key, out firstImage);
                 }
-                it.Cover = BuildCover(c, firstImage ?? first, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize);
+                it.Cover = BuildCover(row.Collection, firstImage ?? first,
+                    CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize);
                 list.Add(it);
             }
             return list;
+        }
+
+        private void AddVisibleCollectionRow(CollectionIndex index, ResourceCollection c, int depth,
+            string parentPath, List<CollectionRow> rows, HashSet<string> visited)
+        {
+            string key = CollectionKeys.GetKey(c);
+            if (!visited.Add(key)) return;
+            CollectionRow row = new CollectionRow();
+            row.Collection = c;
+            row.Key = key;
+            row.Depth = depth;
+            row.Path = (parentPath ?? string.Empty) + " / " + c.Name;
+            List<ResourceCollection> children = DirectCollectionChildren(index, key);
+            row.HasChildren = children.Count > 0;
+            row.Expanded = row.HasChildren && expandedCollections.Contains(key);
+            rows.Add(row);
+            if (!row.Expanded) return;
+            for (int i = 0; i < children.Count; i++)
+                AddVisibleCollectionRow(index, children[i], depth + 1, row.Path, rows, visited);
+        }
+
+        private List<ResourceCollection> DirectCollectionChildren(CollectionIndex index, string parentKey)
+        {
+            List<ResourceCollection> result = new List<ResourceCollection>();
+            List<ResourceCollection> children = index.Children(parentKey);
+            for (int i = 0; i < children.Count; i++)
+            {
+                ResourceCollection c = children[i];
+                if (c != null && string.Equals(c.Parent, currentCategory, StringComparison.Ordinal))
+                    result.Add(c);
+            }
+            return result;
+        }
+
+        /// <summary>旧配置路径一次扫描成员池，按集合生成首个成员与首个可用图片成员。</summary>
+        private void BuildLegacyCollectionCoverCandidates(List<CollectionRow> rows,
+            out Dictionary<string, AppInfo> firstByKey, out Dictionary<string, AppInfo> firstImageByKey)
+        {
+            firstByKey = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+            firstImageByKey = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
+            HashSet<string> visible = new HashSet<string>(visibleCollectionKeys, StringComparer.Ordinal);
+            List<AppInfo> pool = VisibleResourcePool(currentCategory);
+            for (int i = 0; i < pool.Count; i++)
+            {
+                AppInfo a = pool[i];
+                List<string> categories;
+                if (a == null || string.IsNullOrEmpty(a.Key)
+                    || !config.ItemCategories.TryGetValue(a.Key, out categories)) continue;
+                for (int j = 0; j < categories.Count; j++)
+                {
+                    string key = categories[j];
+                    if (!visible.Contains(key)) continue;
+                    if (!firstByKey.ContainsKey(key)) firstByKey[key] = a;
+                    if (firstImageByKey.ContainsKey(key) || !IsImageMember(a)
+                        || IsCoverFailed(a.TargetPath, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize)) continue;
+                    firstImageByKey[key] = a;
+                }
+            }
+        }
+
+        private void PruneExpandedCollections(CollectionIndex index)
+        {
+            List<string> stale = new List<string>();
+            foreach (string key in expandedCollections)
+                if (index.Find(key) == null) stale.Add(key);
+            for (int i = 0; i < stale.Count; i++) expandedCollections.Remove(stale[i]);
+        }
+
+        private void ExpandCollectionAncestors(string key)
+        {
+            ResourceCollection c = FindCollectionByKey(key);
+            while (c != null && !string.IsNullOrEmpty(c.ParentCollection))
+            {
+                expandedCollections.Add(c.ParentCollection);
+                c = FindCollectionByKey(c.ParentCollection);
+            }
+        }
+
+        /// <summary>侧栏箭头或键盘触发展开/收起：只重建可见树，不刷新列表、不抢滚动位置。</summary>
+        private void OnCollectionToggleRequested(string key, bool expanded)
+        {
+            if (collectionSidebar == null || !collectionSidebar.Visible || string.IsNullOrEmpty(key)) return;
+            ResourceCollection c = FindCollectionByKey(key);
+            if (c == null || !string.Equals(c.Parent, currentCategory, StringComparison.Ordinal)) return;
+            if (expanded) expandedCollections.Add(key);
+            else expandedCollections.Remove(key);
+            string preserveKey = collectionInfo != null && collectionInfo.IsEditing ? currentCollection : null;
+            collectionSidebar.SetItems(BuildCollectionItems(), preserveKey);
+            collectionSidebar.SetActive(currentCollection == null ? string.Empty : currentCollection);
+        }
+
+        private void RemapExpandedCollections(Dictionary<string, string> map)
+        {
+            if (map == null || map.Count == 0) return;
+            List<string> mapped = new List<string>();
+            foreach (string key in expandedCollections)
+            {
+                string value;
+                mapped.Add(map.TryGetValue(key, out value) ? value : key);
+            }
+            expandedCollections.Clear();
+            for (int i = 0; i < mapped.Count; i++) expandedCollections.Add(mapped[i]);
         }
 
         /// <summary>分类内「当前可见」的资源条目池：与网格过滤同口径（ShouldShow），保证卡片计数与网格显示一致。</summary>
@@ -3032,15 +3222,18 @@ namespace AppManager
             {
                 currentCollection = null;
                 collectionEntered = true;
+                revealActiveCollection = false;
             }
             else
             {
                 if (FindCollectionByKey(key) == null) return;
                 currentCollection = key;
                 collectionEntered = true;
+                revealActiveCollection = true;
             }
             collectionSidebar.SetActive(key ?? string.Empty);
             RefreshGrid();
+            collectionSidebar.ScrollToKey(key ?? string.Empty);
         }
 
         /// <summary>单击集合：全部直接展示内容网格；自定义集合停留信息页（名称/简介/封面/进入）。</summary>
@@ -3052,68 +3245,149 @@ namespace AppManager
             {
                 currentCollection = null;
                 collectionEntered = true;
+                revealActiveCollection = false;
             }
             else
             {
                 if (FindCollectionByKey(key) == null) return;
                 currentCollection = key;
                 collectionEntered = false;
+                revealActiveCollection = true;
             }
             collectionSidebar.SetActive(key ?? string.Empty);
             RefreshGrid();
+            collectionSidebar.ScrollToKey(key ?? string.Empty);
         }
 
-        /// <summary>新建集合（当前分类为父分类）；appsToJoin 非空时新建后立即把这些条目加入集合。</summary>
+        /// <summary>新建一级集合（当前分类为父分类）。</summary>
         private void OnCreateCollection(List<AppInfo> appsToJoin)
         {
-            // 重名时保留已输入内容重开对话框，避免用户重填
-            ResourceCollection seed = null;
-            ResourceCollection c;
-            while (true)
+            CreateCollectionUnder(null, appsToJoin);
+        }
+
+        /// <summary>
+        /// 在资源分类或指定父集合下创建集合。校验和保存失败都保留对话框输入；
+        /// 集合定义与成员归属先提交，展开状态和导航键只在保存成功后更新。
+        /// </summary>
+        private void CreateCollectionUnder(string parentCollectionKey, List<AppInfo> appsToJoin)
+        {
+            if (!CanEditCategory(currentCategory)) return;
+            parentCollectionKey = parentCollectionKey ?? string.Empty;
+            ResourceCollection parent;
+            string root;
+            string parentError;
+            if (!ResolveCollectionCreationParent(parentCollectionKey, out parent, out root, out parentError))
             {
-                c = CollectionDialog.Show("新建集合（" + currentCategory + "）", seed);
-                if (c == null) return;
-                string error = CategoryRules.ValidateCollectionName(c.Name);
-                if (error != null)
-                {
-                    MessageBox.Show(error, "新建集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    seed = c;
-                    continue;
-                }
-                if (!CollectionOps.NameExists(config, currentCategory, c.Name)) break;
-                MessageBox.Show("集合「" + c.Name + "」已存在，请换一个名称。", "新建集合",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                seed = c;
-            }
-            collectionInfo.EndEdit();   // 新建并切换到新集合前，放弃当前页内编辑
-            c.Parent = currentCategory;
-            config.Collections.Add(c);
-            string key = CollectionKeys.GetKey(c);
-            if (appsToJoin != null)
-            {
-                for (int i = 0; i < appsToJoin.Count; i++)
-                {
-                    AppInfo a = appsToJoin[i];
-                    if (a == null || string.IsNullOrEmpty(a.Key)) continue;
-                    if (!CanJoinResourceCategory(a, currentCategory)) continue;
-                    CollectionOps.AddMember(config, a.Key, key);
-                }
-            }
-            if (!config.Save())
-            {
-                MessageBox.Show(this, "新建集合未能保存。\n" + config.DatabaseError, "新建集合",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                RefreshGrid();
+                MessageBox.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            if (appsToJoin == null || appsToJoin.Count == 0)
+            string title = parent == null
+                ? "新建集合（" + currentCategory + "）"
+                : "新建子文件夹（" + CollectionKeys.DisplayPath(parentCollectionKey) + "）";
+
+            ResourceCollection seed = null;
+            string createdKey = null;
+            while (createdKey == null)
             {
-                // 从侧边栏「新建集合」：选中新集合并停留在信息页
-                currentCollection = key;
-                collectionEntered = false;
-                collectionSidebar.SetActive(key);
+                ResourceCollection draft = CollectionDialog.Show(title, seed);
+                if (draft == null) return;
+
+                // 对话框关闭后重新验证父集合，避免分类/集合上下文已变化时落到错误父级。
+                if (!ResolveCollectionCreationParent(parentCollectionKey, out parent, out root, out parentError))
+                {
+                    MessageBox.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                string error = ValidateCollectionDraft(draft, root, parentCollectionKey);
+                if (error != null)
+                {
+                    MessageBox.Show(this, error, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    seed = draft;
+                    continue;
+                }
+
+                string name = (draft.Name ?? string.Empty).Trim();
+                string key = CollectionKeys.GetKey(root, parentCollectionKey, name);
+                draft.Parent = root;
+                draft.ParentCollection = parentCollectionKey;
+                draft.Name = name;
+                config.Collections.Add(draft);
+                if (appsToJoin != null)
+                {
+                    for (int i = 0; i < appsToJoin.Count; i++)
+                    {
+                        AppInfo a = appsToJoin[i];
+                        if (a == null || string.IsNullOrEmpty(a.Key)) continue;
+                        if (!CanJoinResourceCategory(a, root)) continue;
+                        CollectionOps.AddMember(config, a.Key, key);
+                    }
+                }
+                if (!config.Save())
+                {
+                    MessageBox.Show(this, "新建文件夹未能保存，请重试或取消。\n" + config.DatabaseError,
+                        "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    seed = draft;   // 保留名称/简介；config.Save 已回滚到数据库状态
+                    continue;
+                }
+                createdKey = key;
             }
+
+            collectionInfo.EndEdit();   // 保存成功后才放弃当前页内编辑
+            bool revealNew = appsToJoin == null || appsToJoin.Count == 0;
+            ExpandCollectionAncestors(createdKey);
+            if (!string.IsNullOrEmpty(parentCollectionKey)) expandedCollections.Add(parentCollectionKey);
+            if (revealNew)
+            {
+                currentCollection = createdKey;
+                collectionEntered = false;
+                revealActiveCollection = true;
+                collectionSidebar.SetActive(createdKey);
+            }
+            else revealActiveCollection = false;
             RefreshGrid();
+            if (revealNew) collectionSidebar.ScrollToKey(createdKey);
+        }
+
+        private bool ResolveCollectionCreationParent(string parentCollectionKey, out ResourceCollection parent,
+            out string root, out string error)
+        {
+            parent = null;
+            root = currentCategory;
+            error = null;
+            if (string.IsNullOrEmpty(parentCollectionKey)) return true;
+            parent = FindCollectionByKey(parentCollectionKey);
+            if (parent == null)
+            {
+                error = "当前文件夹已不存在，请返回后重试。";
+                return false;
+            }
+            if (!string.Equals(parent.Parent, currentCategory, StringComparison.Ordinal))
+            {
+                error = "当前文件夹不再属于该资源分类，请返回后重试。";
+                return false;
+            }
+            root = parent.Parent;
+            return true;
+        }
+
+        private string ValidateCollectionDraft(ResourceCollection draft, string root, string parentCollectionKey)
+        {
+            string error = CategoryRules.ValidateCollectionName(draft == null ? string.Empty : draft.Name);
+            if (error != null) return error;
+            string name = draft.Name.Trim();
+            if (CollectionOps.NameExists(config, root, parentCollectionKey ?? string.Empty, name))
+                return "集合「" + name + "」已存在，请换一个名称。";
+            string key = CollectionKeys.GetKey(root, parentCollectionKey ?? string.Empty, name);
+            if (key.Length > CollectionKeys.MaxKeyLength)
+                return "集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）。";
+            int depth = CollectionKeys.Depth(key);
+            if (depth <= 0 || depth > CollectionKeys.MaxDepth)
+                return "集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）。";
+            int count = 0;
+            for (int i = 0; i < config.Collections.Count; i++) if (config.Collections[i] != null) count++;
+            if (count >= CollectionKeys.MaxCollections)
+                return "集合数量超过上限（最多 " + CollectionKeys.MaxCollections + " 个）。";
+            return null;
         }
 
         /// <summary>集合右键菜单：编辑 / 删除。</summary>
@@ -3122,6 +3396,8 @@ namespace AppManager
             ResourceCollection c = FindCollectionByKey(key);
             if (c == null) return;
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
+            items.Add(MkMenu("新建子文件夹…", delegate { CreateCollectionUnder(key, null); }));
+            items.Add(MkSep());
             items.Add(MkMenu("编辑集合", delegate { EditCollection(c); }));   // 进入信息页页内编辑，不弹对话框
             items.Add(MkMenu("删除集合", delegate { DeleteCollection(c); }));
             MenuWindow mw = new MenuWindow(items, 160);
@@ -3137,8 +3413,10 @@ namespace AppManager
             string key = CollectionKeys.GetKey(c);
             currentCollection = key;
             collectionEntered = false;
+            revealActiveCollection = true;
             collectionSidebar.SetActive(key);
             RefreshGrid();          // 先展示信息页，再进入编辑态
+            collectionSidebar.ScrollToKey(key);
             collectionInfo.BeginEdit();
         }
 
@@ -3179,9 +3457,9 @@ namespace AppManager
             string oldCover = c.Cover;
             string oldKey = CollectionKeys.GetKey(c);
             string browsingKey = currentCollection;
+            Dictionary<string, string> renames = null;
             if (!string.Equals(name, c.Name, StringComparison.Ordinal))
             {
-                Dictionary<string, string> renames;
                 try { renames = CollectionOps.RenameSubtree(config, c, name); }
                 catch (InvalidOperationException ex)
                 {
@@ -3191,8 +3469,6 @@ namespace AppManager
                 }
                 string newKey = CollectionKeys.GetKey(c);
                 config.QueueCategoryRename(oldKey, newKey);
-                string mapped;
-                if (currentCollection != null && renames.TryGetValue(currentCollection, out mapped)) currentCollection = mapped;
             }
             c.Description = newDescription ?? string.Empty;
             c.Cover = finalCover;
@@ -3207,6 +3483,12 @@ namespace AppManager
                 collectionInfo.EndEdit();
                 RefreshGrid();
                 return;
+            }
+            if (renames != null)
+            {
+                RemapExpandedCollections(renames);
+                string mapped;
+                if (currentCollection != null && renames.TryGetValue(currentCollection, out mapped)) currentCollection = mapped;
             }
             DeleteManagedCoverIfUnused(oldCover, finalCover);
             collectionInfo.EndEdit();
@@ -3324,46 +3606,92 @@ namespace AppManager
                 RefreshGrid();
                 return;
             }
+            foreach (string removedKey in keys) expandedCollections.Remove(removedKey);
             if (browsingRemoved)
             {
                 currentCollection = null;   // 删除当前集合或其祖先：回到「全部」
                 collectionEntered = true;
+                revealActiveCollection = false;
             }
             for (int i = 0; i < covers.Count; i++) DeleteManagedCoverIfUnused(covers[i], null);
             RefreshGrid();
         }
 
         /// <summary>
-        /// 条目右键「加入集合…」级联子项：列出当前分类下的集合（所选条目全部已加入/类型不符时置灰），
-        /// 末尾附「新建集合…」新建后即加入。
+        /// 条目右键「加入集合…」级联子项：按集合树逐级列出当前分类下的文件夹；
+        /// 集合内容页内新建时在当前集合下创建子文件夹。
         /// </summary>
         private List<MenuWindow.MenuItem> BuildJoinCollectionItems(List<AppInfo> targets)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             if (targets == null || targets.Count == 0) return items;
-            int count = 0;
-            for (int i = 0; i < config.Collections.Count; i++)
-            {
-                ResourceCollection c = config.Collections[i];
-                if (c.Parent != currentCategory) continue;
-                string key = CollectionKeys.GetKey(c);
-                MenuWindow.MenuItem m = MkMenu(c.Name, delegate { AddItemsToCategory(targets, key); });
-                bool addable = false;
-                for (int j = 0; j < targets.Count; j++)
-                {
-                    AppInfo a = targets[j];
-                    if (a == null || IsInExtraCategory(a, key)) continue;
-                    if (!CanJoinResourceCategory(a, c.Parent)) continue;
-                    addable = true;
-                    break;
-                }
-                m.Disabled = !addable;
-                items.Add(m);
-                count++;
-            }
-            if (count > 0) items.Add(MkSep());
-            items.Add(MkMenu("新建集合…", delegate { OnCreateCollection(targets); }));
+            CollectionIndex index = new CollectionIndex(config.Collections);
+            List<ResourceCollection> roots = CollectionChildrenForMenu(index, null);
+            HashSet<string> visited = new HashSet<string>(StringComparer.Ordinal);
+            items.AddRange(BuildJoinCollectionSubmenu(index, roots, targets, visited));
+            if (items.Count > 0) items.Add(MkSep());
+            string activeCollection = ActiveCollectionKey;
+            if (!string.IsNullOrEmpty(activeCollection))
+                items.Add(MkMenu("新建子文件夹并加入…", delegate { CreateCollectionUnder(activeCollection, targets); }));
+            else
+                items.Add(MkMenu("新建集合…", delegate { OnCreateCollection(targets); }));
             return items;
+        }
+
+        private List<MenuWindow.MenuItem> BuildJoinCollectionSubmenu(CollectionIndex index,
+            List<ResourceCollection> collections, List<AppInfo> targets, HashSet<string> visited)
+        {
+            List<MenuWindow.MenuItem> result = new List<MenuWindow.MenuItem>();
+            for (int i = 0; i < collections.Count; i++)
+            {
+                ResourceCollection c = collections[i];
+                string key = CollectionKeys.GetKey(c);
+                if (!visited.Add(key)) continue;
+                bool addable = CanJoinCollection(targets, c, key);
+                List<ResourceCollection> children = CollectionChildrenForMenu(index, key);
+                if (children.Count == 0)
+                {
+                    MenuWindow.MenuItem leaf = MkMenu(c.Name, delegate { AddItemsToCategory(targets, key); });
+                    leaf.Disabled = !addable;
+                    result.Add(leaf);
+                    continue;
+                }
+                List<MenuWindow.MenuItem> sub = new List<MenuWindow.MenuItem>();
+                MenuWindow.MenuItem self = MkMenu("加入「" + c.Name + "」", delegate { AddItemsToCategory(targets, key); });
+                self.Disabled = !addable;
+                sub.Add(self);
+                sub.Add(MkSep());
+                sub.AddRange(BuildJoinCollectionSubmenu(index, children, targets, visited));
+                result.Add(MkSubMenu(c.Name, sub));
+            }
+            return result;
+        }
+
+        private List<ResourceCollection> CollectionChildrenForMenu(CollectionIndex index, string parentKey)
+        {
+            List<ResourceCollection> result = new List<ResourceCollection>();
+            List<ResourceCollection> children = index.Children(parentKey ?? string.Empty);
+            for (int i = 0; i < children.Count; i++)
+            {
+                ResourceCollection c = children[i];
+                if (c != null && string.Equals(c.Parent, currentCategory, StringComparison.Ordinal)) result.Add(c);
+            }
+            result.Sort(delegate(ResourceCollection a, ResourceCollection b)
+            {
+                return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase);
+            });
+            return result;
+        }
+
+        private bool CanJoinCollection(List<AppInfo> targets, ResourceCollection c, string key)
+        {
+            for (int i = 0; i < targets.Count; i++)
+            {
+                AppInfo a = targets[i];
+                if (a == null || IsInExtraCategory(a, key)) continue;
+                if (CanJoinResourceCategory(a, c.Parent)) return true;
+            }
+            return false;
         }
 
         /// <summary>返回条目所属的全部分类名（逗号分隔），供列表「所属」字段与属性对话框使用。</summary>
@@ -3570,10 +3898,25 @@ namespace AppManager
             // 若正浏览其下某个集合，集合键一并跟随（browsing.Parent 已被 RenameParent 就地更新）
             ResourceCollection browsing = currentCollection == null ? null : FindCollectionByKey(currentCollection);
             if (resource) CollectionOps.RenameParent(config, oldName, name);
-            if (browsing != null && browsing.Parent == name)
-                currentCollection = CollectionKeys.GetKey(browsing);
+            string browsingNewKey = browsing != null && browsing.Parent == name
+                ? CollectionKeys.GetKey(browsing) : null;
+            if (!config.Save()) return false;
+            if (resource)
+            {
+                string oldBase = CollectionKeys.Prefix + oldName;
+                string newBase = CollectionKeys.Prefix + name;
+                List<string> mapped = new List<string>();
+                foreach (string key in expandedCollections)
+                {
+                    if (key.StartsWith(oldBase + "/", StringComparison.Ordinal))
+                        mapped.Add(newBase + key.Substring(oldBase.Length));
+                    else mapped.Add(key);
+                }
+                expandedCollections.Clear();
+                for (int i = 0; i < mapped.Count; i++) expandedCollections.Add(mapped[i]);
+            }
+            if (browsingNewKey != null) currentCollection = browsingNewKey;
             if (currentCategory == oldName) currentCategory = name;
-            config.Save();
             RebuildSidebar();
             RefreshGrid();
             return true;
@@ -3592,9 +3935,14 @@ namespace AppManager
             }
             if (!ConfirmDialog.Show("删除分类", "确认删除分类「" + category + "」？\n该分类下的条目将回归默认分类。")) return;
             List<string> collectionCovers = new List<string>();
+            List<string> removedCollectionKeys = new List<string>();
             if (resource)
                 foreach (ResourceCollection c in config.Collections)
-                    if (c.Parent == category && !string.IsNullOrEmpty(c.Cover)) collectionCovers.Add(c.Cover);
+                {
+                    if (c.Parent != category) continue;
+                    removedCollectionKeys.Add(CollectionKeys.GetKey(c));
+                    if (!string.IsNullOrEmpty(c.Cover)) collectionCovers.Add(c.Cover);
+                }
             ResourceCollection browsing = currentCollection == null ? null : FindCollectionByKey(currentCollection);
             bool browsingRemoved = resource && browsing != null && browsing.Parent == category;
             if (resource) config.ResourceCategories.Remove(category);
@@ -3624,11 +3972,13 @@ namespace AppManager
                 RefreshGrid();
                 return;
             }
+            for (int i = 0; i < removedCollectionKeys.Count; i++) expandedCollections.Remove(removedCollectionKeys[i]);
             if (currentCategory == category) currentCategory = resource ? "全部资源" : "全部软件";
             if (browsingRemoved)
             {
                 currentCollection = null;
                 collectionEntered = true;
+                revealActiveCollection = false;
             }
             foreach (string cover in collectionCovers) DeleteManagedCoverIfUnused(cover, null);
             RebuildSidebar();
@@ -3841,9 +4191,16 @@ namespace AppManager
             List<ResourceCollection> collections = new List<ResourceCollection>();
             foreach (ResourceCollection collection in config.Collections)
                 if (collection.Parent == "音乐") collections.Add(collection);
-            collections.Sort(delegate(ResourceCollection a, ResourceCollection b) { return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase); });
+            collections.Sort(delegate(ResourceCollection a, ResourceCollection b)
+            {
+                return string.Compare(CollectionKeys.DisplayPath(CollectionKeys.GetKey(a)),
+                    CollectionKeys.DisplayPath(CollectionKeys.GetKey(b)), StringComparison.CurrentCultureIgnoreCase);
+            });
             foreach (ResourceCollection collection in collections)
-                lists.Add(new KeyValuePair<string, string>(CollectionKeys.GetKey(collection), collection.Name));
+            {
+                string key = CollectionKeys.GetKey(collection);
+                lists.Add(new KeyValuePair<string, string>(key, CollectionKeys.DisplayPath(key)));
+            }
 
             // 曲目列表（分页读库 + 逐个确认文件存在）在后台预取；子菜单展开时已就绪就直接显示，
             // 未就绪显示“正在读取…”，读完后清掉占位，再次悬停即可看到。点击曲目播放的正是菜单展示的这份列表，下标不会错位。
@@ -4217,8 +4574,8 @@ namespace AppManager
                 }
                 if (RemovableFromCurrent(new List<AppInfo> { app }).Count > 0)
                     items.Add(MkMenu("从「" + currentCategory + "」移除", delegate { RemoveFromCategory(app); }));
-                // 集合视图内：移出仅解除集合归属，文件保留在父分类（多选时整批移出）；搜索结果是全局的，不提供
-                if (currentCollection != null && !SearchActive)
+                // 集合视图内（含当前文件夹内搜索）：移出仅解除集合归属，文件保留在父分类
+                if (currentCollection != null)
                 {
                     List<AppInfo> removeTargets = MenuTargets(app);
                     items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(removeTargets, currentCollection); }));
@@ -4287,7 +4644,7 @@ namespace AppManager
             if (removable.Count > 0)
                 items.Add(MkMenu("从「" + currentCategory + "」移出",
                     delegate { RemoveTargetsFromCategory(removable, currentCategory); }));
-            if (currentCollection != null && !SearchActive)
+            if (currentCollection != null)
                 items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(targets, currentCollection); }));
 
             items.Add(MkSep());
@@ -4756,7 +5113,7 @@ namespace AppManager
         private bool CanJoinResourceCategory(AppInfo app, string category)
         {
             if (app == null) return false;
-            // 集合成员须属于父分类（搜索跨分类结果不可加入），且类型符合父分类约束
+            // 集合成员须属于父分类，且类型符合父分类约束
             if (!InCategory(app, category)) return false;
             return MediaRules.FitsCategory(category, app.TargetPath, app.IsFolder);
         }
@@ -5492,16 +5849,16 @@ namespace AppManager
         /// <summary>
         /// 列表行右侧第二个按钮：进入集合后为「移除」（仅从当前集合移出，分类与「全部资源」中的归属不变）；
         /// 资源模式分类/全部资源下为「删除」（与右键「删除」同语义：文件移入回收站并清理收录）；
-        /// 软件模式与搜索态为「删除」（仅移除收录记录，不动磁盘）。
+        /// 软件模式与未进入集合的搜索态为「删除」（仅移除收录记录，不动磁盘）。
         /// </summary>
         private void OnGridRowRemove(AppInfo app)
         {
             if (app == null) return;
             if (contentMode == SidebarControl.ContentMode.Website)
             {
-                // 集合视图（非搜索）：行按钮是「移除」，只解除集合归属
-                if (currentCollection != null && !SearchActive) { RemoveItemFromCategory(app, currentCollection); return; }
-                // 资源分类/全部资源/资源搜索：行按钮「删除」与右键菜单「删除」同语义（磁盘文件进回收站）
+                // 集合视图（含集合内搜索）：行按钮是「移除」，只解除集合归属
+                if (currentCollection != null) { RemoveItemFromCategory(app, currentCollection); return; }
+                // 资源分类/全部资源/未进入集合的搜索：行按钮「删除」与右键菜单「删除」同语义
                 if (CanDeleteEntryDisk(app)) { ConfirmDeleteEntryDisk(app); return; }
                 DeleteAddedEntry(app);
                 return;
@@ -5515,7 +5872,7 @@ namespace AppManager
             if (apps == null || apps.Count == 0) return;
             if (contentMode == SidebarControl.ContentMode.Website)
             {
-                if (currentCollection != null && !SearchActive)
+                if (currentCollection != null)
                 {
                     RemoveItemsFromCategory(apps, currentCollection);
                     return;
@@ -6663,7 +7020,7 @@ namespace AppManager
             {
                 ResourceCollection c = FindCollectionByKey(currentCollection);
                 if (c == null) return;
-                name = c.Name;
+                name = CollectionKeys.DisplayPath(currentCollection);
             }
             // 有集合上下文时才绘制分隔线与文案，其余情况保持纯留白
             using (Pen p = new Pen(Theme.Separator, 1))
@@ -6821,6 +7178,7 @@ namespace AppManager
                 {
                     currentCollection = null;
                     collectionEntered = true;
+                    revealActiveCollection = false;
                     collectionSidebar.SetActive(string.Empty);
                 }
                 RefreshGrid();

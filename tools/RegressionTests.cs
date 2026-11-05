@@ -17,6 +17,7 @@ namespace AppManager
     {
         private static int passed, failed;
         private static string root;
+        private static string onlyTests;
         private const BindingFlags Private = BindingFlags.Instance | BindingFlags.NonPublic;
         private const BindingFlags StaticPrivate = BindingFlags.Static | BindingFlags.NonPublic;
 
@@ -25,6 +26,8 @@ namespace AppManager
         {
             Application.EnableVisualStyles();
             Control.CheckForIllegalCrossThreadCalls = true;
+            string[] arguments = Environment.GetCommandLineArgs();
+            if (arguments.Length > 1) onlyTests = arguments[1];
             root = Path.Combine(Path.GetTempPath(), "AppManagerRegression_" + Guid.NewGuid().ToString("N"));
             Paths.DataDirOverride = root;
             Paths.ConfigFileOverride = Path.Combine(root, "config.xml");
@@ -92,6 +95,7 @@ namespace AppManager
                 Run("search field clear button follows input and clears it", SearchFieldClearButton);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
                 Run("scanner merges duplicate launch targets only when arguments also match", ScannerLaunchIdentityMerge);
+                Run("restored shortcut aliases merge through resolve, add and name merge", RestoreAliasShortcutScan);
                 Run("newer desktop shortcut replaces launch target while keeping identity", NewerShortcutKeepsIdentity);
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
@@ -107,6 +111,9 @@ namespace AppManager
                 Run("grid selection fires once per change and restores a ten-thousand item selection", GridSelectionNotifications);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
+                Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
+                Run("collection tree auto-expands and searches only direct members", CollectionTreeSearchAndInfo);
+                Run("collection creation uses active folder scope and enforces tree limits", CollectionCreateScopeAndLimits);
                 Run("grid delete handles every selected item; arrow starts at the first item", GridBatchDeleteAndArrow);
                 Run("icon cache evicts by bytes and LRU instead of clearing everything", IconCacheLru);
                 Run("auto scan pause keeps pending and paused changes, resume fires once", AutoScanPauseResume);
@@ -128,6 +135,8 @@ namespace AppManager
 
         private static void Run(string name, Action action)
         {
+            if (!string.IsNullOrEmpty(onlyTests)
+                && name.IndexOf(onlyTests, StringComparison.OrdinalIgnoreCase) < 0) return;
             try { action(); passed++; Console.WriteLine("PASS " + name); }
             catch (Exception ex) { failed++; Console.WriteLine("FAIL " + name + ": " + ex); }
         }
@@ -2321,6 +2330,266 @@ namespace AppManager
             }
         }
 
+        private static void CollectionSidebarTreeInteraction()
+        {
+            using (Form host = new Form
+            {
+                ShowInTaskbar = false,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(-3000, -3000),
+                Size = new Size(320, 420)
+            })
+            using (Controls.CollectionSidebar sidebar = new Controls.CollectionSidebar { Dock = DockStyle.Fill })
+            {
+                host.Controls.Add(sidebar);
+                host.Show();
+                Application.DoEvents();
+
+                string rootKey = CollectionKeys.Make("照片", "旅行");
+                string childKey = rootKey + "/2024";
+                string siblingKey = CollectionKeys.Make("照片", "风景");
+                List<Controls.CollectionSidebar.Item> items = new List<Controls.CollectionSidebar.Item>();
+                items.Add(new Controls.CollectionSidebar.Item { IsAll = true, Name = "全部" });
+                items.Add(new Controls.CollectionSidebar.Item
+                {
+                    Key = rootKey, Name = "旅行", Depth = 0, HasChildren = true, Expanded = false,
+                    Path = "照片 / 旅行"
+                });
+                items.Add(new Controls.CollectionSidebar.Item
+                {
+                    Key = childKey, Name = "2024", Depth = 1, ParentKey = rootKey,
+                    Path = "照片 / 旅行 / 2024"
+                });
+                items.Add(new Controls.CollectionSidebar.Item
+                {
+                    Key = siblingKey, Name = "风景", Depth = 0, Path = "照片 / 风景"
+                });
+                sidebar.SetItems(items);
+
+                string toggledKey = null;
+                bool toggledExpanded = false;
+                string selectedKey = null;
+                string activatedKey = null;
+                sidebar.ToggleRequested += delegate(string key, bool expanded) { toggledKey = key; toggledExpanded = expanded; };
+                sidebar.ItemSelected += delegate(string key) { selectedKey = key; };
+                sidebar.ItemActivated += delegate(string key) { activatedKey = key; };
+
+                Type type = typeof(Controls.CollectionSidebar);
+                MethodInfo itemRect = type.GetMethod("ItemRect", Private);
+                MethodInfo arrowRect = type.GetMethod("ArrowRect", Private);
+                Rectangle rootRow = (Rectangle)itemRect.Invoke(sidebar, new object[] { 1 });
+                Rectangle rootArrow = (Rectangle)arrowRect.Invoke(sidebar, new object[] { items[1], rootRow });
+                Point arrowPoint = new Point(rootArrow.X + rootArrow.Width / 2, rootArrow.Y + rootArrow.Height / 2);
+                bool arrowHit = (bool)type.GetMethod("IsArrowAt", Private).Invoke(sidebar, new object[] { arrowPoint, 1 });
+                int arrowIndex = (int)type.GetMethod("IndexAt", Private).Invoke(sidebar, new object[] { arrowPoint.Y });
+                type.GetMethod("OnMouseClick", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, arrowPoint.X, arrowPoint.Y, 0) });
+                Check(toggledKey == rootKey && toggledExpanded,
+                    "arrow did not request expansion; hit=" + arrowHit + " index=" + arrowIndex + " rect=" + rootArrow);
+                Check(selectedKey == null && activatedKey == null, "arrow click selected or entered the collection");
+
+                type.GetMethod("OnMouseDoubleClick", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 2, arrowPoint.X, arrowPoint.Y, 0) });
+                Check(activatedKey == null, "double-clicking the arrow entered the collection");
+
+                Rectangle siblingRow = (Rectangle)itemRect.Invoke(sidebar, new object[] { 3 });
+                type.GetMethod("OnMouseDoubleClick", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 2,
+                        siblingRow.X + siblingRow.Width / 2, siblingRow.Y + siblingRow.Height / 2, 0) });
+                Check(activatedKey == siblingKey, "double-clicking a collection row did not enter it");
+
+                sidebar.SetActive(rootKey);
+                selectedKey = null;
+                type.GetMethod("OnKeyDown", Private).Invoke(sidebar, new object[] { new KeyEventArgs(Keys.Down) });
+                Check(selectedKey == childKey, "down arrow did not move selection to the first child");
+                Check(!sidebar.TabStop && sidebar.CanFocus, "collection sidebar cannot receive click focus without taking Tab");
+
+                List<Controls.CollectionSidebar.Item> scrollItems = new List<Controls.CollectionSidebar.Item>();
+                scrollItems.Add(new Controls.CollectionSidebar.Item { IsAll = true, Name = "全部" });
+                scrollItems.Add(new Controls.CollectionSidebar.Item
+                {
+                    Key = rootKey, Name = "旅行", Depth = 0, HasChildren = true, Expanded = true
+                });
+                scrollItems.Add(new Controls.CollectionSidebar.Item
+                {
+                    Key = childKey, Name = "2024", Depth = 1, ParentKey = rootKey
+                });
+                for (int i = 0; i < 30; i++)
+                    scrollItems.Add(new Controls.CollectionSidebar.Item
+                    {
+                        Key = CollectionKeys.Make("照片", "项目 " + i), Name = "项目 " + i, Depth = 0
+                    });
+                sidebar.SetItems(scrollItems);
+                int rowHeight = (int)type.GetProperty("RowH", Private).GetValue(sidebar, null);
+                type.GetMethod("SetScroll", Private).Invoke(sidebar, new object[] { rowHeight * 2 + 5 });
+
+                List<Controls.CollectionSidebar.Item> collapsed = new List<Controls.CollectionSidebar.Item>();
+                collapsed.Add(new Controls.CollectionSidebar.Item { IsAll = true, Name = "全部" });
+                collapsed.Add(new Controls.CollectionSidebar.Item
+                {
+                    Key = rootKey, Name = "旅行", Depth = 0, HasChildren = true, Expanded = false
+                });
+                for (int i = 0; i < 30; i++)
+                    collapsed.Add(new Controls.CollectionSidebar.Item
+                    {
+                        Key = CollectionKeys.Make("照片", "项目 " + i), Name = "项目 " + i, Depth = 0
+                    });
+                sidebar.SetItems(collapsed);
+                int restoredOffset = (int)type.GetField("scrollOffset", Private).GetValue(sidebar);
+                Check(restoredOffset == rowHeight, "collapsing above the anchor did not fall back to the nearest visible parent");
+            }
+        }
+
+        private static void CollectionTreeSearchAndInfo()
+        {
+            AppConfig config = RenameConfig("collection-tree-ui");
+            config.AutoScan = false;
+            string rootKey = CollectionKeys.Make("照片", "旅行");
+            string childKey = rootKey + "/2024";
+            string grandKey = childKey + "/十月";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "十月", ParentCollection = childKey });
+            AppInfo direct = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "照片", "trip-root.png"),
+                false, true, "trip root");
+            AppInfo nested = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "照片", "trip-grand.png"),
+                false, true, "trip grand");
+            CollectionOps.AddMember(config, direct.Key, rootKey);
+            CollectionOps.AddMember(config, nested.Key, grandKey);
+            Check(config.Save(), "database fixture save failed");
+            List<string> directMemberships;
+            Check(config.ItemCategories.TryGetValue(direct.Key, out directMemberships) && directMemberships.Contains(rootKey),
+                "fixture lost the direct collection membership before publishing");
+            int savedDirect = config.Database.Page(rootKey, true, true, "", 10, null, true, false).Total;
+            Check(savedDirect == 1, "fixture projection has " + savedDirect + " direct members after save");
+
+            using (MainForm form = ResourceForm(config, "照片"))
+            {
+                int formDirect = config.Database.Page(rootKey, true, true, "", 10, null, true, false).Total;
+                Check(formDirect == 1, "ResourceForm lost the direct collection projection: " + formDirect);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1000, 680);
+                form.Show();
+                Application.DoEvents();
+
+                Controls.CollectionSidebar sidebar = (Controls.CollectionSidebar)typeof(MainForm).GetField("collectionSidebar", Private).GetValue(form);
+                Controls.CollectionInfoPanel info = (Controls.CollectionInfoPanel)typeof(MainForm).GetField("collectionInfo", Private).GetValue(form);
+                HashSet<string> expanded = (HashSet<string>)typeof(MainForm).GetField("expandedCollections", Private).GetValue(form);
+                FieldInfo itemField = typeof(Controls.CollectionSidebar).GetField("items", Private);
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, null);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, true);
+                Invoke(form, "UpdateCollectionUi");
+                List<Controls.CollectionSidebar.Item> visible = (List<Controls.CollectionSidebar.Item>)itemField.GetValue(sidebar);
+                Check(visible.Count == 2, "collapsed collection tree should show only the root collection");
+
+                Invoke(form, "OnCollectionToggleRequested", rootKey, true);
+                visible = (List<Controls.CollectionSidebar.Item>)itemField.GetValue(sidebar);
+                Check(visible.Count == 3, "expanding the root did not reveal its direct child");
+                Invoke(form, "OnCollectionToggleRequested", childKey, true);
+                visible = (List<Controls.CollectionSidebar.Item>)itemField.GetValue(sidebar);
+                Check(visible.Count == 4, "expanding the child did not reveal the grandchild");
+                Check(visible[1].Depth == 0 && visible[2].Depth == 1 && visible[3].Depth == 2,
+                    "collection rows lost nested depth");
+                Check(visible[3].ParentKey == childKey && visible[3].Path == "照片 / 旅行 / 2024 / 十月",
+                    "collection row path or parent key is wrong");
+
+                expanded.Clear();
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, grandKey);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, true);
+                typeof(MainForm).GetField("revealActiveCollection", Private).SetValue(form, true);
+                Invoke(form, "UpdateCollectionUi");
+                visible = (List<Controls.CollectionSidebar.Item>)itemField.GetValue(sidebar);
+                Check(visible.Count == 4 && expanded.Contains(rootKey) && expanded.Contains(childKey),
+                    "selecting a deep collection did not expand its ancestors before building rows");
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, rootKey);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, false);
+                typeof(MainForm).GetField("revealActiveCollection", Private).SetValue(form, false);
+                Invoke(form, "UpdateCollectionUi");
+                Check(info.Visible, "collection info page did not open");
+                int infoCount = (int)typeof(Controls.CollectionInfoPanel).GetField("count", Private).GetValue(info);
+                int pageCount = config.Database.Page(rootKey, true, true, "", 10, null, true, false).Total;
+                Check(infoCount == 1,
+                    "collection info counted descendants as direct members; info=" + infoCount + " page=" + pageCount);
+                Check((int)typeof(Controls.CollectionInfoPanel).GetField("childFolderCount", Private).GetValue(info) == 1,
+                    "collection info did not show the direct child folder count");
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, grandKey);
+                Invoke(form, "UpdateCollectionUi");
+                Check((string)typeof(Controls.CollectionInfoPanel).GetField("parent", Private).GetValue(info) == "照片 / 旅行 / 2024",
+                    "nested collection info did not show the full parent path");
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, rootKey);
+                MethodInfo readPage = typeof(MainForm).GetMethod("ReadDatabasePage", Private);
+                List<AppInfo> found = (List<AppInfo>)readPage.Invoke(form, new object[] { "trip" });
+                Check(found.Count == 1 && found[0].Name == "trip root", "collection search included a descendant member");
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, null);
+                found = (List<AppInfo>)readPage.Invoke(form, new object[] { "trip" });
+                Check(found.Count == 2, "category search no longer finds all direct category members");
+            }
+        }
+
+        private static void CollectionCreateScopeAndLimits()
+        {
+            AppConfig config = RenameConfig("collection-create-scope");
+            config.AutoScan = false;
+            string rootKey = CollectionKeys.Make("照片", "旅行");
+            string childKey = rootKey + "/2024";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey });
+            Check(config.Save(), "database fixture save failed");
+
+            using (MainForm form = ResourceForm(config, "照片"))
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1000, 680);
+                form.Show();
+                Application.DoEvents();
+
+                Controls.CollectionSidebar sidebar = (Controls.CollectionSidebar)typeof(MainForm).GetField("collectionSidebar", Private).GetValue(form);
+                Controls.SearchField search = (Controls.SearchField)typeof(MainForm).GetField("search", Private).GetValue(form);
+                PropertyInfo active = typeof(MainForm).GetProperty("ActiveCollectionKey", Private);
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, rootKey);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, true);
+                Invoke(form, "UpdateCollectionUi");
+                Check(sidebar.Visible, "collection sidebar did not become visible");
+                Check((string)active.GetValue(form, null) == rootKey, "entered collection was not the active creation scope");
+
+                search.Text = "trip";
+                Check((string)active.GetValue(form, null) == null, "search mode still used the collection as creation scope");
+                search.Text = string.Empty;
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, false);
+                Invoke(form, "UpdateCollectionUi");
+                Check((string)active.GetValue(form, null) == null, "collection info page still used the collection as creation scope");
+
+                MethodInfo validate = typeof(MainForm).GetMethod("ValidateCollectionDraft", Private);
+                Func<string, string, string> check = delegate(string name, string parentCollection)
+                {
+                    return (string)validate.Invoke(form, new object[]
+                    {
+                        new ResourceCollection { Name = name }, "照片", parentCollection
+                    });
+                };
+                Check(check("2024", rootKey) != null, "same-parent duplicate name was accepted");
+                Check(check("2024", childKey) == null, "same name under a different parent was rejected");
+
+                string depth15 = rootKey;
+                for (int depth = 2; depth <= 15; depth++) depth15 += "/L" + depth;
+                Check(check("L16", depth15) == null, "collection at the 16th level was rejected");
+                Check(check("L17", depth15 + "/L16") != null, "collection beyond the 16th level was accepted");
+
+                string longParent = rootKey;
+                for (int depth = 0; depth < 26; depth++) longParent += "/" + new string('x', 80);
+                string longError = check("y", longParent);
+                Check(longError != null && longError.Contains("过长"), "overlong collection key was not rejected");
+            }
+        }
+
         private static void GridBatchDeleteAndArrow()
         {
             using (Controls.AppGridControl grid = new Controls.AppGridControl { Size = new Size(640, 420) })
@@ -2789,6 +3058,73 @@ namespace AppManager
             {
                 foreach (string link in new string[] { rootLink, nestedLink, legacyLink, legacyOrphan })
                     try { File.Delete(link); } catch { }
+            }
+        }
+
+        private static void RestoreAliasShortcutScan()
+        {
+            string dir = Path.Combine(root, "restore-alias-scan");
+            string canonical = Path.Combine(dir, "微信.lnk");
+            string alias = Path.Combine(dir, "微信_restored2_1.lnk");
+            string target = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "notepad.exe");
+            Directory.CreateDirectory(dir);
+            try
+            {
+                CreateShortcutWithArguments(canonical, target, "--scene=desktop");
+                CreateShortcutWithArguments(alias, target, "--scene=restored");
+                DateTime now = DateTime.UtcNow;
+                File.SetLastWriteTimeUtc(canonical, now.AddMinutes(-2));
+                File.SetLastWriteTimeUtc(alias, now);
+
+                AppInfo resolved = Scanner.ResolveShortcut(alias, "Desktop");
+                Check(resolved != null && resolved.Name == "微信", "resolved shortcut kept the generated restore suffix");
+
+                Scanner backupScanner = new Scanner(new AppConfig());
+                typeof(Scanner).GetField("nameIndex", Private).SetValue(backupScanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+                typeof(Scanner).GetField("launchIndex", Private).SetValue(backupScanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+                Dictionary<string, AppInfo> backupDict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+                MethodInfo addShortcut = typeof(Scanner).GetMethod("AddShortcut", Private);
+                addShortcut.Invoke(backupScanner, new object[] { backupDict, canonical, "Desktop", false });
+                addShortcut.Invoke(backupScanner, new object[] { backupDict, alias, "Desktop", false });
+                AppInfo merged = backupDict.Values.Single();
+                Check(backupDict.Count == 1 && merged.Name == "微信", "restored alias did not merge into one software entry");
+                Check(merged.LaunchArguments == "--scene=restored", "newer backup shortcut arguments were not retained");
+
+                Scanner desktopScanner = new Scanner(new AppConfig());
+                typeof(Scanner).GetField("nameIndex", Private).SetValue(desktopScanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+                typeof(Scanner).GetField("launchIndex", Private).SetValue(desktopScanner, new Dictionary<string, AppInfo>(StringComparer.Ordinal));
+                Dictionary<string, AppInfo> desktopDict = new Dictionary<string, AppInfo>(StringComparer.OrdinalIgnoreCase);
+                addShortcut.Invoke(desktopScanner, new object[] { desktopDict, canonical, "Desktop", true });
+                addShortcut.Invoke(desktopScanner, new object[] { desktopDict, alias, "Desktop", false });
+                AppInfo desktopMerged = desktopDict.Values.Single();
+                Check(desktopMerged.Name == "微信" && desktopMerged.LaunchArguments == "--scene=desktop",
+                    "newer backup alias overrode the current desktop shortcut");
+            }
+            finally
+            {
+                try { File.Delete(canonical); } catch { }
+                try { File.Delete(alias); } catch { }
+            }
+        }
+
+        private static void CreateShortcutWithArguments(string path, string target, string arguments)
+        {
+            object shell = null, shortcut = null;
+            try
+            {
+                Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+                if (shellType == null) throw new InvalidOperationException("WScript.Shell unavailable");
+                shell = Activator.CreateInstance(shellType);
+                shortcut = shellType.InvokeMember("CreateShortcut", BindingFlags.InvokeMethod, null, shell, new object[] { path });
+                Type shortcutType = shortcut.GetType();
+                shortcutType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, shortcut, new object[] { target });
+                shortcutType.InvokeMember("Arguments", BindingFlags.SetProperty, null, shortcut, new object[] { arguments });
+                shortcutType.InvokeMember("Save", BindingFlags.InvokeMethod, null, shortcut, null);
+            }
+            finally
+            {
+                try { if (shortcut != null) Marshal.FinalReleaseComObject(shortcut); } catch { }
+                try { if (shell != null) Marshal.FinalReleaseComObject(shell); } catch { }
             }
         }
 

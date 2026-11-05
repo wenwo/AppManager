@@ -10,6 +10,7 @@ namespace AppManager
     /// <summary>
     /// 媒体文件「拍摄时间」读取：列表时间列与排序共用同一口径。
     /// 照片取 EXIF DateTimeOriginal（0x9003，不存在则依次回退 0x9004/0x0132）；
+    /// RW2 通过系统 WIC 只读元数据，不进入 GDI+ 或整图解码；
     /// 视频解析 mp4/mov/m4v 的 mvhd atom 中的 creation_time（ISO-BMFF，自 1904-01-01 起的秒数）；
     /// 其他类型或解析失败返回 false，调用方回退到 LastWriteTime。
     /// 所有 IO/解码异常都在内部吞掉，绝不影响列表加载或排序。
@@ -23,8 +24,8 @@ namespace AppManager
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) return false;
             try
             {
-                // RAW 依赖 WIC；GDI+ 既不支持，也不要为列表排序触发额外解压。
-                if (MediaRules.IsRawImage(path)) return false;
+                // RAW 依赖 WIC；只读元数据，不解码像素。
+                if (MediaRules.IsRawImage(path)) return WicImageDecoder.TryGetTakenDate(path, out taken);
                 if (MediaRules.IsImage(path)) return TryReadImageTaken(path, out taken);
                 if (MediaRules.IsVideo(path)) return TryReadVideoTaken(path, out taken);
             }
@@ -41,43 +42,48 @@ namespace AppManager
             {
                 using (Image img = Image.FromFile(path))
                 {
-                    string dto = null, dtd = null, dt = null;
+                    DateTime dto = DateTime.MinValue, dtd = DateTime.MinValue, dt = DateTime.MinValue;
+                    bool hasDto = false, hasDtd = false, hasDt = false;
                     PropertyItem[] props = img.PropertyItems;
                     for (int i = 0; i < props.Length; i++)
                     {
                         PropertyItem p = props[i];
                         switch (p.Id)
                         {
-                            case 0x9003: dto = ExifDate(p.Value); break;
-                            case 0x9004: dtd = ExifDate(p.Value); break;
-                            case 0x0132: dt = ExifDate(p.Value); break;
+                            case 0x9003: if (!hasDto) hasDto = TryExifDate(p.Value, out dto); break;
+                            case 0x9004: if (!hasDtd) hasDtd = TryExifDate(p.Value, out dtd); break;
+                            case 0x0132: if (!hasDt) hasDt = TryExifDate(p.Value, out dt); break;
                         }
                     }
-                    string s = !string.IsNullOrEmpty(dto) ? dto
-                             : !string.IsNullOrEmpty(dtd) ? dtd : dt;
-                    if (string.IsNullOrEmpty(s)) return false;
-                    DateTime t;
-                    if (DateTime.TryParseExact(s, "yyyy-MM-dd HH:mm:ss",
-                            CultureInfo.InvariantCulture, DateTimeStyles.None, out t))
-                    {
-                        taken = t;
-                        return true;
-                    }
+                    if (hasDto) { taken = dto; return true; }
+                    if (hasDtd) { taken = dtd; return true; }
+                    if (hasDt) { taken = dt; return true; }
                 }
             }
             catch { }
             return false;
         }
 
-        private static string ExifDate(byte[] value)
+        private static bool TryExifDate(byte[] value, out DateTime taken)
         {
-            if (value == null || value.Length == 0) return null;
-            string s = Encoding.ASCII.GetString(value).Trim('\0', ' ');
-            DateTime t;
-            if (DateTime.TryParseExact(s, "yyyy:MM:dd HH:mm:ss",
-                    CultureInfo.InvariantCulture, DateTimeStyles.None, out t))
-                return t.ToString("yyyy-MM-dd HH:mm:ss");
-            return null;   // 占位/损坏日期不能挡住后续有效字段
+            taken = DateTime.MinValue;
+            if (value == null || value.Length == 0) return false;
+            return TryParseExifWallTime(Encoding.ASCII.GetString(value), out taken);
+        }
+
+        /// <summary>EXIF 时间按本地墙上时间解析；占位/损坏值返回 false，不阻止后续字段回退。</summary>
+        internal static bool TryParseExifWallTime(string value, out DateTime taken)
+        {
+            taken = DateTime.MinValue;
+            if (string.IsNullOrEmpty(value)) return false;
+            string text = value.Trim('\0', ' ');
+            if (text.Length == 0) return false;
+            DateTime parsed;
+            if (!DateTime.TryParseExact(text, "yyyy:MM:dd HH:mm:ss",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed))
+                return false;
+            taken = DateTime.SpecifyKind(parsed, DateTimeKind.Unspecified);
+            return true;
         }
 
         // ===== 视频：mp4/mov/m4v 的 mvhd =====

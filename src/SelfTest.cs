@@ -410,7 +410,7 @@ namespace AppManager
 
         private static void Case21_StripIndexSuffix()
         {
-            Begin("21 重名后缀剔除（(2)/_1/-1；空格+数字视为版本号不裁）");
+            Begin("21 重名后缀剔除（(2)/_1/-1；还原别名；空格+数字视为版本号不裁）");
             bool a = Scanner.StripIndexSuffix("微信 (2)") == "微信";
             bool b = Scanner.StripIndexSuffix("Chrome_1") == "Chrome";
             bool c = Scanner.StripIndexSuffix("工具-2") == "工具";
@@ -419,8 +419,14 @@ namespace AppManager
             // 版本号形如「名称 16」，不得被当作重名序号裁剪，否则不同版本会被合并
             bool f = Scanner.StripIndexSuffix("Navicat Premium 16") == "Navicat Premium 16";
             bool g = Scanner.StripIndexSuffix("App 7") == "App 7";
-            Assert(a && b && c && d && e && f && g,
-                "a=" + a + " b=" + b + " c=" + c + " d=" + d + " e=" + e + " f=" + f + " g=" + g);
+            bool h = Scanner.CanonicalShortcutName("微信_restored") == "微信";
+            bool i = Scanner.CanonicalShortcutName("微信_restored2") == "微信";
+            bool j = Scanner.CanonicalShortcutName("微信_restored2_1") == "微信";
+            bool k = Scanner.CanonicalShortcutName("Chrome_1") == "Chrome_1";
+            bool l = Scanner.CanonicalShortcutName("App_restored_backup") == "App_restored_backup";
+            Assert(a && b && c && d && e && f && g && h && i && j && k && l,
+                "a=" + a + " b=" + b + " c=" + c + " d=" + d + " e=" + e + " f=" + f + " g=" + g
+                + " h=" + h + " i=" + i + " j=" + j + " k=" + k + " l=" + l);
         }
 
         private static void Case22_NameDedupRule()
@@ -1068,7 +1074,7 @@ namespace AppManager
         private static void Case49_MediaTypeRules()
         {
             Begin("49 媒体类型识别与视频分类过滤器");
-            string[] videos = { ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v" };
+            string[] videos = { ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp" };
             string filter = MediaRules.ResourceCategoryFilter("视频");
             bool allVideo = true;
             bool filterAll = true;
@@ -1081,6 +1087,7 @@ namespace AppManager
             bool videoOk = allVideo
                 && !MediaRules.IsVideo(@"C:\a\song.mp3")
                 && !MediaRules.IsVideo(@"C:\a\pic.jpg")
+                && !MediaRules.IsVideo(@"C:\a\old.rmvb")
                 && !MediaRules.IsVideo(@"C:\a\plain")
                 && !MediaRules.IsVideo(null);
             bool imageOk = MediaRules.IsImage(@"C:\a\Photo.JPG")

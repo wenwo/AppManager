@@ -1546,8 +1546,14 @@ namespace AppManager
             out string taken, out string geo, out Bitmap preview)
         {
             width = 0; height = 0; taken = null; geo = null; preview = null;
-            // RAW 不支持 GDI+；首版属性页只保留基础信息，不在后台额外解码 RAW。
-            if (MediaRules.IsRawImage(path)) return;
+            // RAW 不支持 GDI+；只通过 WIC 读取元数据时间，不进入整图解码或缩略图生成。
+            if (MediaRules.IsRawImage(path))
+            {
+                DateTime rawTaken;
+                if (MediaInfo.TryGetTakenDate(path, out rawTaken))
+                    taken = rawTaken.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+                return;
+            }
             try
             {
                 using (Image img = Image.FromFile(path))

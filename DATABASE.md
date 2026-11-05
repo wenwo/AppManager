@@ -16,6 +16,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\activate-database-bu
 
 脚本保留旧程序副本，再原子替换主程序。然后通过原入口启动。迁移后如果需要退回旧程序，先导出最新 `.ambak` 并保留完整数据库；原 `config.xml` 是迁移前状态。
 
+数据库当前使用 `user_version=2`。新版可读取并升级 v1 数据库，但升级后旧版程序会拒绝打开更高版本；含嵌套集合的 `.ambak` 备份不支持降级导入，旧版会忽略 `parentCollection` 并把层级扁平化。回退请使用升级前的完整备份。
+
 ## 表和关系
 
 | 表 | 用途与约束 |

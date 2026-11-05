@@ -4,6 +4,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Windows;
 using System.Windows.Media;
@@ -34,12 +35,78 @@ namespace AppManager
             return Decode(path, maxSideFor, CancellationToken.None);
         }
 
+        private static readonly string[][] TakenDateQueries =
+        {
+            new string[] { "/ifd/exif/{ushort=36867}", "/app1/ifd/exif/{ushort=36867}" },
+            new string[] { "/ifd/exif/{ushort=36868}", "/app1/ifd/exif/{ushort=36868}" },
+            new string[] { "/ifd/{ushort=306}", "/app1/ifd/{ushort=306}" }
+        };
+
+        /// <summary>
+        /// 只读取 RAW 的 EXIF 时间元数据，不解码像素、不生成缩略图；文件大小不受限制。
+        /// 依次尝试 DateTimeOriginal、DateTimeDigitized、DateTime，单个字段非法时继续回退。
+        /// </summary>
+        internal static bool TryGetTakenDate(string path, out DateTime taken)
+        {
+            taken = DateTime.MinValue;
+            try
+            {
+                using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                {
+                    BitmapDecoder decoder = BitmapDecoder.Create(stream,
+                        BitmapCreateOptions.PreservePixelFormat, BitmapCacheOption.OnDemand);
+                    if (decoder.Frames.Count == 0) return false;
+                    BitmapMetadata metadata = decoder.Frames[0].Metadata as BitmapMetadata;
+                    if (metadata == null) return false;
+                    for (int i = 0; i < TakenDateQueries.Length; i++)
+                    {
+                        DateTime value;
+                        if (TryReadExifDate(metadata, TakenDateQueries[i], out value))
+                        {
+                            taken = value;
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }   // 无 WIC 解码器、损坏文件或元数据缺失时由调用方回退
+            return false;
+        }
+
+        private static bool TryReadExifDate(BitmapMetadata metadata, string[] queries, out DateTime taken)
+        {
+            taken = DateTime.MinValue;
+            for (int i = 0; i < queries.Length; i++)
+            {
+                string text = ReadExifText(metadata, queries[i]);
+                if (MediaInfo.TryParseExifWallTime(text, out taken)) return true;
+            }
+            return false;
+        }
+
+        private static string ReadExifText(BitmapMetadata metadata, string query)
+        {
+            try
+            {
+                object value = metadata.GetQuery(query);
+                if (value == null) return null;
+                string text = value as string;
+                if (text == null)
+                {
+                    byte[] bytes = value as byte[];
+                    if (bytes != null) text = Encoding.ASCII.GetString(bytes);
+                }
+                return string.IsNullOrEmpty(text) ? null : text;
+            }
+            catch (Exception) { return null; }   // 不同容器的查询路径可能不支持，继续尝试下一个
+        }
+
         private static Bitmap Decode(string path, Func<int, int, int> maxSideFor, CancellationToken cancellation)
         {
             cancellation.ThrowIfCancellationRequested();
             using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
             {
-                if (stream.Length > 256L * 1024 * 1024)
+                if (!MediaRules.IsRawImage(path) && stream.Length > 256L * 1024 * 1024)
                     throw new InvalidDataException("图片超过 256 MB，请使用外部查看器打开。");
                 BitmapDecoder probe;
                 BitmapFrame frame;

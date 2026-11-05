@@ -26,9 +26,9 @@ namespace AppManager
         // 保存后一次 GROUP BY 重建，不再逐集合分页查询。条目走保留池，失效时只清空映射。
         private readonly Dictionary<string, AppInfo> collectionCoverImages = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
         private readonly Dictionary<string, AppInfo> collectionCoverFirst = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
-        private readonly List<string> collectionCoverKeys = new List<string>();
+        private readonly HashSet<string> collectionCoverImageRequested = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> collectionCoverFirstRequested = new HashSet<string>(StringComparer.Ordinal);
         private string collectionCoverStamp;
-        private bool collectionCoverFirstLoaded;
         // 跨分类/分页保留的条目对象（持有已加载图标），按 Key 复用；超过上限时只留当前页。
         private readonly Dictionary<string, AppInfo> databaseRetained = new Dictionary<string, AppInfo>(StringComparer.Ordinal);
         private const int DatabaseRetainedLimit = 1000;
@@ -86,7 +86,8 @@ namespace AppManager
 
         private List<AppInfo> ReadDatabasePage(string keyword)
         {
-            string category = !string.IsNullOrEmpty(currentCollection) && keyword.Length == 0 ? currentCollection : currentCategory;
+            // 集合内搜索只查当前文件夹的直接成员；离开集合后才回到整个资源分类。
+            string category = !string.IsNullOrEmpty(currentCollection) ? currentCollection : currentCategory;
             string context = category + "\n" + contentMode + "\n" + keyword + "\n" + config.ShowHidden + "\n" + listSortColumn + "\n" + listSortAsc + "\n" + config.Database.Revision;
             if (context != databaseContext)
             {
@@ -97,7 +98,8 @@ namespace AppManager
             databaseDeferredDisposals.Clear();
             CatalogPage after = databasePageNumber == 0 ? null : databaseCursors[databasePageNumber - 1];
             databasePage = config.Database.Page(category, contentMode == SidebarControl.ContentMode.Website, config.ShowHidden,
-                keyword, DatabasePageSize, after, listSortColumn == "name", listSortColumn != null && !listSortAsc, listSortColumn);
+                keyword, DatabasePageSize, after, listSortColumn == "name", listSortColumn != null && !listSortAsc, listSortColumn,
+                null, currentCollection);
             if (databasePageNumber < databaseCursors.Count) databaseCursors[databasePageNumber] = databasePage;
             else databaseCursors.Add(databasePage);
             scanner.ApplyConfig(databasePage.Items);
@@ -194,37 +196,44 @@ namespace AppManager
         /// 无图片成员的集合在首次需要时再批量取首个成员（图标版式化兜底）。
         /// 首个图片成员封面解码失败时回退首个成员，不再逐个尝试后续图片成员。
         /// </summary>
-        private void EnsureCollectionCovers(string category)
+        private void EnsureCollectionCovers(IEnumerable<string> visibleKeys)
         {
-            string stamp = config.Database.Revision + "|" + config.ShowHidden + "|" + category;
-            if (stamp == collectionCoverStamp) return;
-            collectionCoverStamp = stamp;
-            collectionCoverImages.Clear();
-            collectionCoverFirst.Clear();
-            collectionCoverFirstLoaded = false;
-            collectionCoverKeys.Clear();
-            for (int i = 0; i < config.Collections.Count; i++)
-                if (config.Collections[i].Parent == category)
-                    collectionCoverKeys.Add(CollectionKeys.GetKey(config.Collections[i]));
-            RetainCoverMembers(config.Database.CollectionFirstMembers(collectionCoverKeys, config.ShowHidden, true), collectionCoverImages);
+            if (config.Database == null || visibleKeys == null) return;
+            string stamp = config.Database.Revision + "|" + config.ShowHidden + "|" + currentCategory;
+            if (!string.Equals(stamp, collectionCoverStamp, StringComparison.Ordinal))
+            {
+                collectionCoverStamp = stamp;
+                collectionCoverImages.Clear();
+                collectionCoverFirst.Clear();
+                collectionCoverImageRequested.Clear();
+                collectionCoverFirstRequested.Clear();
+            }
+
+            List<string> imageMissing = new List<string>();
+            List<string> firstMissing = new List<string>();
+            foreach (string key in visibleKeys)
+            {
+                if (string.IsNullOrEmpty(key)) continue;
+                if (collectionCoverImageRequested.Add(key)) imageMissing.Add(key);
+            }
+            if (imageMissing.Count > 0)
+            {
+                RetainCoverMembers(config.Database.CollectionFirstMembers(imageMissing, config.ShowHidden, true), collectionCoverImages);
+                for (int i = 0; i < imageMissing.Count; i++)
+                {
+                    string key = imageMissing[i];
+                    AppInfo image;
+                    if (collectionCoverImages.TryGetValue(key, out image)
+                        && !IsCoverFailed(image.TargetPath, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize)) continue;
+                    if (collectionCoverFirstRequested.Add(key)) firstMissing.Add(key);
+                }
+            }
+            if (firstMissing.Count > 0)
+                RetainCoverMembers(config.Database.CollectionFirstMembers(firstMissing, config.ShowHidden, false), collectionCoverFirst);
         }
 
         private AppInfo CollectionCoverFallback(string key)
         {
-            if (!collectionCoverFirstLoaded)
-            {
-                collectionCoverFirstLoaded = true;
-                List<string> missing = new List<string>();
-                foreach (string k in collectionCoverKeys)
-                {
-                    AppInfo image;
-                    // 没有图片成员、或首个图片成员封面解码失败的集合，都回退到首个成员的图标版式化
-                    if (collectionCoverImages.TryGetValue(k, out image)
-                        && !IsCoverFailed(image.TargetPath, CollectionSidebar.ThumbSize, CollectionSidebar.ThumbSize)) continue;
-                    missing.Add(k);
-                }
-                RetainCoverMembers(config.Database.CollectionFirstMembers(missing, config.ShowHidden, false), collectionCoverFirst);
-            }
             AppInfo value;
             return collectionCoverFirst.TryGetValue(key, out value) ? value : null;
         }

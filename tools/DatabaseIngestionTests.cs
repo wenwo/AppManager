@@ -612,7 +612,8 @@ namespace AppManager
             choices = MainForm.ResourceImportChoices(all, new[] { "pack.zip", "album" }, new[] { false, true }, ref preferred);
             Check(preferred == "文件" && choices.Count == all.Length, "folder picker wrong: " + string.Join(",", choices));
 
-            // 分类接收清单：补充常见格式；证件不收脚本；查看器清单不受影响（新格式双击交给系统程序）
+            // 分类接收清单：补充常见格式；证件不收脚本；查看器白名单只纳入已验证可播放的 3GP，
+            // RMVB 等未验证格式仍交给系统程序。
             string[][] accepted = {
                 new[] { "照片", "IMG_0001.HEIC", "scan.tiff", "a.avif" }, new[] { "视频", "clip.m2ts", "old.rmvb", "phone.3gp" },
                 new[] { "文档", "report.wps", "sheet.et", "invoice.ofd", "a.odt" }, new[] { "证件", "id.heic", "license.ofd", "id.pdf", "id.txt" },
@@ -622,7 +623,8 @@ namespace AppManager
             string[][] refused = { new[] { "证件", "run.bat", "tool.ps1", "app.js", "q.sql" }, new[] { "视频", "stream.ts" }, new[] { "照片", "a.pdf" } };
             foreach (string[] row in refused)
                 for (int i = 1; i < row.Length; i++) Check(!MediaRules.MatchCategoryExt(row[0], row[i]), row[0] + " accepted " + row[i]);
-            Check(!MediaRules.IsImage("a.heic") && !MediaRules.IsVideo("a.rmvb") && MediaRules.IsText("a.ts"), "viewer type lists changed");
+            Check(!MediaRules.IsImage("a.heic") && MediaRules.IsVideo("phone.3gp")
+                && !MediaRules.IsVideo("a.rmvb") && MediaRules.IsText("a.ts"), "viewer type lists changed");
             Integrity(Reload().Database);
         }
         private static void Restore()
