@@ -114,6 +114,7 @@ namespace AppManager
                 Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
                 Run("collection tree auto-expands and searches only direct members", CollectionTreeSearchAndInfo);
                 Run("collection creation uses active folder scope and enforces tree limits", CollectionCreateScopeAndLimits);
+                Run("collection deletion falls back to the nearest surviving ancestor", CollectionDeleteFallback);
                 Run("grid delete handles every selected item; arrow starts at the first item", GridBatchDeleteAndArrow);
                 Run("icon cache evicts by bytes and LRU instead of clearing everything", IconCacheLru);
                 Run("auto scan pause keeps pending and paused changes, resume fires once", AutoScanPauseResume);
@@ -2592,6 +2593,65 @@ namespace AppManager
                 for (int depth = 0; depth < 26; depth++) longParent += "/" + new string('x', 80);
                 string longError = check("y", longParent);
                 Check(longError != null && longError.Contains("过长"), "overlong collection key was not rejected");
+            }
+        }
+
+        private static void CollectionDeleteFallback()
+        {
+            AppConfig config = RenameConfig("collection-delete-fallback");
+            config.AutoScan = false;
+            string rootKey = CollectionKeys.Make("照片", "旅行");
+            string childKey = rootKey + "/2024";
+            string grandKey = childKey + "/十月";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "十月", ParentCollection = childKey });
+            Check(config.Save(), "database fixture save failed");
+
+            using (MainForm form = ResourceForm(config, "照片"))
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1000, 680);
+                form.Show();
+                Application.DoEvents();
+
+                Controls.CollectionSidebar sidebar = (Controls.CollectionSidebar)typeof(MainForm).GetField("collectionSidebar", Private).GetValue(form);
+                HashSet<string> expanded = (HashSet<string>)typeof(MainForm).GetField("expandedCollections", Private).GetValue(form);
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, grandKey);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, true);
+                typeof(MainForm).GetField("revealActiveCollection", Private).SetValue(form, true);
+                Invoke(form, "UpdateCollectionUi");
+                Check(expanded.Contains(rootKey) && expanded.Contains(childKey), "fixture did not reveal the nested collection");
+
+                ResourceCollection child = CollectionOps.FindByKey(config, childKey);
+                Check(child != null, "fixture lost the parent collection");
+                ClickConfirmation(delegate { Invoke(form, "DeleteCollection", child); }, true);
+
+                Check((string)typeof(MainForm).GetField("currentCollection", Private).GetValue(form) == rootKey,
+                    "deleting the current collection's parent did not navigate to the nearest surviving ancestor");
+                Check((bool)typeof(MainForm).GetField("collectionEntered", Private).GetValue(form),
+                    "fallback ancestor did not open its content view");
+                Check((string)typeof(Controls.CollectionSidebar).GetField("activeKey", Private).GetValue(sidebar) == rootKey,
+                    "fallback ancestor was not selected in the collection sidebar");
+                Check(!expanded.Contains(childKey) && !expanded.Contains(grandKey),
+                    "deleted collection keys remained expanded");
+                Check(CollectionOps.FindByKey(config, childKey) == null && CollectionOps.FindByKey(config, grandKey) == null,
+                    "deleted subtree remained in memory");
+                AppConfig loaded = AppConfig.Load();
+                Check(CollectionOps.FindByKey(loaded, rootKey) != null
+                    && CollectionOps.FindByKey(loaded, childKey) == null
+                    && CollectionOps.FindByKey(loaded, grandKey) == null,
+                    "deleted subtree was not persisted correctly");
+
+                ResourceCollection root = CollectionOps.FindByKey(config, rootKey);
+                Check(root != null, "fixture lost the root collection");
+                ClickConfirmation(delegate { Invoke(form, "DeleteCollection", root); }, true);
+                Check((string)typeof(MainForm).GetField("currentCollection", Private).GetValue(form) == null,
+                    "deleting the whole tree did not return to all collections");
+                Check(config.Collections.Count == 0, "top-level deletion left collection definitions behind");
+                Check(AppConfig.Load().Collections.Count == 0, "top-level deletion was not persisted");
             }
         }
 

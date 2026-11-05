@@ -3609,12 +3609,29 @@ namespace AppManager
             foreach (string removedKey in keys) expandedCollections.Remove(removedKey);
             if (browsingRemoved)
             {
-                currentCollection = null;   // 删除当前集合或其祖先：回到「全部」
+                string fallbackKey = NearestSurvivingCollectionAncestor(browsingKey, keys);
+                currentCollection = fallbackKey != null && FindCollectionByKey(fallbackKey) != null
+                    ? fallbackKey : null;
                 collectionEntered = true;
-                revealActiveCollection = false;
+                revealActiveCollection = currentCollection != null;
             }
             for (int i = 0; i < covers.Count; i++) DeleteManagedCoverIfUnused(covers[i], null);
             RefreshGrid();
+            if (browsingRemoved && currentCollection != null)
+                collectionSidebar.ScrollToKey(currentCollection);
+        }
+
+        /// <summary>删除子树后沿父链返回最近仍存在的集合键；没有幸存祖先时返回 null。</summary>
+        private static string NearestSurvivingCollectionAncestor(string removedKey, HashSet<string> removedKeys)
+        {
+            string key = removedKey;
+            while (!string.IsNullOrEmpty(key) && removedKeys != null && removedKeys.Contains(key))
+            {
+                string parent, parentCollection, name;
+                if (!CollectionKeys.TryParse(key, out parent, out parentCollection, out name)) return null;
+                key = parentCollection;
+            }
+            return string.IsNullOrEmpty(key) ? null : key;
         }
 
         /// <summary>
