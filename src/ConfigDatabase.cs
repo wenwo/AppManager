@@ -7,12 +7,12 @@ using System.Xml;
 
 namespace AppManager
 {
-    /// <summary>数据库版本闸门：新版读取 v1/v2，旧版不得打开 v2 及更高版本。</summary>
+    /// <summary>数据库版本闸门：新版读取并升级 v1/v2，旧版不得打开更高版本。</summary>
     internal static class DatabaseCompatibility
     {
         internal const int ApplicationId = 1095584594;
         internal const int OldestSupportedVersion = 1;
-        internal const int CurrentVersion = 2;
+        internal const int CurrentVersion = 3;
 
         internal static bool IsSupportedVersion(int version)
         {
@@ -91,10 +91,10 @@ namespace AppManager
             }
         }
 
-        /// <summary>v1 与 v2 表结构一致；升级只推进版本闸门，数据由后续普通保存按新模型写入。</summary>
+        /// <summary>版本闸门在事务内推进；后加列和索引由 EnsureIndexes 幂等补齐。</summary>
         private static void UpgradeSchema(Sqlite db, int fromVersion)
         {
-            if (fromVersion != 1)
+            if (fromVersion != 1 && fromVersion != 2)
                 throw new IOException("数据库版本无法自动升级：" + fromVersion + "。");
             db.Execute("BEGIN IMMEDIATE");
             try
@@ -110,15 +110,53 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 补齐后加的索引（旧库升级、在线恢复的快照都可能缺少）。只建索引不改表结构，旧版本程序仍可读写。
+        /// 补齐后加的列和索引（旧库升级、在线恢复的快照都可能缺少）。
         /// add: 路径键按 NOCASE 查找；没有这个索引时每次查找都全表扫描，批量收录会退化成平方级耗时。
         /// </summary>
         private static void EnsureIndexes(Sqlite db)
         {
             EnsureCatalogRetryColumns(db);
+            bool hasAddedItems = HasTable(db, "added_items");
+            if (hasAddedItems) EnsureAddedOriginColumns(db);
             db.Execute("CREATE INDEX IF NOT EXISTS ix_entries_key_nocase ON entries(key COLLATE NOCASE)");
+            if (hasAddedItems) db.Execute("CREATE INDEX IF NOT EXISTS ix_added_origin ON added_items(origin_key,group_id)");
             db.Execute("CREATE INDEX IF NOT EXISTS ix_catalog_retry ON catalog(item_id) WHERE indexed=2");
             db.Execute("CREATE INDEX IF NOT EXISTS ix_catalog_retry_due ON catalog(next_retry,item_id) WHERE indexed=2");
+        }
+
+        private static bool HasTable(Sqlite db, string table)
+        {
+            return Convert.ToInt32(db.Scalar("SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", table),
+                CultureInfo.InvariantCulture) != 0;
+        }
+
+        private static void EnsureAddedOriginColumns(Sqlite db)
+        {
+            if (!HasTable(db, "added_items")) return;
+            bool hasOrigin = false, hasOriginKey = false;
+            foreach (string[] row in db.Query("PRAGMA table_info(added_items)"))
+            {
+                if (row.Length < 2) continue;
+                if (row[1] == "origin") hasOrigin = true;
+                else if (row[1] == "origin_key") hasOriginKey = true;
+            }
+            if (hasOrigin && hasOriginKey) return;
+            db.Execute("BEGIN IMMEDIATE");
+            try
+            {
+                if (!hasOrigin) db.Execute("ALTER TABLE added_items ADD COLUMN origin TEXT");
+                if (!hasOriginKey) db.Execute("ALTER TABLE added_items ADD COLUMN origin_key TEXT");
+                db.Execute("DROP TRIGGER IF EXISTS audit_added_items_INSERT");
+                db.Execute("DROP TRIGGER IF EXISTS audit_added_items_UPDATE");
+                db.Execute("DROP TRIGGER IF EXISTS audit_added_items_DELETE");
+                Audit(db, "added_items", new string[] { "id", "item_id", "group_id", "path", "path_key", "name", "folder", "resource", "origin", "origin_key" });
+                db.Execute("COMMIT");
+            }
+            catch
+            {
+                db.Rollback();
+                throw;
+            }
         }
 
         private static void EnsureCatalogRetryColumns(Sqlite db)
@@ -300,9 +338,10 @@ namespace AppManager
                     "CREATE INDEX ix_records_group ON records(section,group_id,ordinal,item_id)",
                     "CREATE INDEX ix_records_item ON records(item_id,section,group_id)",
                     "CREATE UNIQUE INDEX ux_primary_category ON records(item_id) WHERE section='CategoryOverrides'",
-                    "CREATE TABLE added_items(id INTEGER PRIMARY KEY AUTOINCREMENT,item_id INTEGER NOT NULL REFERENCES entries(id),group_id INTEGER REFERENCES groups(id),path TEXT NOT NULL CHECK(length(path)>0),path_key TEXT NOT NULL,name TEXT NOT NULL,folder INTEGER NOT NULL CHECK(folder IN(0,1)),resource INTEGER NOT NULL CHECK(resource IN(0,1)))",
+                    "CREATE TABLE added_items(id INTEGER PRIMARY KEY AUTOINCREMENT,item_id INTEGER NOT NULL REFERENCES entries(id),group_id INTEGER REFERENCES groups(id),path TEXT NOT NULL CHECK(length(path)>0),path_key TEXT NOT NULL,name TEXT NOT NULL,folder INTEGER NOT NULL CHECK(folder IN(0,1)),resource INTEGER NOT NULL CHECK(resource IN(0,1)),origin TEXT,origin_key TEXT)",
                     "CREATE UNIQUE INDEX ux_added_membership ON added_items(item_id,ifnull(group_id,0))",
                     "CREATE INDEX ix_added_path ON added_items(path_key,group_id)",
+                    "CREATE INDEX ix_added_origin ON added_items(origin_key,group_id)",
                     "CREATE INDEX ix_added_group ON added_items(group_id,item_id)",
                     "CREATE INDEX ix_added_item ON added_items(item_id,id)",
                     "CREATE INDEX ix_added_software ON added_items(id) WHERE resource=0",
@@ -331,7 +370,7 @@ namespace AppManager
                 Audit(db, "groups", new string[] { "id", "key", "name", "parent_id" });
                 Audit(db, "entries", new string[] { "id", "key" });
                 Audit(db, "records", new string[] { "id", "record_key", "section", "item_id", "group_id", "ordinal", "slot", "payload" });
-                Audit(db, "added_items", new string[] { "id", "item_id", "group_id", "path", "path_key", "name", "folder", "resource" });
+                Audit(db, "added_items", new string[] { "id", "item_id", "group_id", "path", "path_key", "name", "folder", "resource", "origin", "origin_key" });
                 db.Execute("PRAGMA application_id=" + ApplicationId);
                 db.Execute("PRAGMA user_version=" + SchemaVersion);
                 db.Execute("COMMIT");

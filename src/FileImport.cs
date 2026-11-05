@@ -40,7 +40,7 @@ namespace AppManager
 
     public sealed class ImportItem
     {
-        public string Source, Target, Error, TargetId, StagingId, State = FileImport.Waiting;
+        public string Source, Target, Origin, Error, TargetId, StagingId, State = FileImport.Waiting;
         public string TargetRoot;
         public long RequiredBytes;
         public bool SizeKnown;
@@ -54,6 +54,7 @@ namespace AppManager
     {
         public string Id = Guid.NewGuid().ToString("N"), Category, Collection, Error;
         public bool Resource, Committed, DeleteAuthorized, Finished, SpaceLimited, Stopped;
+        public bool PreserveCategoryExclusions;
         public ImportOperation Operation;
         public int CopyBytesPerSecond;
         public List<ImportItem> Items = new List<ImportItem>();
@@ -305,6 +306,23 @@ namespace AppManager
             if ((info.ReparseTag & NameSurrogate) != 0) throw new IOException("路径包含链接或联接点，操作已取消：" + path);
         }
 
+        /// <summary>链接、联接点等名称代理重解析点；云盘按需文件不算，扫描和读取均应放行。</summary>
+        internal static bool IsNameSurrogateReparsePoint(string path, FileAttributes attributes)
+        {
+            if ((attributes & FileAttributes.ReparsePoint) == 0) return false;
+            try
+            {
+                AttributeTagInfo info;
+                using (SafeFileHandle handle = Open(path, ReadAttributes, ShareAll, OpenReparsePoint | BackupSemantics))
+                    if (!GetFileInformationByHandleEx(handle, 9, out info, 8)) return true;
+                return (info.ReparseTag & NameSurrogate) != 0;
+            }
+            catch (Exception)
+            {
+                return true;
+            }
+        }
+
         internal static void EnsureNoLinks(string path)
         {
             string current = Path.GetFullPath(path);
@@ -390,7 +408,7 @@ namespace AppManager
             batch.Collection = EscapeValue(batch.Collection); batch.Error = EscapeValue(batch.Error);
             foreach (ImportItem item in batch.Items)
             {
-                item.Source = EscapeValue(item.Source); item.Target = EscapeValue(item.Target);
+                item.Source = EscapeValue(item.Source); item.Target = EscapeValue(item.Target); item.Origin = EscapeValue(item.Origin);
                 item.Error = EscapeValue(item.Error); item.TargetId = EscapeValue(item.TargetId);
                 item.StagingId = EscapeValue(item.StagingId);
                 for (int i = 0; i < item.Directories.Count; i++) item.Directories[i] = EscapeValue(item.Directories[i]);
@@ -414,7 +432,7 @@ namespace AppManager
             batch.Collection = UnescapeValue(batch.Collection); batch.Error = UnescapeValue(batch.Error);
             foreach (ImportItem item in batch.Items)
             {
-                item.Source = UnescapeValue(item.Source); item.Target = UnescapeValue(item.Target);
+                item.Source = UnescapeValue(item.Source); item.Target = UnescapeValue(item.Target); item.Origin = UnescapeValue(item.Origin);
                 item.Error = UnescapeValue(item.Error); item.TargetId = UnescapeValue(item.TargetId);
                 item.StagingId = UnescapeValue(item.StagingId);
                 for (int i = 0; i < item.Directories.Count; i++) item.Directories[i] = UnescapeValue(item.Directories[i]);

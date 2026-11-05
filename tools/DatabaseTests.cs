@@ -50,7 +50,7 @@ namespace AppManager
                 Run("nested collection subtree rename migrates keys, references and ids", CollectionSubtreeRename);
                 Run("nested collection rename conflicts and failed saves are retryable", CollectionSubtreeConflictAndRollback);
                 Run("nested collection subtree delete clears only its references", CollectionSubtreeDelete);
-                Run("v1 database upgrades to v2 and v1 snapshots remain restorable", SchemaUpgrade);
+                Run("v1 database upgrades to current version and v1 snapshots remain restorable", SchemaUpgrade);
                 Run("collection import rejects malformed, orphaned, cyclic and duplicate trees", CollectionImportValidation);
                 Run("latest-operation undo, redo and stale rollback rejection", Undo);
                 Run("stale writer rejected; failed transaction keeps all rows", Concurrency);
@@ -211,7 +211,8 @@ namespace AppManager
             {
                 Check(db.Scalar("SELECT parent_id FROM groups WHERE id=?", childId) == rootId.ToString(), "child parent_id not direct collection");
                 Check(db.Scalar("SELECT parent_id FROM groups WHERE id=?", grandId) == childId.ToString(), "grandchild parent_id not direct collection");
-                Check(db.Scalar("PRAGMA user_version") == "2", "database did not upgrade to v2");
+                Check(Convert.ToInt32(db.Scalar("PRAGMA user_version"), CultureInfo.InvariantCulture) == DatabaseCompatibility.CurrentVersion,
+                    "database did not upgrade to current version");
             }
         }
 
@@ -398,7 +399,9 @@ namespace AppManager
             using (Sqlite db = new Sqlite(c.Database.FilePath, false)) db.Execute("PRAGMA user_version=1");
             AppConfig upgraded = ConfigDatabase.Load(path);
             Check(!upgraded.LoadFailed && upgraded.Favorites.Count == 1, "v1 database did not reopen");
-            using (Sqlite db = new Sqlite(upgraded.Database.FilePath, true)) Check(db.Scalar("PRAGMA user_version") == "2", "v1 was not upgraded");
+            using (Sqlite db = new Sqlite(upgraded.Database.FilePath, true))
+                Check(Convert.ToInt32(db.Scalar("PRAGMA user_version"), CultureInfo.InvariantCulture) == DatabaseCompatibility.CurrentVersion,
+                    "v1 was not upgraded to current version");
 
             string snapshot = Path.Combine(root, "schema-v1-snapshot.db");
             upgraded.Database.Backup(snapshot);
@@ -409,13 +412,28 @@ namespace AppManager
             Check(File.Exists(safety), "safety copy missing");
             Check(upgraded.Database.Read().Favorites.Count == 1, "v1 snapshot restore mismatch");
             using (Sqlite db = new Sqlite(upgraded.Database.FilePath, true))
-                Check(db.Scalar("PRAGMA user_version") == "2", "restored v1 snapshot was not upgraded");
+                Check(Convert.ToInt32(db.Scalar("PRAGMA user_version"), CultureInfo.InvariantCulture) == DatabaseCompatibility.CurrentVersion,
+                    "restored v1 snapshot was not upgraded to current version");
 
-            using (Sqlite db = new Sqlite(snapshot, false)) db.Execute("PRAGMA user_version=3");
+            using (Sqlite db = new Sqlite(snapshot, false)) db.Execute("PRAGMA user_version=" + (DatabaseCompatibility.CurrentVersion + 1));
             bool rejected = false;
             try { new ConfigDatabase(snapshot); }
             catch (IOException) { rejected = true; }
             Check(rejected, "future database version was accepted");
+
+            string legacyProjection = Path.Combine(root, "legacy-added-projection.db");
+            using (Sqlite db = new Sqlite(legacyProjection, false))
+            {
+                db.Execute("CREATE TABLE write_context(id INTEGER PRIMARY KEY,operation_id INTEGER)");
+                db.Execute("CREATE TABLE changes(operation_id INTEGER,entity TEXT,row_id INTEGER,undo_sql TEXT,redo_sql TEXT)");
+                db.Execute("CREATE TABLE added_items(id INTEGER PRIMARY KEY,item_id INTEGER,group_id INTEGER,path TEXT,path_key TEXT,name TEXT,folder INTEGER,resource INTEGER)");
+                typeof(ConfigDatabase).GetMethod("EnsureAddedOriginColumns", BindingFlags.Static | BindingFlags.NonPublic)
+                    .Invoke(null, new object[] { db });
+                Check(db.Query("PRAGMA table_info(added_items)").Any(row => row[1] == "origin")
+                    && db.Query("PRAGMA table_info(added_items)").Any(row => row[1] == "origin_key"), "legacy origin columns were not added");
+                Check(db.Scalar("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='audit_added_items_UPDATE'").Contains("origin"),
+                    "legacy audit trigger does not track origins");
+            }
         }
         private static void CollectionImportValidation()
         {
@@ -622,18 +640,52 @@ namespace AppManager
             Check(c.Database.Page("快捷中心", false, false, "trip", 10, null, true, false, null, null, "快捷中心").Total == 1,
                 "quick-center virtual category scope changed");
 
+            Check(c.Database.Page("照片", true, false, "++", 10, null, true, false, null, null, "照片").Total == 0,
+                "punctuation-only search fell back to matching every scoped row");
+            Check(c.Database.Page("照片", true, false, "照片", 10, null, true, false, null, null, "照片").Total == photoCount + 1,
+                "category-name search missed scoped category members");
+            Check(c.Database.Page("照片", true, false, "旅行", 10, null, true, false, null, null, "照片").Total == 1,
+                "collection-name search returned a non-member or missed the direct member");
+            Check(c.Database.Page(child, true, false, "2024", 10, null, true, false, null, null, child).Total == 1,
+                "nested collection-name search missed its direct member");
+
+            string[] sortColumns = { "size", "time" };
+            foreach (string sortColumn in sortColumns)
+            {
+                foreach (bool descending in new[] { false, true })
+                {
+                    HashSet<string> sortedKeys = new HashSet<string>(StringComparer.Ordinal);
+                    CatalogPage sortedPage = null;
+                    int sortedTotal = 0;
+                    do
+                    {
+                        sortedPage = c.Database.Page("照片", true, false, "trip", 37, sortedPage, false, descending, sortColumn, null, "照片");
+                        sortedTotal = sortedPage.Total;
+                        foreach (AppInfo a in sortedPage.Items) Check(sortedKeys.Add(a.Key), "scoped " + sortColumn + " search returned a duplicate cursor row");
+                    } while (sortedPage.Items.Count > 0);
+                    Check(sortedTotal == photoCount + 1 && sortedKeys.Count == photoCount + 1,
+                        "scoped " + sortColumn + " search lost rows: " + sortedKeys.Count + "/" + sortedTotal);
+                }
+            }
+
             using (Sqlite db = new Sqlite(c.Database.FilePath, true))
             {
-                string plan = string.Join(" | ", db.Query("EXPLAIN QUERY PLAN SELECT c.item_id FROM listing l CROSS JOIN catalog c ON c.item_id=l.item_id "
-                    + "WHERE l.group_id=? AND l.kind=2 AND l.hidden=0 AND c.active=1 AND (l.name LIKE ? "
-                    + "OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id "
-                    + "AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?)) "
-                    + "ORDER BY l.name,l.item_id LIMIT 37", GroupId(c.Database, "照片"), "%t%r%i%p%", "%t%r%i%p%")
-                    .Select(r => r[3]));
-                Console.WriteLine("SCOPED_SEARCH plan=" + plan);
-                Check(plan.StartsWith("SEARCH l USING COVERING INDEX ix_listing_name", StringComparison.Ordinal) && !plan.Contains("TEMP B-TREE"),
-                    "scoped search does not use the ordered group/name index: " + plan);
+                string visiblePlan = ScopedSearchPlan(db, c.Database, false);
+                Console.WriteLine("SCOPED_SEARCH visible_plan=" + visiblePlan);
+                Check(visiblePlan.Contains("ix_listing_name (") && !visiblePlan.Contains("ix_listing_name_all") && !visiblePlan.Contains("TEMP B-TREE"),
+                    "scoped search does not use the ordered visible group/name index: " + visiblePlan);
+                string hiddenPlan = ScopedSearchPlan(db, c.Database, true);
+                Console.WriteLine("SCOPED_SEARCH hidden_plan=" + hiddenPlan);
+                Check(hiddenPlan.Contains("ix_listing_name_all") && !hiddenPlan.Contains("TEMP B-TREE"),
+                    "scoped search with hidden items does not use the ordered all group/name index: " + hiddenPlan);
             }
+        }
+
+        private static string ScopedSearchPlan(Sqlite db, ConfigDatabase database, bool showHidden)
+        {
+            return string.Join(" | ", db.Query("EXPLAIN QUERY PLAN SELECT c.item_id FROM " + ConfigDatabase.ScopedSearchFrom
+                + " WHERE " + ConfigDatabase.ScopedSearchWhere(true, showHidden) + " ORDER BY l.name,l.item_id LIMIT 37",
+                GroupId(database, "照片"), "%t%r%i%p%", "%t%r%i%p%").Select(r => r[3]));
         }
 
         private static void Rw2MetadataIndexRefresh()
@@ -1613,10 +1665,22 @@ namespace AppManager
         {
             AppConfig c = Fixture("bulk-lookup");
             string staged = Path.Combine(root, "bulk-lookup", "staged.txt");
-            c.AddedItems.Add(new AddedEntry { Path = staged, Category = "工具" });
+            string origin = Path.Combine(root, "bulk-lookup", "original.mp3");
+            c.AddedItems.Add(new AddedEntry { Path = staged, Category = "音乐", IsResource = true, OriginPath = origin });
             Dictionary<string, List<AddedEntry>> found = c.AddedItems.LookupMany(new string[] { "C:\\FILE.TXT", staged.ToUpperInvariant(), staged.ToUpperInvariant() });
             Check(found["C:\\FILE.TXT"].Count == 1, "stored path lookup failed");
             Check(found[staged.ToUpperInvariant()].Count == 1, "staged path lookup failed or duplicated");
+            Dictionary<string, List<AddedEntry>> origins = c.AddedItems.LookupMany(new[] { origin.ToUpperInvariant() }, true);
+            Check(origins[origin.ToUpperInvariant()].Single().Path == staged, "staged origin lookup failed");
+            Check(AddedEntryList.RegisteredPaths(c.Database.FilePath, new[] { origin }).Count == 0,
+                "uncommitted origin leaked into the background database lookup");
+            Check(c.Save(), c.DatabaseError);
+            Dictionary<string, string> registeredOrigins = AddedEntryList.RegisteredPaths(c.Database.FilePath,
+                new[] { origin.ToUpperInvariant(), staged });
+            Check(registeredOrigins[origin.ToUpperInvariant()] == staged && registeredOrigins[staged] == staged,
+                "stored origin lookup or direct-path precedence failed");
+            AppConfig reloaded = ConfigDatabase.Load(Path.Combine(root, "bulk-lookup", "config.xml"));
+            Check(reloaded.AddedItems.ByPath(staged).Single().OriginPath == origin, "origin did not survive reload");
             c.AddedItems.Prefetch(new string[] { "C:\\FILE.TXT", staged.ToUpperInvariant() });
             Dictionary<string, List<AddedEntry>> cache = (Dictionary<string, List<AddedEntry>>)typeof(AddedEntryList)
                 .GetField("pathCache", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(c.AddedItems);

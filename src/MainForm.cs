@@ -124,6 +124,7 @@ namespace AppManager
         // AddedItems 热路径查找索引：路径（OrdinalIgnoreCase）→ 该路径下的记录列表；
         // 任何对 config.AddedItems 的结构性修改都必须调用 InvalidateAddedIndex 使其失效。
         private Dictionary<string, List<AddedEntry>> addedIndex;
+        private Dictionary<string, List<AddedEntry>> addedOriginIndex;
         private bool addedIndexDirty = true;
 
         // 拖动窗体
@@ -516,6 +517,7 @@ namespace AppManager
             try { if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { StopMusicPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { if (musicSession != null) musicSession.Dispose(); } catch (Exception ex) { Paths.LogError(ex); }
+            try { if (localMusicScanCancel != null) localMusicScanCancel.Cancel(); } catch (Exception ex) { Paths.LogError(ex); }
             try { if (localPhotoScanCancel != null) localPhotoScanCancel.Cancel(); } catch (Exception ex) { Paths.LogError(ex); }
             importTip.Dispose();
             if (importStatusTimer != null) importStatusTimer.Dispose();
@@ -1916,18 +1918,22 @@ namespace AppManager
             else if (kw.Length > 0)
             {
                 // 搜索跟随当前浏览层级：始终限定当前分类；集合内再限定当前文件夹的直接成员。
-                foreach (AppInfo a in allApps)
+                if (!HasSearchCharacters(kw))
                 {
-                    if (!ShouldShow(a)) continue;
-                    if (!MatchesContentMode(a)) continue;
-                    if (!InCategory(a, currentCategory)) continue;
-                    if (currentCollection != null && !IsInExtraCategory(a, currentCollection)) continue;
-                    // 多字段匹配：名称 / 分类，任一命中即显示（归一化，故「vscode」可命中「VS Code」）
-                    if (Scanner.FuzzyMatch(a.Name, kw)
-                        || Scanner.FuzzyMatch(a.Category, kw))
-                        shown.Add(a);
+                    categoryTotal = 0;
                 }
-                categoryTotal = shown.Count;
+                else
+                {
+                    foreach (AppInfo a in allApps)
+                    {
+                        if (!ShouldShow(a)) continue;
+                        if (!MatchesContentMode(a)) continue;
+                        if (!InCategory(a, currentCategory)) continue;
+                        if (currentCollection != null && !IsInExtraCategory(a, currentCollection)) continue;
+                        if (MatchesSearchFields(a, kw)) shown.Add(a);
+                    }
+                    categoryTotal = shown.Count;
+                }
             }
             else if (contentMode == SidebarControl.ContentMode.Website)
             {
@@ -2608,6 +2614,45 @@ namespace AppManager
             // 内置分类：未被 override 覆盖时按规则分类；同一文件可收录在多个分类（多条收录记录），
             // 列表投影会展示每一条归属，这里也必须认，否则第二个分类里“加入集合”等操作会被判为不属于而跳过
             return a.Category == category || (a.IsFile && IsAddedToCategory(a, category));
+        }
+
+        private static bool HasSearchCharacters(string keyword)
+        {
+            if (string.IsNullOrEmpty(keyword)) return false;
+            for (int i = 0; i < keyword.Length; i++) if (char.IsLetterOrDigit(keyword[i])) return true;
+            return false;
+        }
+
+        /// <summary>无数据库搜索与数据库分支保持一致：匹配条目名、分类名或所属集合名。</summary>
+        private bool MatchesSearchFields(AppInfo a, string keyword)
+        {
+            if (a == null) return false;
+            if (Scanner.FuzzyMatch(a.Name, keyword) || Scanner.FuzzyMatch(a.Category, keyword)) return true;
+            string overridden;
+            if (config.CategoryOverride.TryGetValue(a.Key, out overridden) && MatchesSearchGroup(a, overridden, keyword)) return true;
+            List<string> categories;
+            if (config.ItemCategories.TryGetValue(a.Key, out categories))
+                for (int i = 0; i < categories.Count; i++)
+                    if (MatchesSearchGroup(a, categories[i], keyword)) return true;
+            List<AddedEntry> entries = AddedIndexLookup(a.TargetPath);
+            if (entries != null)
+                for (int i = 0; i < entries.Count; i++)
+                    if (MatchesSearchGroup(a, entries[i].Category, keyword)) return true;
+            return a.IsDesktop && MatchesSearchGroup(a, QuickCenter, keyword);
+        }
+
+        private bool MatchesSearchGroup(AppInfo a, string group, string keyword)
+        {
+            if (a == null || string.IsNullOrEmpty(group) || IsSearchVirtualGroup(group) || !InCategory(a, group)) return false;
+            string parent, parentCollection, name;
+            if (CollectionKeys.TryParse(group, out parent, out parentCollection, out name))
+                return Scanner.FuzzyMatch(name, keyword);
+            return Scanner.FuzzyMatch(group, keyword);
+        }
+
+        private static bool IsSearchVirtualGroup(string group)
+        {
+            return group == "全部软件" || group == "全部文件" || group == "全部资源" || group == "常用";
         }
 
         /// <summary>分类名是否属于资源模式（内置资源分类或用户资源分类）；软件与资源分类不允许重名。</summary>
@@ -5488,6 +5533,8 @@ namespace AppManager
             if (currentCategory == "照片") items.Add(MkMenu("整理本机照片…", OrganizeLocalPhotos));
             string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
             items.Add(MkMenu("添加" + typeName + "…", delegate { PickFiles(); }));
+            if (string.Equals(currentCategory, "音乐", StringComparison.OrdinalIgnoreCase))
+                items.Add(MkMenu("扫描本机音乐…", delegate { ScanLocalMusic(); }));
             items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
             MenuWindow mw = new MenuWindow(items, 180);
             mw.Location = FixLocation(addBtn.PointToScreen(new Point(0, addBtn.Height)), mw.Size);
@@ -6028,9 +6075,9 @@ namespace AppManager
             return addedIndex.TryGetValue(path, out list) ? list : null;
         }
 
-        private Dictionary<string, List<AddedEntry>> AddedIndexLookups(IEnumerable<string> paths)
+        private Dictionary<string, List<AddedEntry>> AddedIndexLookups(IEnumerable<string> paths, bool includeOrigins = false)
         {
-            if (config.Database != null) return config.AddedItems.LookupMany(paths);
+            if (config.Database != null) return config.AddedItems.LookupMany(paths, includeOrigins);
             Dictionary<string, List<AddedEntry>> result =
                 new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
             EnsureAddedIndex();
@@ -6038,7 +6085,8 @@ namespace AppManager
             {
                 if (string.IsNullOrEmpty(path)) continue;
                 List<AddedEntry> list;
-                if (addedIndex.TryGetValue(path, out list)) result[path] = list;
+                if (addedIndex.TryGetValue(path, out list)
+                    || includeOrigins && addedOriginIndex.TryGetValue(path, out list)) result[path] = list;
             }
             return result;
         }
@@ -6046,8 +6094,9 @@ namespace AppManager
         /// <summary>确保索引可用：脏标记时按当前 config.AddedItems 重建。</summary>
         private void EnsureAddedIndex()
         {
-            if (!addedIndexDirty && addedIndex != null) return;
+            if (!addedIndexDirty && addedIndex != null && addedOriginIndex != null) return;
             Dictionary<string, List<AddedEntry>> map = new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, List<AddedEntry>> origins = new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < config.AddedItems.Count; i++)
             {
                 AddedEntry e = config.AddedItems[i];
@@ -6059,8 +6108,14 @@ namespace AppManager
                     map[e.Path] = list;
                 }
                 list.Add(e);
+                if (!string.IsNullOrEmpty(e.OriginPath))
+                {
+                    if (!origins.TryGetValue(e.OriginPath, out list)) { list = new List<AddedEntry>(1); origins[e.OriginPath] = list; }
+                    list.Add(e);
+                }
             }
             addedIndex = map;
+            addedOriginIndex = origins;
             addedIndexDirty = false;
         }
 

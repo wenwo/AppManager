@@ -1,4 +1,4 @@
-param([string]$BaselineRevision = '468a3ab', [int[]]$Counts = @(10000, 100000, 300000), [string]$OutputDirectory = '', [string]$LiveDatabasePath = '')
+param([string]$BaselineRevision = '468a3ab', [string]$SQLiteBaselineRevision = '', [int[]]$Counts = @(10000, 100000, 300000), [string]$OutputDirectory = '', [string]$LiveDatabasePath = '')
 $ErrorActionPreference = 'Stop'
 $perfProject = Split-Path -Parent $PSScriptRoot
 $perfRoot = Join-Path ([IO.Path]::GetTempPath()) ('AppManagerPerformance_' + [Guid]::NewGuid().ToString('N'))
@@ -14,6 +14,22 @@ $perfLog = Join-Path $perfRoot 'results.log'
 & git -C $perfProject archive --format=zip "--output=$perfArchive" $BaselineRevision
 if ($LASTEXITCODE -ne 0) { throw 'Cannot export baseline revision.' }
 Expand-Archive -LiteralPath $perfArchive -DestinationPath $perfBaseline
+$perfSqliteBaseline = $null
+$perfSqliteOld = $null
+if ($SQLiteBaselineRevision) {
+    if ($SQLiteBaselineRevision -eq $BaselineRevision) {
+        $perfSqliteBaseline = $perfBaseline
+    } else {
+        $perfSqliteBaseline = Join-Path $perfRoot 'sqlite-baseline'
+        [IO.Directory]::CreateDirectory($perfSqliteBaseline) | Out-Null
+        $perfSqliteArchive = Join-Path $perfRoot 'sqlite-baseline.zip'
+        & git -C $perfProject archive --format=zip "--output=$perfSqliteArchive" $SQLiteBaselineRevision
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot export SQLite baseline revision.' }
+        Expand-Archive -LiteralPath $perfSqliteArchive -DestinationPath $perfSqliteBaseline
+    }
+    $perfSqliteOld = Join-Path $perfRoot 'SQLite-baseline.exe'
+    Write-Output "SQLITE_BASELINE_REVISION=$SQLiteBaselineRevision"
+}
 $perfRefs = @('System.dll','System.Core.dll','System.Drawing.dll','System.Windows.Forms.dll','System.Xml.dll','Microsoft.VisualBasic.dll','Microsoft.CSharp.dll', 'System.IO.Compression.dll') | ForEach-Object { '/r:' + $_ }
 $perfRefs += @('WPF\PresentationCore.dll', 'WPF\WindowsBase.dll', 'System.Xaml.dll') |
     ForEach-Object { '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) $_) }
@@ -23,13 +39,16 @@ $perfRefs += '/r:' + (Join-Path (Split-Path -Parent $perfCompiler) 'System.Runti
 $perfRefs += @('Windows.Foundation.winmd', 'Windows.Data.winmd', 'Windows.Graphics.winmd', 'Windows.Storage.winmd') |
     ForEach-Object { '/r:' + (Join-Path $env:WINDIR ('System32\WinMetadata\' + $_)) }
 $perfNew = Join-Path $perfRoot 'SQLite.exe'
-foreach ($perfBuild in @(@($perfBaseline, $perfOld, ''), @($perfProject, $perfNew, '/define:DATABASE'))) {
-    $perfFiles = Get-ChildItem (Join-Path $perfBuild[0] 'src') -Filter *.cs -Recurse | ForEach-Object FullName
+function Compile-PerformanceProbe([string]$source, [string]$exe, [string]$define) {
+    $perfFiles = Get-ChildItem (Join-Path $source 'src') -Filter *.cs -Recurse | ForEach-Object FullName
     $perfExtra = @()
-    if ($perfBuild[2]) { $perfExtra += $perfBuild[2] }
-    & $perfCompiler /nologo /target:exe /platform:x64 /utf8output /main:AppManager.DatabasePerformanceProbe "/out:$($perfBuild[1])" @perfExtra @perfRefs $perfFiles $perfProbe
+    if ($define) { $perfExtra += $define }
+    & $perfCompiler /nologo /target:exe /platform:x64 /utf8output /main:AppManager.DatabasePerformanceProbe "/out:$exe" @perfExtra @perfRefs $perfFiles $perfProbe
     if ($LASTEXITCODE -ne 0) { throw 'Probe compilation failed.' }
 }
+Compile-PerformanceProbe $perfBaseline $perfOld ''
+Compile-PerformanceProbe $perfProject $perfNew '/define:DATABASE'
+if ($perfSqliteOld) { Compile-PerformanceProbe $perfSqliteBaseline $perfSqliteOld '/define:DATABASE' }
 Write-Output "RESULTS=$perfRoot"
 function Run-PerformanceProbe([string]$exe, [string[]]$probeArguments) {
     $probeOut = Join-Path $perfRoot ('stdout-' + [Guid]::NewGuid().ToString('N') + '.log')
@@ -54,22 +73,71 @@ foreach ($perfCount in $Counts) {
     $perfFixture = Join-Path $perfRoot ('items-' + $perfCount)
     Run-PerformanceProbe $perfNew @('generate', $perfFixture, "$perfCount")
     Run-PerformanceProbe $perfNew @('migrate', $perfFixture, "$perfCount")
+    $perfSqliteBaselineFixture = $null
+    if ($perfSqliteOld) {
+        $perfSqliteBaselineFixture = Join-Path $perfRoot ('items-' + $perfCount + '-sqlite-baseline')
+        [IO.Directory]::CreateDirectory($perfSqliteBaselineFixture) | Out-Null
+        Copy-Item -LiteralPath (Join-Path $perfFixture 'config.xml') -Destination (Join-Path $perfSqliteBaselineFixture 'config.xml')
+        Run-PerformanceProbe $perfSqliteOld @('migrate', $perfSqliteBaselineFixture, "$perfCount")
+    }
     # Alternate execution order by size to limit systematic order bias; OS file cache is not flushed.
-    $perfOrder = @($perfOld, $perfNew)
-    if ($perfCount -eq 100000) { $perfOrder = @($perfNew, $perfOld) }
-    foreach ($perfExe in $perfOrder) { Run-PerformanceProbe $perfExe @('run', $perfFixture, "$perfCount") }
+    $perfRuns = @(
+        [pscustomobject]@{ Exe = $perfOld; Label = 'XML-baseline'; Fixture = $perfFixture },
+        [pscustomobject]@{ Exe = $perfNew; Label = 'SQLite-current'; Fixture = $perfFixture }
+    )
+    $perfStrictRuns = $null
+    if ($perfSqliteOld) {
+        $perfStrictRuns = @(
+            [pscustomobject]@{ Exe = $perfNew; Label = 'SQLite-current-strict'; Fixture = $perfFixture },
+            [pscustomobject]@{ Exe = $perfSqliteOld; Label = 'SQLite-baseline'; Fixture = $perfSqliteBaselineFixture }
+        )
+    }
+    if ($perfCount -eq 100000) {
+        $perfRuns = @($perfRuns[1], $perfRuns[0])
+        if ($perfStrictRuns) { $perfStrictRuns = @($perfStrictRuns[1], $perfStrictRuns[0]) }
+    }
+    foreach ($perfRun in $perfRuns) {
+        Run-PerformanceProbe $perfRun.Exe @('run', $perfRun.Fixture, "$perfCount", ('label=' + $perfRun.Label))
+    }
+    if ($perfStrictRuns) {
+        foreach ($perfRun in $perfStrictRuns) {
+            Run-PerformanceProbe $perfRun.Exe @('run', $perfRun.Fixture, "$perfCount", ('label=' + $perfRun.Label))
+        }
+    }
 }
 # Dense relation metadata is a separate workload; do not hide compatibility-layer costs.
 $perfDense = Join-Path $perfRoot 'dense-10000'
 Write-Output 'DENSE_RELATIONS=10000'
 Run-PerformanceProbe $perfNew @('generate', $perfDense, '10000', 'dense')
 Run-PerformanceProbe $perfNew @('migrate', $perfDense, '10000')
-foreach ($perfExe in @($perfOld, $perfNew)) { Run-PerformanceProbe $perfExe @('run', $perfDense, '10000') }
+$perfDenseSqliteBaseline = $null
+if ($perfSqliteOld) {
+    $perfDenseSqliteBaseline = Join-Path $perfRoot 'dense-10000-sqlite-baseline'
+    [IO.Directory]::CreateDirectory($perfDenseSqliteBaseline) | Out-Null
+    Copy-Item -LiteralPath (Join-Path $perfDense 'config.xml') -Destination (Join-Path $perfDenseSqliteBaseline 'config.xml')
+    Run-PerformanceProbe $perfSqliteOld @('migrate', $perfDenseSqliteBaseline, '10000')
+}
+foreach ($perfRun in @(
+    [pscustomobject]@{ Exe = $perfOld; Label = 'XML-baseline'; Fixture = $perfDense },
+    [pscustomobject]@{ Exe = $perfNew; Label = 'SQLite-current'; Fixture = $perfDense })) {
+    Run-PerformanceProbe $perfRun.Exe @('run', $perfRun.Fixture, '10000', ('label=' + $perfRun.Label))
+}
+if ($perfDenseSqliteBaseline) {
+    foreach ($perfRun in @(
+        [pscustomobject]@{ Exe = $perfNew; Label = 'SQLite-current-strict'; Fixture = $perfDense },
+        [pscustomobject]@{ Exe = $perfSqliteOld; Label = 'SQLite-baseline'; Fixture = $perfDenseSqliteBaseline })) {
+        Run-PerformanceProbe $perfRun.Exe @('run', $perfRun.Fixture, '10000', ('label=' + $perfRun.Label))
+    }
+}
 if ($LiveDatabasePath) {
     $perfUser = Join-Path $perfRoot 'current-user'
     $perfSnapshot = @(Run-PerformanceProbe $perfNew @('snapshot', $perfUser, '0', [IO.Path]::GetFullPath($LiveDatabasePath)))
     $perfSnapshot | Write-Output
     $perfUserCount = ($perfSnapshot | Where-Object { $_ -like 'SNAPSHOT count=*' } | Select-Object -Last 1).Split('=')[1]
-    foreach ($perfExe in @($perfOld, $perfNew)) { Run-PerformanceProbe $perfExe @('user', $perfUser, "$perfUserCount") }
+    foreach ($perfRun in @(
+        [pscustomobject]@{ Exe = $perfOld; Label = 'XML-baseline' },
+        [pscustomobject]@{ Exe = $perfNew; Label = 'SQLite-current' })) {
+        Run-PerformanceProbe $perfRun.Exe @('user', $perfUser, "$perfUserCount", ('label=' + $perfRun.Label))
+    }
 }
 Write-Output "DONE results=$perfLog"

@@ -103,6 +103,88 @@ namespace AppManager
                     }
                     Check(MediaRules.ResourceCategoryFilter("照片").Contains("*.rw2"), "photo filter missing RW2");
                 });
+                Test("local music scan is recursive, case-insensitive and skips metadata folders", delegate
+                {
+                    string scanRoot = Path.Combine(Path.GetTempPath(), "AppManagerMusicScan_" + Guid.NewGuid().ToString("N"));
+                    string junction = Path.Combine(scanRoot, "linked-album");
+                    try
+                    {
+                        string nested = Path.Combine(scanRoot, "album", "disc 1");
+                        string recycle = Path.Combine(scanRoot, "$Recycle.Bin");
+                        Directory.CreateDirectory(nested);
+                        Directory.CreateDirectory(recycle);
+                        foreach (string name in new[] { "System Volume Information", "Recovery", "Config.Msi" })
+                        {
+                            string skipped = Path.Combine(scanRoot, name); Directory.CreateDirectory(skipped);
+                            File.WriteAllText(Path.Combine(skipped, "skipped.mp3"), "skip");
+                        }
+                        File.WriteAllText(Path.Combine(scanRoot, "one.mp3"), "a");
+                        File.WriteAllText(Path.Combine(scanRoot, "album", "two.FLAC"), "b");
+                        File.WriteAllText(Path.Combine(nested, "three.ogg"), "c");
+                        File.WriteAllText(Path.Combine(nested, "notes.txt"), "not audio");
+                        File.WriteAllText(Path.Combine(recycle, "deleted.mp3"), "skip");
+                        using (System.Diagnostics.Process mk = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
+                            "/c mklink /J \"" + junction + "\" \"" + nested + "\"") { CreateNoWindow = true, UseShellExecute = false }))
+                        { mk.WaitForExit(); Check(mk.ExitCode == 0, "music scan junction setup"); }
+                        string ordinary = Path.Combine(scanRoot, "one.mp3");
+                        Check(!FileImport.IsNameSurrogateReparsePoint(ordinary, File.GetAttributes(ordinary)),
+                            "ordinary file treated as a link");
+                        int progressCalls = 0;
+                        LocalMusicScanResult result = LocalMusicScanner.ScanRoots(new[] { scanRoot, scanRoot },
+                            CancellationToken.None, delegate(int count, string path) { progressCalls++; });
+                        Check(result.Files.Count == 3, "audio count wrong: " + result.Files.Count);
+                        Check(result.Files.All(p => File.Exists(p)), "scanner returned a missing file");
+                        Check(!result.Files.Any(p => p.Contains("$Recycle.Bin")), "recycle bin was scanned");
+                        Check(!result.Files.Any(p => p.Contains("System Volume Information") || p.Contains("Recovery")
+                            || p.Contains("Config.Msi") || p.Contains("linked-album")), "metadata folder or junction was scanned");
+                        Check(result.DirectoriesSkipped >= 1, "skipped directory not counted");
+                        Check(progressCalls > 0, "scan progress was not reported");
+                        string appAudio = Path.Combine(root, "must-not-scan.mp3");
+                        File.WriteAllText(appAudio, "private");
+                        try
+                        {
+                            LocalMusicScanResult appResult = LocalMusicScanner.ScanRoots(new[] { root },
+                                CancellationToken.None, null);
+                            Check(!appResult.Files.Contains(appAudio), "app data directory was scanned");
+                        }
+                        finally { File.Delete(appAudio); }
+                        LocalMusicScanResult invalid = LocalMusicScanner.ScanRoots(new[] { "bad\0root" }, CancellationToken.None, null);
+                        Check(invalid.Errors == 1 && invalid.ErrorSamples.Count == 1, "scan failure has no actionable sample");
+                    }
+                    finally
+                    {
+                        if (Directory.Exists(junction)) Directory.Delete(junction);
+                        if (Directory.Exists(scanRoot)) Directory.Delete(scanRoot, true);
+                    }
+                });
+                Test("local music scan honours cancellation", delegate
+                {
+                    using (CancellationTokenSource cancel = new CancellationTokenSource())
+                    {
+                        cancel.Cancel();
+                        bool cancelled = false;
+                        try { LocalMusicScanner.ScanRoots(new[] { root }, cancel.Token, null); }
+                        catch (OperationCanceledException) { cancelled = true; }
+                        Check(cancelled, "cancelled scan continued");
+                    }
+                    string cancelRoot = Path.Combine(Path.GetTempPath(), "AppManagerMusicCancel_" + Guid.NewGuid().ToString("N"));
+                    try
+                    {
+                        for (int i = 0; i < 70; i++) Directory.CreateDirectory(Path.Combine(cancelRoot, "d" + i));
+                        using (CancellationTokenSource cancel = new CancellationTokenSource())
+                        {
+                            bool cancelled = false;
+                            try
+                            {
+                                LocalMusicScanner.ScanRoots(new[] { cancelRoot }, cancel.Token,
+                                    delegate(int count, string path) { cancel.Cancel(); });
+                            }
+                            catch (OperationCanceledException) { cancelled = true; }
+                            Check(cancelled, "in-progress scan ignored cancellation");
+                        }
+                    }
+                    finally { if (Directory.Exists(cancelRoot)) Directory.Delete(cancelRoot, true); }
+                });
                 Test("resource store selection skips an unavailable location and keeps a folder together", delegate
                 {
                     string dir = Path.Combine(root, "multi-store-" + Guid.NewGuid().ToString("N"));

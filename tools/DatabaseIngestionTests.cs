@@ -107,9 +107,20 @@ namespace AppManager
         { using (Sqlite db = new Sqlite(store.FilePath, true)) return Convert.ToInt64(db.Scalar("SELECT id FROM entries WHERE key=?", key)); }
         private static object Invoke(MainForm form, string name, params object[] args)
         {
-            MethodInfo method = typeof(MainForm).GetMethods(Private).Single(m => m.Name == name && m.GetParameters().Length == args.Length &&
-                m.GetParameters().Select((p, i) => args[i] == null || p.ParameterType.IsInstanceOfType(args[i])).All(v => v));
-            return method.Invoke(form, args);
+            MethodInfo method = typeof(MainForm).GetMethods(Private).Single(delegate(MethodInfo m)
+            {
+                if (m.Name != name) return false;
+                ParameterInfo[] parameters = m.GetParameters();
+                if (args.Length > parameters.Length || args.Length < parameters.Count(delegate(ParameterInfo p) { return !p.IsOptional; })) return false;
+                for (int i = 0; i < args.Length; i++)
+                    if (args[i] != null && !parameters[i].ParameterType.IsInstanceOfType(args[i])) return false;
+                return true;
+            });
+            ParameterInfo[] declared = method.GetParameters();
+            object[] actual = new object[declared.Length];
+            Array.Copy(args, actual, args.Length);
+            for (int i = args.Length; i < declared.Length; i++) actual[i] = declared[i].DefaultValue;
+            return method.Invoke(form, actual);
         }
         private static void Set(MainForm form, string name, object value) { typeof(MainForm).GetField(name, Private).SetValue(form, value); }
         private static MainForm Form(AppConfig c, bool resource)

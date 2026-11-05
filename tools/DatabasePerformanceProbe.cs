@@ -12,7 +12,7 @@ namespace AppManager
     {
         private static int count, sink;
         private static AppConfig config;
-        private static string xml, backend;
+        private static string xml, backend, label;
         private static readonly CultureInfo Invariant = CultureInfo.InvariantCulture;
 
         public static int Main(string[] args)
@@ -29,6 +29,9 @@ namespace AppManager
 #else
                 backend = "XML";
 #endif
+                label = backend;
+                for (int i = 3; i < args.Length; i++)
+                    if (args[i].StartsWith("label=", StringComparison.Ordinal)) label = args[i].Substring(6);
 #if DATABASE
                 if (mode == "snapshot")
                 {
@@ -65,7 +68,7 @@ namespace AppManager
                 Metric("first_load", delegate { config = Load(); CheckConfig(); }, 1);
                 Metric("reload", delegate { config = Load(); CheckConfig(); }, 3);
                 GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect();
-                Console.WriteLine("MEMORY backend=" + backend + "; count=" + count + "; managed_bytes=" + GC.GetTotalMemory(false));
+                Console.WriteLine("MEMORY backend=" + label + "; count=" + count + "; managed_bytes=" + GC.GetTotalMemory(false));
                 if (mode != "user")
                 {
                     Metric("first_category_page", Page, 1);
@@ -145,7 +148,7 @@ namespace AppManager
         {
             List<double> values = new List<double>();
             for (int i = 0; i < rounds; i++) values.Add(Time(action));
-            Console.WriteLine("METRIC," + backend + "," + count + "," + name + "," + string.Join(";", values.Select(v => v.ToString("F3", Invariant)).ToArray()));
+            Console.WriteLine("METRIC," + label + "," + count + "," + name + "," + string.Join(";", values.Select(v => v.ToString("F3", Invariant)).ToArray()));
         }
     }
 }

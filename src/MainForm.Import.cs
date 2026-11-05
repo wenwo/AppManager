@@ -415,13 +415,15 @@ namespace AppManager
         }
 
         private void QueueImport(string[] paths, ImportOperation operation, string category, string collection, bool resource, uint sequence,
-            Action<ImportBatch> completed = null, int copyBytesPerSecond = 0)
+            Action<ImportBatch> completed = null, int copyBytesPerSecond = 0, bool preserveCategoryExclusions = false)
         {
-            QueueImportWithCancellation(paths, operation, category, collection, resource, sequence, completed, importCancel.Token, copyBytesPerSecond);
+            QueueImportWithCancellation(paths, operation, category, collection, resource, sequence, completed, importCancel.Token,
+                copyBytesPerSecond, preserveCategoryExclusions);
         }
 
         private void QueueImportWithCancellation(string[] paths, ImportOperation operation, string category, string collection, bool resource,
-            uint sequence, Action<ImportBatch> completed, CancellationToken cancel, int copyBytesPerSecond = 0)
+            uint sequence, Action<ImportBatch> completed, CancellationToken cancel, int copyBytesPerSecond = 0,
+            bool preserveCategoryExclusions = false)
         {
             // 目标与动作均在投放/粘贴时冻结；存储目录也在此算好（只读配置、不建目录）。
             // 路径归属、文件夹内收录检查等预处理放进导入队列在后台执行，批量拖入几千个文件时不卡界面；
@@ -438,6 +440,7 @@ namespace AppManager
                     : PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
                         RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
                 prepared.CopyBytesPerSecond = copyBytesPerSecond;
+                prepared.PreserveCategoryExclusions = preserveCategoryExclusions;
                 if (prepared.Items.Count == 0) { if (completed != null) completed(prepared); return; }
                 EnqueueImport(delegate { RunPreparedImport(prepared, activeRoots, completed, cancel); });
                 return;
@@ -471,6 +474,7 @@ namespace AppManager
                     return;
                 }
                 prepared.CopyBytesPerSecond = copyBytesPerSecond;
+                prepared.PreserveCategoryExclusions = preserveCategoryExclusions;
                 if (prepared.Items.Count == 0) { RunOnUi(delegate { if (completed != null) completed(prepared); }); return; }
                 RunPreparedImport(prepared, activeRoots, completed, cancel);
             });
@@ -480,7 +484,7 @@ namespace AppManager
         private Dictionary<string, string> RegisteredPathsInMemory(List<string> paths)
         {
             Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (KeyValuePair<string, List<AddedEntry>> kv in AddedIndexLookups(paths))
+            foreach (KeyValuePair<string, List<AddedEntry>> kv in AddedIndexLookups(paths, true))
                 if (kv.Value != null && kv.Value.Count > 0) result[kv.Key] = kv.Value[0].Path;
             return result;
         }
@@ -527,7 +531,7 @@ namespace AppManager
             {
                 try
                 {
-                    string source = Path.GetFullPath(path);
+                    string source = Path.GetFullPath(path), origin = source;
                     if (!seen.Add(source)) continue;
                     string registered;
                     bool known = knownPaths.TryGetValue(source, out registered);
@@ -536,7 +540,7 @@ namespace AppManager
                     string dir = folder ? folderDir : fileDir;
                     bool reference = (!resource && !folder && IsSoftwareFile(source)) || known
                         || (resource ? ResourceStore.IsUnderAny(knownRoots, source) : FileImport.Within(dir, source));
-                    ImportItem item = new ImportItem { Source = source, Target = dir, Folder = folder, Reference = reference };
+                    ImportItem item = new ImportItem { Source = source, Target = dir, Origin = origin, Folder = folder, Reference = reference };
                     // 软件页面只登记程序（原位引用），不复制、不移动任何文件或文件夹。
                     if (!resource && (folder || !IsSoftwareFile(source)))
                     { item.State = FileImport.Skipped; item.Error = "软件页面只登记程序（.exe），文件和文件夹请到资源页面导入。"; }
@@ -678,7 +682,8 @@ namespace AppManager
             Dictionary<string, List<AddedEntry>> knownTargets = AddedIndexLookups(committed.Select(i => i.Target));
             foreach (ImportItem item in committed)
             {
-                if (SetCategoryExcluded(new AppInfo { Key = "add:" + item.Target }, batch.Category, false)) exclusions.Add(item.Target);
+                if (!batch.PreserveCategoryExclusions
+                    && SetCategoryExcluded(new AppInfo { Key = "add:" + item.Target }, batch.Category, false)) exclusions.Add(item.Target);
                 List<AddedEntry> known;
                 knownTargets.TryGetValue(item.Target, out known);
                 if (known != null && known.Count == 0) known = null;
@@ -691,7 +696,9 @@ namespace AppManager
                     }
                     else
                     {
-                        AddedEntry entry = new AddedEntry { Path = item.Target, Category = batch.Category, IsFolder = item.Folder, IsResource = batch.Resource };
+                        AddedEntry entry = new AddedEntry { Path = item.Target, Category = batch.Category, IsFolder = item.Folder,
+                            IsResource = batch.Resource, OriginPath = batch.Resource && batch.Operation == ImportOperation.Copy && !item.Reference
+                                ? item.Origin ?? item.Source : null };
                         config.AddedItems.Add(entry); added.Add(entry);
                     }
                 }

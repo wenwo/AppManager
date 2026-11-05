@@ -90,6 +90,7 @@ namespace AppManager
                 Run("software page refuses external drops, file imports, new files and the all-files view", SoftwarePageRefusesFiles);
                 Run("desktop stash moves software shortcuts only; folder and document shortcuts stay on the desktop", StashOnlySoftwareShortcuts);
                 Run("import recovery and history still recognise old software batches after migration", ImportRecoveryAfterMigration);
+                Run("music scan reuses copied origins after repeat, rename and category changes", MusicScanReusesCopiedOrigins);
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
@@ -2107,6 +2108,74 @@ namespace AppManager
                 Check(check(false, "开发工具", target), "migrated software batch target not recognised; recovery would withdraw a library copy");
                 Check(check(true, "文档", target) && !check(true, "照片", target), "resource batch matching changed");
                 Check(!check(false, "开发工具", target + ".missing"), "unregistered target treated as registered");
+            }
+        }
+
+        private static ImportBatch RunMusicScanImport(MainForm form, AppConfig config, string source)
+        {
+            MethodInfo registered = typeof(MainForm).GetMethod("RegisteredPathsInMemory", Private);
+            Func<List<string>, Dictionary<string, string>> lookup = delegate(List<string> paths)
+            { return (Dictionary<string, string>)registered.Invoke(form, new object[] { paths }); };
+            MethodInfo prepare = typeof(MainForm).GetMethod("PrepareImportBatchMultiStore", Private);
+            ImportBatch batch = (ImportBatch)prepare.Invoke(form, new object[] { new[] { source }, ImportOperation.Copy, "音乐", null, true, (uint)0,
+                config.ResourceStorePath, Path.Combine(config.ResourceStorePath, "音乐"), lookup,
+                new Func<string, bool>(delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; }),
+                new List<string> { config.ResourceStorePath } });
+            batch.JournalDirectory = Path.Combine(root, "music-scan-origin-journals");
+            batch.PreserveCategoryExclusions = true;
+            batch.ResolveTarget = delegate(ImportItem item)
+            {
+                string name = Path.GetFileName(item.Source);
+                string target = Path.Combine(config.ResourceStorePath, "音乐", name);
+                int suffix = 1;
+                while (File.Exists(target)) target = Path.Combine(config.ResourceStorePath, "音乐",
+                    Path.GetFileNameWithoutExtension(name) + "_" + suffix++ + Path.GetExtension(name));
+                return target;
+            };
+            FileImport.Run(batch, delegate(ImportBatch value) { return (bool)Invoke(form, "CommitImport", value); }, null);
+            return batch;
+        }
+
+        private static void MusicScanReusesCopiedOrigins()
+        {
+            AppConfig config = RenameConfig("music-scan-origin");
+            using (MainForm form = ResourceForm(config, "音乐"))
+            {
+                string source = Path.Combine(root, "music-scan-origin-source", "song.mp3");
+                Directory.CreateDirectory(Path.GetDirectoryName(source));
+                File.WriteAllText(source, "music");
+
+                ImportBatch first = RunMusicScanImport(form, config, source);
+                Check(first.Items[0].State == FileImport.Copied && File.Exists(first.Items[0].Target) && File.Exists(source),
+                    "initial music scan did not preserve and copy the source");
+                string target = first.Items[0].Target;
+                AddedEntry entry = config.AddedItems.ByPath(target).Single();
+                Check(entry.OriginPath == source && config.AddedItems.Count == 1, "copied origin was not registered");
+
+                ImportBatch repeated = RunMusicScanImport(form, config, source);
+                Check(repeated.Items[0].State == FileImport.Linked && repeated.Items[0].Target == target,
+                    "repeat scan copied the same source again");
+                Check(config.AddedItems.Count == 1 && !File.Exists(Path.Combine(config.ResourceStorePath, "音乐", "song_1.mp3")),
+                    "repeat scan created a duplicate registration or file");
+
+                string renamed = Path.Combine(config.ResourceStorePath, "音乐", "renamed.mp3");
+                File.Move(target, renamed); entry.Path = renamed;
+                Check(config.Save(), config.DatabaseError);
+                ImportBatch afterRename = RunMusicScanImport(form, config, source);
+                Check(afterRename.Items[0].State == FileImport.Linked && afterRename.Items[0].Target == renamed,
+                    "renaming the registered target broke origin deduplication");
+
+                entry = config.AddedItems.ByPath(renamed).Single(); entry.Category = "文档";
+                config.ExcludedCategories["add:" + renamed] = new List<string> { "音乐" };
+                Check(config.Save(), config.DatabaseError);
+                ImportBatch otherCategory = RunMusicScanImport(form, config, source);
+                Check(otherCategory.Items[0].State == FileImport.Linked && otherCategory.Items[0].Target == renamed,
+                    "origin in another category was copied again");
+                Check(config.ItemCategories["add:" + renamed].Contains("音乐"),
+                    "music membership was not added to the existing resource");
+                Check(config.ExcludedCategories["add:" + renamed].Contains("音乐"),
+                    "music scan restored a user exclusion");
+                Check(config.AddedItems.Count == 1 && File.Exists(source), "origin deduplication changed source or entry count");
             }
         }
 
@@ -4229,6 +4298,17 @@ namespace AppManager
                     "database category search leaked outside the selected category: " + shown.Count);
                 Check(!shown.Any(a => a.Key == hidden.Key), "database category search ignored the hidden setting");
 
+                search.Text = "照片";
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 3, "database category-name search missed scoped members: " + shown.Count);
+                search.Text = "++";
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                int total = (int)typeof(MainForm).GetField("categoryTotal", Private).GetValue(form);
+                Check(shown.Count == 0 && total == 0, "database punctuation-only search returned rows: " + shown.Count + "/" + total);
+                search.Text = "trip";
+
                 typeof(MainForm).GetField("databasePageNumber", Private).SetValue(form, 1);
                 typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "音乐");
                 Invoke(form, "RefreshGrid");
@@ -4245,11 +4325,17 @@ namespace AppManager
                 Check(shown.Count == 1 && shown[0].Key == rootMember.Key, "database collection search included a descendant or sibling");
                 Check((int)typeof(MainForm).GetField("databasePageNumber", Private).GetValue(form) == 0,
                     "switching collection reused a stale search cursor");
-
-                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, childKey);
+                search.Text = "旅行";
                 Invoke(form, "RefreshGrid");
                 shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
-                Check(shown.Count == 1 && shown[0].Key == childMember.Key, "database nested collection search lost its direct member");
+                Check(shown.Count == 1 && shown[0].Key == rootMember.Key, "database collection-name search missed its direct member");
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, childKey);
+                search.Text = "2024";
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 1 && shown[0].Key == childMember.Key, "database nested collection-name search lost its direct member");
+                search.Text = "trip";
 
                 typeof(MainForm).GetField("currentCollection", Private).SetValue(form, null);
                 typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "全部资源");
@@ -4299,15 +4385,32 @@ namespace AppManager
                     Check(shown.All(a => a.Category == "照片") && !shown.Any(a => a.Key == hidden.Key),
                         "fallback category search leaked or ignored hidden state");
 
+                    search.Text = "照片";
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    Check(shown.Count == 3, "fallback category-name search missed scoped members: " + shown.Count);
+                    search.Text = "++";
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    total = (int)typeof(MainForm).GetField("categoryTotal", Private).GetValue(form);
+                    Check(shown.Count == 0 && total == 0, "fallback punctuation-only search returned rows: " + shown.Count + "/" + total);
+                    search.Text = "trip";
+
                     typeof(MainForm).GetField("currentCollection", Private).SetValue(form, rootKey);
                     Invoke(form, "RefreshGrid");
                     shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
                     Check(shown.Count == 1 && shown[0].Key == rootMember.Key, "fallback collection search included a descendant");
-
-                    typeof(MainForm).GetField("currentCollection", Private).SetValue(form, childKey);
+                    search.Text = "旅行";
                     Invoke(form, "RefreshGrid");
                     shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
-                    Check(shown.Count == 1 && shown[0].Key == childMember.Key, "fallback nested collection search lost its direct member");
+                    Check(shown.Count == 1 && shown[0].Key == rootMember.Key, "fallback collection-name search missed its direct member");
+
+                    typeof(MainForm).GetField("currentCollection", Private).SetValue(form, childKey);
+                    search.Text = "2024";
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    Check(shown.Count == 1 && shown[0].Key == childMember.Key, "fallback nested collection-name search lost its direct member");
+                    search.Text = "trip";
 
                     typeof(MainForm).GetField("currentCollection", Private).SetValue(form, null);
                     typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "全部资源");

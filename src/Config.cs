@@ -720,13 +720,14 @@ namespace AppManager
     /// </summary>
     public class AddedEntry
     {
-        private string path = string.Empty, category = string.Empty, name = string.Empty;
+        private string path = string.Empty, category = string.Empty, name = string.Empty, originPath = string.Empty;
         private bool folder, resource;
         internal long RecordId, ItemId;
         internal Action<AddedEntry> Changed;
         public string Path { get { return path; } set { if (path != value) { path = value ?? ""; Notify(); } } }
         public string Category { get { return category; } set { if (category != value) { category = value ?? ""; Notify(); } } }
         public string Name { get { return name; } set { if (name != value) { name = value ?? ""; Notify(); } } }
+        public string OriginPath { get { return originPath; } set { if (originPath != value) { originPath = value ?? ""; Notify(); } } }
         public bool IsFolder { get { return folder; } set { if (folder != value) { folder = value; Notify(); } } }
         public bool IsResource { get { return resource; } set { if (resource != value) { resource = value; Notify(); } } }
         private void Notify() { if (Changed != null) Changed(this); }
@@ -928,6 +929,7 @@ namespace AppManager
                     e.IsFolder = XmlAttributeBool(n, "folder", false);
                     e.IsResource = XmlAttributeBool(n, "resource", false);
                     e.Name = XmlAttr(n, "name");
+                    e.OriginPath = XmlAttr(n, "origin");
                     if (!string.IsNullOrEmpty(e.Path)) cfg.AddedItems.Add(e);
                 }
                 foreach (XmlNode n in root.SelectNodes("DesktopBackup/Item"))
@@ -1224,6 +1226,7 @@ namespace AppManager
                 w.WriteAttributeString("folder", e.IsFolder ? "true" : "false");
                 w.WriteAttributeString("resource", e.IsResource ? "true" : "false");
                 w.WriteAttributeString("name", e.Name ?? string.Empty);
+                if (!string.IsNullOrEmpty(e.OriginPath)) w.WriteAttributeString("origin", e.OriginPath);
                 w.WriteEndElement();
             }
             w.WriteEndElement();

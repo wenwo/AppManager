@@ -14,6 +14,8 @@ namespace AppManager
         private readonly Dictionary<long, AddedEntry> cache = new Dictionary<long, AddedEntry>();
         private readonly Dictionary<string, List<AddedEntry>> changedPaths = new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<AddedEntry, string> trackedPaths = new Dictionary<AddedEntry, string>();
+        private readonly Dictionary<string, List<AddedEntry>> changedOrigins = new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<AddedEntry, string> trackedOrigins = new Dictionary<AddedEntry, string>();
         private readonly Dictionary<string, List<AddedEntry>> pathCache = new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
         private int count;
         public AddedEntryList() { }
@@ -52,16 +54,26 @@ namespace AppManager
             string key = entry.Path ?? ""; List<AddedEntry> list;
             if (!changedPaths.TryGetValue(key, out list)) { list = new List<AddedEntry>(); changedPaths[key] = list; }
             list.Add(entry); trackedPaths[entry] = key;
+            string oldOrigin;
+            if (trackedOrigins.TryGetValue(entry, out oldOrigin))
+            {
+                List<AddedEntry> previous = changedOrigins[oldOrigin]; previous.Remove(entry);
+                if (previous.Count == 0) changedOrigins.Remove(oldOrigin);
+            }
+            string origin = entry.OriginPath ?? "";
+            if (!changedOrigins.TryGetValue(origin, out list)) { list = new List<AddedEntry>(); changedOrigins[origin] = list; }
+            list.Add(entry); trackedOrigins[entry] = origin;
         }
         internal AddedEntry Hydrate(string[] row)
         {
             long id = Convert.ToInt64(row[0]); AddedEntry value;
             if (Dirty.TryGetValue(id, out value) || cache.TryGetValue(id, out value)) return value;
-            value = new AddedEntry { RecordId = id, ItemId = Convert.ToInt64(row[1]), Path = row[2], Name = row[3], Category = row[4] ?? "", IsFolder = row[5] == "1", IsResource = row[6] == "1" };
+            value = new AddedEntry { RecordId = id, ItemId = Convert.ToInt64(row[1]), Path = row[2], Name = row[3], Category = row[4] ?? "",
+                IsFolder = row[5] == "1", IsResource = row[6] == "1", OriginPath = row[7] ?? "" };
             value.Changed = Track;
             if (cache.Count >= 1024) cache.Clear(); cache[id] = value; return value;
         }
-        private const string Columns = "SELECT a.id,a.item_id,a.path,a.name,g.key,a.folder,a.resource FROM added_items a LEFT JOIN groups g ON g.id=a.group_id";
+        private const string Columns = "SELECT a.id,a.item_id,a.path,a.name,g.key,a.folder,a.resource,a.origin FROM added_items a LEFT JOIN groups g ON g.id=a.group_id";
         public List<AddedEntry> ByPath(string path)
         {
             List<AddedEntry> cached;
@@ -71,7 +83,7 @@ namespace AppManager
         }
 
         /// <summary>批量查询路径归属：批量导入时只开少量只读连接，避免每个路径各开一次数据库。</summary>
-        internal Dictionary<string, List<AddedEntry>> LookupMany(IEnumerable<string> paths)
+        internal Dictionary<string, List<AddedEntry>> LookupMany(IEnumerable<string> paths, bool includeOrigins = false)
         {
             List<string> distinct = new List<string>();
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -81,12 +93,12 @@ namespace AppManager
                 distinct.Add(path);
             }
             if (distinct.Count == 0) return new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
-            if (Store == null) return LoadMany(null, distinct);
-            using (Sqlite db = new Sqlite(Store.FilePath, true)) return LoadMany(db, distinct);
+            if (Store == null) return LoadMany(null, distinct, includeOrigins);
+            using (Sqlite db = new Sqlite(Store.FilePath, true)) return LoadMany(db, distinct, includeOrigins);
         }
 
         /// <summary>按路径批量读取数据库行并合并未保存改动；共用一条连接和分块 IN 查询。</summary>
-        private Dictionary<string, List<AddedEntry>> LoadMany(Sqlite db, List<string> paths)
+        private Dictionary<string, List<AddedEntry>> LoadMany(Sqlite db, List<string> paths, bool includeOrigins)
         {
             Dictionary<string, List<AddedEntry>> result =
                 new Dictionary<string, List<AddedEntry>>(StringComparer.OrdinalIgnoreCase);
@@ -118,6 +130,35 @@ namespace AppManager
                 foreach (AddedEntry entry in staged)
                     if (!Removed.Contains(entry.RecordId) && !list.Contains(entry)) list.Add(entry);
             }
+            if (includeOrigins)
+            {
+                if (db != null)
+                {
+                    for (int offset = 0; offset < paths.Count; offset += 256)
+                    {
+                        int count = Math.Min(256, paths.Count - offset);
+                        List<string> chunk = paths.GetRange(offset, count);
+                        List<string> marks = chunk.ConvertAll(delegate(string value) { return "?"; });
+                        object[] args = new object[count];
+                        for (int i = 0; i < count; i++) args[i] = chunk[i].ToUpperInvariant();
+                        foreach (string[] row in db.Query(Columns + " WHERE a.origin_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY a.id", args))
+                        {
+                            if (Removed.Contains(Convert.ToInt64(row[0]))) continue;
+                            AddedEntry entry = Hydrate(row);
+                            List<AddedEntry> list;
+                            if (result.TryGetValue(entry.OriginPath, out list) && list.Count == 0 && !list.Contains(entry)) list.Add(entry);
+                        }
+                    }
+                }
+                foreach (string path in paths)
+                {
+                    if (result[path].Count != 0) continue;
+                    List<AddedEntry> staged;
+                    if (!changedOrigins.TryGetValue(path, out staged)) continue;
+                    foreach (AddedEntry entry in staged)
+                        if (!Removed.Contains(entry.RecordId) && !result[path].Contains(entry)) result[path].Add(entry);
+                }
+            }
             return result;
         }
 
@@ -133,7 +174,7 @@ namespace AppManager
             // 缓存满 512 会整体清空：放不下时先腾空并整批重读，避免预读中途把自己刚读到的结果清掉
             if (pathCache.Count + missing.Count >= 512) { pathCache.Clear(); missing = distinct; }
             Dictionary<string, List<AddedEntry>> loaded;
-            using (Sqlite db = new Sqlite(Store.FilePath, true)) loaded = LoadMany(db, missing);
+            using (Sqlite db = new Sqlite(Store.FilePath, true)) loaded = LoadMany(db, missing, false);
             foreach (KeyValuePair<string, List<AddedEntry>> item in loaded) pathCache[item.Key] = item.Value;
         }
         private List<AddedEntry> LoadPath(Sqlite db, string path)
@@ -233,6 +274,12 @@ namespace AppManager
                         string input;
                         if (byKey.TryGetValue(row[1], out input) && !result.ContainsKey(input)) result[input] = row[0];
                     }
+                    foreach (string[] row in db.Query("SELECT path,origin_key FROM added_items WHERE origin_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY id",
+                        chunk.ConvertAll(delegate(string value) { return (object)value; }).ToArray()))
+                    {
+                        string input;
+                        if (byKey.TryGetValue(row[1], out input) && !result.ContainsKey(input)) result[input] = row[0];
+                    }
                 }
             return result;
         }
@@ -269,6 +316,10 @@ namespace AppManager
             {
                 changedPaths[tracked].Remove(entry); trackedPaths.Remove(entry);
             }
+            if (trackedOrigins.TryGetValue(entry, out tracked))
+            {
+                changedOrigins[tracked].Remove(entry); trackedOrigins.Remove(entry);
+            }
             if (entry.RecordId == 0 || Store == null) return New.Remove(entry);
             Dirty.Remove(entry.RecordId); cache.Remove(entry.RecordId); return Removed.Add(entry.RecordId);
         }
@@ -300,7 +351,8 @@ namespace AppManager
         }
         internal void Accept(int storedCount)
         {
-            New.Clear(); Dirty.Clear(); Removed.Clear(); cache.Clear(); changedPaths.Clear(); trackedPaths.Clear(); pathCache.Clear();
+            New.Clear(); Dirty.Clear(); Removed.Clear(); cache.Clear(); changedPaths.Clear(); trackedPaths.Clear();
+            changedOrigins.Clear(); trackedOrigins.Clear(); pathCache.Clear();
             count = storedCount;
         }
     }

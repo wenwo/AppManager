@@ -335,8 +335,17 @@ namespace AppManager
         }
         private static string SearchPattern(string value)
         {
-            string normal = SearchName(value); if (normal.Length > 64) normal = normal.Substring(0, 64);
+            string normal = SearchName(value); if (normal.Length == 0) return null;
+            if (normal.Length > 64) normal = normal.Substring(0, 64);
             StringBuilder s = new StringBuilder("%"); foreach (char c in normal) { s.Append(c); s.Append('%'); } return s.ToString();
+        }
+
+        internal const string ScopedSearchFrom = "listing l CROSS JOIN catalog c ON c.item_id=l.item_id";
+        internal static string ScopedSearchWhere(bool resources, bool showHidden)
+        {
+            return "l.group_id=? AND " + (resources ? "l.kind=2" : "l.kind=0")
+                + " AND c.active=1" + (showHidden ? "" : " AND l.hidden=0")
+                + " AND (l.name LIKE ? OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?))";
         }
 
         // 游标翻页，不使用深 OFFSET。name/id 为稳定次序，防止同名条目跨页重复或漏读。
@@ -344,6 +353,8 @@ namespace AppManager
         {
             if (limit < 1 || limit > 500) throw new ArgumentOutOfRangeException("limit");
             bool search = !string.IsNullOrEmpty(keyword);
+            string searchPattern = SearchPattern(keyword);
+            if (search && searchPattern == null) return new CatalogPage();
             bool scopedSearch = search && !string.IsNullOrEmpty(searchGroup);
             long categoryGroup = 0;
             if (!search || scopedSearch)
@@ -372,21 +383,21 @@ namespace AppManager
                     if (scopedSearch)
                     {
                         // CROSS JOIN 固定连接顺序；普通 JOIN 可能被规划器重排成 catalog 全表驱动。
-                        from = "listing l CROSS JOIN catalog c ON c.item_id=l.item_id";
-                        where = "l.group_id=? AND " + (resources ? "l.kind=2" : "l.kind=0")
-                            + " AND c.active=1"
-                            + (showHidden ? "" : " AND " + hiddenColumn + "=0");
+                        from = ScopedSearchFrom;
+                        where = ScopedSearchWhere(resources, showHidden);
                         args.Add(categoryGroup);
+                        args.Add(searchPattern);
+                        args.Add(searchPattern);
                     }
                     else
                     {
                         from = "catalog c";
                         where = "c.active=1 AND " + (resources ? "c.kind=2" : "c.kind<>2")
                             + (showHidden ? "" : " AND " + hiddenColumn + "=0");
+                        where += " AND (" + nameColumn + " LIKE ? OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?))";
+                        args.Add(searchPattern);
+                        args.Add(searchPattern);
                     }
-                    where += " AND (" + nameColumn + " LIKE ? OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?))";
-                    args.Add(SearchPattern(keyword));
-                    args.Add(SearchPattern(keyword));
                     byName = true;
                 }
                 else
