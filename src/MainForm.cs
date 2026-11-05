@@ -4742,7 +4742,6 @@ namespace AppManager
                     {
                         items.Add(MkMenu("改名…", delegate { RenameAddedEntry(app); }));
                     }
-                    AddDeleteMenu(items, app);   // 文档/目录条目可直接删除（进回收站）
                 }
                 else
                 {
@@ -4751,6 +4750,15 @@ namespace AppManager
                     items.Add(MkMenu("打开文件", delegate { Launcher.OpenFile(app); }));
                     items.Add(MkMenu("打开所在位置", delegate { Launcher.OpenFileLocation(app); }));
                 }
+                items.Add(MkSep());
+                // 高频且低风险：复制与隐藏放在分类维护之前
+                AddCopyFilesMenu(items, targets);
+                items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
+                items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
+                if (app.IsHidden)
+                    items.Add(MkMenu("取消隐藏", delegate { SetHidden(app, false); }));
+                else
+                    items.Add(MkMenu("隐藏", delegate { SetHidden(app, true); }));
                 items.Add(MkSep());
                 if (website)
                 {
@@ -4767,8 +4775,6 @@ namespace AppManager
                     else
                         items.Add(MkMenu("添加到常用", delegate { ToggleFavorite(app, true); }));
                     items.Add(MkSubMenu("添加到默认分类…", BuildAddCategoryItems(app, false)));
-                    if (InCustom(app))
-                        items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(app); }));
                     items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(app)));
                 }
                 if (RemovableFromCurrent(new List<AppInfo> { app }).Count > 0)
@@ -4778,19 +4784,16 @@ namespace AppManager
                 {
                     items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(targets, currentCollection); }));
                 }
-                items.Add(MkSep());
-                if (app.IsHidden)
-                    items.Add(MkMenu("取消隐藏", delegate { SetHidden(app, false); }));
-                else
-                    items.Add(MkMenu("隐藏", delegate { SetHidden(app, true); }));
-                AddCopyFilesMenu(items, targets);
-                items.Add(MkMenu("复制名称", delegate { CopyText(app.Name); }));
-                items.Add(MkMenu("复制路径", delegate { CopyText(app.TargetPath); }));
-                if (!website && !string.IsNullOrEmpty(app.UninstallString))
+                if (!website && InCustom(app))
+                    items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(app); }));
+                bool uninstall = !website && !string.IsNullOrEmpty(app.UninstallString);
+                bool deletable = CanDeleteEntryDisk(app);
+                if (uninstall || deletable) items.Add(MkSep());
+                if (uninstall)
                 {
-                    items.Add(MkSep());
                     items.Add(MkMenu("卸载", delegate { Launcher.Uninstall(app); }));
                 }
+                if (deletable) AddDeleteMenu(items, app);   // 文档/目录条目可直接删除（进回收站）
             }
 
             if (!multi)
@@ -4827,14 +4830,20 @@ namespace AppManager
                 return;
             }
 
+            items.Add(MkSep());
+            AddCopyFilesMenu(items, targets);
+            items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
+            items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
+            if (AllHidden(targets))
+                items.Add(MkMenu("取消隐藏", delegate { SetHidden(targets, false); }));
+            else
+                items.Add(MkMenu("隐藏", delegate { SetHidden(targets, true); }));
+
+            items.Add(MkSep());
             // 改名仅支持单条：保留菜单项并置灰（与资源管理器一致），避免误以为可批量改名
             MenuWindow.MenuItem rename = MkMenu("改名…", null);
             rename.Disabled = true;
             items.Add(rename);
-            if (AnyDeletableEntry(targets))
-                items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
-
-            items.Add(MkSep());
             items.Add(MkSubMenu("移动到分类…", BuildMoveResourceItems(targets)));
             if (CanEditCategory(currentCategory))
                 items.Add(MkSubMenu("加入集合…", BuildJoinCollectionItems(targets)));
@@ -4845,14 +4854,11 @@ namespace AppManager
             if (currentCollection != null)
                 items.Add(MkMenu("从集合移出", delegate { RemoveItemsFromCategory(targets, currentCollection); }));
 
-            items.Add(MkSep());
-            if (AllHidden(targets))
-                items.Add(MkMenu("取消隐藏", delegate { SetHidden(targets, false); }));
-            else
-                items.Add(MkMenu("隐藏", delegate { SetHidden(targets, true); }));
-            AddCopyFilesMenu(items, targets);
-            items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
-            items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
+            if (AnyDeletableEntry(targets))
+            {
+                items.Add(MkSep());
+                items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
+            }
         }
 
         /// <summary>
@@ -4869,36 +4875,43 @@ namespace AppManager
             if (readOnly)
             {
                 items.Add(MkSep());
-                items.Add(MkSubMenu("添加到默认分类…", BuildAddCategoryItems(targets, false)));
-                if (AnyDeletableEntry(targets))
-                    items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
-                items.Add(MkSep());
                 AddCopyFilesMenu(items, targets);
                 items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
+                items.Add(MkSep());
+                items.Add(MkSubMenu("添加到默认分类…", BuildAddCategoryItems(targets, false)));
+                if (AnyDeletableEntry(targets))
+                {
+                    items.Add(MkSep());
+                    items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
+                }
                 return;
             }
 
+            items.Add(MkSep());
+            AddCopyFilesMenu(items, targets);
+            items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
+            items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
+            items.Add(MkMenu(AllHidden(targets) ? "取消隐藏" : "隐藏",
+                delegate { SetHidden(targets, !AllHidden(targets)); }));
+
+            items.Add(MkSep());
             bool allFavorite = AllFavorite(targets);
             items.Add(MkMenu(allFavorite ? "从常用移除" : "添加到常用",
                 delegate { ToggleFavorite(targets, !allFavorite); }));
             items.Add(MkSubMenu("添加到默认分类…", BuildAddCategoryItems(targets, false)));
-            if (AnyInCustom(targets))
-                items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(targets); }));
             items.Add(MkSubMenu("添加到自定义…", BuildAddCustomItems(targets)));
             List<AppInfo> removable = RemovableFromCurrent(targets);
             if (removable.Count > 0)
                 items.Add(MkMenu("从“" + currentCategory + "”移除",
                     delegate { RemoveTargetsFromCategory(removable, currentCategory); }));
-
-            items.Add(MkSep());
-            items.Add(MkMenu(AllHidden(targets) ? "取消隐藏" : "隐藏",
-                delegate { SetHidden(targets, !AllHidden(targets)); }));
-            AddCopyFilesMenu(items, targets);
-            items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
-            items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
+            if (AnyInCustom(targets))
+                items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(targets); }));
             if (AnyDeletableEntry(targets))
+            {
+                items.Add(MkSep());
                 items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
+            }
         }
 
         /// <summary>

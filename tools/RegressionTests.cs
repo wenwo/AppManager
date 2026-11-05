@@ -70,6 +70,7 @@ namespace AppManager
                 Run("category removal: failed save rolls back membership and permits retry", CategoryRemovalSaveFailure);
                 Run("default category addition: single/batch, multiple memberships, removal and reload", DefaultCategoryAddition);
                 Run("properties: software/resource menus, grid/list and complete memberships", PropertiesMenus);
+                Run("context menu order: copy/hide early, remove/delete last", ContextMenuOrder);
                 Run("properties: file metadata, folders, missing targets and packaged apps", PropertiesMetadata);
                 Run("properties: DPI scrolling, responsive open and cancelled background load", PropertiesResponsiveAndDpi);
                 Run("cross-volume move: no foreign overwrite, read-only source, locked file kept", CrossVolumeMoves);
@@ -958,6 +959,82 @@ namespace AppManager
                 }
                 app.Icon.Dispose();
                 Check(File.ReadAllText(path) == "keep", "properties changed original file");
+            }
+        }
+
+        private static void ContextMenuOrder()
+        {
+            AppConfig softwareConfig = new AppConfig();
+            string firstPath = Path.Combine(root, "menu-order-first.exe");
+            string secondPath = Path.Combine(root, "menu-order-second.exe");
+            File.WriteAllText(firstPath, "keep");
+            File.WriteAllText(secondPath, "keep");
+            AppInfo first = new AppInfo
+            {
+                Key = "menu-order:first", Name = "First", TargetPath = firstPath,
+                Category = "开发工具", IsFavorite = true, UninstallString = "fixture"
+            };
+            AppInfo second = new AppInfo
+            {
+                Key = "menu-order:second", Name = "Second", TargetPath = secondPath, Category = "开发工具"
+            };
+            softwareConfig.Favorites.Add(first.Key);
+            softwareConfig.CustomCategories.Add("我的工具");
+            CollectionOps.AddMember(softwareConfig, first.Key, "我的工具");
+            using (MainForm form = CategoryForm(softwareConfig, first, second))
+            {
+                typeof(MainForm).GetField("contentMode", Private).SetValue(form,
+                    Controls.SidebarControl.ContentMode.Software);
+                List<MenuWindow.MenuItem> single = (List<MenuWindow.MenuItem>)
+                    Invoke(form, "BuildContextMenu", first);
+                CheckMenuOrder(single, "打开", "复制名称", "复制路径", "隐藏", "从常用移除",
+                    "添加到默认分类…", "添加到自定义…", "从「开发工具」移除", "从自定义移除",
+                    "卸载", "属性…");
+
+                List<AppInfo> targets = new List<AppInfo> { first, second };
+                List<MenuWindow.MenuItem> batch = (List<MenuWindow.MenuItem>)
+                    Invoke(form, "BuildContextMenu", first, targets);
+                CheckMenuOrder(batch, "已选择 2 个项目", "打开", "复制名称", "复制路径", "隐藏",
+                    "添加到常用", "添加到默认分类…", "添加到自定义…", "从“开发工具”移除", "从自定义移除");
+
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "全部软件");
+                List<MenuWindow.MenuItem> readOnly = (List<MenuWindow.MenuItem>)
+                    Invoke(form, "BuildContextMenu", first, targets);
+                CheckMenuOrder(readOnly, "已选择 2 个项目", "打开", "复制名称", "复制路径", "添加到默认分类…");
+            }
+
+            AppConfig resourceConfig = RenameConfig("menu-order-resource");
+            AppInfo photo1 = AddEntry(resourceConfig, "照片",
+                Path.Combine(resourceConfig.ResourceStorePath, "照片", "order-1.jpg"), false, true, "order-1");
+            AppInfo photo2 = AddEntry(resourceConfig, "照片",
+                Path.Combine(resourceConfig.ResourceStorePath, "照片", "order-2.jpg"), false, true, "order-2");
+            using (MainForm form = ResourceForm(resourceConfig, "照片", photo1, photo2))
+            {
+                List<MenuWindow.MenuItem> single = (List<MenuWindow.MenuItem>)
+                    Invoke(form, "BuildContextMenu", photo1);
+                CheckMenuOrder(single, "打开文件", "复制名称", "复制路径", "隐藏", "移动到分类…",
+                    "加入集合…", "从「照片」移除", "删除", "属性…");
+
+                List<AppInfo> targets = new List<AppInfo> { photo1, photo2 };
+                List<MenuWindow.MenuItem> batch = (List<MenuWindow.MenuItem>)
+                    Invoke(form, "BuildContextMenu", photo1, targets);
+                CheckMenuOrder(batch, "已选择 2 个项目", "打开", "复制名称", "复制路径", "隐藏",
+                    "移动到分类…", "加入集合…", "从「照片」移出", "删除");
+            }
+        }
+
+        private static void CheckMenuOrder(List<MenuWindow.MenuItem> items, params string[] texts)
+        {
+            int previous = -1;
+            foreach (string text in texts)
+            {
+                int current = items.FindIndex(delegate(MenuWindow.MenuItem item)
+                {
+                    return item != null && item.Text == text;
+                });
+                Check(current >= 0, "menu item missing: " + text);
+                Check(current > previous, "menu order is wrong after: " + text);
+                previous = current;
             }
         }
 
