@@ -205,7 +205,7 @@ namespace AppManager
             collectionCoverKeys.Clear();
             for (int i = 0; i < config.Collections.Count; i++)
                 if (config.Collections[i].Parent == category)
-                    collectionCoverKeys.Add(CollectionKeys.Make(category, config.Collections[i].Name));
+                    collectionCoverKeys.Add(CollectionKeys.GetKey(config.Collections[i]));
             RetainCoverMembers(config.Database.CollectionFirstMembers(collectionCoverKeys, config.ShowHidden, true), collectionCoverImages);
         }
 

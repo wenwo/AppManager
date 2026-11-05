@@ -2808,10 +2808,7 @@ namespace AppManager
         private ResourceCollection FindCollectionByKey(string key)
         {
             if (!CollectionKeys.IsCollectionKey(key)) return null;
-            string rest = key.Substring(CollectionKeys.Prefix.Length);
-            int bar = rest.IndexOf('/');
-            if (bar <= 0) return null;
-            return CollectionOps.Find(config, rest.Substring(0, bar), rest.Substring(bar + 1));
+            return CollectionOps.FindByKey(config, key);
         }
 
         /// <summary>构造当前分类下的集合侧边栏条目：首位固定「全部」，其后为当前分类的自定义集合（含成员数与封面）。</summary>
@@ -2830,7 +2827,7 @@ namespace AppManager
                 ResourceCollection c = config.Collections[i];
                 if (c.Parent != currentCategory) continue;
                 CollectionSidebar.Item it = new CollectionSidebar.Item();
-                it.Key = CollectionKeys.Make(c.Parent, c.Name);
+                it.Key = CollectionKeys.GetKey(c);
                 it.Name = c.Name;
                 AppInfo first = null;
                 AppInfo firstImage = null;
@@ -3091,7 +3088,7 @@ namespace AppManager
             collectionInfo.EndEdit();   // 新建并切换到新集合前，放弃当前页内编辑
             c.Parent = currentCategory;
             config.Collections.Add(c);
-            string key = CollectionKeys.Make(c.Parent, c.Name);
+            string key = CollectionKeys.GetKey(c);
             if (appsToJoin != null)
             {
                 for (int i = 0; i < appsToJoin.Count; i++)
@@ -3137,7 +3134,7 @@ namespace AppManager
         {
             if (c == null) return;
             collectionInfo.EndEdit();   // 先退出可能存在的页内编辑，避免把旧表单数据带到另一个集合
-            string key = CollectionKeys.Make(c.Parent, c.Name);
+            string key = CollectionKeys.GetKey(c);
             currentCollection = key;
             collectionEntered = false;
             collectionSidebar.SetActive(key);
@@ -3159,7 +3156,7 @@ namespace AppManager
                 return;
             }
             if (!string.Equals(name, c.Name, StringComparison.Ordinal)
-                && CollectionOps.NameExists(config, c.Parent, name))
+                && CollectionOps.NameExists(config, c.Parent, c.ParentCollection, name))
             {
                 MessageBox.Show(this, "集合「" + name + "」已存在，请换一个名称。", "编辑集合",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -3180,24 +3177,32 @@ namespace AppManager
             }
 
             string oldCover = c.Cover;
-            string oldKey = CollectionKeys.Make(c.Parent, c.Name);
-            c.Name = name;
+            string oldKey = CollectionKeys.GetKey(c);
+            string browsingKey = currentCollection;
+            if (!string.Equals(name, c.Name, StringComparison.Ordinal))
+            {
+                Dictionary<string, string> renames;
+                try { renames = CollectionOps.RenameSubtree(config, c, name); }
+                catch (InvalidOperationException ex)
+                {
+                    DeleteManagedCoverIfUnused(finalCover, oldCover);
+                    MessageBox.Show(this, ex.Message, "编辑集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                string newKey = CollectionKeys.GetKey(c);
+                config.QueueCategoryRename(oldKey, newKey);
+                string mapped;
+                if (currentCollection != null && renames.TryGetValue(currentCollection, out mapped)) currentCollection = mapped;
+            }
             c.Description = newDescription ?? string.Empty;
             c.Cover = finalCover;
             c.CoverFocusX = ClampFocus(focusX);
             c.CoverFocusY = ClampFocus(focusY);
-            string newKey = CollectionKeys.Make(c.Parent, c.Name);
-            if (newKey != oldKey)
-            {
-                config.QueueCategoryRename(oldKey, newKey);
-                CollectionOps.RenameMemberKey(config, oldKey, newKey);
-                if (currentCollection == oldKey) currentCollection = newKey;
-            }
             bool savedConfig = config.Save();
             if (!savedConfig)
             {
                 // 配置已回滚到数据库状态；刚写入的受管封面没有任何引用，可以安全清理。
-                currentCollection = FindCollectionByKey(oldKey) == null ? null : oldKey;
+                currentCollection = browsingKey == null || FindCollectionByKey(browsingKey) == null ? null : browsingKey;
                 DeleteManagedCoverIfUnused(finalCover, null);
                 collectionInfo.EndEdit();
                 RefreshGrid();
@@ -3298,25 +3303,33 @@ namespace AppManager
         /// <summary>删除集合：仅移除定义与成员归属，文件保留在父分类（相簿删除语义）。</summary>
         private void DeleteCollection(ResourceCollection c)
         {
+            List<ResourceCollection> subtree = CollectionOps.Subtree(config, c);
+            HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < subtree.Count; i++) keys.Add(CollectionKeys.GetKey(subtree[i]));
+            int affected = CollectionOps.CountAffectedMembers(config, subtree);
+            string childText = subtree.Count > 1 ? "及其 " + (subtree.Count - 1) + " 个子文件夹" : string.Empty;
             if (!ConfirmDialog.Show("删除集合",
-                "删除集合「" + c.Name + "」不会删除集合内的文件，\n文件仍保留在「" + c.Parent + "」分类中。\n\n确认删除？")) return;
-            string key = CollectionKeys.Make(c.Parent, c.Name);
-            string oldCover = c.Cover;
-            config.Collections.Remove(c);
-            CollectionOps.RemoveCollectionKey(config, key);
-            if (currentCollection == key)
-            {
-                currentCollection = null;   // 删除当前集合：回到「全部」
-                collectionEntered = true;
-            }
+                "删除集合「" + c.Name + "」" + childText + "？\n将移除 " + affected + " 项资源的集合归属；不会删除磁盘文件。\n\n确认删除？")) return;
+            List<string> covers = new List<string>();
+            for (int i = 0; i < subtree.Count; i++)
+                if (!string.IsNullOrEmpty(subtree[i].Cover)) covers.Add(subtree[i].Cover);
+            string browsingKey = currentCollection;
+            bool browsingRemoved = browsingKey != null && keys.Contains(browsingKey);
+            CollectionOps.RemoveSubtree(config, c);
             if (!config.Save())
             {
                 MessageBox.Show(this, "删除集合未能保存。\n" + config.DatabaseError, "删除集合",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                currentCollection = browsingKey == null || FindCollectionByKey(browsingKey) == null ? null : browsingKey;
                 RefreshGrid();
                 return;
             }
-            DeleteManagedCoverIfUnused(oldCover, null);   // 粘贴生成的封面随集合删除一并清理
+            if (browsingRemoved)
+            {
+                currentCollection = null;   // 删除当前集合或其祖先：回到「全部」
+                collectionEntered = true;
+            }
+            for (int i = 0; i < covers.Count; i++) DeleteManagedCoverIfUnused(covers[i], null);
             RefreshGrid();
         }
 
@@ -3333,7 +3346,7 @@ namespace AppManager
             {
                 ResourceCollection c = config.Collections[i];
                 if (c.Parent != currentCategory) continue;
-                string key = CollectionKeys.Make(c.Parent, c.Name);
+                string key = CollectionKeys.GetKey(c);
                 MenuWindow.MenuItem m = MkMenu(c.Name, delegate { AddItemsToCategory(targets, key); });
                 bool addable = false;
                 for (int j = 0; j < targets.Count; j++)
@@ -3558,7 +3571,7 @@ namespace AppManager
             ResourceCollection browsing = currentCollection == null ? null : FindCollectionByKey(currentCollection);
             if (resource) CollectionOps.RenameParent(config, oldName, name);
             if (browsing != null && browsing.Parent == name)
-                currentCollection = CollectionKeys.Make(name, browsing.Name);
+                currentCollection = CollectionKeys.GetKey(browsing);
             if (currentCategory == oldName) currentCategory = name;
             config.Save();
             RebuildSidebar();
@@ -3582,6 +3595,8 @@ namespace AppManager
             if (resource)
                 foreach (ResourceCollection c in config.Collections)
                     if (c.Parent == category && !string.IsNullOrEmpty(c.Cover)) collectionCovers.Add(c.Cover);
+            ResourceCollection browsing = currentCollection == null ? null : FindCollectionByKey(currentCollection);
+            bool browsingRemoved = resource && browsing != null && browsing.Parent == category;
             if (resource) config.ResourceCategories.Remove(category);
             else config.CustomCategories.Remove(category);
             List<string> keys = new List<string>(config.CategoryOverride.Keys);
@@ -3610,6 +3625,11 @@ namespace AppManager
                 return;
             }
             if (currentCategory == category) currentCategory = resource ? "全部资源" : "全部软件";
+            if (browsingRemoved)
+            {
+                currentCollection = null;
+                collectionEntered = true;
+            }
             foreach (string cover in collectionCovers) DeleteManagedCoverIfUnused(cover, null);
             RebuildSidebar();
             OnSidebarSelect(currentCategory);   // 同步侧栏选中、视图模式、添加按钮可见性与列表
@@ -3823,7 +3843,7 @@ namespace AppManager
                 if (collection.Parent == "音乐") collections.Add(collection);
             collections.Sort(delegate(ResourceCollection a, ResourceCollection b) { return string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase); });
             foreach (ResourceCollection collection in collections)
-                lists.Add(new KeyValuePair<string, string>(CollectionKeys.Make(collection.Parent, collection.Name), collection.Name));
+                lists.Add(new KeyValuePair<string, string>(CollectionKeys.GetKey(collection), collection.Name));
 
             // 曲目列表（分页读库 + 逐个确认文件存在）在后台预取；子菜单展开时已就绪就直接显示，
             // 未就绪显示“正在读取…”，读完后清掉占位，再次悬停即可看到。点击曲目播放的正是菜单展示的这份列表，下标不会错位。

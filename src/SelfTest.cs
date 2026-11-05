@@ -981,7 +981,7 @@ namespace AppManager
                 col.Name = "旅行";
                 col.Parent = "照片";
                 c.Collections.Add(col);
-                string key = CollectionKeys.Make(col.Parent, col.Name);
+                string key = CollectionKeys.GetKey(col);
                 string item = "add:C:\\photos\\a.jpg";
 
                 // 首次加入返回 true（产生变化），重复加入返回 false（供调用方决定是否落盘/刷新）

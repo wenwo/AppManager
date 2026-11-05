@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Xml;
 
 namespace AppManager
@@ -138,6 +139,7 @@ namespace AppManager
     {
         public string Name = string.Empty;          // 集合名（同一父分类内唯一）
         public string Parent = string.Empty;       // 所属资源分类（照片/视频/…/自建资源分类）
+        public string ParentCollection = string.Empty; // 直接父集合键；空 = 直接属于 Parent 分类
         public string Description = string.Empty;  // 说明（集合详情栏展示）
         public string Cover = string.Empty;        // 自定义封面图片路径；空 = 自动取首个成员缩略图
         public float CoverFocusX = 0.5F;           // 封面取景焦点横向位置（0~1，0.5 居中）
@@ -148,17 +150,154 @@ namespace AppManager
     internal static class CollectionKeys
     {
         public const string Prefix = "col:";
+        public const int MaxDepth = 16;
+        public const int MaxKeyLength = 2048;
+        public const int MaxCollections = 10000;
 
-        /// <summary>构造集合键（col:父分类/集合名）。</summary>
+        /// <summary>构造直接属于资源分类的集合键（col:父分类/集合名）。业务代码优先用 GetKey(ResourceCollection)。</summary>
         public static string Make(string parent, string name)
         {
             return Prefix + parent + "/" + name;
+        }
+
+        /// <summary>统一集合键入口：同一父节点下追加名称，嵌套集合自动继承完整父键。</summary>
+        public static string GetKey(ResourceCollection collection)
+        {
+            if (collection == null) throw new ArgumentNullException("collection");
+            return GetKey(collection.Parent, collection.ParentCollection, collection.Name);
+        }
+
+        /// <summary>按根资源分类、直接父集合键和名称构造集合键。</summary>
+        public static string GetKey(string parent, string parentCollection, string name)
+        {
+            if (!string.IsNullOrEmpty(parentCollection)) return parentCollection + "/" + (name ?? string.Empty);
+            return Make(parent, name ?? string.Empty);
+        }
+
+        /// <summary>在父节点下追加名称；父节点既可以是资源分类，也可以是完整集合键。</summary>
+        public static string GetChildKey(string parentKey, string name)
+        {
+            if (IsCollectionKey(parentKey)) return parentKey + "/" + (name ?? string.Empty);
+            return Make(parentKey, name ?? string.Empty);
+        }
+
+        /// <summary>解析集合键；根分类、直接父集合键（根集合为空）和名称均须完整。</summary>
+        public static bool TryParse(string key, out string parent, out string parentCollection, out string name)
+        {
+            parent = string.Empty;
+            parentCollection = string.Empty;
+            name = string.Empty;
+            if (!IsCollectionKey(key)) return false;
+            string[] parts = key.Substring(Prefix.Length).Split('/');
+            if (parts.Length < 2) return false;
+            for (int i = 0; i < parts.Length; i++) if (parts[i].Length == 0) return false;
+            parent = parts[0];
+            name = parts[parts.Length - 1];
+            if (parts.Length > 2)
+            {
+                StringBuilder builder = new StringBuilder(Prefix + parts[0]);
+                for (int i = 1; i < parts.Length - 1; i++) builder.Append('/').Append(parts[i]);
+                parentCollection = builder.ToString();
+            }
+            return true;
+        }
+
+        /// <summary>集合在资源分类下的深度：直接成员为 1，子集合为 2。</summary>
+        public static int Depth(string key)
+        {
+            string parent, parentCollection, name;
+            if (!TryParse(key, out parent, out parentCollection, out name)) return 0;
+            int depth = 1;
+            while (!string.IsNullOrEmpty(parentCollection))
+            {
+                depth++;
+                if (!TryParse(parentCollection, out parent, out parentCollection, out name)) return 0;
+            }
+            return depth;
+        }
+
+        /// <summary>是否严格后代：按完整键段边界比较，col:a/b 不会误判 col:a/bc 的后代。</summary>
+        public static bool IsDescendantOrSelf(string ancestor, string candidate)
+        {
+            if (string.IsNullOrEmpty(ancestor) || string.IsNullOrEmpty(candidate)) return false;
+            if (string.Equals(ancestor, candidate, StringComparison.Ordinal)) return true;
+            return candidate.Length > ancestor.Length
+                && candidate.StartsWith(ancestor + "/", StringComparison.Ordinal);
         }
 
         /// <summary>是否为集合键（用于列表「所属」列等处过滤内部标识）。</summary>
         public static bool IsCollectionKey(string key)
         {
             return key != null && key.StartsWith(Prefix, StringComparison.Ordinal);
+        }
+
+        /// <summary>解析配置中指向集合的引用键；图标配置使用 resource: 前缀，其余位置直接存集合键。</summary>
+        public static bool TryGetReferencedCollectionKey(string value, out string collectionKey)
+        {
+            collectionKey = null;
+            if (IsCollectionKey(value)) { collectionKey = value; return true; }
+            const string resourcePrefix = "resource:";
+            if (value != null && value.StartsWith(resourcePrefix, StringComparison.Ordinal)
+                && IsCollectionKey(value.Substring(resourcePrefix.Length)))
+            {
+                collectionKey = value.Substring(resourcePrefix.Length);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    /// <summary>集合树的只读索引：统一按键查找、枚举直接子节点和判断后代。</summary>
+    internal sealed class CollectionIndex
+    {
+        private readonly Dictionary<string, ResourceCollection> byKey =
+            new Dictionary<string, ResourceCollection>(StringComparer.Ordinal);
+        private readonly Dictionary<string, List<ResourceCollection>> byParent =
+            new Dictionary<string, List<ResourceCollection>>(StringComparer.Ordinal);
+
+        internal CollectionIndex(IEnumerable<ResourceCollection> collections)
+        {
+            if (collections == null) return;
+            foreach (ResourceCollection collection in collections)
+            {
+                if (collection == null) continue;
+                string key = CollectionKeys.GetKey(collection);
+                if (!byKey.ContainsKey(key)) byKey[key] = collection;
+                string parent = collection.ParentCollection ?? string.Empty;
+                List<ResourceCollection> children;
+                if (!byParent.TryGetValue(parent, out children))
+                {
+                    children = new List<ResourceCollection>();
+                    byParent[parent] = children;
+                }
+                children.Add(collection);
+            }
+        }
+
+        internal int Count { get { return byKey.Count; } }
+
+        internal bool TryGet(string key, out ResourceCollection collection)
+        {
+            return byKey.TryGetValue(key ?? string.Empty, out collection);
+        }
+
+        internal ResourceCollection Find(string key)
+        {
+            ResourceCollection collection;
+            return TryGet(key, out collection) ? collection : null;
+        }
+
+        /// <summary>直接子集合；parentCollectionKey 为空时返回各资源分类下的一级集合。</summary>
+        internal List<ResourceCollection> Children(string parentCollectionKey)
+        {
+            List<ResourceCollection> children;
+            return byParent.TryGetValue(parentCollectionKey ?? string.Empty, out children)
+                ? new List<ResourceCollection>(children) : new List<ResourceCollection>();
+        }
+
+        internal bool IsDescendantOrSelf(string ancestorKey, string candidateKey)
+        {
+            return CollectionKeys.IsDescendantOrSelf(ancestorKey, candidateKey);
         }
     }
 
@@ -168,18 +307,297 @@ namespace AppManager
         /// <summary>按父分类与名称查找集合定义；未找到返回 null。</summary>
         public static ResourceCollection Find(AppConfig cfg, string parent, string name)
         {
+            return FindSibling(cfg, parent, string.Empty, name);
+        }
+
+        /// <summary>按直接父集合与名称查找同级集合；parentCollection 为空表示资源分类下的一级集合。</summary>
+        public static ResourceCollection FindSibling(AppConfig cfg, string parent, string parentCollection, string name)
+        {
+            if (cfg == null) return null;
             for (int i = 0; i < cfg.Collections.Count; i++)
             {
                 ResourceCollection c = cfg.Collections[i];
-                if (c.Parent == parent && c.Name == name) return c;
+                if (c == null || !string.Equals(c.Parent, parent, StringComparison.Ordinal)
+                    || !string.Equals(c.ParentCollection ?? string.Empty, parentCollection ?? string.Empty, StringComparison.Ordinal)
+                    || !string.Equals(c.Name, name, StringComparison.Ordinal)) continue;
+                return c;
             }
             return null;
         }
 
-        /// <summary>同父分类下集合名是否已存在。</summary>
+        /// <summary>按完整集合键查找定义；键必须与集合的 Parent/ParentCollection/Name 完全一致。</summary>
+        public static ResourceCollection FindByKey(AppConfig cfg, string key)
+        {
+            if (cfg == null || string.IsNullOrEmpty(key)) return null;
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c != null && string.Equals(CollectionKeys.GetKey(c), key, StringComparison.Ordinal)) return c;
+            }
+            return null;
+        }
+
+        /// <summary>同一直接父节点下集合名是否已存在（一级集合口径）。</summary>
         public static bool NameExists(AppConfig cfg, string parent, string name)
         {
-            return Find(cfg, parent, name) != null;
+            return NameExists(cfg, parent, string.Empty, name);
+        }
+
+        /// <summary>同一直接父节点下集合名是否已存在；parentCollection 为空表示资源分类下的一级集合。</summary>
+        public static bool NameExists(AppConfig cfg, string parent, string parentCollection, string name)
+        {
+            if (cfg == null) return false;
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c == null || !string.Equals(c.Parent, parent, StringComparison.Ordinal)
+                    || !string.Equals(c.ParentCollection ?? string.Empty, parentCollection ?? string.Empty, StringComparison.Ordinal)
+                    || !string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>返回集合自身及其全部后代；键按完整段边界判断。</summary>
+        public static List<ResourceCollection> Subtree(AppConfig cfg, ResourceCollection collection)
+        {
+            List<ResourceCollection> result = new List<ResourceCollection>();
+            if (cfg == null || collection == null) return result;
+            string rootKey = CollectionKeys.GetKey(collection);
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c != null && CollectionKeys.IsDescendantOrSelf(rootKey, CollectionKeys.GetKey(c)))
+                    result.Add(c);
+            }
+            return result;
+        }
+
+        /// <summary>统计会被这些集合移除归属的条目数；只算额外归属，不改条目所在分类。</summary>
+        public static int CountAffectedMembers(AppConfig cfg, IEnumerable<ResourceCollection> collections)
+        {
+            if (cfg == null || collections == null) return 0;
+            HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+            foreach (ResourceCollection c in collections) if (c != null) keys.Add(CollectionKeys.GetKey(c));
+            if (keys.Count == 0) return 0;
+            int count = 0;
+            foreach (KeyValuePair<string, List<string>> entry in cfg.ItemCategories)
+            {
+                if (entry.Value == null) continue;
+                for (int i = 0; i < entry.Value.Count; i++)
+                    if (keys.Contains(entry.Value[i])) { count++; break; }
+            }
+            return count;
+        }
+
+        /// <summary>重命名集合子树：先校验全部目标键，再一次性迁移定义、父集合引用和配置引用。</summary>
+        public static Dictionary<string, string> RenameSubtree(AppConfig cfg, ResourceCollection collection, string newName)
+        {
+            if (cfg == null) throw new ArgumentNullException("cfg");
+            if (collection == null) throw new ArgumentNullException("collection");
+            string normalized = (newName ?? string.Empty).Trim();
+            string nameError = CategoryRules.ValidateCollectionName(normalized);
+            if (nameError != null) throw new InvalidOperationException(nameError);
+
+            string oldRoot = CollectionKeys.GetKey(collection);
+            string newRoot = CollectionKeys.GetKey(collection.Parent, collection.ParentCollection, normalized);
+            List<ResourceCollection> subtree = Subtree(cfg, collection);
+            if (subtree.Count == 0 || !subtree.Contains(collection))
+                throw new InvalidOperationException("集合定义不在当前配置中。");
+
+            HashSet<ResourceCollection> subtreeSet = new HashSet<ResourceCollection>(subtree);
+            HashSet<string> externalKeys = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection other = cfg.Collections[i];
+                if (other == null || subtreeSet.Contains(other)) continue;
+                externalKeys.Add(CollectionKeys.GetKey(other));
+            }
+
+            Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.Ordinal);
+            HashSet<string> targets = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < subtree.Count; i++)
+            {
+                ResourceCollection c = subtree[i];
+                string oldKey = CollectionKeys.GetKey(c);
+                string newKey = newRoot + oldKey.Substring(oldRoot.Length);
+                if (newKey.Length > CollectionKeys.MaxKeyLength)
+                    throw new InvalidOperationException("集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）：" + newKey);
+                if (externalKeys.Contains(newKey))
+                    throw new InvalidOperationException("目标路径已存在集合：" + newKey);
+                if (!targets.Add(newKey))
+                    throw new InvalidOperationException("集合重命名产生了重复路径：" + newKey);
+                map[oldKey] = newKey;
+            }
+
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c == null || string.IsNullOrEmpty(c.ParentCollection)) continue;
+                string mapped;
+                if (map.TryGetValue(c.ParentCollection, out mapped)) c.ParentCollection = mapped;
+            }
+            collection.Name = normalized;
+            RemapCollectionReferences(cfg, map);
+            return map;
+        }
+
+        /// <summary>删除集合子树定义，并一次性清理所有配置引用；不触碰真实文件或条目所在分类。</summary>
+        public static List<ResourceCollection> RemoveSubtree(AppConfig cfg, ResourceCollection collection)
+        {
+            List<ResourceCollection> removed = Subtree(cfg, collection);
+            if (removed.Count == 0) return removed;
+            HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < removed.Count; i++) keys.Add(CollectionKeys.GetKey(removed[i]));
+            cfg.Collections.RemoveAll(delegate(ResourceCollection c)
+            {
+                return c == null || keys.Contains(CollectionKeys.GetKey(c));
+            });
+            RemoveCollectionKeys(cfg, keys);
+            return removed;
+        }
+
+        /// <summary>迁移配置中可能保存集合键的字段，供改名和父分类改名共用。</summary>
+        private static void RemapCollectionReferences(AppConfig cfg, Dictionary<string, string> map)
+        {
+            if (map.Count == 0) return;
+            List<string> emptyItems = new List<string>();
+            foreach (KeyValuePair<string, List<string>> entry in cfg.ItemCategories)
+            {
+                RemapMembershipList(entry.Value, map);
+                if (entry.Value == null || entry.Value.Count == 0) emptyItems.Add(entry.Key);
+            }
+            for (int i = 0; i < emptyItems.Count; i++) cfg.ItemCategories.Remove(emptyItems[i]);
+
+            emptyItems.Clear();
+            foreach (KeyValuePair<string, List<string>> entry in cfg.ExcludedCategories)
+            {
+                RemapMembershipList(entry.Value, map);
+                if (entry.Value == null || entry.Value.Count == 0) emptyItems.Add(entry.Key);
+            }
+            for (int i = 0; i < emptyItems.Count; i++) cfg.ExcludedCategories.Remove(emptyItems[i]);
+
+            RemapOrderKeys(cfg.ItemOrder, map);
+            RemapBooleanKeys(cfg.CategoryViewMode, map);
+            RemapIconKeys(cfg.CategoryIconNames, map);
+            for (int i = 0; i < cfg.SidebarOrder.Count; i++)
+            {
+                string mapped;
+                if (map.TryGetValue(cfg.SidebarOrder[i], out mapped)) cfg.SidebarOrder[i] = mapped;
+            }
+        }
+
+        private static void RemapMembershipList(List<string> values, Dictionary<string, string> map)
+        {
+            if (values == null || values.Count == 0) return;
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            int write = 0;
+            for (int read = 0; read < values.Count; read++)
+            {
+                string value = values[read];
+                string mapped;
+                if (map.TryGetValue(value, out mapped)) value = mapped;
+                if (seen.Add(value)) values[write++] = value;
+            }
+            if (write < values.Count) values.RemoveRange(write, values.Count - write);
+        }
+
+        private static void RemapOrderKeys(Dictionary<string, List<string>> values, Dictionary<string, string> map)
+        {
+            List<KeyValuePair<string, string>> moves = new List<KeyValuePair<string, string>>();
+            foreach (KeyValuePair<string, List<string>> entry in values)
+            {
+                string mapped;
+                if (map.TryGetValue(entry.Key, out mapped) && !string.Equals(entry.Key, mapped, StringComparison.Ordinal))
+                    moves.Add(new KeyValuePair<string, string>(entry.Key, mapped));
+            }
+            for (int i = 0; i < moves.Count; i++)
+            {
+                string oldKey = moves[i].Key, newKey = moves[i].Value;
+                List<string> source;
+                if (!values.TryGetValue(oldKey, out source)) continue;
+                List<string> target;
+                if (values.TryGetValue(newKey, out target))
+                {
+                    for (int j = 0; j < source.Count; j++) if (!target.Contains(source[j])) target.Add(source[j]);
+                }
+                else values[newKey] = new List<string>(source);
+                values.Remove(oldKey);
+            }
+        }
+
+        private static void RemapBooleanKeys(Dictionary<string, bool> values, Dictionary<string, string> map)
+        {
+            List<KeyValuePair<string, string>> moves = new List<KeyValuePair<string, string>>();
+            foreach (KeyValuePair<string, bool> entry in values)
+            {
+                string mapped;
+                if (map.TryGetValue(entry.Key, out mapped) && !string.Equals(entry.Key, mapped, StringComparison.Ordinal))
+                    moves.Add(new KeyValuePair<string, string>(entry.Key, mapped));
+            }
+            for (int i = 0; i < moves.Count; i++)
+            {
+                bool value;
+                if (!values.TryGetValue(moves[i].Key, out value)) continue;
+                values[moves[i].Value] = value;
+                values.Remove(moves[i].Key);
+            }
+        }
+
+        private static void RemapIconKeys(Dictionary<string, string> values, Dictionary<string, string> map)
+        {
+            List<KeyValuePair<string, string>> moves = new List<KeyValuePair<string, string>>();
+            foreach (KeyValuePair<string, string> entry in values)
+            {
+                string collectionKey;
+                if (!CollectionKeys.TryGetReferencedCollectionKey(entry.Key, out collectionKey)) continue;
+                string mapped;
+                if (!map.TryGetValue(collectionKey, out mapped) || string.Equals(collectionKey, mapped, StringComparison.Ordinal)) continue;
+                string newKey = entry.Key.Substring(0, entry.Key.Length - collectionKey.Length) + mapped;
+                moves.Add(new KeyValuePair<string, string>(entry.Key, newKey));
+            }
+            for (int i = 0; i < moves.Count; i++)
+            {
+                string value;
+                if (!values.TryGetValue(moves[i].Key, out value)) continue;
+                values[moves[i].Value] = value;
+                values.Remove(moves[i].Key);
+            }
+        }
+
+        private static void RemoveCollectionKeys(AppConfig cfg, HashSet<string> keys)
+        {
+            if (keys.Count == 0) return;
+            List<string> emptyItems = new List<string>();
+            foreach (KeyValuePair<string, List<string>> entry in cfg.ItemCategories)
+            {
+                if (entry.Value == null) { emptyItems.Add(entry.Key); continue; }
+                entry.Value.RemoveAll(delegate(string value) { return keys.Contains(value); });
+                if (entry.Value.Count == 0) emptyItems.Add(entry.Key);
+            }
+            for (int i = 0; i < emptyItems.Count; i++) cfg.ItemCategories.Remove(emptyItems[i]);
+
+            emptyItems.Clear();
+            foreach (KeyValuePair<string, List<string>> entry in cfg.ExcludedCategories)
+            {
+                if (entry.Value == null) { emptyItems.Add(entry.Key); continue; }
+                entry.Value.RemoveAll(delegate(string value) { return keys.Contains(value); });
+                if (entry.Value.Count == 0) emptyItems.Add(entry.Key);
+            }
+            for (int i = 0; i < emptyItems.Count; i++) cfg.ExcludedCategories.Remove(emptyItems[i]);
+
+            foreach (string key in new List<string>(cfg.ItemOrder.Keys))
+                if (keys.Contains(key)) cfg.ItemOrder.Remove(key);
+            foreach (string key in new List<string>(cfg.CategoryViewMode.Keys))
+                if (keys.Contains(key)) cfg.CategoryViewMode.Remove(key);
+            foreach (string key in new List<string>(cfg.CategoryIconNames.Keys))
+            {
+                string collectionKey;
+                if (CollectionKeys.TryGetReferencedCollectionKey(key, out collectionKey) && keys.Contains(collectionKey))
+                    cfg.CategoryIconNames.Remove(key);
+            }
+            for (int i = cfg.SidebarOrder.Count - 1; i >= 0; i--)
+                if (keys.Contains(cfg.SidebarOrder[i])) cfg.SidebarOrder.RemoveAt(i);
         }
 
         /// <summary>把条目键加入集合（多归属，不搬文件）；已存在不重复添加。返回是否产生变化（供调用方决定是否落盘/刷新）。</summary>
@@ -235,27 +653,39 @@ namespace AppManager
         /// </summary>
         public static void RenameParent(AppConfig cfg, string oldParent, string newParent)
         {
+            if (cfg == null) return;
+            string oldBase = CollectionKeys.Prefix + (oldParent ?? string.Empty);
+            string newBase = CollectionKeys.Prefix + (newParent ?? string.Empty);
+            Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.Ordinal);
             for (int i = 0; i < cfg.Collections.Count; i++)
             {
                 ResourceCollection c = cfg.Collections[i];
                 if (c.Parent != oldParent) continue;
-                string oldKey = CollectionKeys.Make(oldParent, c.Name);
-                string newKey = CollectionKeys.Make(newParent, c.Name);
-                c.Parent = newParent;
-                RenameMemberKey(cfg, oldKey, newKey);
+                string oldKey = CollectionKeys.GetKey(c);
+                string newKey = newBase + oldKey.Substring(oldBase.Length);
+                if (newKey.Length > CollectionKeys.MaxKeyLength)
+                    throw new InvalidOperationException("集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）：" + newKey);
+                map[oldKey] = newKey;
             }
+            foreach (ResourceCollection c in cfg.Collections) if (c.Parent == oldParent) c.Parent = newParent;
+            foreach (ResourceCollection c in cfg.Collections)
+            {
+                if (string.IsNullOrEmpty(c.ParentCollection)) continue;
+                string mapped;
+                if (map.TryGetValue(c.ParentCollection, out mapped)) c.ParentCollection = mapped;
+            }
+            RemapCollectionReferences(cfg, map);
         }
 
         /// <summary>资源分类删除：移除其下全部集合定义，并清理条目归属中的成员键。</summary>
         public static void RemoveByParent(AppConfig cfg, string parent)
         {
-            for (int i = cfg.Collections.Count - 1; i >= 0; i--)
-            {
-                ResourceCollection c = cfg.Collections[i];
-                if (c.Parent != parent) continue;
-                RemoveCollectionKey(cfg, CollectionKeys.Make(parent, c.Name));
-                cfg.Collections.RemoveAt(i);
-            }
+            if (cfg == null) return;
+            HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+            for (int i = 0; i < cfg.Collections.Count; i++)
+                if (cfg.Collections[i].Parent == parent) keys.Add(CollectionKeys.GetKey(cfg.Collections[i]));
+            cfg.Collections.RemoveAll(delegate(ResourceCollection c) { return c.Parent == parent; });
+            RemoveCollectionKeys(cfg, keys);
         }
     }
 
@@ -283,6 +713,7 @@ namespace AppManager
     /// </summary>
     public class AppConfig
     {
+        internal const int BackupFormatVersion = 2;
         private readonly object saveLock = new object();
         internal ConfigDatabase Database;
         internal string DatabaseError;
@@ -406,6 +837,13 @@ namespace AppManager
                     return cfg;
                 }
 
+                int backupFormatVersion = 1;
+                string versionText = XmlAttr(root, "backupFormatVersion");
+                if (versionText.Length > 0 &&
+                    (!int.TryParse(versionText, NumberStyles.Integer, CultureInfo.InvariantCulture, out backupFormatVersion)
+                    || backupFormatVersion < 1 || backupFormatVersion > BackupFormatVersion))
+                    throw new InvalidDataException("备份格式版本不受支持。");
+
                 cfg.ViewGrid = XmlElementBool(root, "ViewGrid", true);
                 cfg.ShowHidden = XmlElementBool(root, "ShowHidden", false);
                 cfg.AutoScan = XmlElementBool(root, "AutoScan", true);
@@ -421,11 +859,13 @@ namespace AppManager
                     ResourceCollection c = new ResourceCollection();
                     c.Name = XmlAttr(n, "name");
                     c.Parent = XmlAttr(n, "parent");
+                    c.ParentCollection = XmlAttr(n, "parentCollection");
                     c.Description = XmlAttr(n, "desc");
                     c.Cover = XmlAttr(n, "cover");
                     c.CoverFocusX = XmlAttributeFocus(n, "fx");
                     c.CoverFocusY = XmlAttributeFocus(n, "fy");
-                    if (c.Name.Length > 0 && c.Parent.Length > 0) cfg.Collections.Add(c);
+                    // 保留不完整项交给导入/恢复校验拒绝，不能在这里静默丢掉整棵集合节点。
+                    if (c.Name.Length > 0 || c.Parent.Length > 0 || c.ParentCollection.Length > 0) cfg.Collections.Add(c);
                 }
                 foreach (XmlNode n in root.SelectNodes("CategoryOverrides/Item"))
                 {
@@ -676,6 +1116,7 @@ namespace AppManager
         private void WriteXml(XmlWriter w, bool includeAddedItems = true)
         {
             w.WriteStartElement("AppManagerConfig");
+            w.WriteAttributeString("backupFormatVersion", BackupFormatVersion.ToString(CultureInfo.InvariantCulture));
             w.WriteElementString("ViewGrid", ViewGrid ? "true" : "false");
             w.WriteElementString("ShowHidden", ShowHidden ? "true" : "false");
             w.WriteElementString("AutoScan", AutoScan ? "true" : "false");
@@ -705,6 +1146,7 @@ namespace AppManager
                 w.WriteStartElement("Item");
                 w.WriteAttributeString("name", c.Name ?? string.Empty);
                 w.WriteAttributeString("parent", c.Parent ?? string.Empty);
+                w.WriteAttributeString("parentCollection", c.ParentCollection ?? string.Empty);
                 w.WriteAttributeString("desc", c.Description ?? string.Empty);
                 w.WriteAttributeString("cover", c.Cover ?? string.Empty);
                 w.WriteAttributeString("fx", c.CoverFocusX.ToString("0.###", CultureInfo.InvariantCulture));
@@ -1113,16 +1555,102 @@ namespace AppManager
                 foreach (string name in resources)
                     if (software.Contains(name)) return "软件分类与资源分类不能同名：“" + name + "”。";
             }
-            HashSet<string> collections = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (ResourceCollection collection in Collections)
+            string collectionError = ValidateCollectionTree(resources);
+            if (collectionError != null) return collectionError;
+            return null;
+        }
+
+        /// <summary>校验整棵集合树及其成员引用；任何孤立、循环、越界或重复都拒绝，不做扁平化兜底。</summary>
+        private string ValidateCollectionTree(HashSet<string> resourceCategories)
+        {
+            if (Collections == null) return "集合列表无效。";
+            if (Collections.Count > CollectionKeys.MaxCollections)
+                return "集合数量超过上限（最多 " + CollectionKeys.MaxCollections + " 个）。";
+
+            CollectionIndex index = new CollectionIndex(Collections);
+            HashSet<string> keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < Collections.Count; i++)
             {
+                ResourceCollection collection = Collections[i];
+                if (collection == null) return "集合列表中包含空项。";
                 string error = CategoryRules.ValidateCollectionName(collection.Name);
                 if (error != null) return "集合“" + collection.Name + "”无效：" + error;
                 error = CategoryRules.ValidateCollectionName(collection.Parent);
                 if (error != null) return "集合“" + collection.Name + "”的父分类“" + collection.Parent + "”无效：" + error;
-                string key = CollectionKeys.Make(collection.Parent, collection.Name);
-                if (!collections.Add(key)) return "集合“" + collection.Parent + " / " + collection.Name + "”重复。";
+                if (!resourceCategories.Contains(collection.Parent))
+                    return "集合“" + collection.Name + "”引用了不存在的资源分类“" + collection.Parent + "”。";
+
+                string key = CollectionKeys.GetKey(collection);
+                if (key.Length > CollectionKeys.MaxKeyLength)
+                    return "集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）：" + key;
+                int depth = CollectionKeys.Depth(key);
+                if (depth <= 0 || depth > CollectionKeys.MaxDepth)
+                    return "集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）：" + key;
+                if (!keys.Add(key)) return "集合“" + key + "”重复。";
+
+                if (string.IsNullOrEmpty(collection.ParentCollection)) continue;
+                string root, parentCollection, name;
+                if (!CollectionKeys.TryParse(collection.ParentCollection, out root, out parentCollection, out name))
+                    return "集合“" + key + "”的父集合键无效。";
+                if (!string.Equals(root, collection.Parent, StringComparison.OrdinalIgnoreCase))
+                    return "集合“" + key + "”与父集合不属于同一资源分类。";
             }
+
+            for (int i = 0; i < Collections.Count; i++)
+            {
+                ResourceCollection collection = Collections[i];
+                string key = CollectionKeys.GetKey(collection);
+                string cursor = collection.ParentCollection;
+                HashSet<string> chain = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                while (!string.IsNullOrEmpty(cursor))
+                {
+                    if (!chain.Add(cursor)) return "集合“" + key + "”的父集合链存在循环或自引用。";
+                    ResourceCollection parent;
+                    if (!index.TryGet(cursor, out parent))
+                        return "集合“" + key + "”引用了不存在的父集合“" + cursor + "”。";
+                    if (!string.Equals(parent.Parent, collection.Parent, StringComparison.OrdinalIgnoreCase))
+                        return "集合“" + key + "”的父集合根分类不一致。";
+                    cursor = parent.ParentCollection;
+                }
+            }
+
+            string referenceError = ValidateCollectionReferences(index);
+            if (referenceError != null) return referenceError;
+            return null;
+        }
+
+        /// <summary>校验所有可能保存集合键的配置，避免导入后出现成员或视图指向不存在的文件夹。</summary>
+        private string ValidateCollectionReferences(CollectionIndex index)
+        {
+            foreach (KeyValuePair<string, List<string>> entry in ItemCategories)
+                if (entry.Value != null)
+                    foreach (string category in entry.Value)
+                    {
+                        if (!CollectionKeys.IsCollectionKey(category)) continue;
+                        if (index.Find(category) == null) return "条目“" + entry.Key + "”的归属引用了不存在的集合“" + category + "”。";
+                    }
+            foreach (KeyValuePair<string, List<string>> entry in ExcludedCategories)
+                if (entry.Value != null)
+                    foreach (string category in entry.Value)
+                    {
+                        if (!CollectionKeys.IsCollectionKey(category)) continue;
+                        if (index.Find(category) == null) return "条目“" + entry.Key + "”的排除项引用了不存在的集合“" + category + "”。";
+                    }
+            foreach (string category in ItemOrder.Keys)
+                if (CollectionKeys.IsCollectionKey(category) && index.Find(category) == null)
+                    return "排序配置引用了不存在的集合“" + category + "”。";
+            foreach (string category in CategoryViewMode.Keys)
+                if (CollectionKeys.IsCollectionKey(category) && index.Find(category) == null)
+                    return "视图配置引用了不存在的集合“" + category + "”。";
+            foreach (string category in CategoryIconNames.Keys)
+            {
+                string collectionKey;
+                if (CollectionKeys.TryGetReferencedCollectionKey(category, out collectionKey) && index.Find(collectionKey) == null)
+                    return "图标配置引用了不存在的集合“" + collectionKey + "”。";
+            }
+            foreach (string category in SidebarOrder)
+                if (CollectionKeys.IsCollectionKey(category) && index.Find(category) == null)
+                    return "侧栏配置引用了不存在的集合“" + category + "”。";
             return null;
         }
 

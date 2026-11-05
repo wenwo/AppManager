@@ -103,10 +103,9 @@ namespace AppManager
         {
             using (Sqlite source = new Sqlite(path, true))
             {
-                if (source.Scalar("PRAGMA application_id") != Scalar("PRAGMA application_id") ||
-                    source.Scalar("PRAGMA user_version") != Scalar("PRAGMA user_version") ||
-                    source.Scalar("PRAGMA integrity_check") != "ok" || source.Query("PRAGMA foreign_key_check").Count != 0)
-                    throw new IOException("恢复文件格式或完整性检查失败。");
+                int expectedApplicationId = Convert.ToInt32(Scalar("PRAGMA application_id"));
+                string validation = DatabaseCompatibility.ValidateSnapshot(source, expectedApplicationId);
+                if (validation != null) throw new IOException("恢复文件格式或完整性检查失败：" + validation);
                 IntPtr backup = sqlite3_backup_init(handle, Utf8("main"), source.handle, Utf8("main"));
                 if (backup == IntPtr.Zero) throw new IOException("SQLite restore init: " + Error);
                 int rc;

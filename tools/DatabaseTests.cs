@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Windows.Forms;
+using System.Xml;
 
 namespace AppManager
 {
@@ -35,6 +36,12 @@ namespace AppManager
             {
                 Run("migration, all fields, idempotence and original XML preserved", Migration);
                 Run("stable category and collection ids on rename", Rename);
+                Run("nested collection keys, indexes and parent ids survive reload", CollectionTree);
+                Run("nested collection subtree rename migrates keys, references and ids", CollectionSubtreeRename);
+                Run("nested collection rename conflicts and failed saves are retryable", CollectionSubtreeConflictAndRollback);
+                Run("nested collection subtree delete clears only its references", CollectionSubtreeDelete);
+                Run("v1 database upgrades to v2 and v1 snapshots remain restorable", SchemaUpgrade);
+                Run("collection import rejects malformed, orphaned, cyclic and duplicate trees", CollectionImportValidation);
                 Run("latest-operation undo, redo and stale rollback rejection", Undo);
                 Run("stale writer rejected; failed transaction keeps all rows", Concurrency);
                 Run("consistent online backup and integrity", Backup);
@@ -50,6 +57,8 @@ namespace AppManager
                 Run("duplicate category membership merges instead of failing", DuplicateMembership);
                 Run("physical disk transactions cannot be undone piecemeal", PhysicalUndo);
                 Run("ambak import keeps local storage paths and drops forged desktop rows", AmbakSanitize);
+                Run("resource storage locations persist as one ordered SQLite value", StorageLocationPoolSqlite);
+                Run("legacy storage location records upgrade atomically and survive failed saves", StorageLocationUpgrade);
                 Run("bulk path lookup matches case variants and staged rows", BulkLookup);
                 Run("folder range and registered path lookups read the database directly", FolderRangeLookup);
                 Run("case-insensitive entry lookup uses an index, also after online restore", NocaseIndex);
@@ -150,10 +159,320 @@ namespace AppManager
             c.AddedItems.First(a => a.IsResource).Category = "相片";
             c.ItemCategories["add:C:\\image.jpg"][0] = "col:相片/旅行";
             Check(c.Save(), c.DatabaseError);
-            Check(GroupId(c.Database, "相片") == parent && GroupId(c.Database, "col:相片/旅行") == collection, "ids changed");
+            long renamedParent = GroupId(c.Database, "相片"), renamedCollection = GroupId(c.Database, "col:相片/旅行");
+            Check(renamedParent == parent && renamedCollection == collection,
+                "ids changed parent " + parent + "=>" + renamedParent + ", collection " + collection + "=>" + renamedCollection);
             AppConfig read = ConfigDatabase.Load(Path.Combine(root, "rename", "config.xml"));
             Check(read.Collections[0].Parent == "相片" && read.ItemCategories["add:C:\\image.jpg"][0] == "col:相片/旅行", "renamed relationships lost");
             Check(c.Database.Page("col:相片/旅行", true, true, "", 10, null, false, false).Total == 1, "renamed listing lost");
+        }
+        private static void CollectionTree()
+        {
+            AppConfig c = Fixture("collection-tree");
+            string rootKey = CollectionKeys.Make("照片", "旅行");
+            string childKey = rootKey + "/2024";
+            string grandKey = childKey + "/春";
+            c.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey });
+            c.Collections.Add(new ResourceCollection { Parent = "照片", Name = "春", ParentCollection = childKey });
+            CollectionOps.AddMember(c, "add:C:\\image.jpg", childKey);
+            CollectionOps.AddMember(c, "add:C:\\image.jpg", grandKey);
+            Check(c.Save(), c.DatabaseError);
+
+            AppConfig read = Reload("collection-tree");
+            Check(!read.LoadFailed, read.DatabaseError);
+            ResourceCollection child = read.Collections.Single(x => x.Name == "2024");
+            ResourceCollection grand = read.Collections.Single(x => x.Name == "春");
+            Check(child.Parent == "照片" && child.ParentCollection == rootKey, "child parent lost");
+            Check(grand.Parent == "照片" && grand.ParentCollection == childKey, "grandchild parent lost");
+            CollectionIndex index = new CollectionIndex(read.Collections);
+            Check(index.Find(childKey) == child && index.Children(rootKey).Count == 1, "collection index mismatch");
+            Check(index.IsDescendantOrSelf(rootKey, grandKey) && !index.IsDescendantOrSelf(rootKey, rootKey + "2"),
+                "descendant boundary mismatch");
+            Check(read.ItemCategories["add:C:\\image.jpg"].Contains(childKey)
+                && read.ItemCategories["add:C:\\image.jpg"].Contains(grandKey), "nested memberships lost");
+            string parsedParent, parsedParentCollection, parsedName;
+            Check(CollectionKeys.TryParse(grandKey, out parsedParent, out parsedParentCollection, out parsedName)
+                && parsedParent == "照片" && parsedParentCollection == childKey && parsedName == "春"
+                && CollectionKeys.Depth(grandKey) == 3, "nested key parsing mismatch");
+
+            long rootId = GroupId(read.Database, rootKey), childId = GroupId(read.Database, childKey), grandId = GroupId(read.Database, grandKey);
+            using (Sqlite db = new Sqlite(read.Database.FilePath, true))
+            {
+                Check(db.Scalar("SELECT parent_id FROM groups WHERE id=?", childId) == rootId.ToString(), "child parent_id not direct collection");
+                Check(db.Scalar("SELECT parent_id FROM groups WHERE id=?", grandId) == childId.ToString(), "grandchild parent_id not direct collection");
+                Check(db.Scalar("PRAGMA user_version") == "2", "database did not upgrade to v2");
+            }
+        }
+
+        private sealed class NestedCollectionFixture
+        {
+            internal AppConfig Config;
+            internal ResourceCollection Root, Child, Grand, Sibling;
+            internal string RootKey, ChildKey, GrandKey, SiblingKey;
+            internal string ItemKey = "add:C:\\image.jpg";
+            internal string ExcludedKey = "add:C:\\file.txt";
+        }
+
+        private static NestedCollectionFixture NestedCollections(string name, string siblingName)
+        {
+            AppConfig c = Fixture(name);
+            ResourceCollection root = c.Collections.Single(x => x.Parent == "照片" && x.Name == "旅行" && x.ParentCollection == "");
+            string rootKey = CollectionKeys.GetKey(root);
+            string childKey = rootKey + "/2024";
+            string grandKey = childKey + "/十月";
+            ResourceCollection child = new ResourceCollection { Parent = "照片", ParentCollection = rootKey, Name = "2024" };
+            ResourceCollection grand = new ResourceCollection { Parent = "照片", ParentCollection = childKey, Name = "十月" };
+            ResourceCollection sibling = new ResourceCollection { Parent = "照片", Name = siblingName };
+            c.Collections.Add(child); c.Collections.Add(grand); c.Collections.Add(sibling);
+            string siblingKey = CollectionKeys.GetKey(sibling);
+            CollectionOps.AddMember(c, "add:C:\\image.jpg", childKey);
+            CollectionOps.AddMember(c, "add:C:\\image.jpg", grandKey);
+            CollectionOps.AddMember(c, "add:C:\\image.jpg", siblingKey);
+            c.ExcludedCategories["add:C:\\file.txt"].Add(childKey);
+            c.ItemOrder[childKey] = new List<string> { "add:C:\\image.jpg" };
+            c.ItemOrder[siblingKey] = new List<string> { "add:C:\\image.jpg" };
+            c.CategoryViewMode[grandKey] = false;
+            c.CategoryIconNames["resource:" + childKey] = "Star";
+            c.CategoryIconNames[grandKey] = "Code";
+            c.SidebarOrder.Add(grandKey);
+            Check(c.Save(), c.DatabaseError);
+            return new NestedCollectionFixture
+            {
+                Config = c, Root = root, Child = child, Grand = grand, Sibling = sibling,
+                RootKey = rootKey, ChildKey = childKey, GrandKey = grandKey, SiblingKey = siblingKey
+            };
+        }
+
+        private static void CollectionSubtreeRename()
+        {
+            NestedCollectionFixture f = NestedCollections("collection-subtree-rename", "证件");
+            long rootId = GroupId(f.Config.Database, f.RootKey), childId = GroupId(f.Config.Database, f.ChildKey);
+            long grandId = GroupId(f.Config.Database, f.GrandKey), siblingId = GroupId(f.Config.Database, f.SiblingKey);
+            Dictionary<string, string> map = CollectionOps.RenameSubtree(f.Config, f.Root, "远行");
+            string newRoot = "col:照片/远行", newChild = newRoot + "/2024", newGrand = newChild + "/十月";
+            Check(map.Count == 3 && map[f.RootKey] == newRoot && map[f.ChildKey] == newChild && map[f.GrandKey] == newGrand,
+                "subtree key map mismatch");
+            Check(f.Root.Name == "远行" && f.Child.ParentCollection == newRoot && f.Grand.ParentCollection == newChild,
+                "nested definitions did not follow rename");
+            Check(CollectionOps.FindByKey(f.Config, newGrand) == f.Grand && CollectionOps.FindByKey(f.Config, f.GrandKey) == null,
+                "exact nested lookup mismatch");
+            List<string> members = f.Config.ItemCategories[f.ItemKey];
+            Check(members.Contains(newRoot) && members.Contains(newChild) && members.Contains(newGrand)
+                && !members.Contains(f.RootKey) && !members.Contains(f.ChildKey) && !members.Contains(f.GrandKey),
+                "membership keys did not migrate");
+            Check(f.Config.ExcludedCategories[f.ExcludedKey].Contains(newChild)
+                && !f.Config.ExcludedCategories[f.ExcludedKey].Contains(f.ChildKey)
+                && f.Config.ExcludedCategories[f.ExcludedKey].Contains("其他"), "excluded references did not migrate");
+            Check(f.Config.ItemOrder.ContainsKey(newChild) && !f.Config.ItemOrder.ContainsKey(f.ChildKey)
+                && f.Config.ItemOrder.ContainsKey(f.SiblingKey), "order keys did not migrate or sibling was touched");
+            Check(f.Config.CategoryViewMode.ContainsKey(newGrand) && !f.Config.CategoryViewMode.ContainsKey(f.GrandKey),
+                "view mode did not migrate");
+            Check(f.Config.CategoryIconNames["resource:" + newChild] == "Star" && f.Config.CategoryIconNames[newGrand] == "Code"
+                && !f.Config.CategoryIconNames.ContainsKey("resource:" + f.ChildKey)
+                && !f.Config.CategoryIconNames.ContainsKey(f.GrandKey), "collection icon keys did not migrate");
+            Check(f.Config.SidebarOrder.Contains(newGrand) && !f.Config.SidebarOrder.Contains(f.GrandKey), "sidebar reference did not migrate");
+
+            f.Config.QueueCategoryRename(f.RootKey, newRoot);
+            Check(f.Config.Save(), f.Config.DatabaseError);
+            Check(GroupId(f.Config.Database, newRoot) == rootId && GroupId(f.Config.Database, newChild) == childId
+                && GroupId(f.Config.Database, newGrand) == grandId && GroupId(f.Config.Database, f.SiblingKey) == siblingId,
+                "subtree rename changed group identities");
+            using (Sqlite db = new Sqlite(f.Config.Database.FilePath, true))
+            {
+                Check(db.Scalar("SELECT id FROM groups WHERE key=?", f.RootKey) == null
+                    && db.Scalar("SELECT id FROM groups WHERE key=?", f.ChildKey) == null
+                    && db.Scalar("SELECT id FROM groups WHERE key=?", f.GrandKey) == null, "old group keys remained");
+                Check(db.Scalar("SELECT parent_id FROM groups WHERE id=?", childId) == rootId.ToString()
+                    && db.Scalar("SELECT parent_id FROM groups WHERE id=?", grandId) == childId.ToString(),
+                    "rename changed group parent links");
+            }
+            AppConfig read = Reload("collection-subtree-rename");
+            Check(!read.LoadFailed, read.DatabaseError);
+            ResourceCollection readGrand = read.Collections.Single(x => x.Name == "十月");
+            Check(CollectionKeys.GetKey(readGrand) == newGrand && readGrand.ParentCollection == newChild, "reloaded nested path mismatch");
+            Check(read.ItemCategories[f.ItemKey].Contains(newGrand) && !read.ItemCategories[f.ItemKey].Contains(f.GrandKey),
+                "reloaded membership mismatch");
+            Check(read.Database.Page(newGrand, true, true, "", 10, null, false, false).Total == 1, "renamed nested listing lost");
+            Check(read.Database.Check().Contains("foreign_key_errors=0"), "rename broke foreign keys");
+
+            long renamedRootId = GroupId(read.Database, newRoot), renamedChildId = GroupId(read.Database, newChild);
+            long renamedGrandId = GroupId(read.Database, newGrand), renamedSiblingId = GroupId(read.Database, f.SiblingKey);
+            read.ResourceCategories[0] = "相片";
+            read.AddedItems.First(x => x.IsResource).Category = "相片";
+            read.QueueCategoryRename("照片", "相片");
+            CollectionOps.RenameParent(read, "照片", "相片");
+            string parentRoot = "col:相片/远行", parentChild = parentRoot + "/2024", parentGrand = parentChild + "/十月";
+            Check(read.Collections.Any(x => CollectionKeys.GetKey(x) == parentGrand && x.ParentCollection == parentChild),
+                "parent category rename did not migrate nested ParentCollection");
+            Check(read.ItemCategories[f.ItemKey].Contains(parentGrand)
+                && !read.ItemCategories[f.ItemKey].Contains(newGrand), "parent category rename did not migrate memberships");
+            Check(read.CategoryIconNames.ContainsKey("resource:" + parentChild)
+                && read.CategoryIconNames.ContainsKey(parentGrand) && read.ItemOrder.ContainsKey(parentChild),
+                "parent category rename did not migrate collection references");
+            Check(read.Save(), read.DatabaseError);
+            Check(GroupId(read.Database, parentRoot) == renamedRootId && GroupId(read.Database, parentChild) == renamedChildId
+                && GroupId(read.Database, parentGrand) == renamedGrandId
+                && GroupId(read.Database, "col:相片/证件") == renamedSiblingId,
+                "parent category rename changed nested ids");
+            AppConfig parentRead = Reload("collection-subtree-rename");
+            Check(parentRead.Collections.Single(x => x.Name == "十月").ParentCollection == parentChild,
+                "reloaded parent category rename mismatch");
+        }
+
+        private static void CollectionSubtreeConflictAndRollback()
+        {
+            NestedCollectionFixture f = NestedCollections("collection-subtree-conflicts", "远行");
+            bool rejected = false;
+            try { CollectionOps.RenameSubtree(f.Config, f.Root, "远行"); }
+            catch (InvalidOperationException) { rejected = true; }
+            Check(rejected, "rename onto an existing sibling was accepted");
+            Check(f.Config.Collections.Any(x => x.Name == "旅行" && x.ParentCollection == "")
+                && f.Config.Collections.Any(x => x.Name == "2024" && x.ParentCollection == f.RootKey)
+                && f.Config.ItemCategories[f.ItemKey].Contains(f.ChildKey), "conflicted rename mutated memory");
+
+            using (Sqlite db = new Sqlite(f.Config.Database.FilePath, false))
+                db.Execute("CREATE TRIGGER test_collection_rename_failure BEFORE UPDATE ON groups BEGIN SELECT RAISE(ABORT,'injected collection rename failure'); END");
+            string newRoot = "col:照片/远行2";
+            CollectionOps.RenameSubtree(f.Config, f.Root, "远行2");
+            f.Config.QueueCategoryRename(f.RootKey, newRoot);
+            Check(!f.Config.Save(), "injected collection rename failure was accepted");
+            Check(f.Config.Collections.Any(x => x.Name == "旅行" && x.ParentCollection == "")
+                && f.Config.Collections.Any(x => x.Name == "2024" && x.ParentCollection == f.RootKey)
+                && !f.Config.Collections.Any(x => x.Name == "远行2")
+                && f.Config.ItemCategories[f.ItemKey].Contains(f.GrandKey)
+                && !f.Config.ItemCategories[f.ItemKey].Contains(newRoot + "/2024/十月"),
+                "failed save did not reload the committed collection tree");
+            using (Sqlite db = new Sqlite(f.Config.Database.FilePath, false)) db.Execute("DROP TRIGGER test_collection_rename_failure");
+
+            ResourceCollection retry = f.Config.Collections.Single(x => x.Name == "旅行" && x.ParentCollection == "");
+            CollectionOps.RenameSubtree(f.Config, retry, "远行2");
+            f.Config.QueueCategoryRename(f.RootKey, newRoot);
+            Check(f.Config.Save(), "retry after failed nested rename failed: " + f.Config.DatabaseError);
+            Check(f.Config.Collections.Any(x => x.Name == "2024" && x.ParentCollection == newRoot)
+                && f.Config.ItemCategories[f.ItemKey].Contains(newRoot + "/2024/十月"), "retry did not migrate the subtree");
+        }
+
+        private static void CollectionSubtreeDelete()
+        {
+            NestedCollectionFixture f = NestedCollections("collection-subtree-delete", "证件");
+            long siblingId = GroupId(f.Config.Database, f.SiblingKey);
+            Check(CollectionOps.CountAffectedMembers(f.Config, CollectionOps.Subtree(f.Config, f.Root)) == 1,
+                "affected member count mismatch");
+            List<ResourceCollection> removed = CollectionOps.RemoveSubtree(f.Config, f.Root);
+            Check(removed.Count == 3 && f.Config.Collections.Count == 1 && f.Config.Collections[0].Name == "证件",
+                "subtree delete removed the wrong definitions");
+            Check(f.Config.ItemCategories[f.ItemKey].Count == 1 && f.Config.ItemCategories[f.ItemKey][0] == f.SiblingKey,
+                "subtree delete damaged sibling membership");
+            Check(!f.Config.ExcludedCategories[f.ExcludedKey].Contains(f.ChildKey)
+                && f.Config.ExcludedCategories[f.ExcludedKey].Contains("其他"), "subtree delete left an excluded reference");
+            Check(!f.Config.ItemOrder.ContainsKey(f.ChildKey) && f.Config.ItemOrder.ContainsKey(f.SiblingKey),
+                "subtree delete left an order reference");
+            Check(!f.Config.CategoryViewMode.ContainsKey(f.GrandKey), "subtree delete left a view reference");
+            Check(!f.Config.CategoryIconNames.ContainsKey("resource:" + f.ChildKey)
+                && !f.Config.CategoryIconNames.ContainsKey(f.GrandKey), "subtree delete left an icon reference");
+            Check(!f.Config.SidebarOrder.Contains(f.GrandKey), "subtree delete left a sidebar reference");
+            Check(f.Config.Save(), f.Config.DatabaseError);
+            Check(GroupId(f.Config.Database, f.SiblingKey) == siblingId, "subtree delete changed the sibling id");
+            AppConfig read = Reload("collection-subtree-delete");
+            Check(!read.LoadFailed && read.Collections.Count == 1 && read.Collections[0].Name == "证件", "reloaded tree is wrong");
+            Check(read.ItemCategories[f.ItemKey].Count == 1 && read.ItemCategories[f.ItemKey][0] == f.SiblingKey
+                && !read.ItemOrder.ContainsKey(f.ChildKey) && !read.CategoryViewMode.ContainsKey(f.GrandKey),
+                "reloaded references were not cleaned");
+            Check(read.Database.Check().Contains("foreign_key_errors=0"), "subtree delete broke foreign keys");
+        }
+        private static void SchemaUpgrade()
+        {
+            AppConfig c = Fixture("schema-upgrade");
+            string path = Path.Combine(root, "schema-upgrade", "config.xml");
+            using (Sqlite db = new Sqlite(c.Database.FilePath, false)) db.Execute("PRAGMA user_version=1");
+            AppConfig upgraded = ConfigDatabase.Load(path);
+            Check(!upgraded.LoadFailed && upgraded.Favorites.Count == 1, "v1 database did not reopen");
+            using (Sqlite db = new Sqlite(upgraded.Database.FilePath, true)) Check(db.Scalar("PRAGMA user_version") == "2", "v1 was not upgraded");
+
+            string snapshot = Path.Combine(root, "schema-v1-snapshot.db");
+            upgraded.Database.Backup(snapshot);
+            using (Sqlite db = new Sqlite(snapshot, false)) db.Execute("PRAGMA user_version=1");
+            upgraded.Favorites.Add("add:after-snapshot");
+            Check(upgraded.Save(), upgraded.DatabaseError);
+            string safety = upgraded.Database.Restore(snapshot);
+            Check(File.Exists(safety), "safety copy missing");
+            Check(upgraded.Database.Read().Favorites.Count == 1, "v1 snapshot restore mismatch");
+            using (Sqlite db = new Sqlite(upgraded.Database.FilePath, true))
+                Check(db.Scalar("PRAGMA user_version") == "2", "restored v1 snapshot was not upgraded");
+
+            using (Sqlite db = new Sqlite(snapshot, false)) db.Execute("PRAGMA user_version=3");
+            bool rejected = false;
+            try { new ConfigDatabase(snapshot); }
+            catch (IOException) { rejected = true; }
+            Check(rejected, "future database version was accepted");
+        }
+        private static void CollectionImportValidation()
+        {
+            string rootKey = CollectionKeys.Make("照片", "旅行");
+            string childKey = rootKey + "/2024";
+            AppConfig valid = new AppConfig();
+            valid.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            valid.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey });
+            valid.ItemCategories["add:C:\\image.jpg"] = new List<string> { childKey };
+            Check(valid.ValidateImportedContent(true) == null, "valid nested tree rejected");
+
+            AppConfig missing = new AppConfig();
+            missing.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey + "/缺失" });
+            Check(missing.ValidateImportedContent(true) != null, "missing parent accepted");
+
+            AppConfig mismatch = new AppConfig();
+            mismatch.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            mismatch.Collections.Add(new ResourceCollection { Parent = "视频", Name = "2024", ParentCollection = rootKey });
+            Check(mismatch.ValidateImportedContent(true) != null, "root category mismatch accepted");
+
+            AppConfig malformed = new AppConfig();
+            malformed.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = "照片/旅行" });
+            Check(malformed.ValidateImportedContent(true) != null, "malformed parent key accepted");
+
+            AppConfig duplicate = new AppConfig();
+            duplicate.Collections.Add(new ResourceCollection { Parent = "照片", Name = "Travel" });
+            duplicate.Collections.Add(new ResourceCollection { Parent = "照片", Name = "travel" });
+            Check(duplicate.ValidateImportedContent(true) != null, "case-insensitive sibling duplicate accepted");
+
+            AppConfig orphan = new AppConfig();
+            orphan.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            orphan.ItemCategories["add:C:\\image.jpg"] = new List<string> { childKey };
+            Check(orphan.ValidateImportedContent(true) != null, "orphan membership accepted");
+
+            AppConfig caseReference = new AppConfig();
+            caseReference.Collections.Add(new ResourceCollection { Parent = "照片", Name = "Travel" });
+            caseReference.ItemCategories["add:C:\\image.jpg"] = new List<string> { CollectionKeys.Make("照片", "travel") };
+            Check(caseReference.ValidateImportedContent(true) != null, "case-variant membership key accepted");
+
+            AppConfig unknownRoot = new AppConfig();
+            unknownRoot.Collections.Add(new ResourceCollection { Parent = "不存在", Name = "旅行" });
+            Check(unknownRoot.ValidateImportedContent(true) != null, "unknown root category accepted");
+
+            AppConfig deep = new AppConfig();
+            string parentKey = string.Empty;
+            for (int i = 1; i <= CollectionKeys.MaxDepth + 1; i++)
+            {
+                ResourceCollection collection = new ResourceCollection { Parent = "照片", Name = "D" + i, ParentCollection = parentKey };
+                deep.Collections.Add(collection);
+                parentKey = CollectionKeys.GetKey(collection);
+            }
+            Check(deep.ValidateImportedContent(true) != null, "over-depth tree accepted");
+
+            AppConfig versioned = new AppConfig();
+            Check(versioned.ToDocument(false).DocumentElement.GetAttribute("backupFormatVersion") == "2", "backup format version missing");
+            XmlDocument future = versioned.ToDocument(false);
+            future.DocumentElement.SetAttribute("backupFormatVersion", "3");
+            string futurePath = Path.Combine(root, "future-format.ambak");
+            future.Save(futurePath);
+            Check(AppConfig.ImportFrom(futurePath) == null, "future backup format accepted");
+
+            XmlDocument incomplete = valid.ToDocument(false);
+            ((XmlElement)incomplete.DocumentElement.SelectSingleNode("Collections/Item")).SetAttribute("parent", string.Empty);
+            string incompletePath = Path.Combine(root, "incomplete-collection.ambak");
+            incomplete.Save(incompletePath);
+            AppConfig incompleteImport = AppConfig.ImportFrom(incompletePath);
+            Check(incompleteImport != null && incompleteImport.ValidateImportedContent(true) != null,
+                "incomplete collection was silently dropped");
         }
         private static void Undo()
         {
@@ -644,6 +963,19 @@ namespace AppManager
                 && imported.ResourceStoreLocations[1].Path == localStoreTwo && !imported.ResourceStoreLocations[1].Enabled,
                 "import did not keep the local storage location pool");
 
+            Check(local.Save("ambak.local.store"), local.DatabaseError);
+            AppConfig localReloaded = Reload("ambak-local");
+            CheckStoreLocations(localReloaded, local.ResourceStoreLocations, "local ambak storage pool");
+            CheckCanonicalStorageRecord(localReloaded, 2, "local ambak storage pool");
+
+            string importedPath = Path.Combine(Folder("ambak-imported"), "config.xml");
+            Check(imported.SaveTo(importedPath), "imported ambak XML export failed");
+            AppConfig importedDb = ConfigDatabase.Load(importedPath);
+            Check(!importedDb.LoadFailed, importedDb.DatabaseError);
+            AppConfig importedReloaded = ConfigDatabase.Load(importedPath);
+            CheckStoreLocations(importedReloaded, imported.ResourceStoreLocations, "imported ambak storage pool");
+            CheckCanonicalStorageRecord(importedReloaded, 2, "imported ambak storage pool");
+
             AppConfig bad = new AppConfig(); bad.CustomCategories.Add("Bad/Name");
             Check(bad.PrepareAmbakImport(local, out dropped) != null, "slash category accepted");
             AppConfig cross = new AppConfig(); cross.CustomCategories.Add("Same"); cross.ResourceCategories.Add("Same");
@@ -664,6 +996,216 @@ namespace AppManager
                 Check(rejected && AppConfig.ImportFrom(oversized) == null, "oversized XML was accepted");
             }
             finally { try { if (File.Exists(oversized)) File.Delete(oversized); } catch { } }
+        }
+
+        private const string StorageRecordKey = "Settings:0:0:ResourceStoreLocations";
+        private const string LegacyStorageRecordKey = "ResourceStoreLocations:0:0:";
+
+        private static void StorageLocationPoolSqlite()
+        {
+            string path = Path.Combine(Folder("store-locations-sqlite"), "config.xml");
+            AppConfig empty = ConfigDatabase.Load(path);
+            Check(!empty.LoadFailed, empty.DatabaseError);
+            Check(empty.Save("store.empty"), empty.DatabaseError);
+            CheckCanonicalStorageRecord(empty, 0, "empty storage pool");
+            CheckStoreLocations(ConfigDatabase.Load(path), new List<ResourceStoreLocation>(), "empty storage pool");
+
+            string first = "S:\\StoreOne";
+            List<ResourceStoreLocation> one = new List<ResourceStoreLocation> { new ResourceStoreLocation(first, true) };
+            AppConfig c = ConfigDatabase.Load(path);
+            c.ResourceStoreLocations = one;
+            Check(c.Save("store.one"), c.DatabaseError);
+            AppConfig loaded = ConfigDatabase.Load(path);
+            CheckStoreLocations(loaded, one, "single storage pool");
+            CheckCanonicalStorageRecord(loaded, 1, "single storage pool");
+
+            string disabled = "S:\\StoreDisabled";
+            string escaped = "S:\\资料 & '精选'\\位置";
+            List<ResourceStoreLocation> three = new List<ResourceStoreLocation>
+            {
+                new ResourceStoreLocation(first, true),
+                new ResourceStoreLocation(disabled, false),
+                new ResourceStoreLocation(escaped, true)
+            };
+            c = ConfigDatabase.Load(path);
+            c.ResourceStoreLocations = three;
+            Check(c.Save("store.three"), c.DatabaseError);
+            loaded = ConfigDatabase.Load(path);
+            CheckStoreLocations(loaded, three, "three storage locations");
+            string payload = CheckCanonicalStorageRecord(loaded, 3, "three storage locations");
+            Check(payload.Contains("&amp;"), "storage path ampersand was not XML escaped");
+
+            List<ResourceStoreLocation> reordered = new List<ResourceStoreLocation>
+            {
+                new ResourceStoreLocation(escaped, true),
+                new ResourceStoreLocation(disabled, true),
+                new ResourceStoreLocation(first, false)
+            };
+            c = ConfigDatabase.Load(path);
+            c.ResourceStoreLocations = reordered;
+            Check(c.Save("store.reorder"), c.DatabaseError);
+            loaded = ConfigDatabase.Load(path);
+            CheckStoreLocations(loaded, reordered, "reordered storage locations");
+            CheckCanonicalStorageRecord(loaded, 3, "reordered storage locations");
+
+            List<ResourceStoreLocation> disabledAll = new List<ResourceStoreLocation>
+            {
+                new ResourceStoreLocation(first, false),
+                new ResourceStoreLocation(disabled, false),
+                new ResourceStoreLocation(escaped, false)
+            };
+            c = ConfigDatabase.Load(path);
+            c.ResourceStoreLocations = disabledAll;
+            Check(c.Save("store.disabled"), c.DatabaseError);
+            loaded = ConfigDatabase.Load(path);
+            CheckStoreLocations(loaded, disabledAll, "all-disabled storage locations");
+            Check(ResourceStore.ActiveRoots(loaded, "S:\\fallback").Count == 0, "all-disabled pool accepted new files");
+            CheckCanonicalStorageRecord(loaded, 3, "all-disabled storage locations");
+
+            List<ResourceStoreLocation> many = new List<ResourceStoreLocation>();
+            for (int i = 0; i < 100; i++)
+                many.Add(new ResourceStoreLocation(Path.Combine("S:\\Stores", "位置-" + i), i % 7 != 0));
+            c = ConfigDatabase.Load(path);
+            c.ResourceStoreLocations = many;
+            Check(c.Save("store.hundred"), c.DatabaseError);
+            loaded = ConfigDatabase.Load(path);
+            CheckStoreLocations(loaded, many, "hundred storage locations");
+            CheckCanonicalStorageRecord(loaded, 100, "hundred storage locations");
+
+            string conflictPath = Path.Combine(Folder("store-locations-conflict"), "config.xml");
+            AppConfig conflict = ConfigDatabase.Load(conflictPath);
+            conflict.Collections.Add(new ResourceCollection { Parent = "照片", Name = "重复", Description = "first" });
+            conflict.Collections.Add(new ResourceCollection { Parent = "照片", Name = "重复", Description = "second" });
+            Check(!conflict.Save("store.conflict"), "conflicting record key was saved");
+            string error = conflict.DatabaseError ?? string.Empty;
+            Check(error.Contains("配置记录键冲突") && error.IndexOf('<') < 0,
+                "record key conflict error leaked XML: " + error);
+            AppConfig conflictReloaded = ConfigDatabase.Load(conflictPath);
+            Check(conflictReloaded.Collections.Count == 0, "failed conflict save changed collections");
+            conflictReloaded.Collections.Add(new ResourceCollection { Parent = "照片", Name = "正常", Description = "ok" });
+            Check(conflictReloaded.Save("store.conflict.recover"), conflictReloaded.DatabaseError);
+            Check(ConfigDatabase.Load(conflictPath).Collections.Count == 1, "conflict guard rejected a valid save");
+        }
+
+        private static void StorageLocationUpgrade()
+        {
+            string path = Path.Combine(Folder("store-locations-upgrade"), "config.xml");
+            string legacyPath = "S:\\Legacy & '旧位置'";
+            string addedPath = "S:\\AddedLater";
+            AppConfig seed = ConfigDatabase.Load(path);
+            Check(!seed.LoadFailed, seed.DatabaseError);
+            seed.ResourceStoreLocations.Add(new ResourceStoreLocation(legacyPath, true));
+            Check(seed.Save("store.upgrade.seed"), seed.DatabaseError);
+            CheckCanonicalStorageRecord(seed, 1, "storage upgrade seed");
+
+            ReplaceStorageRecordWithLegacy(seed, legacyPath, true);
+            AppConfig legacy = ConfigDatabase.Load(path);
+            Check(!legacy.LoadFailed, legacy.DatabaseError);
+            List<ResourceStoreLocation> expected = new List<ResourceStoreLocation> { new ResourceStoreLocation(legacyPath, true) };
+            CheckStoreLocations(legacy, expected, "legacy storage record");
+            CheckLegacyStorageRecord(legacy, 1, "legacy storage record");
+
+            BumpRevision(legacy);
+            legacy.ResourceStoreLocations.Add(new ResourceStoreLocation(addedPath, true));
+            Check(!legacy.Save("store.upgrade.fail"), "stale storage upgrade save was accepted");
+            CheckStoreLocations(legacy, expected, "storage upgrade failed save reload");
+            CheckLegacyStorageRecord(legacy, 1, "storage upgrade failed save");
+
+            legacy.ResourceStoreLocations.Add(new ResourceStoreLocation(addedPath, true));
+            Check(legacy.Save("store.upgrade"), legacy.DatabaseError);
+            expected.Add(new ResourceStoreLocation(addedPath, true));
+            AppConfig upgraded = ConfigDatabase.Load(path);
+            CheckStoreLocations(upgraded, expected, "upgraded storage locations");
+            CheckCanonicalStorageRecord(upgraded, 2, "upgraded storage locations");
+
+            BumpRevision(upgraded);
+            upgraded.ResourceStoreLocations.RemoveAt(1);
+            Check(!upgraded.Save("store.upgrade.after.success.fail"), "stale post-upgrade save was accepted");
+            CheckStoreLocations(upgraded, expected, "post-upgrade failed save reload");
+            CheckCanonicalStorageRecord(upgraded, 2, "post-upgrade failed save");
+            CheckStoreLocations(ConfigDatabase.Load(path), expected, "post-upgrade persisted state");
+        }
+
+        private static void CheckStoreLocations(AppConfig config, IList<ResourceStoreLocation> expected, string label)
+        {
+            Check(config != null && !config.LoadFailed, label + " reload failed: " + (config == null ? "null" : config.DatabaseError));
+            Check(config.ResourceStoreLocations.Count == expected.Count, label + " count changed");
+            for (int i = 0; i < expected.Count; i++)
+            {
+                ResourceStoreLocation actual = config.ResourceStoreLocations[i];
+                ResourceStoreLocation wanted = expected[i];
+                Check(string.Equals(actual.Path, wanted.Path, StringComparison.OrdinalIgnoreCase)
+                    && actual.Enabled == wanted.Enabled, label + " item " + i + " changed");
+            }
+            string legacy = string.Empty;
+            for (int i = 0; i < expected.Count; i++)
+                if (expected[i].Enabled) { legacy = expected[i].Path; break; }
+            Check(string.Equals(config.ResourceStorePath ?? string.Empty, legacy, StringComparison.OrdinalIgnoreCase),
+                label + " legacy path mismatch");
+        }
+
+        private static string CheckCanonicalStorageRecord(AppConfig config, int items, string label)
+        {
+            using (Sqlite db = new Sqlite(config.Database.FilePath, true))
+            {
+                Check(db.Scalar("SELECT count(*) FROM records WHERE record_key=?", StorageRecordKey) == "1",
+                    label + " did not keep exactly one canonical record");
+                Check(db.Scalar("SELECT count(*) FROM records WHERE section='ResourceStoreLocations' OR record_key LIKE 'ResourceStoreLocations:%'") == "0",
+                    label + " left legacy storage records");
+                string payload = db.Scalar("SELECT payload FROM records WHERE record_key=?", StorageRecordKey);
+                System.Xml.XmlDocument xml = new System.Xml.XmlDocument(); xml.LoadXml(payload);
+                Check(xml.DocumentElement != null && xml.DocumentElement.Name == "ResourceStoreLocations",
+                    label + " canonical payload root is wrong");
+                Check(xml.DocumentElement.SelectNodes("Item").Count == items, label + " canonical payload item count is wrong");
+                return payload;
+            }
+        }
+
+        private static void CheckLegacyStorageRecord(AppConfig config, int items, string label)
+        {
+            using (Sqlite db = new Sqlite(config.Database.FilePath, true))
+            {
+                Check(db.Scalar("SELECT count(*) FROM records WHERE record_key=?", StorageRecordKey) == "0",
+                    label + " unexpectedly created a canonical record");
+                Check(db.Scalar("SELECT count(*) FROM records WHERE record_key=?", LegacyStorageRecordKey) == "1",
+                    label + " lost the legacy record");
+                string payload = db.Scalar("SELECT payload FROM records WHERE record_key=?", LegacyStorageRecordKey);
+                System.Xml.XmlDocument xml = new System.Xml.XmlDocument(); xml.LoadXml(payload);
+                Check(xml.DocumentElement != null && xml.DocumentElement.Name == "Item", label + " legacy payload root is wrong");
+                Check(items == 1, label + " fixture expects one legacy item");
+            }
+        }
+
+        private static void ReplaceStorageRecordWithLegacy(AppConfig config, string path, bool enabled)
+        {
+            System.Xml.XmlDocument item = new System.Xml.XmlDocument();
+            System.Xml.XmlElement node = item.CreateElement("Item");
+            node.SetAttribute("path", path); node.SetAttribute("enabled", enabled ? "true" : "false");
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+            {
+                db.Execute("BEGIN IMMEDIATE");
+                try
+                {
+                    db.Execute("INSERT INTO operations(utc,action,actor,session,pid) VALUES(?,?,?,?,?)",
+                        DateTime.UtcNow.ToString("o"), "fixture.legacy.store", "test", "test", 0);
+                    long operation = db.LastId;
+                    db.Execute("UPDATE write_context SET operation_id=? WHERE id=1", operation);
+                    db.Execute("DELETE FROM records WHERE record_key=? OR section='ResourceStoreLocations'",
+                        StorageRecordKey);
+                    db.Execute("INSERT INTO records(record_key,section,ordinal,slot,payload) VALUES(?,?,0,'',?)",
+                        LegacyStorageRecordKey, "ResourceStoreLocations", node.OuterXml);
+                    db.Execute("UPDATE write_context SET operation_id=NULL WHERE id=1");
+                    db.Execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
+                    db.Execute("COMMIT");
+                }
+                catch { db.Rollback(); throw; }
+            }
+        }
+
+        private static void BumpRevision(AppConfig config)
+        {
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                db.Execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
         }
 
         private static void BulkLookup()

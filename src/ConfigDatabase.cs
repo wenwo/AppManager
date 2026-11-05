@@ -7,6 +7,31 @@ using System.Xml;
 
 namespace AppManager
 {
+    /// <summary>数据库版本闸门：新版读取 v1/v2，旧版不得打开 v2 及更高版本。</summary>
+    internal static class DatabaseCompatibility
+    {
+        internal const int ApplicationId = 1095584594;
+        internal const int OldestSupportedVersion = 1;
+        internal const int CurrentVersion = 2;
+
+        internal static bool IsSupportedVersion(int version)
+        {
+            return version >= OldestSupportedVersion && version <= CurrentVersion;
+        }
+
+        /// <summary>恢复前和恢复后都调用；返回 null 表示可安全继续。</summary>
+        internal static string ValidateSnapshot(Sqlite db, int expectedApplicationId)
+        {
+            int app = Convert.ToInt32(db.Scalar("PRAGMA application_id"), CultureInfo.InvariantCulture);
+            int version = Convert.ToInt32(db.Scalar("PRAGMA user_version"), CultureInfo.InvariantCulture);
+            if (app != expectedApplicationId) return "备份不是由本程序创建。";
+            if (!IsSupportedVersion(version)) return "备份数据库版本不受支持：" + version + "。";
+            if (db.Scalar("PRAGMA integrity_check") != "ok") return "备份完整性检查失败。";
+            if (db.Query("PRAGMA foreign_key_check").Count != 0) return "备份外键检查失败。";
+            return null;
+        }
+    }
+
     // 正式数据只写入 SQLite。XML 保留为导入/导出格式和迁移原件。
     internal sealed partial class ConfigDatabase
     {
@@ -18,8 +43,8 @@ namespace AppManager
         private readonly Dictionary<string, long> entries = new Dictionary<string, long>(StringComparer.Ordinal);
         private readonly List<string[]> renames = new List<string[]>();
         private readonly List<string[]> entryRenames = new List<string[]>();
-        private const int ApplicationId = 1095584594;
-        private const int SchemaVersion = 1;
+        private const int ApplicationId = DatabaseCompatibility.ApplicationId;
+        private const int SchemaVersion = DatabaseCompatibility.CurrentVersion;
         private static readonly string Session = Guid.NewGuid().ToString("N");
         internal long Revision { get { return revision; } }
 
@@ -56,9 +81,31 @@ namespace AppManager
                         throw new IOException("拒绝初始化非空未知数据库。");
                     CreateSchema(db);
                 }
+                else if (version < SchemaVersion)
+                {
+                    UpgradeSchema(db, version);
+                }
                 if (db.Scalar("PRAGMA quick_check") != "ok") throw new IOException("数据库完整性检查失败，请从备份恢复。");
                 EnsureIndexes(db);
                 LoadBaseline(db);
+            }
+        }
+
+        /// <summary>v1 与 v2 表结构一致；升级只推进版本闸门，数据由后续普通保存按新模型写入。</summary>
+        private static void UpgradeSchema(Sqlite db, int fromVersion)
+        {
+            if (fromVersion != 1)
+                throw new IOException("数据库版本无法自动升级：" + fromVersion + "。");
+            db.Execute("BEGIN IMMEDIATE");
+            try
+            {
+                db.Execute("PRAGMA user_version=" + SchemaVersion);
+                db.Execute("COMMIT");
+            }
+            catch
+            {
+                db.Rollback();
+                throw;
             }
         }
 
@@ -328,10 +375,12 @@ namespace AppManager
             if (groups.TryGetValue(key, out id)) return id;
             long parent = 0;
             string name = key;
-            if (CollectionKeys.IsCollectionKey(key))
+            string root, parentCollection, parsedName;
+            if (CollectionKeys.TryParse(key, out root, out parentCollection, out parsedName))
             {
-                int slash = key.IndexOf('/', 4);
-                if (slash > 4) { parent = Group(db, key.Substring(4, slash - 4)); name = key.Substring(slash + 1); }
+                name = parsedName;
+                string parentKey = string.IsNullOrEmpty(parentCollection) ? root : parentCollection;
+                if (!string.IsNullOrEmpty(parentKey)) parent = Group(db, parentKey);
             }
             db.Execute("INSERT INTO groups(key,name,parent_id) VALUES(?,?,?)", key, name, Foreign(parent));
             // audit triggers also insert rows and change last_insert_rowid();
@@ -371,31 +420,108 @@ namespace AppManager
                 entries.Remove(rename[0]); entries[rename[1]] = Number(id);
             }
             foreach (string[] rename in renames)
+                ApplyGroupRename(db, rename[0], rename[1]);
+        }
+
+        /// <summary>
+        /// 一次改名迁移整棵分组子树。按 parent_id 读取真实层级并从新根重建完整键，
+        /// 避免嵌套键只改一层，或把完整旧键再次传给 CollectionKeys.Make。
+        /// </summary>
+        private void ApplyGroupRename(Sqlite db, string oldKey, string newKey)
+        {
+            long rootId;
+            if (!groups.TryGetValue(oldKey, out rootId)) return;
+            List<string[]> rows = db.Query(
+                "WITH RECURSIVE subtree(id,key,name,parent_id) AS (" +
+                "SELECT id,key,name,parent_id FROM groups WHERE id=? " +
+                "UNION SELECT g.id,g.key,g.name,g.parent_id FROM groups g JOIN subtree s ON g.parent_id=s.id) " +
+                "SELECT id,key,name,parent_id FROM subtree", rootId);
+            if (rows.Count == 0) return;
+            if (rows.Count > CollectionKeys.MaxCollections)
+                throw new IOException("集合子树超过数量上限（最多 " + CollectionKeys.MaxCollections + " 个）。");
+
+            Dictionary<long, string[]> byId = new Dictionary<long, string[]>();
+            Dictionary<long, List<long>> children = new Dictionary<long, List<long>>();
+            for (int i = 0; i < rows.Count; i++)
             {
-                long id;
-                if (!groups.TryGetValue(rename[0], out id)) continue;
-                long targetId;
-                if (groups.TryGetValue(rename[1], out targetId) && targetId != id)
+                long id = Number(rows[i][0]), parentId = Number(rows[i][3]);
+                byId[id] = rows[i];
+                if (parentId == 0) continue;
+                List<long> list;
+                if (!children.TryGetValue(parentId, out list)) { list = new List<long>(); children[parentId] = list; }
+                list.Add(id);
+            }
+            if (!byId.ContainsKey(rootId)) return;
+
+            Dictionary<long, string> newKeys = new Dictionary<long, string>();
+            Dictionary<string, long> targetOwners = new Dictionary<string, long>(StringComparer.Ordinal);
+            Queue<long> pending = new Queue<long>();
+            newKeys[rootId] = newKey;
+            pending.Enqueue(rootId);
+            while (pending.Count > 0)
+            {
+                long parentId = pending.Dequeue();
+                List<long> list;
+                if (!children.TryGetValue(parentId, out list)) continue;
+                string parentKey = newKeys[parentId];
+                for (int i = 0; i < list.Count; i++)
                 {
-                    // 目标行若仍被任何记录、收录项或子集合引用，改名会静默合并两个分类，必须阻止。
-                    // 完全无引用的历史残留行先换成退役键，再让原名复用，既允许沿用旧名字又不丢数据。
-                    if (GroupHasReferences(db, targetId))
-                        throw new IOException("目标分类名称已被其它分类或记录使用，不能合并不同分类。");
-                    string retired = RetiredGroupKey(db, targetId);
-                    db.Execute("UPDATE groups SET key=? WHERE id=?", retired, targetId);
-                    groups.Remove(rename[1]); groups[retired] = targetId;
-                }
-                int slash = CollectionKeys.IsCollectionKey(rename[1]) ? rename[1].IndexOf('/', 4) : -1;
-                string displayName = slash < 0 ? rename[1] : rename[1].Substring(slash + 1);
-                db.Execute("UPDATE groups SET key=?,name=? WHERE id=?", rename[1], displayName, id);
-                groups.Remove(rename[0]); groups.Add(rename[1], id);
-                foreach (string[] child in db.Query("SELECT id,key,name FROM groups WHERE parent_id=?", id))
-                {
-                    string key = CollectionKeys.Make(rename[1], child[2]);
-                    db.Execute("UPDATE groups SET key=? WHERE id=?", key, Number(child[0]));
-                    groups.Remove(child[1]); groups[key] = Number(child[0]);
+                    long id = list[i];
+                    string name = byId[id][2];
+                    if (string.IsNullOrEmpty(name)) throw new IOException("分组树中存在空名称，不能安全改名。");
+                    string key = CollectionKeys.GetChildKey(parentKey, name);
+                    newKeys[id] = key;
+                    pending.Enqueue(id);
                 }
             }
+            foreach (KeyValuePair<long, string> entry in newKeys)
+            {
+                if (CollectionKeys.IsCollectionKey(entry.Value))
+                {
+                    if (entry.Value.Length > CollectionKeys.MaxKeyLength)
+                        throw new IOException("集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）：" + entry.Value);
+                    int depth = CollectionKeys.Depth(entry.Value);
+                    if (depth <= 0 || depth > CollectionKeys.MaxDepth)
+                        throw new IOException("集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）：" + entry.Value);
+                }
+                if (targetOwners.ContainsKey(entry.Value))
+                    throw new IOException("改名目标路径重复：" + entry.Value);
+                targetOwners[entry.Value] = entry.Key;
+            }
+
+            List<long> retired = new List<long>();
+            foreach (KeyValuePair<string, long> entry in targetOwners)
+            {
+                long existingId;
+                if (!groups.TryGetValue(entry.Key, out existingId) || existingId == entry.Value) continue;
+                if (newKeys.ContainsKey(existingId))
+                    throw new IOException("改名目标与子树内其它分组冲突：" + entry.Key);
+                if (GroupHasReferences(db, existingId))
+                    throw new IOException("目标分类名称已被其它分类或记录使用，不能合并不同分类。");
+                retired.Add(existingId);
+            }
+            HashSet<long> retiredSet = new HashSet<long>();
+            for (int i = 0; i < retired.Count; i++)
+            {
+                long targetId = retired[i];
+                if (!retiredSet.Add(targetId)) continue;
+                string targetKey = db.Scalar("SELECT key FROM groups WHERE id=?", targetId);
+                if (targetKey == null) continue;
+                string retiredKey = RetiredGroupKey(db, targetId);
+                db.Execute("UPDATE groups SET key=? WHERE id=?", retiredKey, targetId);
+                groups.Remove(targetKey); groups[retiredKey] = targetId;
+            }
+
+            string root, parentCollection, displayName;
+            if (!CollectionKeys.TryParse(newKey, out root, out parentCollection, out displayName))
+                displayName = newKey;
+            foreach (KeyValuePair<long, string> entry in newKeys)
+            {
+                string previous = byId[entry.Key][1];
+                db.Execute("UPDATE groups SET key=? WHERE id=?", entry.Value, entry.Key);
+                groups.Remove(previous); groups[entry.Value] = entry.Key;
+            }
+            db.Execute("UPDATE groups SET name=? WHERE id=?", displayName, rootId);
         }
 
         private static bool GroupHasReferences(Sqlite db, long id)
@@ -502,6 +628,12 @@ namespace AppManager
             Dictionary<string, Record> result = new Dictionary<string, Record>(baseline.Count + 32, StringComparer.Ordinal);
             foreach (XmlElement section in doc.DocumentElement.ChildNodes)
             {
+                // 存储位置池必须整体落库：子项没有稳定身份，拆成多条记录会生成同一个键并互相覆盖。
+                if (section.Name == "ResourceStoreLocations")
+                {
+                    AddRecord(result, "Settings", 0, 0, 0, section.Name, section.OuterXml);
+                    continue;
+                }
                 if (!section.HasChildNodes || section.FirstChild is XmlText)
                 {
                     AddRecord(result, "Settings", 0, 0, 0, section.Name, section.OuterXml);
@@ -531,7 +663,10 @@ namespace AppManager
                     else if (name == "CustomCategories" || name == "ResourceCategories" || name == "SidebarOrder")
                     { group = Group(db, node.InnerText); node.InnerText = ""; }
                     else if (name == "Collections")
-                    { group = Group(db, CollectionKeys.Make(node.GetAttribute("parent"), node.GetAttribute("name"))); node.RemoveAttribute("parent"); node.RemoveAttribute("name"); }
+                    {
+                        group = Group(db, CollectionKeys.GetKey(node.GetAttribute("parent"), node.GetAttribute("parentCollection"), node.GetAttribute("name")));
+                        node.RemoveAttribute("parent"); node.RemoveAttribute("parentCollection"); node.RemoveAttribute("name");
+                    }
                     else if (name == "CategoryOverrides")
                     { item = Entry(db, node.GetAttribute("key")); group = Group(db, node.InnerText); node.RemoveAttribute("key"); node.InnerText = ""; }
                     else if (name == "CategoryViewModes" || name == "CategoryIconNames")
@@ -549,6 +684,9 @@ namespace AppManager
         private static void AddRecord(Dictionary<string, Record> records, string section, long item, long group, long ordinal, string slot, string payload)
         {
             string key = section + ":" + item + ":" + group + ":" + slot;
+            Record existing;
+            if (records.TryGetValue(key, out existing) && !string.Equals(existing.Payload, payload, StringComparison.Ordinal))
+                throw new InvalidDataException("配置记录键冲突: " + key);
             records[key] = new Record { Key = key, Section = section, Item = item, Group = group, Ordinal = ordinal, Slot = slot, Payload = payload };
         }
         internal AppConfig Read()
@@ -581,7 +719,21 @@ namespace AppManager
                     XmlElement node = AppendFragment(doc, target, r[5]);
                     if (section == "Favorites" || section == "Hidden") node.InnerText = r[1];
                     else if (section == "CustomCategories" || section == "ResourceCategories" || section == "SidebarOrder") node.InnerText = r[2];
-                    else if (section == "Collections") { node.SetAttribute("name", r[6]); node.SetAttribute("parent", r[7]); }
+                    else if (section == "Collections")
+                    {
+                        node.SetAttribute("name", r[6]);
+                        string root, parentCollection, name;
+                        if (CollectionKeys.TryParse(r[2], out root, out parentCollection, out name))
+                        {
+                            node.SetAttribute("parent", root);
+                            node.SetAttribute("parentCollection", parentCollection);
+                        }
+                        else
+                        {
+                            node.SetAttribute("parent", r[7] ?? string.Empty);
+                            node.SetAttribute("parentCollection", string.Empty);
+                        }
+                    }
                     else if (section == "CategoryOverrides") { node.SetAttribute("key", r[1]); node.InnerText = r[2]; }
                     else if (section == "CategoryViewModes" || section == "CategoryIconNames") node.SetAttribute("cat", r[2]);
                     else if (section == "AddedItems") node.SetAttribute("category", r[2] ?? "");
@@ -664,6 +816,10 @@ namespace AppManager
                 db.Restore(path);
                 try
                 {
+                    string restoredError = DatabaseCompatibility.ValidateSnapshot(db, ApplicationId);
+                    if (restoredError != null) throw new IOException("恢复后的数据库校验失败：" + restoredError);
+                    int restoredVersion = Convert.ToInt32(db.Scalar("PRAGMA user_version"), CultureInfo.InvariantCulture);
+                    if (restoredVersion < SchemaVersion) UpgradeSchema(db, restoredVersion);
                     // 恢复的快照可能来自旧版本，没有后加的索引。
                     EnsureIndexes(db);
                     long restoredRevision = Number(db.Scalar("SELECT value FROM metadata WHERE key='revision'"));
@@ -676,7 +832,8 @@ namespace AppManager
                 }
                 catch
                 {
-                    db.Rollback(); db.Restore(safety); LoadBaseline(db); throw;
+                    try { db.Rollback(); } catch { }
+                    db.Restore(safety); LoadBaseline(db); throw;
                 }
                 return safety;
             }

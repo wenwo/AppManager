@@ -14,9 +14,8 @@ namespace AppManager
             string temporary = databasePath + ".recover-" + Guid.NewGuid().ToString("N");
             using (Sqlite source = new Sqlite(sourcePath, true))
             {
-                if (source.Scalar("PRAGMA application_id") != "1095584594" || source.Scalar("PRAGMA user_version") != "1" ||
-                    source.Scalar("PRAGMA integrity_check") != "ok" || source.Query("PRAGMA foreign_key_check").Count != 0)
-                    throw new IOException("备份格式或完整性检查失败，原数据未变更。");
+                string validation = DatabaseCompatibility.ValidateSnapshot(source, DatabaseCompatibility.ApplicationId);
+                if (validation != null) throw new IOException("备份格式或完整性检查失败，原数据未变更：" + validation);
                 source.Backup(temporary);
             }
             string safety = databasePath + ".before-recovery-" + DateTime.Now.ToString("yyyyMMdd-HHmmss-fff");
