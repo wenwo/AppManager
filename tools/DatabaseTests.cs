@@ -57,6 +57,7 @@ namespace AppManager
                 Run("consistent online backup and integrity", Backup);
                 Run("backup overwrite is atomic and reflects the latest commit", BackupOverwrite);
                 Run("indexed keyset pagination, exclusions, hidden and multi-membership", Paging);
+                Run("scoped search uses exact category and collection groups with stable cursors", ScopedSearchPaging);
                 Run("UI reads bounded database page and supports next/previous", UiPaging);
                 Run("mini music includes manual files and resources without duplicate paths", MiniMusic);
                 Run("XML backup export reports write failure", ExportFailure);
@@ -558,6 +559,81 @@ namespace AppManager
             Check(c.Database.Page("照片", true, true, "", 10, null, false, false).Total == 503, "hidden filter");
             Check(c.Database.Page("全部资源", true, true, "", 10, null, false, false).Total == 504, "exclusion removed physical item");
             Check(c.Database.Page("照片", true, false, "照片0002", 10, null, true, false).Total == 1, "search");
+        }
+
+        private static void ScopedSearchPaging()
+        {
+            AppConfig c = new AppConfig();
+            const int photoCount = 250;
+            for (int i = 0; i < photoCount; i++)
+                c.AddedItems.Add(new AddedEntry { Path = "C:\\scoped-search\\photo" + i.ToString("D4") + ".jpg", Name = "trip same", Category = "照片", IsResource = true });
+            for (int i = 0; i < 5; i++)
+                c.AddedItems.Add(new AddedEntry { Path = "C:\\scoped-search\\music" + i + ".mp3", Name = "trip music", Category = "音乐", IsResource = true });
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\scoped-search\\hidden.jpg", Name = "trip hidden", Category = "照片", IsResource = true });
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\scoped-search\\tool0.exe", Name = "trip tool", Category = "开发工具", IsResource = false });
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\scoped-search\\tool1.exe", Name = "trip tool", Category = "浏览器", IsResource = false });
+            string dualKey = "add:C:\\scoped-search\\dual.txt";
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\scoped-search\\dual.txt", Name = "trip dual", Category = "照片", IsResource = true });
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\scoped-search\\dual.txt", Name = "trip dual", Category = "开发工具", IsResource = false });
+            c.Hidden.Add("add:C:\\scoped-search\\hidden.jpg");
+            c.Favorites.Add("add:C:\\scoped-search\\photo0000.jpg");
+            string root = CollectionKeys.Make("照片", "旅行");
+            string child = root + "/2024";
+            c.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            c.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = root });
+            c.ItemCategories["add:C:\\scoped-search\\photo0000.jpg"] = new List<string> { root };
+            c.ItemCategories["add:C:\\scoped-search\\photo0001.jpg"] = new List<string> { child };
+            Check(c.Save(), c.DatabaseError);
+            c.Database.PublishCatalog(c, new List<AppInfo>
+            {
+                new AppInfo { Key = "af:scoped-search-desktop", Name = "trip desk", Category = "工具", IsDesktop = true }
+            });
+
+            HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
+            CatalogPage page = null;
+            int total = 0;
+            do
+            {
+                page = c.Database.Page("照片", true, false, "trip", 37, page, true, false, null, null, "照片");
+                total = page.Total;
+                foreach (AppInfo a in page.Items) Check(keys.Add(a.Key), "scoped search returned a duplicate cursor row");
+            } while (page.Items.Count > 0);
+            Check(total == photoCount + 1 && keys.Count == photoCount + 1, "scoped category search lost or duplicated rows: " + keys.Count + "/" + total);
+            Check(c.Database.Page("照片", true, true, "trip", 10, null, true, false, null, null, "照片").Total == photoCount + 2,
+                "showHidden did not include the hidden scoped item");
+            Check(c.Database.Page("音乐", true, false, "trip", 10, null, true, false, null, null, "音乐").Total == 5,
+                "category scope leaked or missed music items");
+            Check(c.Database.Page("全部资源", true, false, "trip", 10, null, true, false, null, null, "全部资源").Total == photoCount + 6,
+                "all-resources scope changed");
+            Check(c.Database.Page(root, true, false, "trip", 10, null, true, false, null, null, root).Total == 1,
+                "collection scope included a descendant member");
+            Check(c.Database.Page(child, true, false, "trip", 10, null, true, false, null, null, child).Total == 1,
+                "nested collection scope lost its direct member");
+            Check(c.Database.Page("全部软件", false, false, "trip", 10, null, true, false, null, null, "全部软件").Total == 4,
+                "all-software scope changed");
+            CatalogPage tools = c.Database.Page("开发工具", false, false, "trip", 10, null, true, false, null, null, "开发工具");
+            Check(tools.Total == 2 && tools.Items.Any(a => a.Key == dualKey) && tools.Items.All(a => a.DatabaseKind == 0),
+                "software category search missed the dual-mode item or mixed in resources");
+            CatalogPage photos = c.Database.Page("照片", true, false, "trip", 10, null, true, false, null, null, "照片");
+            Check(photos.Items.Any(a => a.Key == dualKey) && photos.Items.All(a => a.DatabaseKind == 2),
+                "resource category search missed the dual-mode item or mixed in software");
+            Check(c.Database.Page("常用", true, false, "trip", 10, null, true, false, null, null, "常用").Total == 1,
+                "favorite virtual category scope changed");
+            Check(c.Database.Page("快捷中心", false, false, "trip", 10, null, true, false, null, null, "快捷中心").Total == 1,
+                "quick-center virtual category scope changed");
+
+            using (Sqlite db = new Sqlite(c.Database.FilePath, true))
+            {
+                string plan = string.Join(" | ", db.Query("EXPLAIN QUERY PLAN SELECT c.item_id FROM listing l CROSS JOIN catalog c ON c.item_id=l.item_id "
+                    + "WHERE l.group_id=? AND l.kind=2 AND l.hidden=0 AND c.active=1 AND (l.name LIKE ? "
+                    + "OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id "
+                    + "AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?)) "
+                    + "ORDER BY l.name,l.item_id LIMIT 37", GroupId(c.Database, "照片"), "%t%r%i%p%", "%t%r%i%p%")
+                    .Select(r => r[3]));
+                Console.WriteLine("SCOPED_SEARCH plan=" + plan);
+                Check(plan.StartsWith("SEARCH l USING COVERING INDEX ix_listing_name", StringComparison.Ordinal) && !plan.Contains("TEMP B-TREE"),
+                    "scoped search does not use the ordered group/name index: " + plan);
+            }
         }
 
         private static void Rw2MetadataIndexRefresh()

@@ -1914,19 +1914,19 @@ namespace AppManager
             }
             else if (kw.Length > 0)
             {
-                // 搜索：集合内只匹配当前文件夹直接成员；未进入集合时保持原有跨分类搜索。
+                // 搜索跟随当前浏览层级：始终限定当前分类；集合内再限定当前文件夹的直接成员。
                 foreach (AppInfo a in allApps)
                 {
                     if (!ShouldShow(a)) continue;
                     if (!MatchesContentMode(a)) continue;
-                    if (currentCollection != null
-                        && (!InCategory(a, currentCategory) || !IsInExtraCategory(a, currentCollection))) continue;
+                    if (!InCategory(a, currentCategory)) continue;
+                    if (currentCollection != null && !IsInExtraCategory(a, currentCollection)) continue;
                     // 多字段匹配：名称 / 分类，任一命中即显示（归一化，故「vscode」可命中「VS Code」）
                     if (Scanner.FuzzyMatch(a.Name, kw)
                         || Scanner.FuzzyMatch(a.Category, kw))
                         shown.Add(a);
                 }
-                categoryTotal = currentCollection != null ? shown.Count : CountVisible();
+                categoryTotal = shown.Count;
             }
             else if (contentMode == SidebarControl.ContentMode.Website)
             {
@@ -2774,9 +2774,14 @@ namespace AppManager
         private void UpdateCollectionUi()
         {
             if (search != null)
+            {
+                bool all = string.Equals(currentCategory,
+                    contentMode == SidebarControl.ContentMode.Website ? "全部资源" : "全部软件", StringComparison.Ordinal);
                 search.Placeholder = currentCollection != null
                     ? "在当前文件夹中搜索…"
-                    : (contentMode == SidebarControl.ContentMode.Website ? "搜索资源…" : "搜索应用…");
+                    : (all ? (contentMode == SidebarControl.ContentMode.Website ? "搜索资源…" : "搜索应用…")
+                        : "在「" + currentCategory + "」中搜索…");
+            }
             coverIconWaiters.Clear();   // 本次重建中仍缺图标的封面成员会由 BuildCover 重新登记
             if (!CanShowCollectionSidebar)
             {

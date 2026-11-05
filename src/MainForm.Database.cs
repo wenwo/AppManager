@@ -132,7 +132,7 @@ namespace AppManager
 
         private List<AppInfo> ReadDatabasePage(string keyword)
         {
-            // 集合内搜索只查当前文件夹的直接成员；离开集合后才回到整个资源分类。
+            // 搜索与浏览使用同一精确分组键：集合优先，否则左侧当前分类；集合只查直接成员。
             string category = !string.IsNullOrEmpty(currentCollection) ? currentCollection : currentCategory;
             string context = category + "\n" + contentMode + "\n" + keyword + "\n" + config.ShowHidden + "\n" + listSortColumn + "\n" + listSortAsc + "\n" + config.Database.Revision;
             if (context != databaseContext)
@@ -145,7 +145,7 @@ namespace AppManager
             CatalogPage after = databasePageNumber == 0 ? null : databaseCursors[databasePageNumber - 1];
             databasePage = config.Database.Page(category, contentMode == SidebarControl.ContentMode.Website, config.ShowHidden,
                 keyword, DatabasePageSize, after, listSortColumn == "name", listSortColumn != null && !listSortAsc, listSortColumn,
-                null, currentCollection);
+                null, category);
             if (databasePageNumber < databaseCursors.Count) databaseCursors[databasePageNumber] = databasePage;
             else databaseCursors.Add(databasePage);
             scanner.ApplyConfig(databasePage.Items);

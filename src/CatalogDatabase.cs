@@ -360,17 +360,33 @@ namespace AppManager
                 string from;
                 string where;
                 bool metadataSort = sortColumn == "size" || sortColumn == "time";
+                bool listingBacked = !search || scopedSearch;
+                string hiddenColumn = listingBacked ? "l.hidden" : "c.hidden";
+                string nameColumn = listingBacked ? "l.name" : "c.search_name";
+                string kindColumn = listingBacked ? "l.kind" : "c.kind";
                 if (search)
                 {
-                    from = "catalog c";
-                    where = "c.active=1 AND " + (resources ? "c.kind=2" : "c.kind<>2") + (showHidden ? "" : " AND c.hidden=0") + " AND (c.search_name LIKE ? OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?))";
-                    args.Add(SearchPattern(keyword));
-                    args.Add(SearchPattern(keyword));
+                    // 有搜索作用域时从当前分组投影出发：分组、名称和隐藏状态都取自 listing，
+                    // 可直接利用 (group_id,kind,hidden,name,item_id) 索引分页，不额外排序。
+                    // 作用域键由调用方传 currentCollection ?? currentCategory。
                     if (scopedSearch)
                     {
-                        where += " AND EXISTS(SELECT 1 FROM listing scoped WHERE scoped.item_id=c.item_id AND scoped.group_id=?)";
+                        // CROSS JOIN 固定连接顺序；普通 JOIN 可能被规划器重排成 catalog 全表驱动。
+                        from = "listing l CROSS JOIN catalog c ON c.item_id=l.item_id";
+                        where = "l.group_id=? AND " + (resources ? "l.kind=2" : "l.kind=0")
+                            + " AND c.active=1"
+                            + (showHidden ? "" : " AND " + hiddenColumn + "=0");
                         args.Add(categoryGroup);
                     }
+                    else
+                    {
+                        from = "catalog c";
+                        where = "c.active=1 AND " + (resources ? "c.kind=2" : "c.kind<>2")
+                            + (showHidden ? "" : " AND " + hiddenColumn + "=0");
+                    }
+                    where += " AND (" + nameColumn + " LIKE ? OR EXISTS(SELECT 1 FROM listing sl JOIN groups sg ON sg.id=sl.group_id WHERE sl.item_id=c.item_id AND sg.key NOT IN('全部软件','全部文件','全部资源','常用') AND sg.name LIKE ?))";
+                    args.Add(SearchPattern(keyword));
+                    args.Add(SearchPattern(keyword));
                     byName = true;
                 }
                 else
@@ -392,12 +408,12 @@ namespace AppManager
                     filter.Append(")");
                     where += filter.ToString();
                 }
-                string countFrom = extensions != null && extensions.Length > 0
-                    ? from : (search ? "catalog c" : "listing l");
+                // 计数必须与分页查询使用同一 FROM：作用域搜索从 listing 驱动，不能再固定为 catalog。
+                string countFrom = search || (extensions != null && extensions.Length > 0) ? from : "listing l";
                 result.Total = after == null ? Convert.ToInt32(db.Scalar("SELECT count(*) FROM " + countFrom + " WHERE " + where, args.ToArray())) : after.Total;
-                string name = search ? "c.search_name" : "l.name";
-                string itemId = search ? "c.item_id" : "l.item_id";
-                string rank = metadataSort ? (search ? "c." : "l.") + (sortColumn == "size" ? "size" : "modified") : (search || byName ? "0" : "l.rank");
+                string name = nameColumn;
+                string itemId = listingBacked ? "l.item_id" : "c.item_id";
+                string rank = metadataSort ? (listingBacked ? "l." : "c.") + (sortColumn == "size" ? "size" : "modified") : (search || byName ? "0" : "l.rank");
                 string compare = descending ? "<" : ">";
                 if (after != null)
                 {
@@ -413,8 +429,7 @@ namespace AppManager
                 else order = (search || byName ? name : "l.rank,l.name") + (descending && (search || byName) ? " DESC," + itemId + " DESC" : "," + itemId);
                 args.Add(limit);
                 // 分类视图按该分类自己的归属类型取内容类型：同一路径可能同时属于软件分类和资源分类。
-                string kindColumn = search ? "c.kind" : "l.kind";
-                foreach (string[] row in db.Query("SELECT c.metadata,c.hidden,c.item_id," + rank + "," + name + ",g.key," + kindColumn + " FROM " + from + " LEFT JOIN groups g ON g.id=c.base_group WHERE " + where + " ORDER BY " + order + " LIMIT ?", args.ToArray()))
+                foreach (string[] row in db.Query("SELECT c.metadata," + hiddenColumn + ",c.item_id," + rank + "," + name + ",g.key," + kindColumn + " FROM " + from + " LEFT JOIN groups g ON g.id=c.base_group WHERE " + where + " ORDER BY " + order + " LIMIT ?", args.ToArray()))
                 {
                     AppInfo a = Unpack(row[0]); a.IsHidden = row[1] == "1"; result.Items.Add(a);
                     if (row[5] != null) a.Category = row[5];

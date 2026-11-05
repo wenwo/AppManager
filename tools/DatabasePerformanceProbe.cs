@@ -70,6 +70,7 @@ namespace AppManager
                 {
                     Metric("first_category_page", Page, 1);
                     Metric("category_page", Page, 5);
+                    Metric("scoped_search", Search, 5);
                     Metric("path_lookup", Lookup, 5);
                 }
                 List<string> targets = mode == "user" ? config.AddedItems.Take(5).Select(a => "add:" + a.Path).ToList() : null;
@@ -115,6 +116,17 @@ namespace AppManager
             // Equivalent in-memory category filtering/sorting; excludes disk probing, icons and painting.
             List<AddedEntry> entries = config.AddedItems.Where(e => e.IsResource && e.Category == "照片").OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).Take(200).ToList();
             if (entries.Count != 200 || entries[0].Name != "photo000000") throw new Exception("Page mismatch");
+#endif
+        }
+        private static void Search()
+        {
+#if DATABASE
+            CatalogPage page = config.Database.Page("照片", true, false, "photo", 200, null, true, false, null, null, "照片");
+            if (page.Items.Count != 200 || page.Total != count || page.Items[0].Category != "照片") throw new Exception("Search mismatch");
+#else
+            List<AddedEntry> entries = config.AddedItems.Where(e => e.IsResource && e.Category == "照片"
+                && Scanner.FuzzyMatch(e.Name, "photo")).OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).Take(200).ToList();
+            if (entries.Count != Math.Min(200, count) || entries[0].Category != "照片") throw new Exception("Search mismatch");
 #endif
         }
         private static void Lookup()

@@ -93,6 +93,7 @@ namespace AppManager
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
+                Run("search follows the selected category and direct collection scope in database and fallback", SearchScopeFollowsCategory);
                 Run("search field clear button follows input and clears it", SearchFieldClearButton);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
                 Run("scanner merges duplicate launch targets only when arguments also match", ScannerLaunchIdentityMerge);
@@ -339,6 +340,17 @@ namespace AppManager
             MainForm form = CategoryForm(config, apps);
             typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
             typeof(MainForm).GetField("currentCategory", Private).SetValue(form, category);
+            return form;
+        }
+
+        private static MainForm SearchForm(AppConfig config, Controls.SidebarControl.ContentMode mode, string category, params AppInfo[] apps)
+        {
+            MainForm form = new MainForm(config);
+            Invoke(form, "BuildControls");
+            typeof(MainForm).GetField("contentMode", Private).SetValue(form, mode);
+            typeof(MainForm).GetField("currentCategory", Private).SetValue(form, category);
+            typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo>(apps));
+            typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
             return form;
         }
 
@@ -4179,6 +4191,143 @@ namespace AppManager
                 Check(!config.Favorites.Contains(inside.Key) && !config.Hidden.Contains(inside.Key), "record delete left favorite/hidden behind");
                 Check(File.Exists(path), "record delete touched the disk file");
             }
+        }
+
+        private static void SearchScopeFollowsCategory()
+        {
+            AppConfig config = RenameConfig("search-scope");
+            config.AutoScan = false;
+            AppInfo photo = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "trip-photo.jpg"), false, true, "trip photo");
+            AppInfo music = AddEntry(config, "音乐", Path.Combine(config.ResourceStorePath, "trip-music.mp3"), false, true, "trip music");
+            AppInfo rootMember = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "trip-root.jpg"), false, true, "trip root");
+            AppInfo childMember = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "trip-child.jpg"), false, true, "trip child");
+            AppInfo hidden = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "trip-hidden.jpg"), false, true, "trip hidden");
+            AppInfo software = AddEntry(config, "开发工具", Path.Combine(config.ManageRootPath, "trip-tool.exe"), false, false, "trip tool");
+            string rootKey = CollectionKeys.Make("照片", "旅行");
+            string childKey = rootKey + "/2024";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey });
+            config.ItemCategories[rootMember.Key] = new List<string> { rootKey };
+            config.ItemCategories[childMember.Key] = new List<string> { childKey };
+            config.Favorites.Add(photo.Key);
+            config.Hidden.Add(hidden.Key);
+            photo.IsFavorite = true;
+            hidden.IsHidden = true;
+            software.IsDesktop = true;
+            Check(config.Save(), config.DatabaseError);
+            AppInfo[] apps = { photo, music, rootMember, childMember, hidden, software };
+
+            using (MainForm form = SearchForm(config, Controls.SidebarControl.ContentMode.Website, "照片", apps))
+            {
+                Controls.SearchField search = (Controls.SearchField)typeof(MainForm).GetField("search", Private).GetValue(form);
+                Invoke(form, "RefreshGrid");
+                Check(search.Placeholder == "在「照片」中搜索…", "category search placeholder missing: " + search.Placeholder);
+                search.Text = "trip";
+                Invoke(form, "RefreshGrid");
+                List<AppInfo> shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 3 && shown.All(a => a.Category == "照片"),
+                    "database category search leaked outside the selected category: " + shown.Count);
+                Check(!shown.Any(a => a.Key == hidden.Key), "database category search ignored the hidden setting");
+
+                typeof(MainForm).GetField("databasePageNumber", Private).SetValue(form, 1);
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "音乐");
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 1 && shown[0].Key == music.Key, "switching category kept the previous search scope");
+                Check((int)typeof(MainForm).GetField("databasePageNumber", Private).GetValue(form) == 0,
+                    "switching category reused a stale search cursor");
+
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "照片");
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, rootKey);
+                typeof(MainForm).GetField("databasePageNumber", Private).SetValue(form, 1);
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 1 && shown[0].Key == rootMember.Key, "database collection search included a descendant or sibling");
+                Check((int)typeof(MainForm).GetField("databasePageNumber", Private).GetValue(form) == 0,
+                    "switching collection reused a stale search cursor");
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, childKey);
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 1 && shown[0].Key == childMember.Key, "database nested collection search lost its direct member");
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, null);
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "全部资源");
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 4, "database all-resources search changed: " + shown.Count);
+
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "常用");
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 1 && shown[0].Key == photo.Key, "database favorites search did not use the favorite projection");
+
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "开发工具");
+                typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Software);
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 1 && shown[0].Key == software.Key, "database software search mixed in resources");
+
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "照片");
+                typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+                typeof(MainForm).GetField("databasePageNumber", Private).SetValue(form, 1);
+                config.ShowHidden = true;
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 4 && shown.Any(a => a.Key == hidden.Key), "showHidden did not affect scoped search");
+                Check((int)typeof(MainForm).GetField("databasePageNumber", Private).GetValue(form) == 0,
+                    "showHidden reused a stale search cursor");
+                config.ShowHidden = false;
+                search.Text = string.Empty;
+                Invoke(form, "RefreshGrid");
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                Check(shown.Count == 3, "clearing search did not restore the full current category");
+            }
+
+            ConfigDatabase database = config.Database;
+            config.Database = null;
+            try
+            {
+                using (MainForm form = SearchForm(config, Controls.SidebarControl.ContentMode.Website, "照片", apps))
+                {
+                    Controls.SearchField search = (Controls.SearchField)typeof(MainForm).GetField("search", Private).GetValue(form);
+                    search.Text = "trip";
+                    Invoke(form, "RefreshGrid");
+                    List<AppInfo> shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    int total = (int)typeof(MainForm).GetField("categoryTotal", Private).GetValue(form);
+                    Check(shown.Count == 3 && total == shown.Count, "fallback category search kept a global total: " + shown.Count + "/" + total);
+                    Check(shown.All(a => a.Category == "照片") && !shown.Any(a => a.Key == hidden.Key),
+                        "fallback category search leaked or ignored hidden state");
+
+                    typeof(MainForm).GetField("currentCollection", Private).SetValue(form, rootKey);
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    Check(shown.Count == 1 && shown[0].Key == rootMember.Key, "fallback collection search included a descendant");
+
+                    typeof(MainForm).GetField("currentCollection", Private).SetValue(form, childKey);
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    Check(shown.Count == 1 && shown[0].Key == childMember.Key, "fallback nested collection search lost its direct member");
+
+                    typeof(MainForm).GetField("currentCollection", Private).SetValue(form, null);
+                    typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "全部资源");
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    Check(shown.Count == 4, "fallback all-resources search changed: " + shown.Count);
+
+                    typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "常用");
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    Check(shown.Count == 1 && shown[0].Key == photo.Key, "fallback favorites search changed");
+
+                    typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "快捷中心");
+                    typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Software);
+                    Invoke(form, "RefreshGrid");
+                    shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                    Check(shown.Count == 1 && shown[0].Key == software.Key, "fallback quick-center search changed");
+                }
+            }
+            finally { config.Database = database; }
         }
 
         private static void SearchFieldClearButton()
