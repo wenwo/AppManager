@@ -495,7 +495,11 @@ namespace AppManager
                 long now = DateTime.UtcNow.Ticks;
                 List<string[]> batch;
                 lock (gate) using (Sqlite db = Open())
-                    batch = db.Query("SELECT item_id,metadata,indexed,retry_count FROM catalog WHERE active=1 AND (indexed=0 OR (indexed=2 AND next_retry<=?)) ORDER BY indexed,item_id LIMIT 128", now);
+                {
+                    batch = db.Query("SELECT item_id,metadata,indexed,retry_count FROM catalog WHERE indexed=0 AND active=1 ORDER BY item_id LIMIT 128");
+                    if (batch.Count == 0)
+                        batch = db.Query("SELECT item_id,metadata,indexed,retry_count FROM catalog WHERE indexed=2 AND active=1 AND next_retry<=? ORDER BY next_retry,item_id LIMIT 128", now);
+                }
                 if (batch.Count == 0) break;
                 ProcessMetadataBatch(batch);
             }
