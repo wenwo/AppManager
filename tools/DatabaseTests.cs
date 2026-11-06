@@ -60,6 +60,7 @@ namespace AppManager
                 Run("scoped search uses exact category and collection groups with stable cursors", ScopedSearchPaging);
                 Run("UI reads bounded database page and supports next/previous", UiPaging);
                 Run("mini music includes manual files and resources without duplicate paths", MiniMusic);
+                Run("music playback sequence spans all database pages and keeps search scope", MusicSequencePaging);
                 Run("XML backup export reports write failure", ExportFailure);
                 Run("corrupt XML/database refuse initialization or overwrite", Corruption);
                 Run("added item edits/deletes are incremental, rollback/reload preserves data", AddedEdits);
@@ -1058,6 +1059,33 @@ namespace AppManager
             // 纯函数部分：扫描条目与库内条目去重（大小写不同也算同一路径），不存在的文件剔除
             List<string> merged = MainForm.CollectMiniMusicSongs(c.Database, "", false, new string[] { ordinary.ToUpperInvariant(), gone, null, "" });
             Check(merged.Count == 2 && merged.Contains(resource) && merged.Contains(ordinary), "song merge kept duplicates or missing files");
+        }
+
+        private static void MusicSequencePaging()
+        {
+            AppConfig c = Fixture("music-sequence");
+            const int count = 505;
+            for (int i = 0; i < count; i++)
+                c.AddedItems.Add(new AddedEntry
+                {
+                    Path = "C:\\music-sequence\\song" + i.ToString("D4") + ".mp3",
+                    Name = "song" + i.ToString("D4"),
+                    Category = "音乐",
+                    IsResource = true
+                });
+            Check(c.Save(), c.DatabaseError);
+
+            List<string> songs = MainForm.CollectDatabaseMediaPaths(c.Database, "音乐", true, false, "",
+                true, false, null, MediaRules.AudioExt, MediaRules.IsAudio, false);
+            Check(songs.Count == count, "music sequence was capped at " + songs.Count + " tracks");
+            Check(songs[0].EndsWith("song0000.mp3", StringComparison.OrdinalIgnoreCase)
+                && songs[count - 1].EndsWith("song0504.mp3", StringComparison.OrdinalIgnoreCase),
+                "music sequence order changed across pages");
+
+            List<string> searched = MainForm.CollectDatabaseMediaPaths(c.Database, "音乐", true, false, "song0500",
+                true, false, null, MediaRules.AudioExt, MediaRules.IsAudio, false);
+            Check(searched.Count == 1 && searched[0].EndsWith("song0500.mp3", StringComparison.OrdinalIgnoreCase),
+                "music sequence search scope was lost");
         }
         private static void ExportFailure()
         {

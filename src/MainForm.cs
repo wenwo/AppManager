@@ -51,6 +51,7 @@ namespace AppManager
         private SearchField search;
         private MiniMusicPlayerControl miniMusic;
         private MusicPlaybackSession musicSession;   // 音乐播放唯一会话：完整/迷你播放器共享
+        private int musicOpenGeneration;   // 只认最后一次双击打开请求，分类切换或改播其它歌曲时丢弃旧查询
         private System.Windows.Forms.Timer searchDebounce;   // 搜索输入防抖计时器
         private ToggleSwitch viewToggle;
         private Label toggleLabel;
@@ -4272,6 +4273,33 @@ namespace AppManager
             return result;
         }
 
+        /// <summary>
+        /// 按与主列表相同的分类/集合、搜索词和排序跨页读取媒体路径；后页不复用 UI 分页游标。
+        /// 音乐播放队列用它绕开每页 200 条的限制，图片、视频查看器仍沿用当前页序列。
+        /// </summary>
+        internal static List<string> CollectDatabaseMediaPaths(ConfigDatabase database, string scope, bool resources,
+            bool showHidden, string keyword, bool byName, bool descending, string sortColumn,
+            string[] extensions, Func<string, bool> typeMatch, bool checkExists)
+        {
+            List<string> result = new List<string>();
+            if (database == null || typeMatch == null) return result;
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CatalogPage page = null;
+            do
+            {
+                page = database.Page(scope, resources, showHidden, keyword, 500, page, byName, descending,
+                    sortColumn, extensions, scope);
+                foreach (AppInfo app in page.Items)
+                {
+                    if (app.IsFolder || string.IsNullOrEmpty(app.TargetPath)) continue;
+                    if (!typeMatch(app.TargetPath)) continue;
+                    if (checkExists && !File.Exists(app.TargetPath)) continue;
+                    if (seen.Add(app.TargetPath)) result.Add(app.TargetPath);
+                }
+            } while (page.Items.Count > 0);
+            return result;
+        }
+
         private void ShowMiniMusicCollections(Point screen)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
@@ -4478,7 +4506,50 @@ namespace AppManager
 
         private void ShowMusicPlayer(AppInfo app)
         {
-            List<string> songs = MediaSequence(MediaRules.IsAudio);
+            int generation = ++musicOpenGeneration;
+            if (config.Database == null)
+            {
+                OpenMusicPlayer(app, MediaSequence(MediaRules.IsAudio));
+                return;
+            }
+
+            ConfigDatabase database = config.Database;
+            string keyword = (search == null || search.Text == null) ? "" : search.Text.Trim().ToLowerInvariant();
+            string scope = !string.IsNullOrEmpty(currentCollection) ? currentCollection : currentCategory;
+            bool resources = contentMode == SidebarControl.ContentMode.Website;
+            bool showHidden = config.ShowHidden;
+            bool byName = listSortColumn == "name";
+            bool descending = listSortColumn != null && !listSortAsc;
+            string sortColumn = listSortColumn;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<string> songs;
+                try
+                {
+                    songs = CollectDatabaseMediaPaths(database, scope, resources, showHidden, keyword,
+                        byName, descending, sortColumn, MediaRules.AudioExt, MediaRules.IsAudio, true);
+                }
+                catch (Exception ex)
+                {
+                    Paths.LogError(ex);
+                    RunOnUi(delegate
+                    {
+                        if (generation != musicOpenGeneration || IsDisposed || Disposing || config.Database != database) return;
+                        ShowNotice("读取完整音乐列表失败，按当前页播放：" + ex.Message);
+                        OpenMusicPlayer(app, MediaSequence(MediaRules.IsAudio));
+                    });
+                    return;
+                }
+                RunOnUi(delegate
+                {
+                    if (generation != musicOpenGeneration || IsDisposed || Disposing || config.Database != database) return;
+                    OpenMusicPlayer(app, songs);
+                });
+            });
+        }
+
+        private void OpenMusicPlayer(AppInfo app, List<string> songs)
+        {
             if (songs.Count == 0) { Launcher.Launch(app); return; }
             int songIndex = songs.FindIndex(delegate(string path)
             {
@@ -4495,6 +4566,7 @@ namespace AppManager
 
         private void HideMusicPlayer()
         {
+            musicOpenGeneration++;
             if (musicPlayer == null || musicPlayer.IsDisposed) return;
             bool wasVisible = musicPlayer.Visible;
             musicPlayer.Visible = false;
@@ -4509,6 +4581,7 @@ namespace AppManager
         /// <summary>停止完整播放器并隐藏界面；即使播放器已经隐藏也必须释放后台会话。</summary>
         private void StopMusicPlayer()
         {
+            musicOpenGeneration++;
             if (musicSession == null) return;
             musicSession.Stop();
             if (musicPlayer != null && !musicPlayer.IsDisposed && musicPlayer.Visible) musicPlayer.Visible = false;
