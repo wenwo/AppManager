@@ -330,7 +330,7 @@ namespace AppManager.Controls
             if (width >= 620)
             {
                 int searchWidth = Math.Max(140, Math.Min(280, width - 462));
-                queueSearchRect = new Rectangle(306, 8, searchWidth, 34);
+                queueSearchRect = new Rectangle(contentRect.X + 4, 8, searchWidth, 34);
                 showHeaderCount = true;
             }
             else
