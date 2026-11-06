@@ -60,7 +60,7 @@ namespace AppManager
                 Run("category removal: override, extra membership and added file", CategoryRemovalSources);
                 Run("category icon-only edit keeps item order; rename migrates it", CategoryIconOnlyEdit);
                 Run("deleting a resource category removes covers, view mode and the add button", CategoryDeleteCleansState);
-                Run("main form disposed without Close leaves no message filter behind", DisposedFormMessageFilter);
+                Run("main form disposed without Close leaves no message filter or tray icon behind", DisposedFormMessageFilter);
                 Run("storage dialog writes back only the edited fields", StoreDialogSavesOnlyEdits);
                 Run("storage locations keep order, disabled roots and legacy first-path compatibility", ResourceStoreLocationsPool);
                 Run("custom category add/remove uses the same memberships and keeps an existing icon", CustomCategoryAddRemove);
@@ -1411,6 +1411,7 @@ namespace AppManager
         {
             // 显示后不经 Close 直接释放：OnFormClosed 不会执行，过滤器必须在释放时注销，
             // 否则之后任何消息循环都会访问已释放窗体的 Handle 并抛 ObjectDisposedException。
+            NotifyIcon tray;
             using (MainForm form = new MainForm(new AppConfig()))
             {
                 typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
@@ -1420,7 +1421,11 @@ namespace AppManager
                 form.Size = new Size(900, 600);
                 form.Show();
                 Application.DoEvents();
+                tray = (NotifyIcon)typeof(MainForm).GetField("tray", Private).GetValue(form);
+                Check(tray != null && tray.Visible, "fixture did not create the tray icon");
             }
+            // 托盘图标同样只在 OnFormClosed 里移除：释放时不撤掉，进程退出后通知区会残留无主图标
+            Check(!tray.Visible, "tray icon survived dispose without Close");
             // 泄漏只在过滤器处理鼠标移动等消息时暴露：主动投递一条 WM_MOUSEMOVE，不依赖测试期间真实鼠标是否在动
             using (Form probe = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual,
                 Location = new Point(-3000, -3000), Size = new Size(200, 120) })

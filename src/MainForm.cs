@@ -506,6 +506,13 @@ namespace AppManager
             {
                 Application.RemoveMessageFilter(this);
                 DisposeDatabaseMetadataRetryTimer();
+                // 托盘图标同理：只靠 OnFormClosed 移除时，未经 Close 释放的窗体会在进程退出后留下无主的托盘图标
+                if (tray != null)
+                {
+                    tray.Visible = false;
+                    tray.Dispose();
+                    tray = null;
+                }
             }
             base.Dispose(disposing);
         }
