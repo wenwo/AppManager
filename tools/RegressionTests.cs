@@ -1300,8 +1300,51 @@ namespace AppManager
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+        private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);
+
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        private static extern IntPtr FindWindow(string className, string windowName);
+        private static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder name, int count);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        private static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentProcessId();
+
+        /// <summary>
+        /// 只在本测试进程的顶层窗口里找系统对话框（#32770），title 为 null 时匹配任意标题。
+        /// FindWindow 是全系统范围：会命中其它程序的隐藏对话框，兜底时把 WM_CLOSE 发给别的进程，
+        /// 自己弹出的对话框反而没人关，测试就永久卡住。
+        /// </summary>
+        private static IntPtr FindOwnDialog(string title)
+        {
+            uint self = GetCurrentProcessId();
+            IntPtr found = IntPtr.Zero;
+            EnumWindows(delegate(IntPtr hwnd, IntPtr lParam)
+            {
+                uint owner;
+                GetWindowThreadProcessId(hwnd, out owner);
+                if (owner != self) return true;
+                System.Text.StringBuilder name = new System.Text.StringBuilder(16);
+                GetClassName(hwnd, name, name.Capacity);
+                if (name.ToString() != "#32770") return true;
+                if (title != null)
+                {
+                    System.Text.StringBuilder text = new System.Text.StringBuilder(256);
+                    GetWindowText(hwnd, text, text.Capacity);
+                    if (text.ToString() != title) return true;
+                }
+                found = hwnd;
+                return false;
+            }, IntPtr.Zero);
+            return found;
+        }
 
         private static void StoreDialogSavesOnlyEdits()
         {
@@ -3185,9 +3228,12 @@ namespace AppManager
                 bool confirm, native, unexpected;
                 using (FileStream locked = new FileStream(app.TargetPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 {
-                    RunDeleteFlow(delete.Action, true, "删除", 1, out confirm, out native, out unexpected);
+                    // 只有“确定”的系统提示框，按钮控件 ID 是 IDCANCEL(2) 而不是 IDOK(1)：发 1 会被忽略，
+                    // 发 2 等同按确定/Esc，MessageBox 仍返回 OK。
+                    RunDeleteFlow(delete.Action, true, "删除", 2, out confirm, out native, out unexpected);
                 }
                 Check(confirm, "delete confirmation was not executed");
+                Check(native && !unexpected, "failed delete did not show exactly one failure prompt");
                 Check(File.Exists(app.TargetPath) && config.AddedItems.ByPath(app.TargetPath).Count > 0,
                     "failed delete removed the file or record");
                 Check(viewer.Visible && viewer.CurrentPath == app.TargetPath,
@@ -3488,7 +3534,7 @@ namespace AppManager
                     }
                     if (nativeTitle != null && !answered)
                     {
-                        IntPtr hwnd = FindWindow("#32770", nativeTitle);
+                        IntPtr hwnd = FindOwnDialog(nativeTitle);
                         if (hwnd != IntPtr.Zero)
                         {
                             answered = true;
@@ -3498,7 +3544,7 @@ namespace AppManager
                     }
                     if (elapsed.ElapsedMilliseconds > 300 && !answered)
                     {
-                        IntPtr other = FindWindow("#32770", null);
+                        IntPtr other = FindOwnDialog(null);
                         Form modal = FindModalForm();
                         if (other != IntPtr.Zero || modal != null)
                         {
@@ -3512,7 +3558,7 @@ namespace AppManager
                     if (elapsed.ElapsedMilliseconds > 8000)
                     {
                         stray = true;
-                        IntPtr other = FindWindow("#32770", null);
+                        IntPtr other = FindOwnDialog(null);
                         if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
                         Form modal = FindModalForm();
                         if (modal != null) modal.Close();
@@ -3544,7 +3590,7 @@ namespace AppManager
             {
                 timer.Tick += delegate
                 {
-                    IntPtr hwnd = FindWindow("#32770", title);
+                    IntPtr hwnd = FindOwnDialog(title);
                     if (!answered && hwnd != IntPtr.Zero)
                     {
                         answered = true;
@@ -3559,7 +3605,7 @@ namespace AppManager
                     }
                     else
                     {
-                        IntPtr other = FindWindow("#32770", null);
+                        IntPtr other = FindOwnDialog(null);
                         if (other != IntPtr.Zero && other != answeredHwnd)
                         {
                             stray = true;
@@ -3569,7 +3615,7 @@ namespace AppManager
                     if (elapsed.ElapsedMilliseconds > 8000)
                     {
                         stray = true;
-                        IntPtr other = FindWindow("#32770", null);
+                        IntPtr other = FindOwnDialog(null);
                         if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
                         timer.Stop();
                     }
