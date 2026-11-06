@@ -51,6 +51,7 @@ namespace AppManager
                 Run("DPI messages: effective DPI / suggested rectangle / repeated scaling", DpiMessages);
                 Run("maximize stays in selected monitor work area and restores", MaximizeWithinScreenWorkArea);
                 Run("window resize hit zones, minimum size, and fullscreen threshold", ResizeBounds);
+                Run("non-client grid scrollbar keeps the right resize edge active", ResizeOverGridScrollbar);
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
                 Run("backup list row height at 100/125/150/175 percent", BackupDpi);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
@@ -115,6 +116,7 @@ namespace AppManager
                 Run("grid selection fires once per change and restores a ten-thousand item selection", GridSelectionNotifications);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
+                Run("tray hide keeps the music playlist and current track", TrayHideKeepsMusicPlaylist);
                 Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
                 Run("collection tree auto-expands and searches only direct members", CollectionTreeSearchAndInfo);
                 Run("collection creation uses active folder scope and enforces tree limits", CollectionCreateScopeAndLimits);
@@ -2606,6 +2608,42 @@ namespace AppManager
             }
         }
 
+        private static void TrayHideKeepsMusicPlaylist()
+        {
+            AppConfig config = RenameConfig("tray-music");
+            config.AutoScan = false;
+            config.CloseToTray = true;
+            Check(config.Save(), "database fixture save failed");
+            string song = Path.Combine(config.ResourceStorePath, "tray-song.mp3");
+            using (MainForm form = new MainForm(config))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Size = new Size(1000, 640);
+                form.Show();
+                Application.DoEvents();
+
+                Controls.MusicPlaybackSession session = (Controls.MusicPlaybackSession)
+                    typeof(MainForm).GetField("musicSession", Private).GetValue(form);
+                typeof(Controls.MusicPlaybackSession).GetField("paths", Private)
+                    .SetValue(session, new List<string> { song });
+                typeof(Controls.MusicPlaybackSession).GetField("index", Private).SetValue(session, 0);
+
+                Invoke(form, "HideToTray");
+                Application.DoEvents();
+                Check(!form.Visible, "HideToTray did not hide the form");
+                Check(session.PathCount == 1 && session.Index == 0 && session.CurrentPath == song,
+                    "hiding to tray stopped or cleared the music session");
+
+                Invoke(form, "ShowFromTray");
+                Application.DoEvents();
+                Check(form.Visible && session.PathCount == 1 && session.CurrentPath == song,
+                    "restoring from tray lost the music session");
+            }
+        }
+
         private static void CollectionSidebarTreeInteraction()
         {
             using (Form host = new Form
@@ -4783,6 +4821,72 @@ namespace AppManager
                 }
                 finally { Marshal.FreeHGlobal(sizing); }
             }
+        }
+
+        private static void ResizeOverGridScrollbar()
+        {
+            AppConfig config = RenameConfig("resize-scrollbar");
+            config.AutoScan = false;
+            List<AppInfo> apps = new List<AppInfo>();
+            for (int i = 0; i < 120; i++)
+                apps.Add(new AppInfo { Key = "af:resize-" + i, Name = "Resize " + i, Category = "开发工具" });
+            Check(config.Save(), "database fixture save failed");
+            config.Database.PublishCatalog(config, new List<AppInfo>(apps));
+
+            Cursor original = Cursor.Current;
+            try
+            {
+                using (MainForm form = new MainForm(config))
+                {
+                    typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                    form.ShowInTaskbar = false;
+                    form.StartPosition = FormStartPosition.Manual;
+                    form.Location = new Point(-3000, -3000);
+                    form.Size = new Size(1200, 520);
+                    form.Show();
+                    Application.DoEvents();
+                    typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "开发工具");
+                    typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo>(apps));
+                    Invoke(form, "RefreshGrid");
+                    Application.DoEvents();
+
+                    Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                    Check(grid.ClientSize.Width < grid.Width, "fixture did not show a vertical scrollbar");
+                    int edge = DpiHelper.Scale(7, DpiHelper.ForControl(form));
+                    int middleY = grid.Top + grid.Height / 2;
+                    MethodInfo hitTest = typeof(MainForm).GetMethod("ResizeHitTest", Private);
+                    Point rightClient = new Point(form.ClientSize.Width - 2, middleY);
+                    Check((int)hitTest.Invoke(form, new object[] { rightClient }) == 11,
+                        "right resize edge missing beside the grid scrollbar");
+
+                    Cursor.Current = Cursors.Default;
+                    Message message = Message.Create(grid.Handle, 0x00A0, IntPtr.Zero,
+                        PackScreenPoint(form.PointToScreen(rightClient)));
+                    Check(!form.PreFilterMessage(ref message), "non-client move was swallowed");
+                    Check(Cursor.Current == Cursors.SizeWE,
+                        "non-client scrollbar move did not show the horizontal resize cursor");
+
+                    Point innerClient = new Point(form.ClientSize.Width - edge - 2, middleY);
+                    Check((int)hitTest.Invoke(form, new object[] { innerClient }) == 0,
+                        "scrollbar interior became a resize zone");
+                    Cursor.Current = Cursors.Hand;
+                    message = Message.Create(grid.Handle, 0x00A0, IntPtr.Zero,
+                        PackScreenPoint(form.PointToScreen(innerClient)));
+                    form.PreFilterMessage(ref message);
+                    Check(Cursor.Current == Cursors.Hand,
+                        "scrollbar interior move was turned into a resize cursor");
+                }
+            }
+            finally
+            {
+                Cursor.Current = original;
+            }
+        }
+
+        private static IntPtr PackScreenPoint(Point point)
+        {
+            long packed = (long)(uint)(point.X & 0xFFFF) | ((long)(uint)(point.Y & 0xFFFF) << 16);
+            return new IntPtr(packed);
         }
 
         private static void MenuDpi()

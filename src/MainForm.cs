@@ -133,6 +133,7 @@ namespace AppManager
         private static extern int SendMessage(IntPtr h, int msg, IntPtr wp, IntPtr lp);
         [DllImport("user32.dll")]
         private static extern bool ReleaseCapture();
+        private const int WM_NCMOUSEMOVE = 0xA0;
         private const int WM_NCLBUTTONDOWN = 0xA1;
         private const int WM_NCHITTEST = 0x0084;
         private const int WM_SIZING = 0x0214;
@@ -310,12 +311,17 @@ namespace AppManager
         private bool TryHandleResizeHitTest(ref Message m)
         {
             if (IsFormMaximized || playerFullscreen || WindowState != FormWindowState.Normal) return false;
-            long packed = m.LParam.ToInt64();
-            Point screen = new Point(unchecked((short)(packed & 0xFFFF)), unchecked((short)((packed >> 16) & 0xFFFF)));
+            Point screen = ScreenPointFromLParam(m.LParam);
             int hit = ResizeHitTest(PointToClient(screen));
             if (hit == 0) return false;
             m.Result = (IntPtr)hit;
             return true;
+        }
+
+        private static Point ScreenPointFromLParam(IntPtr lParam)
+        {
+            long packed = lParam.ToInt64();
+            return new Point(unchecked((short)(packed & 0xFFFF)), unchecked((short)((packed >> 16) & 0xFFFF)));
         }
 
         /// <summary>返回四边、四角对应的系统缩放命中码；客户区内部返回 0。</summary>
@@ -563,11 +569,17 @@ namespace AppManager
         {
             // 已释放（或正在释放）的窗体不再处理任何消息：下面的判断会访问 Handle，对已释放窗体会抛 ObjectDisposedException
             if (IsDisposed || Disposing) return false;
-            if (m.Msg == WM_LBUTTONDOWN && StartResizeFromChild(m.HWnd)) return true;
+            if (m.Msg == WM_LBUTTONDOWN && StartResizeFromChild(m.HWnd, Cursor.Position)) return true;
+            // 子控件的原生滚动条位于非客户区，WM_NCHITTEST 和客户区鼠标消息都不会到主窗体；
+            // 仅在滚动条覆盖的窗体边缘转交缩放，滚动条内侧仍由控件正常处理。
+            if (m.Msg == WM_NCLBUTTONDOWN && m.HWnd != Handle
+                && StartResizeFromChild(m.HWnd, ScreenPointFromLParam(m.LParam))) return true;
             // WM_SETCURSOR 直接发往子控件 WndProc，不经过消息泵，过滤器收不到；
-            // 改用 WM_MOUSEMOVE（会经过泵）在边缘命中区设置缩放光标，按住按键拖动期间跳过以免覆盖拖放光标
-            if (m.Msg == WM_MOUSEMOVE && (Control.MouseButtons == MouseButtons.None || resizingWindow))
-                SetResizeCursorFromChild(m.HWnd);
+            // 改用鼠标移动消息在边缘命中区设置缩放光标，按住按键拖动期间跳过以免覆盖拖放光标
+            bool clientMove = m.Msg == WM_MOUSEMOVE;
+            bool nonClientMove = m.Msg == WM_NCMOUSEMOVE && m.HWnd != Handle;
+            if ((clientMove || nonClientMove) && (Control.MouseButtons == MouseButtons.None || resizingWindow))
+                SetResizeCursorFromChild(m.HWnd, nonClientMove ? ScreenPointFromLParam(m.LParam) : Cursor.Position);
             if (m.Msg != WM_MOUSEWHEEL) return false;
             // 只路由发往主窗口的滚轮：模态对话框（属性、数据维护等）叠在侧栏上方时，滚轮属于对话框，不能被侧栏吞掉
             if (!IsMainWindowMessage(m.HWnd)) return false;
@@ -589,10 +601,9 @@ namespace AppManager
             return true;
         }
 
-        private bool StartResizeFromChild(IntPtr source)
+        private bool StartResizeFromChild(IntPtr source, Point screen)
         {
             if (!IsMainWindowMessage(source) || IsFormMaximized || playerFullscreen || WindowState != FormWindowState.Normal) return false;
-            Point screen = Cursor.Position;
             int hit = ResizeHitTest(PointToClient(screen));
             if (hit == 0) return false;
             ReleaseCapture();
@@ -611,10 +622,10 @@ namespace AppManager
             return true;
         }
 
-        private bool SetResizeCursorFromChild(IntPtr source)
+        private bool SetResizeCursorFromChild(IntPtr source, Point screen)
         {
             if (!IsMainWindowMessage(source) || IsFormMaximized || playerFullscreen || WindowState != FormWindowState.Normal) return false;
-            int hit = ResizeHitTest(PointToClient(Cursor.Position));
+            int hit = ResizeHitTest(PointToClient(screen));
             Cursor cursor = ResizeCursor(hit);
             if (cursor == null) return false;
             Cursor.Current = cursor;
@@ -717,8 +728,8 @@ namespace AppManager
         private void HideToTray()
         {
             if (!_ready) { Hide(); return; }
-            if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer();   // 窗体隐藏不触发子控件 VisibleChanged，先收起播放器，避免托盘后台继续出声
-            StopMusicPlayer();
+            if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer();   // 窗体隐藏不触发子控件 VisibleChanged，先收起视频，避免托盘后台继续出声
+            // 音乐会话独立于窗口句柄，托盘隐藏时继续播放；真正退出仍由 OnFormClosed 停止。
             if (WindowState != FormWindowState.Minimized) preTrayWindowState = WindowState;   // 记录最大化等状态
             Hide();
             if (!trayTipShown && tray != null)

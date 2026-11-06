@@ -69,6 +69,7 @@ namespace AppManager
                 Run("video failure placeholder does not block previous/next switching", VideoFailureSwitching);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
                 Run("music queue search maps filtered rows without changing playback order", MusicQueueSearch);
+                Run("music queue scrollbar drags, hides and keeps filtered row hit zones", MusicQueueScrollbar);
                 Run("music probe rejects short voice audio, accepts a normal song and surfaces corrupt files", MusicProbeContent);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
@@ -589,6 +590,79 @@ namespace AppManager
                 player.Open(new List<string>(songs), 1);
                 Check(string.IsNullOrEmpty(search.Text) && ((List<int>)Field(player, "visibleIndices")).Count == 4,
                     "opening a new queue did not clear the previous filter");
+                host.Hide();
+            }
+        }
+
+        private static void MusicQueueScrollbar()
+        {
+            List<string> songs = new List<string>();
+            for (int i = 0; i < 120; i++) songs.Add(@"D:\Music\Song " + i.ToString("000") + ".mp3");
+            using (Form host = new Form
+            {
+                ShowInTaskbar = false,
+                Size = new Size(900, 640),
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(-2000, -2000)
+            })
+            using (MusicPlayerControl player = new MusicPlayerControl { Dock = DockStyle.Fill })
+            {
+                host.Controls.Add(player);
+                host.Show();
+                player.Visible = true;
+                host.Activate();
+                Application.DoEvents();
+
+                Set(player, "paths", songs);
+                Set(player, "index", 0);
+                Set(player, "queueVisible", true);
+                Call(player, "LayoutPlayer");
+                Call(player, "RebuildVisibleIndices", true);
+                Rectangle content = (Rectangle)Field(player, "contentRect");
+                Rectangle track = (Rectangle)Call(player, "QueueScrollTrackRect");
+                Rectangle thumb = (Rectangle)Call(player, "QueueScrollThumbRect");
+                Check(!track.IsEmpty && !thumb.IsEmpty, "long queue did not expose a scrollbar");
+                Check(track.Left <= thumb.Left && thumb.Right <= track.Right
+                    && track.Top <= thumb.Top && thumb.Bottom <= track.Bottom,
+                    "scrollbar thumb escaped its track");
+                Check(thumb.Height >= 30, "scrollbar thumb became too small to drag");
+                Check((int)Call(player, "HitTest", new Point(content.Right - 8, content.Y + 5)) == 10,
+                    "scrollbar hit zone was treated as a song row");
+
+                Call(player, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, track.X + 1, track.Y + 1, 0));
+                Check((bool)Field(player, "queueScrollDragging"), "scrollbar drag did not start");
+                Call(player, "OnMouseMove", new MouseEventArgs(MouseButtons.Left, 0, track.X + 1, track.Bottom - 1, 0));
+                int visibleRows = Math.Max(1, content.Height / 42);
+                Check((int)Field(player, "queueFirst") == Math.Max(0, songs.Count - visibleRows),
+                    "scrollbar drag did not reach the final queue page");
+                Call(player, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, track.X + 1, track.Bottom - 1, 0));
+                Check(!(bool)Field(player, "queueScrollDragging"), "scrollbar drag stayed active after mouse up");
+
+                Set(player, "queueFirst", 0);
+                int middle = track.Y + track.Height / 2;
+                Call(player, "OnMouseDown", new MouseEventArgs(MouseButtons.Left, 1, track.X + 1, middle, 0));
+                int jumped = (int)Field(player, "queueFirst");
+                Check(jumped > 0 && jumped < songs.Count - visibleRows,
+                    "clicking the scrollbar track did not jump into the queue");
+                Call(player, "OnMouseUp", new MouseEventArgs(MouseButtons.Left, 1, track.X + 1, middle, 0));
+
+                Set(player, "queueFirst", 10);
+                Set(player, "hover", 100);
+                Call(player, "SetQueueFirst", 0);
+                Check((int)Field(player, "hover") != 100, "wheel scrolling left a stale hovered row");
+
+                SearchField search = (SearchField)Field(player, "queueSearch");
+                search.Text = "Song 119";
+                Check(((List<int>)Field(player, "visibleIndices")).Count == 1, "queue filter did not narrow the scrollbar range");
+                thumb = (Rectangle)Call(player, "QueueScrollThumbRect");
+                Check(thumb.IsEmpty, "filtered single-row queue still showed a scrollbar");
+
+                search.Text = "";
+                Set(player, "paths", songs.GetRange(0, 5));
+                Set(player, "index", 0);
+                Call(player, "RebuildVisibleIndices", true);
+                thumb = (Rectangle)Call(player, "QueueScrollThumbRect");
+                Check(thumb.IsEmpty, "short queue showed a scrollbar");
                 host.Hide();
             }
         }

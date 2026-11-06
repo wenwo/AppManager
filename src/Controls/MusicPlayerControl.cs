@@ -10,6 +10,12 @@ namespace AppManager.Controls
 {
     public class MusicPlayerControl : Control
     {
+        private const int QueueRowHeight = 42;
+        private const int QueueScrollBarW = 4;
+        private const int QueueScrollHitW = 12;
+        private const int QueueScrollMinThumbH = 30;
+        private const int QueueScrollAction = 10;
+
         public event Action CloseRequested;
         public event Action PlaybackStarting;
         private MusicPlaybackSession session;
@@ -25,6 +31,8 @@ namespace AppManager.Controls
         private int scaledCoverWidth, scaledCoverHeight;
         private List<LyricLine> lyrics = new List<LyricLine>();
         private bool seeking, volumeDrag;
+        private bool queueScrollHot, queueScrollDragging;
+        private int queueScrollGrabDy;
         private bool playing, queueVisible, muted;
         private string failure = "";
         private double duration, position;
@@ -200,6 +208,8 @@ namespace AppManager.Controls
             queueFilter = "";
             queueSearchForceVisible = false;
             if (!string.IsNullOrEmpty(queueSearch.Text)) queueSearch.Text = "";
+            EndQueueScrollDrag();
+            queueScrollHot = false;
             visibleIndices.Clear();
             queueFirst = 0;
             hover = pressed = -1;
@@ -511,7 +521,7 @@ namespace AppManager.Controls
         private void DrawQueue(Graphics g)
         {
             DrawTabs(g);
-            int rowHeight = 42;
+            int rowHeight = QueueRowHeight;
             int visible = Math.Max(1, contentRect.Height / rowHeight);
             ClampQueueFirst();
             GraphicsState state = g.Save();
@@ -542,6 +552,17 @@ namespace AppManager.Controls
                 }
             }
             g.Restore(state);
+            DrawQueueScrollBar(g);
+        }
+
+        private void DrawQueueScrollBar(Graphics g)
+        {
+            if (QueueMaxFirst <= 0) return;
+            Rectangle thumb = QueueScrollThumbRect();
+            if (thumb.Width <= 0 || thumb.Height <= 0) return;
+            int alpha = (queueScrollHot || queueScrollDragging) ? 150 : 80;
+            using (SolidBrush brush = new SolidBrush(Color.FromArgb(alpha, 60, 60, 67)))
+                Draw.FillRoundedRect(g, brush, thumb, QueueScrollBarW / 2);
         }
 
         private void DrawTransport(Graphics g)
@@ -729,9 +750,10 @@ namespace AppManager.Controls
             if (queueTabRect.Contains(point)) return 7;
             if (seekRect.Contains(point)) return 8;
             if (volumeRect.Contains(point)) return 9;
+            if (queueVisible && QueueMaxFirst > 0 && QueueScrollHitRect().Contains(point)) return QueueScrollAction;
             if (queueVisible && contentRect.Contains(point))
             {
-                int row = (point.Y - contentRect.Y) / 42;
+                int row = (point.Y - contentRect.Y) / QueueRowHeight;
                 int position = queueFirst + row;
                 if (row >= 0 && position >= 0 && position < visibleIndices.Count)
                     return 100 + visibleIndices[position];
@@ -744,8 +766,12 @@ namespace AppManager.Controls
             base.OnMouseMove(e);
             if (seeking) { UpdateSeek(e.X); return; }
             if (volumeDrag) { UpdateVolume(e.X); return; }
+            if (queueScrollDragging) { DragQueueScrollTo(e.Y); Cursor = Cursors.Default; return; }
             int current = HitTest(e.Location);
-            if (current != hover) { hover = current; Invalidate(); }
+            bool overScroll = current == QueueScrollAction;
+            if (overScroll != queueScrollHot) { queueScrollHot = overScroll; Invalidate(); }
+            int visualHover = overScroll ? -1 : current;
+            if (visualHover != hover) { hover = visualHover; Invalidate(); }
             Cursor = Cursors.Default;
         }
 
@@ -753,6 +779,7 @@ namespace AppManager.Controls
         {
             base.OnMouseLeave(e);
             hover = -1;
+            if (!queueScrollDragging) queueScrollHot = false;
             Cursor = Cursors.Default;
             Invalidate();
         }
@@ -762,7 +789,9 @@ namespace AppManager.Controls
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
             Focus();
-            pressed = HitTest(e.Location);
+            int action = HitTest(e.Location);
+            if (action == QueueScrollAction) { BeginQueueScrollDrag(e.Y); return; }
+            pressed = action;
             if (pressed == 8) { seeking = true; Capture = true; UpdateSeek(e.X); }
             else if (pressed == 9) { volumeDrag = true; Capture = true; UpdateVolume(e.X); }
             Invalidate();
@@ -776,6 +805,13 @@ namespace AppManager.Controls
             pressed = -1;
             if (seeking) { seeking = false; UpdateSeek(e.X); SeekTo(position); Invalidate(); return; }
             if (volumeDrag) { volumeDrag = false; UpdateVolume(e.X); return; }
+            if (queueScrollDragging)
+            {
+                EndQueueScrollDrag();
+                queueScrollHot = QueueMaxFirst > 0 && QueueScrollHitRect().Contains(e.Location);
+                Invalidate();
+                return;
+            }
             if (action < 0 || action != HitTest(e.Location)) { Invalidate(); return; }
             if (action == 0) { Session.CycleMode(); Invalidate(); }
             else if (action == 1) PlayPrevious();
@@ -783,13 +819,33 @@ namespace AppManager.Controls
             else if (action == 3) RequestClose();
             else if (action == 4) PlayNext();
             else if (action == 5) ToggleMuteFromMiniPlayer();
-            else if (action == 6 || action == 7) { queueVisible = action == 7; EnsureQueueCurrentVisible(); Invalidate(); }
+            else if (action == 6 || action == 7)
+            {
+                queueVisible = action == 7;
+                if (!queueVisible)
+                {
+                    EndQueueScrollDrag();
+                    queueScrollHot = false;
+                }
+                EnsureQueueCurrentVisible();
+                Invalidate();
+            }
         }
 
         protected override void OnMouseCaptureChanged(EventArgs e)
         {
             base.OnMouseCaptureChanged(e);
-            if (!Capture) seeking = volumeDrag = false;
+            if (!Capture)
+            {
+                seeking = volumeDrag = false;
+                if (queueScrollDragging)
+                {
+                    queueScrollDragging = false;
+                    queueScrollGrabDy = 0;
+                    queueScrollHot = false;
+                    Invalidate();
+                }
+            }
         }
 
         protected override void OnMouseDoubleClick(MouseEventArgs e)
@@ -818,10 +874,7 @@ namespace AppManager.Controls
         {
             base.OnMouseWheel(e);
             if (queueVisible && contentRect.Contains(e.Location))
-            {
-                int visible = Math.Max(1, contentRect.Height / 42);
-                queueFirst = Math.Max(0, Math.Min(Math.Max(0, visibleIndices.Count - visible), queueFirst - Math.Sign(e.Delta) * 3));
-            }
+                SetQueueFirst(queueFirst - Math.Sign(e.Delta) * 3);
             else SetVolume(volume + Math.Sign(e.Delta) * 5);
             Invalidate();
         }
@@ -872,6 +925,8 @@ namespace AppManager.Controls
             playing = false;
             position = duration = 0;
             seeking = volumeDrag = false;
+            EndQueueScrollDrag();
+            queueScrollHot = false;
             paths = new List<string>();
             index = -1;
             failure = "";
@@ -898,10 +953,10 @@ namespace AppManager.Controls
         {
             int row = visibleIndices.IndexOf(index);
             if (row < 0) return;
-            int visible = Math.Max(1, contentRect.Height / 42);
-            if (row < queueFirst) queueFirst = row;
-            else if (row >= queueFirst + visible) queueFirst = row - visible + 1;
-            ClampQueueFirst();
+            int target = queueFirst;
+            if (row < target) target = row;
+            else if (row >= target + QueueVisibleRows) target = row - QueueVisibleRows + 1;
+            SetQueueFirst(target);
         }
 
         private bool HasQueueFilter
@@ -911,6 +966,8 @@ namespace AppManager.Controls
 
         private void RebuildVisibleIndices(bool resetScroll)
         {
+            EndQueueScrollDrag();
+            queueScrollHot = false;
             visibleIndices.Clear();
             string filter = (queueFilter ?? "").Trim();
             for (int i = 0; i < paths.Count; i++)
@@ -929,10 +986,107 @@ namespace AppManager.Controls
             Invalidate();
         }
 
+        private int QueueVisibleRows
+        {
+            get { return Math.Max(1, contentRect.Height / QueueRowHeight); }
+        }
+
+        private int QueueMaxFirst
+        {
+            get { return Math.Max(0, visibleIndices.Count - QueueVisibleRows); }
+        }
+
+        private Rectangle QueueScrollTrackRect()
+        {
+            int height = Math.Max(0, contentRect.Height - 2);
+            return new Rectangle(contentRect.Right - QueueScrollBarW, contentRect.Y + 1, QueueScrollBarW, height);
+        }
+
+        private Rectangle QueueScrollHitRect()
+        {
+            int width = Math.Min(QueueScrollHitW, Math.Max(0, contentRect.Width));
+            return new Rectangle(contentRect.Right - width, contentRect.Y, width, contentRect.Height);
+        }
+
+        private Rectangle QueueScrollThumbRect()
+        {
+            if (QueueMaxFirst <= 0) return Rectangle.Empty;
+            Rectangle track = QueueScrollTrackRect();
+            if (track.Height <= 0) return Rectangle.Empty;
+            int thumbHeight = (int)((long)track.Height * QueueVisibleRows / Math.Max(1, visibleIndices.Count));
+            if (thumbHeight < QueueScrollMinThumbH) thumbHeight = QueueScrollMinThumbH;
+            if (thumbHeight > track.Height) thumbHeight = track.Height;
+            int travel = track.Height - thumbHeight;
+            int y = travel <= 0 ? track.Y : track.Y + (int)((long)travel * queueFirst / QueueMaxFirst);
+            return new Rectangle(track.X, y, track.Width, thumbHeight);
+        }
+
+        private void SetQueueFirst(int value)
+        {
+            int maximum = QueueMaxFirst;
+            if (value < 0) value = 0;
+            else if (value > maximum) value = maximum;
+            if (value == queueFirst) return;
+            queueFirst = value;
+            SyncQueueHoverToCursor();
+            Invalidate();
+        }
+
+        private void SyncQueueHoverToCursor()
+        {
+            if (!queueVisible || !Visible || !IsHandleCreated) { hover = -1; return; }
+            int current = HitTest(PointToClient(Cursor.Position));
+            hover = current == QueueScrollAction ? -1 : current;
+        }
+
+        private void BeginQueueScrollDrag(int y)
+        {
+            Rectangle track = QueueScrollTrackRect();
+            Rectangle thumb = QueueScrollThumbRect();
+            if (track.Height <= 0 || thumb.Height <= 0) return;
+            queueScrollDragging = true;
+            queueScrollHot = true;
+            if (y >= thumb.Y && y < thumb.Bottom)
+            {
+                queueScrollGrabDy = y - thumb.Y;
+            }
+            else
+            {
+                queueScrollGrabDy = thumb.Height / 2;
+                DragQueueScrollTo(y);
+            }
+            pressed = -1;
+            hover = -1;
+            Capture = true;
+            Invalidate();
+        }
+
+        private void DragQueueScrollTo(int y)
+        {
+            Rectangle track = QueueScrollTrackRect();
+            Rectangle thumb = QueueScrollThumbRect();
+            int travel = track.Height - thumb.Height;
+            if (travel <= 0) return;
+            int top = y - queueScrollGrabDy;
+            if (top < track.Y) top = track.Y;
+            else if (top > track.Bottom - thumb.Height) top = track.Bottom - thumb.Height;
+            int value = (int)((long)(top - track.Y) * QueueMaxFirst / travel);
+            if (value == queueFirst) return;
+            queueFirst = value;
+            hover = -1;
+            Invalidate();
+        }
+
+        private void EndQueueScrollDrag()
+        {
+            queueScrollDragging = false;
+            queueScrollGrabDy = 0;
+            if (Capture) Capture = false;
+        }
+
         private void ClampQueueFirst()
         {
-            int visible = Math.Max(1, contentRect.Height / 42);
-            queueFirst = Math.Max(0, Math.Min(queueFirst, Math.Max(0, visibleIndices.Count - visible)));
+            queueFirst = Math.Max(0, Math.Min(queueFirst, QueueMaxFirst));
         }
 
         private void RequestClose()
