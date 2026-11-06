@@ -61,7 +61,7 @@ namespace AppManager
                 {
                     double elapsed = Time(delegate { config = Load(); });
                     CheckConfig();
-                    Console.WriteLine("MIGRATION count=" + count + "; ms=" + elapsed.ToString("F3", Invariant) + "; db_bytes=" + new FileInfo(config.Database.FilePath).Length);
+                    Console.WriteLine("MIGRATION backend=" + label + "; count=" + count + "; ms=" + elapsed.ToString("F3", Invariant) + "; db_bytes=" + new FileInfo(config.Database.FilePath).Length);
                     return 0;
                 }
 #endif

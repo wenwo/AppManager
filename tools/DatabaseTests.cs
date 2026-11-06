@@ -110,7 +110,7 @@ namespace AppManager
             c.CategoryViewMode["工具"] = false; c.CategoryIconNames["工具"] = "Folder"; c.SidebarOrder.Add("工具");
             c.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行", Description = "中文 & ' 引号", Cover = "C:\\cover.jpg", CoverFocusX = .25F });
             c.AddedItems.Add(new AddedEntry { Path = "C:\\file.txt", Name = "file", Category = "工具" });
-            c.AddedItems.Add(new AddedEntry { Path = "C:\\image.jpg", Name = "image", Category = "照片", IsResource = true });
+            c.AddedItems.Add(new AddedEntry { Path = "C:\\image.jpg", Name = "image", Category = "照片", IsResource = true, OriginPath = "C:\\original.jpg" });
             c.CategoryOverride["add:C:\\file.txt"] = "工具";
             c.ItemCategories["add:C:\\image.jpg"] = new List<string> { "col:照片/旅行" };
             c.ExcludedCategories["add:C:\\file.txt"] = new List<string> { "其他" };
@@ -127,6 +127,7 @@ namespace AppManager
             Check(c.Favorites.Count == 1 && c.Hidden.Count == 1 && c.CustomCategories[0] == "工具", "lists lost");
             Check(c.Collections[0].Description == "中文 & ' 引号" && c.Collections[0].CoverFocusX == .25F, "collection lost");
             Check(c.AddedItems.Count == 2 && c.AddedItems.Any(a => a.IsResource), "added entries lost");
+            Check(c.AddedItems.ByPath("C:\\image.jpg").Single().OriginPath == "C:\\original.jpg", "added origin lost");
             Check(c.ItemCategories["add:C:\\image.jpg"][0] == "col:照片/旅行", "membership lost");
             Check(c.DesktopBackup[0].IsCopy && !c.CategoryViewMode["工具"], "settings lost");
             int operations = c.Database.History(100).Count;

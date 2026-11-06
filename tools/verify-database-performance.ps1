@@ -1,4 +1,5 @@
 param([string]$BaselineRevision = '468a3ab', [string]$SQLiteBaselineRevision = '', [int[]]$Counts = @(10000, 100000, 300000), [string]$OutputDirectory = '', [string]$LiveDatabasePath = '')
+# BaselineRevision 编译为 XML 后端；SQLiteBaselineRevision 可选，按 SQLite 后端单独迁移和计时。
 $ErrorActionPreference = 'Stop'
 $perfProject = Split-Path -Parent $PSScriptRoot
 $perfRoot = Join-Path ([IO.Path]::GetTempPath()) ('AppManagerPerformance_' + [Guid]::NewGuid().ToString('N'))
@@ -72,13 +73,13 @@ function Run-PerformanceProbe([string]$exe, [string[]]$probeArguments) {
 foreach ($perfCount in $Counts) {
     $perfFixture = Join-Path $perfRoot ('items-' + $perfCount)
     Run-PerformanceProbe $perfNew @('generate', $perfFixture, "$perfCount")
-    Run-PerformanceProbe $perfNew @('migrate', $perfFixture, "$perfCount")
+    Run-PerformanceProbe $perfNew @('migrate', $perfFixture, "$perfCount", 'label=SQLite-current')
     $perfSqliteBaselineFixture = $null
     if ($perfSqliteOld) {
         $perfSqliteBaselineFixture = Join-Path $perfRoot ('items-' + $perfCount + '-sqlite-baseline')
         [IO.Directory]::CreateDirectory($perfSqliteBaselineFixture) | Out-Null
         Copy-Item -LiteralPath (Join-Path $perfFixture 'config.xml') -Destination (Join-Path $perfSqliteBaselineFixture 'config.xml')
-        Run-PerformanceProbe $perfSqliteOld @('migrate', $perfSqliteBaselineFixture, "$perfCount")
+        Run-PerformanceProbe $perfSqliteOld @('migrate', $perfSqliteBaselineFixture, "$perfCount", 'label=SQLite-baseline')
     }
     # Alternate execution order by size to limit systematic order bias; OS file cache is not flushed.
     $perfRuns = @(
@@ -109,13 +110,13 @@ foreach ($perfCount in $Counts) {
 $perfDense = Join-Path $perfRoot 'dense-10000'
 Write-Output 'DENSE_RELATIONS=10000'
 Run-PerformanceProbe $perfNew @('generate', $perfDense, '10000', 'dense')
-Run-PerformanceProbe $perfNew @('migrate', $perfDense, '10000')
+Run-PerformanceProbe $perfNew @('migrate', $perfDense, '10000', 'label=SQLite-current')
 $perfDenseSqliteBaseline = $null
 if ($perfSqliteOld) {
     $perfDenseSqliteBaseline = Join-Path $perfRoot 'dense-10000-sqlite-baseline'
     [IO.Directory]::CreateDirectory($perfDenseSqliteBaseline) | Out-Null
     Copy-Item -LiteralPath (Join-Path $perfDense 'config.xml') -Destination (Join-Path $perfDenseSqliteBaseline 'config.xml')
-    Run-PerformanceProbe $perfSqliteOld @('migrate', $perfDenseSqliteBaseline, '10000')
+    Run-PerformanceProbe $perfSqliteOld @('migrate', $perfDenseSqliteBaseline, '10000', 'label=SQLite-baseline')
 }
 foreach ($perfRun in @(
     [pscustomobject]@{ Exe = $perfOld; Label = 'XML-baseline'; Fixture = $perfDense },
