@@ -150,8 +150,8 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 扫描本机本地磁盘上的音频文件，并移动到资源页「音乐」分类。
-        /// 已登记的同一路径由现有导入流程转成引用并跳过重复入库，不会移动源文件。
+        /// 扫描本机本地磁盘上的音频文件，按内容识别歌曲后复制到资源页「音乐」分类。
+        /// 已登记的同一路径由现有导入流程跳过重复入库；扫描只读，源文件保留。
         /// </summary>
         private void ScanLocalMusic()
         {
@@ -169,19 +169,23 @@ namespace AppManager
                 return;
             }
             string formats = string.Join("、", MediaRules.AudioExt).ToUpperInvariant();
-            string prompt = "将扫描本机固定磁盘和可移动磁盘，查找以下音频文件：\n" + formats
+            string prompt = "将只读扫描本机固定磁盘和可移动磁盘，并按内容识别歌曲。\n"
+                + "会跳过系统和程序目录、AppData、游戏库、云端未下载文件、过小文件，"
+                + "以及提示音、录音、播客、无法解析或过短的音频。\n\n支持扩展名：" + formats
                 + "\n\n找到的歌曲会复制到资源存储位置的「音乐」分类，源文件保留；"
-                + "已收录的同一路径会自动跳过，之前排除的项目保持排除。"
-                + "\n按扩展名识别，可能包含提示音等其他音频。全盘扫描可能需要几分钟，可随时取消。是否开始？";
+                + "已收录的同一路径会自动跳过，之前排除的项目保持排除。\n"
+                + "全盘扫描可能需要几分钟，可随时取消。是否开始？";
             if (MessageBox.Show(this, prompt, "扫描本机音乐", MessageBoxButtons.OKCancel,
                 MessageBoxIcon.Question) != DialogResult.OK) return;
 
             localMusicScanRunning = true;
             CancellationTokenSource cancel = new CancellationTokenSource();
             localMusicScanCancel = cancel;
+            MusicScanRequest request = BuildLocalMusicScanRequest();
             LocalMusicScanResult result = null;
             Exception failure = null;
             bool canceled = false;
+            bool extensionOnly = false;
             using (Form dialog = BuildMusicScanDialog())
             {
                 Label status = (Label)dialog.Tag;
@@ -200,20 +204,66 @@ namespace AppManager
                     {
                         try
                         {
-                            result = LocalMusicScanner.Scan(cancel.Token, delegate(int count, string directory)
+                            string availabilityError;
+                            bool available = MpvAudioProbeSession.TryCheckAvailability(out availabilityError, cancel.Token);
+                            if (!available && !cancel.IsCancellationRequested)
                             {
-                                PostMusicScanProgress(dialog, status, detail, count, directory);
+                                bool fallback = false;
+                                using (ManualResetEvent answer = new ManualResetEvent(false))
+                                {
+                                    try
+                                    {
+                                        dialog.BeginInvoke((Action)delegate
+                                        {
+                                            if (dialog.IsDisposed || cancel.IsCancellationRequested) { answer.Set(); return; }
+                                            string message = "播放组件缺失或版本不兼容，无法识别音频内容。\n\n"
+                                                + (string.IsNullOrEmpty(availabilityError) ? "" : availabilityError + "\n\n")
+                                                + "是否按扩展名继续扫描？\n"
+                                                + "选择「是」将按扩展名收录，仍会跳过系统和程序目录、过小文件、云端占位文件和已排除项。";
+                                            fallback = MessageBox.Show(dialog, message, "播放组件缺失",
+                                                MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                                            answer.Set();
+                                        });
+                                    }
+                                    catch (ObjectDisposedException) { answer.Set(); }
+                                    catch (InvalidOperationException) { answer.Set(); }
+                                    while (!answer.WaitOne(50))
+                                    {
+                                        if (cancel.IsCancellationRequested) return;
+                                    }
+                                }
+                                if (cancel.IsCancellationRequested) return;
+                                if (!fallback)
+                                {
+                                    canceled = true;
+                                    CloseMusicScanDialog(dialog);
+                                    return;
+                                }
+                                extensionOnly = true;
+                                UpdateMusicScanStatus(dialog, status, detail, "播放组件缺失，按扩展名扫描…", "准备扫描…");
+                            }
+                            if (cancel.IsCancellationRequested) return;
+                            request.ExtensionOnly = extensionOnly;
+                            request.ProbeFactory = extensionOnly ? null : new Func<IMusicProbeSession>(delegate { return new MpvAudioProbeSession(); });
+                            int lastUpdate = Environment.TickCount - 250;
+                            result = LocalMusicScanner.Scan(request, cancel.Token, delegate(MusicScanProgress value)
+                            {
+                                int now = Environment.TickCount;
+                                bool shouldUpdate = value.Probing || unchecked(now - lastUpdate) >= 200;
+                                if (!shouldUpdate) return;
+                                lastUpdate = now;
+                                if (value.Probing)
+                                    UpdateMusicScanStatus(dialog, status, detail,
+                                        "识别中 " + value.Index + " / " + value.Total + "，已通过 " + value.Accepted,
+                                        value.Path);
+                                else
+                                    UpdateMusicScanStatus(dialog, status, detail,
+                                        "正在收集候选… 已找到 " + value.Candidates + " 个音频文件", value.Path);
                             });
                         }
                         catch (OperationCanceledException) { canceled = true; }
                         catch (Exception ex) { failure = ex; Paths.LogError(ex); }
-                        finally
-                        {
-                            RunOnUi(delegate
-                            {
-                                if (!dialog.IsDisposed) dialog.Close();
-                            });
-                        }
+                        finally { CloseMusicScanDialog(dialog); }
                     });
                 };
                 dialog.ShowDialog(this);
@@ -234,15 +284,45 @@ namespace AppManager
                 ShowNotice("已取消扫描本机音乐，未导入任何文件。");
                 return;
             }
-            if (result == null || result.Files.Count == 0)
+            if (result == null)
             {
-                string message = "扫描结束，未找到支持的音频文件。";
-                if (result != null) message += MusicScanErrorSummary(result);
-                MessageBox.Show(this, message, "扫描本机音乐",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "扫描本机音乐未返回结果，未导入任何文件。",
+                    "扫描本机音乐", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             FinishLocalMusicScan(result);
+        }
+
+        private MusicScanRequest BuildLocalMusicScanRequest()
+        {
+            MusicScanRequest request = new MusicScanRequest();
+            request.MusicRoots = LocalMusicScanner.UserMusicRoots();
+            HashSet<string> seenIncluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> seenExcluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (AddedEntry entry in config.AddedItems.InCategory("音乐"))
+            {
+                AddMusicPath(request.IncludedPaths, seenIncluded, entry.Path);
+                AddMusicPath(request.IncludedPaths, seenIncluded, entry.OriginPath);
+            }
+            foreach (KeyValuePair<string, List<string>> pair in config.ExcludedCategories)
+            {
+                if (pair.Value == null || !pair.Value.Contains("音乐")) continue;
+                if (pair.Key == null || !pair.Key.StartsWith("add:", StringComparison.OrdinalIgnoreCase)) continue;
+                string path = pair.Key.Substring(4);
+                AddMusicPath(request.ExcludedPaths, seenExcluded, path);
+                foreach (AddedEntry entry in config.AddedItems.ByPath(path))
+                    AddMusicPath(request.ExcludedPaths, seenExcluded, entry.OriginPath);
+            }
+            foreach (string root in KnownResourceStoreRoots())
+                if (!string.IsNullOrEmpty(root)) request.ExcludedRoots.Add(root);
+            request.ExcludedRoots.Add(Paths.DataDir);
+            return request;
+        }
+
+        private static void AddMusicPath(List<string> paths, HashSet<string> seen, string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !seen.Add(path)) return;
+            paths.Add(path);
         }
 
         private static Form BuildMusicScanDialog()
@@ -256,16 +336,16 @@ namespace AppManager
                 MaximizeBox = false,
                 ControlBox = false,
                 ShowInTaskbar = false,
-                ClientSize = new Size(520, 142),
+                ClientSize = new Size(560, 142),
                 BackColor = Theme.Background
             };
             Label status = new Label
             {
                 Name = "scanStatus",
-                Text = "正在扫描本机音乐…",
+                Text = "正在检查播放组件…",
                 AutoSize = false,
                 Location = new Point(18, 18),
-                Size = new Size(484, 24),
+                Size = new Size(524, 24),
                 Font = Theme.DialogTitleFont,
                 ForeColor = Theme.TextPrimary
             };
@@ -276,14 +356,14 @@ namespace AppManager
                 AutoSize = false,
                 AutoEllipsis = true,
                 Location = new Point(18, 50),
-                Size = new Size(484, 22),
+                Size = new Size(524, 22),
                 ForeColor = Theme.TextSecondary
             };
             Button cancel = new Button
             {
                 Name = "scanCancel",
                 Text = "取消",
-                Location = new Point(408, 94),
+                Location = new Point(448, 94),
                 Size = new Size(94, 30)
             };
             dialog.Controls.AddRange(new Control[] { status, detail, cancel });
@@ -292,7 +372,8 @@ namespace AppManager
             return dialog;
         }
 
-        private static void PostMusicScanProgress(Form dialog, Label status, Label detail, int count, string directory)
+        private static void UpdateMusicScanStatus(Form dialog, Label status, Label detail,
+            string statusText, string detailText)
         {
             try
             {
@@ -300,9 +381,21 @@ namespace AppManager
                 dialog.BeginInvoke((Action)delegate
                 {
                     if (dialog.IsDisposed || status.IsDisposed || detail.IsDisposed) return;
-                    status.Text = "正在扫描本机音乐… 已找到 " + count + " 个音频文件";
-                    detail.Text = directory;
+                    status.Text = statusText;
+                    detail.Text = detailText;
                 });
+            }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
+        }
+
+        private static void CloseMusicScanDialog(Form dialog)
+        {
+            try
+            {
+                if (dialog.IsDisposed || dialog.Disposing) return;
+                if (!dialog.IsHandleCreated) { dialog.Close(); return; }
+                dialog.BeginInvoke((Action)delegate { if (!dialog.IsDisposed) dialog.Close(); });
             }
             catch (ObjectDisposedException) { }
             catch (InvalidOperationException) { }
@@ -316,28 +409,119 @@ namespace AppManager
                     "扫描本机音乐", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            string message = (result.Errors == 0 ? "扫描完成：" : "扫描结束（有遗漏）：") + "找到 " + result.Files.Count + " 个音频文件，"
-                + "检查了 " + result.DirectoriesScanned + " 个目录。";
-            message += MusicScanErrorSummary(result);
-            if (result.CloudFiles > 0)
-                message += "\n其中 " + result.CloudFiles + " 个云端按需文件在复制时可能需要下载。";
-            message += "\n\n将复制到资源存储位置的「音乐」分类，源文件保留；"
-                + "已收录的同一路径会自动跳过，之前排除的项目保持排除。是否继续导入？";
-            if (MessageBox.Show(this, message, "扫描完成", MessageBoxButtons.OKCancel,
-                MessageBoxIcon.Question) != DialogResult.OK) return;
-            QueueImport(result.Files.ToArray(), ImportOperation.Copy, "音乐", null, true, 0, null, 0, true);
+            string summary = BuildMusicScanSummary(result);
+            List<string> import = new List<string>();
+            bool importAccepted = false;
+            if (result.Files.Count > 0)
+            {
+                string message = summary + "\n\n将复制通过筛选的 " + result.Files.Count + " 个文件到资源存储位置的「音乐」分类，源文件保留；"
+                    + "\n已收录的同一路径会自动跳过，之前排除的项目保持排除。是否继续导入？";
+                importAccepted = MessageBox.Show(this, message, "扫描完成",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+                if (importAccepted) import.AddRange(result.Files);
+            }
+            if (result.UnconfirmedCount > 0)
+            {
+                string samples = MusicSamples(result, MusicFilterReason.Unconfirmed, 3);
+                string message = "有 " + result.UnconfirmedCount + " 个文件无法确认是否为歌曲。"
+                    + (string.IsNullOrEmpty(samples) ? "" : "\n例如：" + samples)
+                    + "\n\n是否将无法确认的文件也一并导入？选择「否」会忽略这些文件。";
+                if (MessageBox.Show(this, message, "无法确认的文件",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
+                    import.AddRange(result.UnconfirmedFiles);
+            }
+            if (import.Count == 0)
+            {
+                if (result.Files.Count > 0 || result.UnconfirmedCount > 0)
+                    ShowNotice("已取消导入，未导入任何内容。");
+                else
+                    MessageBox.Show(this, summary, "扫描本机音乐", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            QueueImport(import.ToArray(), ImportOperation.Copy, "音乐", null, true, 0, null, 0, true);
         }
 
-        private static string MusicScanErrorSummary(LocalMusicScanResult result)
+        private static string BuildMusicScanSummary(LocalMusicScanResult result)
         {
-            if (result.Errors == 0) return "";
-            string message = "\n有 " + result.Errors + " 个磁盘、目录或文件因权限、占用或路径变化未能读取。";
-            if (result.ErrorSamples.Count > 0)
+            StringBuilder text = new StringBuilder();
+            text.Append("扫描完成：发现 ").Append(result.AudioFilesFound).Append(" 个音频文件，进入识别 ")
+                .Append(result.Candidates).Append(" 个；检查 ")
+                .Append(result.DirectoriesScanned).Append(" 个目录，跳过 ")
+                .Append(result.DirectoriesSkipped).Append(" 个目录。");
+            text.Append("\n通过筛选 ").Append(result.Files.Count).Append(" 个，无法确认 ")
+                .Append(result.UnconfirmedCount).Append(" 个。");
+            AppendMusicReason(text, result, MusicFilterReason.AlreadyIncluded, "已收录跳过");
+            AppendMusicReason(text, result, MusicFilterReason.Excluded, "已排除跳过");
+            AppendMusicReason(text, result, MusicFilterReason.TooSmall, "文件过小");
+            AppendMusicReason(text, result, MusicFilterReason.CloudPlaceholder, "云端未下载");
+            AppendMusicReason(text, result, MusicFilterReason.ProbeFailed, "无法解析");
+            AppendMusicReason(text, result, MusicFilterReason.ProbeTimeout, "识别超时");
+            AppendMusicReason(text, result, MusicFilterReason.ProbeUnavailable, "播放组件不可用");
+            AppendMusicReason(text, result, MusicFilterReason.NoAudioStream, "没有音频轨");
+            AppendMusicReason(text, result, MusicFilterReason.TooShort, "时长不足 30 秒");
+            AppendMusicReason(text, result, MusicFilterReason.NonSongGenre, "播客/有声书/录音等标签");
+            AppendMusicReason(text, result, MusicFilterReason.NonSongDirectory, "提示音/录音等目录");
+            AppendMusicReason(text, result, MusicFilterReason.VoiceQuality, "低采样率单声道");
+            AppendMusicReason(text, result, MusicFilterReason.Mono, "单声道");
+            AppendMusicReason(text, result, MusicFilterReason.LongUntagged, "无标签且超过 20 分钟");
+            AppendMusicReason(text, result, MusicFilterReason.Unconfirmed, "无法确认");
+            AppendMusicReason(text, result, MusicFilterReason.NotProbed, "未探测");
+            if (result.Probes > 0)
             {
-                int count = Math.Min(3, result.ErrorSamples.Count);
-                message += "\n示例：\n" + string.Join("\n", result.ErrorSamples.GetRange(0, count).ToArray());
+                text.Append("\n探测 ").Append(result.Probes).Append(" 个，平均 ")
+                    .Append(result.ProbeMilliseconds / result.Probes).Append(" ms/个；总耗时 ")
+                    .Append(result.TotalMilliseconds).Append(" ms。");
             }
-            return message;
+            else
+            {
+                text.Append("\n总耗时 ").Append(result.TotalMilliseconds).Append(" ms。");
+            }
+            if (result.CloudFiles > 0)
+                text.Append("\n其中 ").Append(result.CloudFiles)
+                    .Append(" 个是云端按需文件。请先在文件资源管理器中选择「始终保留在此设备上」，再重新扫描。");
+            if (result.Errors > 0)
+            {
+                text.Append("\n有 ").Append(result.Errors).Append(" 个磁盘、目录或文件因权限、占用或路径变化未能读取。");
+                if (result.ErrorSamples.Count > 0)
+                {
+                    text.Append("\n示例：");
+                    int count = Math.Min(3, result.ErrorSamples.Count);
+                    for (int i = 0; i < count; i++)
+                        text.Append("\n").Append(result.ErrorSamples[i]);
+                }
+            }
+            return text.ToString();
+        }
+
+        private static void AppendMusicReason(StringBuilder text, LocalMusicScanResult result,
+            MusicFilterReason reason, string label)
+        {
+            int count = result.CountOf(reason);
+            if (count == 0) return;
+            text.Append("\n").Append(label).Append("：").Append(count);
+            List<string> samples = result.SamplesOf(reason);
+            int shown = Math.Min(2, samples.Count);
+            for (int i = 0; i < shown; i++)
+            {
+                string name = Path.GetFileName(samples[i]);
+                text.Append(i == 0 ? "（如 " : "、").Append(string.IsNullOrEmpty(name) ? samples[i] : name);
+            }
+            if (shown > 0) text.Append("）");
+        }
+
+        private static string MusicSamples(LocalMusicScanResult result, MusicFilterReason reason, int limit)
+        {
+            List<string> samples = reason == MusicFilterReason.Unconfirmed
+                ? result.UnconfirmedFiles : result.SamplesOf(reason);
+            StringBuilder text = new StringBuilder();
+            int count = Math.Min(limit, samples.Count);
+            for (int i = 0; i < count; i++)
+            {
+                string name = Path.GetFileName(samples[i]);
+                if (i > 0) text.Append("、");
+                text.Append(string.IsNullOrEmpty(name) ? samples[i] : name);
+            }
+            return text.ToString();
         }
     }
 }

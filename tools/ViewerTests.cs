@@ -69,6 +69,7 @@ namespace AppManager
                 Run("video failure placeholder does not block previous/next switching", VideoFailureSwitching);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
                 Run("music queue search maps filtered rows without changing playback order", MusicQueueSearch);
+                Run("music probe rejects short voice audio, accepts a normal song and surfaces corrupt files", MusicProbeContent);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
@@ -226,6 +227,48 @@ namespace AppManager
             return path;
         }
 
+        private static string WriteWav(string name, double seconds, int channels, int rate)
+        {
+            string path = Path.Combine(root, name);
+            int samples = Math.Max(1, (int)(rate * seconds));
+            int blockAlign = channels * 2;
+            int dataBytes = samples * blockAlign;
+            using (BinaryWriter w = new BinaryWriter(File.Create(path)))
+            {
+                w.Write(Encoding.ASCII.GetBytes("RIFF")); w.Write(36 + dataBytes); w.Write(Encoding.ASCII.GetBytes("WAVE"));
+                w.Write(Encoding.ASCII.GetBytes("fmt ")); w.Write(16); w.Write((short)1); w.Write((short)channels);
+                w.Write(rate); w.Write(rate * blockAlign); w.Write((short)blockAlign); w.Write((short)16);
+                w.Write(Encoding.ASCII.GetBytes("data")); w.Write(dataBytes); w.Write(new byte[dataBytes]);
+            }
+            return path;
+        }
+
+        private static void MusicProbeContent()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string mono = WriteWav("probe-voice.wav", 1, 1, 8000);
+            string stereo = WriteWav("probe-song.wav", 40, 2, 44100);
+            string fake = Path.Combine(root, "probe-fake.mp3");
+            byte[] random = new byte[70000];
+            new Random(17).NextBytes(random);
+            File.WriteAllBytes(fake, random);
+            using (MpvAudioProbeSession session = new MpvAudioProbeSession())
+            {
+                MusicProbeResult voice = session.Probe(mono, 5000, CancellationToken.None);
+                Check(voice.Status == MusicProbeStatus.Success && voice.Info.HasAudioStream, "voice probe failed: " + voice.Info.Error);
+                MusicFilterDecision rejected = MusicFileClassifier.Classify(mono, voice.Info, new string[0]);
+                Check(!rejected.Accepted, "short voice audio was accepted");
+                MusicProbeResult song = session.Probe(stereo, 5000, CancellationToken.None);
+                Check(song.Status == MusicProbeStatus.Success && song.Info.HasAudioStream, "song probe failed: " + song.Info.Error);
+                MusicFilterDecision accepted = MusicFileClassifier.Classify(stereo, song.Info, new string[0]);
+                Check(accepted.Accepted, "normal stereo song was rejected: " + accepted.Reason);
+                MusicProbeResult corrupt = session.Probe(fake, 5000, CancellationToken.None);
+                Check(corrupt.Status == MusicProbeStatus.Failed || corrupt.Status == MusicProbeStatus.TimedOut,
+                    "fake mp3 was treated as music: " + corrupt.Status);
+            }
+        }
         private static bool PumpUntil(Func<bool> done, int milliseconds)
         {
             Stopwatch watch = Stopwatch.StartNew();

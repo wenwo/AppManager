@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -29,6 +30,22 @@ namespace AppManager
             return batch;
         }
         private static ImportBatch Reload(ImportBatch batch) { return FileImport.Load(Path.Combine(batch.JournalDirectory, batch.Id + ".xml")); }
+        private sealed class FailingProbeSession : IMusicProbeSession
+        {
+            private readonly MusicProbeStatus status;
+            private readonly CancellationTokenSource cancel;
+            internal FailingProbeSession(MusicProbeStatus status) { this.status = status; }
+            internal FailingProbeSession(MusicProbeStatus status, CancellationTokenSource cancel) { this.status = status; this.cancel = cancel; }
+            public MusicProbeResult Probe(string path, int timeoutMilliseconds, CancellationToken token)
+            {
+                if (cancel != null) cancel.Cancel();
+                if (status == MusicProbeStatus.TimedOut) return MusicProbeResult.TimedOut(new MusicProbeInfo { Path = path, TimedOut = true });
+                if (status == MusicProbeStatus.Unavailable) return MusicProbeResult.Unavailable("unavailable");
+                if (status == MusicProbeStatus.Cancelled) return MusicProbeResult.Cancelled();
+                return MusicProbeResult.Failed(new MusicProbeInfo { Path = path, Failed = true });
+            }
+            public void Dispose() { }
+        }
         private sealed class AsyncSource : DataObject, ShellImportDrop.IAsyncOperation
         {
             internal int Starts, Ends, Result;
@@ -40,6 +57,10 @@ namespace AppManager
             public void EndOperation(int result, IntPtr reserved, uint effects) { Ends++; Result = result; Effect = effects; }
         }
         private static void Run(ImportBatch batch) { FileImport.Run(batch, delegate { return true; }, null); }
+        private static void WriteSized(string path, int bytes)
+        {
+            using (FileStream stream = new FileStream(path, FileMode.Create, FileAccess.Write)) stream.SetLength(bytes);
+        }
         [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
         private static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
         [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
@@ -55,6 +76,11 @@ namespace AppManager
                 stream.SetLength(new DriveInfo(Path.GetPathRoot(path)).AvailableFreeSpace + (1L << 30));
             }
         }
+        private static string MusicTestRoot(string prefix)
+        {
+            return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), prefix + Guid.NewGuid().ToString("N"));
+        }
+
         private static void WriteStream(string path, string text)
         {
             using (FileStream stream = new FileStream(CreateFile(path, 0x40000000, 0, IntPtr.Zero, 2, 0, IntPtr.Zero), FileAccess.Write))
@@ -105,7 +131,7 @@ namespace AppManager
                 });
                 Test("local music scan is recursive, case-insensitive and skips metadata folders", delegate
                 {
-                    string scanRoot = Path.Combine(Path.GetTempPath(), "AppManagerMusicScan_" + Guid.NewGuid().ToString("N"));
+                    string scanRoot = MusicTestRoot("AppManagerMusicScan_");
                     string junction = Path.Combine(scanRoot, "linked-album");
                     try
                     {
@@ -116,13 +142,13 @@ namespace AppManager
                         foreach (string name in new[] { "System Volume Information", "Recovery", "Config.Msi" })
                         {
                             string skipped = Path.Combine(scanRoot, name); Directory.CreateDirectory(skipped);
-                            File.WriteAllText(Path.Combine(skipped, "skipped.mp3"), "skip");
+                            WriteSized(Path.Combine(skipped, "skipped.mp3"), 70000);
                         }
-                        File.WriteAllText(Path.Combine(scanRoot, "one.mp3"), "a");
-                        File.WriteAllText(Path.Combine(scanRoot, "album", "two.FLAC"), "b");
-                        File.WriteAllText(Path.Combine(nested, "three.ogg"), "c");
+                        WriteSized(Path.Combine(scanRoot, "one.mp3"), 70000);
+                        WriteSized(Path.Combine(scanRoot, "album", "two.FLAC"), 70000);
+                        WriteSized(Path.Combine(nested, "three.ogg"), 70000);
                         File.WriteAllText(Path.Combine(nested, "notes.txt"), "not audio");
-                        File.WriteAllText(Path.Combine(recycle, "deleted.mp3"), "skip");
+                        WriteSized(Path.Combine(recycle, "deleted.mp3"), 70000);
                         using (System.Diagnostics.Process mk = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
                             "/c mklink /J \"" + junction + "\" \"" + nested + "\"") { CreateNoWindow = true, UseShellExecute = false }))
                         { mk.WaitForExit(); Check(mk.ExitCode == 0, "music scan junction setup"); }
@@ -140,7 +166,7 @@ namespace AppManager
                         Check(result.DirectoriesSkipped >= 1, "skipped directory not counted");
                         Check(progressCalls > 0, "scan progress was not reported");
                         string appAudio = Path.Combine(root, "must-not-scan.mp3");
-                        File.WriteAllText(appAudio, "private");
+                        WriteSized(appAudio, 70000);
                         try
                         {
                             LocalMusicScanResult appResult = LocalMusicScanner.ScanRoots(new[] { root },
@@ -167,10 +193,15 @@ namespace AppManager
                         catch (OperationCanceledException) { cancelled = true; }
                         Check(cancelled, "cancelled scan continued");
                     }
-                    string cancelRoot = Path.Combine(Path.GetTempPath(), "AppManagerMusicCancel_" + Guid.NewGuid().ToString("N"));
+                    string cancelRoot = MusicTestRoot("AppManagerMusicCancel_");
                     try
                     {
-                        for (int i = 0; i < 70; i++) Directory.CreateDirectory(Path.Combine(cancelRoot, "d" + i));
+                        for (int i = 0; i < 70; i++)
+                        {
+                            string dir = Path.Combine(cancelRoot, "d" + i);
+                            Directory.CreateDirectory(dir);
+                            WriteSized(Path.Combine(dir, "song.mp3"), 70000);
+                        }
                         using (CancellationTokenSource cancel = new CancellationTokenSource())
                         {
                             bool cancelled = false;
@@ -185,7 +216,165 @@ namespace AppManager
                     }
                     finally { if (Directory.Exists(cancelRoot)) Directory.Delete(cancelRoot, true); }
                 });
-                Test("resource store selection skips an unavailable location and keeps a folder together", delegate
+                Test("music classifier follows fixed priority without filename keyword matching", delegate
+                {
+                    string[] music = new[] { Path.Combine(root, "Music") };
+                    MusicFilterDecision decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 1, SampleRate = 44100, Artist = "Artist" }, music);
+                    Check(decision.Accepted, "meaningful artist tag was rejected before mono rule");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 1, SampleRate = 44100 }, music);
+                    Check(decision.Reason == MusicFilterReason.Mono, "untagged mono was not rejected");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 44100 }, music);
+                    Check(decision.Accepted, "untagged stereo was not accepted");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 8000 }, music);
+                    Check(decision.Accepted, "file under user music root was not accepted");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "elsewhere", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 8000 }, music);
+                    Check(decision.Reason == MusicFilterReason.Unconfirmed, "ambiguous stereo was not unconfirmed");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 44100, Genre = "Podcast" }, music);
+                    Check(decision.Reason == MusicFilterReason.NonSongGenre, "non-song genre did not win over tags");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 44100, Genre = "Podcasts" }, music);
+                    Check(decision.Reason == MusicFilterReason.NonSongGenre, "plural podcast genre was accepted");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 44100, Genre = "Audiobooks" }, music);
+                    Check(decision.Reason == MusicFilterReason.NonSongGenre, "plural audiobook genre was accepted");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "Ringtones", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 44100, Artist = "Artist" }, music);
+                    Check(decision.Reason == MusicFilterReason.NonSongDirectory, "ringtone directory was accepted");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "Live Recordings", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 31, Channels = 2, SampleRate = 44100, Artist = "Artist" }, music);
+                    Check(decision.Accepted, "directory segment partial match rejected a real song");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 29, Channels = 2, SampleRate = 44100, Artist = "Artist" }, music);
+                    Check(decision.Reason == MusicFilterReason.TooShort, "short song passed");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = true, DurationSeconds = 1201, Channels = 2, SampleRate = 44100 }, music);
+                    Check(decision.Reason == MusicFilterReason.LongUntagged, "long untagged recording passed");
+                    decision = MusicFileClassifier.Classify(Path.Combine(root, "Music", "normal.mp3"),
+                        new MusicProbeInfo { HasAudioStream = false, DurationSeconds = 60 }, music);
+                    Check(decision.Reason == MusicFilterReason.NoAudioStream, "missing audio stream passed");
+                    Check(MusicFileClassifier.IsCloudPlaceholder(FileAttributes.Offline), "Offline bit not detected");
+                    Check(MusicFileClassifier.IsCloudPlaceholder((FileAttributes)0x40000), "RECALL_ON_OPEN bit not detected");
+                    Check(MusicFileClassifier.IsCloudPlaceholder((FileAttributes)0x400000), "RECALL_ON_DATA_ACCESS bit not detected");
+                    Check(!MusicFileClassifier.IsCloudPlaceholder(FileAttributes.Normal), "normal file treated as cloud placeholder");
+                });
+                Test("music scan prefilter skips cheap rejects and keeps exact safe directories", delegate
+                {
+                    string scanRoot = MusicTestRoot("AppManagerMusicFilter_");
+                    try
+                    {
+                        string live = Path.Combine(scanRoot, "Music", "Live Recordings");
+                        string music = Path.Combine(scanRoot, "steamapps", "music");
+                        string steamCommon = Path.Combine(scanRoot, "steamapps", "common");
+                        string programData = Path.Combine(scanRoot, "ProgramData");
+                        Directory.CreateDirectory(live); Directory.CreateDirectory(music);
+                        Directory.CreateDirectory(steamCommon); Directory.CreateDirectory(programData);
+                        string keep1 = Path.Combine(live, "a.mp3");
+                        string keep2 = Path.Combine(music, "b.flac");
+                        string included = Path.Combine(scanRoot, "included.mp3");
+                        string excluded = Path.Combine(scanRoot, "excluded.mp3");
+                        string tiny = Path.Combine(scanRoot, "tiny.mp3");
+                        string cloud = Path.Combine(scanRoot, "cloud.mp3");
+                        string common = Path.Combine(steamCommon, "game.mp3");
+                        string program = Path.Combine(programData, "prompt.mp3");
+                        WriteSized(keep1, 70000); WriteSized(keep2, 70000);
+                        WriteSized(included, 70000); WriteSized(excluded, 70000);
+                        WriteSized(tiny, 1024); WriteSized(cloud, 70000);
+                        WriteSized(common, 70000); WriteSized(program, 70000);
+                        File.SetAttributes(cloud, FileAttributes.Offline);
+                        MusicScanRequest request = new MusicScanRequest
+                        {
+                            Roots = new List<string> { scanRoot },
+                            IncludedPaths = new List<string> { included },
+                            ExcludedPaths = new List<string> { excluded },
+                            ExtensionOnly = true
+                        };
+                        LocalMusicScanResult result = LocalMusicScanner.Scan(request, CancellationToken.None, null);
+                        Check(result.Files.Contains(keep1) && result.Files.Contains(keep2), "safe music directory was skipped");
+                        Check(!result.Files.Contains(included) && result.CountOf(MusicFilterReason.AlreadyIncluded) == 1, "included source was not skipped");
+                        Check(!result.Files.Contains(excluded) && result.CountOf(MusicFilterReason.Excluded) == 1, "excluded source was not skipped");
+                        Check(!result.Files.Contains(tiny) && result.CountOf(MusicFilterReason.TooSmall) == 1, "small file was not skipped");
+                        Check(!result.Files.Contains(cloud) && result.CloudFiles == 1, "cloud placeholder was not skipped");
+                        Check(!result.Files.Contains(common), "steamapps/common was scanned");
+                        Check(!result.Files.Contains(program), "ProgramData was scanned");
+                    }
+                    finally { if (Directory.Exists(scanRoot)) Directory.Delete(scanRoot, true); }
+                });
+                Test("music scan abandons timed-out sessions and marks the rest unconfirmed", delegate
+                {
+                    string scanRoot = MusicTestRoot("AppManagerMusicTimeout_");
+                    try
+                    {
+                        Directory.CreateDirectory(scanRoot);
+                        for (int i = 0; i < 5; i++) WriteSized(Path.Combine(scanRoot, "song" + i + ".mp3"), 70000);
+                        int sessions = 0;
+                        MusicScanRequest request = new MusicScanRequest
+                        {
+                            Roots = new List<string> { scanRoot },
+                            MaxAbandonedProbes = 3,
+                            ProbeTimeoutMilliseconds = 100,
+                            ProbeFactory = delegate
+                            {
+                                sessions++;
+                                return new FailingProbeSession(MusicProbeStatus.TimedOut);
+                            }
+                        };
+                        LocalMusicScanResult result = LocalMusicScanner.Scan(request, CancellationToken.None, null);
+                        Check(result.Files.Count == 0, "timed-out candidates were accepted");
+                        Check(result.UnconfirmedCount == 5, "unconfirmed count: " + result.UnconfirmedCount);
+                        Check(result.CountOf(MusicFilterReason.ProbeTimeout) == 3, "timeout count: " + result.CountOf(MusicFilterReason.ProbeTimeout));
+                        Check(result.CountOf(MusicFilterReason.NotProbed) == 2, "not-probed count: " + result.CountOf(MusicFilterReason.NotProbed));
+                        Check(sessions == 3, "probe sessions rebuilt: " + sessions);
+                    }
+                    finally { if (Directory.Exists(scanRoot)) Directory.Delete(scanRoot, true); }
+                });
+                Test("music scan marks the current candidate when probe session creation fails", delegate
+                {
+                    string scanRoot = MusicTestRoot("AppManagerMusicUnavailable_");
+                    try
+                    {
+                        Directory.CreateDirectory(scanRoot);
+                        WriteSized(Path.Combine(scanRoot, "song0.mp3"), 70000);
+                        WriteSized(Path.Combine(scanRoot, "song1.mp3"), 70000);
+                        MusicScanRequest request = new MusicScanRequest
+                        {
+                            Roots = new List<string> { scanRoot },
+                            ProbeFactory = delegate { throw new InvalidOperationException("missing probe"); }
+                        };
+                        LocalMusicScanResult result = LocalMusicScanner.Scan(request, CancellationToken.None, null);
+                        Check(result.UnconfirmedCount == 2, "unconfirmed count: " + result.UnconfirmedCount);
+                        Check(result.CountOf(MusicFilterReason.ProbeUnavailable) == 1, "current unavailable count");
+                        Check(result.CountOf(MusicFilterReason.NotProbed) == 1, "remaining not-probed count");
+                    }
+                    finally { if (Directory.Exists(scanRoot)) Directory.Delete(scanRoot, true); }
+                });
+                Test("music scan aborts when an in-flight probe reports cancellation", delegate
+                {
+                    string scanRoot = MusicTestRoot("AppManagerMusicCancelProbe_");
+                    try
+                    {
+                        Directory.CreateDirectory(scanRoot);
+                        WriteSized(Path.Combine(scanRoot, "song.mp3"), 70000);
+                        using (CancellationTokenSource cancel = new CancellationTokenSource())
+                        {
+                            bool cancelled = false;
+                            MusicScanRequest request = new MusicScanRequest
+                            {
+                                Roots = new List<string> { scanRoot },
+                                ProbeFactory = delegate { return new FailingProbeSession(MusicProbeStatus.Cancelled, cancel); }
+                            };
+                            try { LocalMusicScanner.Scan(request, cancel.Token, null); }
+                            catch (OperationCanceledException) { cancelled = true; }
+                            Check(cancelled, "cancelled probe was not propagated");
+                        }
+                    }
+                    finally { if (Directory.Exists(scanRoot)) Directory.Delete(scanRoot, true); }
+                });                Test("resource store selection skips an unavailable location and keeps a folder together", delegate
                 {
                     string dir = Path.Combine(root, "multi-store-" + Guid.NewGuid().ToString("N"));
                     string blocked = Path.Combine(dir, "blocked"), usable = Path.Combine(dir, "usable");

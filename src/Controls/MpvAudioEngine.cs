@@ -19,6 +19,7 @@ namespace AppManager.Controls
     {
         private const string Dll = "libmpv-2.dll";
         private const int EventStartFile = 6, EventEndFile = 7, EventFileLoaded = 8;
+        internal const int EndFileReasonError = 4;
         private const int FormatInt64 = 4, FormatDouble = 5, FormatFlag = 3;
         private IntPtr context;
 
@@ -36,6 +37,10 @@ namespace AppManager.Controls
         private static extern int mpv_get_property_flag(IntPtr context, string name, int format, ref int data);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, EntryPoint = "mpv_get_property", CharSet = CharSet.Ansi)]
         private static extern int mpv_get_property_long(IntPtr context, string name, int format, ref long data);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi)]
+        private static extern IntPtr mpv_get_property_string(IntPtr context, string name);
+        [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
+        private static extern void mpv_free(IntPtr data);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
         private static extern int mpv_command(IntPtr context, IntPtr args);
         [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)]
@@ -67,7 +72,9 @@ namespace AppManager.Controls
             public long PlaylistInsertId;
             public int PlaylistInsertNumEntries;
         }
-        public MpvAudioEngine()
+        public MpvAudioEngine() : this(false) { }
+
+        public MpvAudioEngine(bool probeMode)
         {
             context = mpv_create();
             if (context == IntPtr.Zero) throw new InvalidOperationException("\u65E0\u6CD5\u521B\u5EFA mpv \u5B9E\u4F8B");
@@ -75,7 +82,6 @@ namespace AppManager.Controls
             {
                 SetOption("vo", "null");
                 SetOption("video", "no");
-                SetOption("keep-open", "yes");
                 SetOption("idle", "yes");
                 SetOption("terminal", "no");
                 SetOption("config", "no");
@@ -83,8 +89,27 @@ namespace AppManager.Controls
                 SetOption("osd-level", "0");
                 SetOption("input-default-bindings", "no");
                 SetOption("input-media-keys", "no");
-                SetOption("gapless-audio", "yes");
+                if (probeMode)
+                {
+                    SetOption("ao", "null");
+                    SetOption("pause", "yes");
+                    SetOption("cache", "no");
+                    SetOption("keep-open", "yes");
+                    SetOption("gapless-audio", "no");
+                    SetOption("load-scripts", "no");
+                    SetOption("ytdl", "no");
+                    SetOption("cover-art-auto", "no");
+                    SetOption("sub-auto", "no");
+                    SetOption("audio-file-auto", "no");
+                    SetOption("resume-playback", "no");
+                }
+                else
+                {
+                    SetOption("keep-open", "yes");
+                    SetOption("gapless-audio", "yes");
+                }
                 if (mpv_initialize(context) < 0) throw new InvalidOperationException("mpv \u521D\u59CB\u5316\u5931\u8D25");
+                if (probeMode) SetPause(true);
             }
             catch
             {
@@ -95,7 +120,7 @@ namespace AppManager.Controls
         }
         public bool IsAvailable { get { return context != IntPtr.Zero; } }
 
-        public void LoadFile(string path) { Command("loadfile", path); }
+        public int LoadFile(string path) { return Command("loadfile", path); }
         public void AppendFile(string path) { Command("loadfile", path, "append"); }
         public void PlaylistNext() { Command("playlist-next"); }
         public void RemovePlaylistIndex(int index)
@@ -124,6 +149,24 @@ namespace AppManager.Controls
             return context != IntPtr.Zero && mpv_get_property_long(context, name, FormatInt64, ref value) >= 0;
         }
 
+        public bool TryGetString(string name, out string value)
+        {
+            value = null;
+            if (context == IntPtr.Zero) return false;
+            IntPtr pointer = mpv_get_property_string(context, name);
+            if (pointer == IntPtr.Zero) return false;
+            try
+            {
+                int length = 0;
+                while (Marshal.ReadByte(pointer, length) != 0) length++;
+                byte[] bytes = new byte[length];
+                if (length > 0) Marshal.Copy(pointer, bytes, 0, length);
+                value = Encoding.UTF8.GetString(bytes);
+                return true;
+            }
+            finally { mpv_free(pointer); }
+        }
+
         public bool TryGetFlag(string name, out bool value)
         {
             value = false;
@@ -142,6 +185,22 @@ namespace AppManager.Controls
         public void DrainEvents(List<AudioEngineEvent> events)
         {
             events.Clear();
+            DrainEventsInto(events);
+        }
+
+        /// <summary>等待一个事件（最多 timeoutSeconds），再把当前队列排空；用于探测时按片检查取消。</summary>
+        public void WaitEvents(List<AudioEngineEvent> events, double timeoutSeconds)
+        {
+            events.Clear();
+            if (context == IntPtr.Zero) return;
+            IntPtr pointer = mpv_wait_event(context, timeoutSeconds);
+            if (pointer == IntPtr.Zero) return;
+            AddEvent(events, (MpvEvent)Marshal.PtrToStructure(pointer, typeof(MpvEvent)));
+            DrainEventsInto(events);
+        }
+
+        private void DrainEventsInto(List<AudioEngineEvent> events)
+        {
             if (context == IntPtr.Zero) return;
             for (int i = 0; i < 128; i++)
             {
@@ -149,31 +208,36 @@ namespace AppManager.Controls
                 if (pointer == IntPtr.Zero) return;
                 MpvEvent mediaEvent = (MpvEvent)Marshal.PtrToStructure(pointer, typeof(MpvEvent));
                 if (mediaEvent.EventId == 0) return;
-                if (mediaEvent.EventId == EventStartFile && mediaEvent.Data != IntPtr.Zero)
+                AddEvent(events, mediaEvent);
+            }
+        }
+
+        private static void AddEvent(List<AudioEngineEvent> events, MpvEvent mediaEvent)
+        {
+            if (mediaEvent.EventId == EventStartFile && mediaEvent.Data != IntPtr.Zero)
+            {
+                MpvEventStartFile start = (MpvEventStartFile)Marshal.PtrToStructure(
+                    mediaEvent.Data, typeof(MpvEventStartFile));
+                events.Add(new AudioEngineEvent
                 {
-                    MpvEventStartFile start = (MpvEventStartFile)Marshal.PtrToStructure(
-                        mediaEvent.Data, typeof(MpvEventStartFile));
-                    events.Add(new AudioEngineEvent
-                    {
-                        Kind = AudioEngineEventKind.StartFile,
-                        PlaylistEntryId = start.PlaylistEntryId
-                    });
-                }
-                else if (mediaEvent.EventId == EventFileLoaded)
+                    Kind = AudioEngineEventKind.StartFile,
+                    PlaylistEntryId = start.PlaylistEntryId
+                });
+            }
+            else if (mediaEvent.EventId == EventFileLoaded)
+            {
+                events.Add(new AudioEngineEvent { Kind = AudioEngineEventKind.FileLoaded });
+            }
+            else if (mediaEvent.EventId == EventEndFile && mediaEvent.Data != IntPtr.Zero)
+            {
+                MpvEventEndFile end = (MpvEventEndFile)Marshal.PtrToStructure(
+                    mediaEvent.Data, typeof(MpvEventEndFile));
+                events.Add(new AudioEngineEvent
                 {
-                    events.Add(new AudioEngineEvent { Kind = AudioEngineEventKind.FileLoaded });
-                }
-                else if (mediaEvent.EventId == EventEndFile && mediaEvent.Data != IntPtr.Zero)
-                {
-                    MpvEventEndFile end = (MpvEventEndFile)Marshal.PtrToStructure(
-                        mediaEvent.Data, typeof(MpvEventEndFile));
-                    events.Add(new AudioEngineEvent
-                    {
-                        Kind = AudioEngineEventKind.EndFile,
-                        PlaylistEntryId = end.PlaylistEntryId,
-                        EndReason = end.Reason
-                    });
-                }
+                    Kind = AudioEngineEventKind.EndFile,
+                    PlaylistEntryId = end.PlaylistEntryId,
+                    EndReason = end.Reason
+                });
             }
         }
         private int SetOption(string name, string value)
