@@ -91,6 +91,7 @@ namespace AppManager
                 Run("desktop stash moves software shortcuts only; folder and document shortcuts stay on the desktop", StashOnlySoftwareShortcuts);
                 Run("import recovery and history still recognise old software batches after migration", ImportRecoveryAfterMigration);
                 Run("music scan reuses copied origins after repeat, rename and category changes", MusicScanReusesCopiedOrigins);
+                Run("music cleanup skips unreachable parents and removes only music memberships", MissingMusicCleanup);
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
@@ -2176,6 +2177,59 @@ namespace AppManager
                 Check(config.ExcludedCategories["add:" + renamed].Contains("音乐"),
                     "music scan restored a user exclusion");
                 Check(config.AddedItems.Count == 1 && File.Exists(source), "origin deduplication changed source or entry count");
+            }
+
+            AppConfig memory = new AppConfig();
+            memory.AddedItems.Add(new AddedEntry { Path = "D:\\library\\song.mp3", Category = "音乐", IsResource = true,
+                OriginPath = "C:\\source\\song.mp3" });
+            using (MainForm form = new MainForm(memory))
+            {
+                Dictionary<string, string> found = (Dictionary<string, string>)Invoke(form, "RegisteredPathsInMemory",
+                    new List<string> { "c:\\SOURCE\\SONG.MP3" });
+                Check(found["c:\\SOURCE\\SONG.MP3"] == "D:\\library\\song.mp3", "in-memory origin lookup failed");
+            }
+        }
+
+        private static void MissingMusicCleanup()
+        {
+            string dir = Path.Combine(root, "missing-music-cleanup-files");
+            Directory.CreateDirectory(dir);
+            string kept = Path.Combine(dir, "kept.mp3");
+            string gone = Path.Combine(dir, "gone.mp3");
+            string offline = Path.Combine(dir, "offline", "gone.mp3");
+            File.WriteAllText(kept, "music");
+
+            List<string> found = MissingResourceCleanup.FindMissingWithReachableParent(
+                new string[] { kept, gone, offline, gone });
+            Check(found.Count == 1 && string.Equals(found[0], gone, StringComparison.OrdinalIgnoreCase),
+                "missing scan did not isolate the reachable missing path");
+
+            AppConfig config = RenameConfig("missing-music-cleanup");
+            AppInfo keepEntry = AddEntry(config, "音乐", kept, false, true, "kept");
+            AppInfo goneEntry = AddEntry(config, "音乐", gone, false, true, "gone");
+            string sharedPath = Path.Combine(dir, "shared.mp3");
+            AddEntry(config, "照片", sharedPath, false, true, "shared-photo");
+            config.AddedItems.Add(new AddedEntry { Path = sharedPath, Category = "音乐", IsResource = true,
+                IsFolder = false, Name = "shared-music" });
+            File.Delete(goneEntry.TargetPath);
+            File.Delete(sharedPath);
+            config.Favorites.Add("add:" + gone);
+            config.Favorites.Add("add:" + sharedPath);
+            config.Favorites.Add(keepEntry.Key);
+
+            using (MainForm form = ResourceForm(config, "音乐", keepEntry, goneEntry))
+            {
+                int removed = (int)Invoke(form, "RemoveMissingMusicEntries",
+                    new List<string> { gone, sharedPath });
+                Check(removed == 2, "missing music cleanup removed the wrong number of memberships");
+                Check(config.AddedItems.ByPath(gone).Count == 0, "missing music entry was not removed");
+                List<AddedEntry> shared = config.AddedItems.ByPath(sharedPath);
+                Check(shared.Count == 1 && shared[0].Category == "照片",
+                    "music cleanup removed the same path from another category");
+                Check(!config.Favorites.Contains("add:" + gone), "orphaned music favorite was not purged");
+                Check(config.Favorites.Contains("add:" + sharedPath), "shared path favorite was purged");
+                Check(config.AddedItems.ByPath(kept).Count == 1 && config.Favorites.Contains(keepEntry.Key),
+                    "existing music entry or favorite was changed");
             }
         }
 

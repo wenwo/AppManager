@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -9,6 +12,142 @@ namespace AppManager
     {
         private bool localMusicScanRunning;
         private CancellationTokenSource localMusicScanCancel;
+        private bool missingMusicCleanupRunning;
+
+        /// <summary>
+        /// 检查「音乐」分类的失效记录。只移除数据库收录，不删除磁盘或回收站文件；
+        /// 路径所在目录不可访问时视为磁盘离线并跳过，确认后还会再复核一次。
+        /// </summary>
+        private void CheckMissingMusicEntries()
+        {
+            if (missingMusicCleanupRunning) return;
+            if (!CanEditCategory("音乐"))
+            {
+                MessageBox.Show(this, "当前无法编辑「音乐」分类。", "清理失效音乐记录",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            List<string> paths = new List<string>();
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (AddedEntry entry in config.AddedItems.InCategory("音乐"))
+                if (!string.IsNullOrEmpty(entry.Path) && seen.Add(entry.Path)) paths.Add(entry.Path);
+            if (paths.Count == 0)
+            {
+                ShowNotice("「音乐」分类中没有可检查的记录。");
+                return;
+            }
+
+            missingMusicCleanupRunning = true;
+            ShowNotice("正在检查「音乐」分类的失效记录…");
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<string> missing = null;
+                Exception failure = null;
+                try { missing = MissingResourceCleanup.FindMissingWithReachableParent(paths); }
+                catch (Exception ex) { failure = ex; }
+                RunOnUi(delegate
+                {
+                    if (IsDisposed) return;
+                    if (failure != null)
+                    {
+                        missingMusicCleanupRunning = false;
+                        Paths.LogError(failure);
+                        MessageBox.Show(this, "检查失效音乐记录失败。\n" + failure.Message, "清理失效音乐记录",
+                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (missing.Count == 0)
+                    {
+                        missingMusicCleanupRunning = false;
+                        ShowNotice("「音乐」分类中没有失效记录。");
+                        return;
+                    }
+                    string message = "在「音乐」分类中发现 " + missing.Count + " 条记录的原文件已不存在"
+                        + "（所在目录仍可访问）。\n\n" + MissingMusicPreview(missing)
+                        + "\n\n仅移除数据库记录，不会删除磁盘、回收站或任何文件。是否继续？";
+                    if (!ConfirmDialog.Show("清理失效音乐记录", message))
+                    {
+                        missingMusicCleanupRunning = false;
+                        return;
+                    }
+                    ConfirmMissingMusicCleanup(missing);
+                });
+            });
+        }
+
+        /// <summary>用户确认后在后台复核；文件已恢复或父目录不可访问时不清理。</summary>
+        private void ConfirmMissingMusicCleanup(List<string> missing)
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<string> confirmed = null;
+                Exception failure = null;
+                try { confirmed = MissingResourceCleanup.FindMissingWithReachableParent(missing); }
+                catch (Exception ex) { failure = ex; }
+                RunOnUi(delegate
+                {
+                    if (IsDisposed) return;
+                    missingMusicCleanupRunning = false;
+                    if (failure != null)
+                    {
+                        Paths.LogError(failure);
+                        MessageBox.Show(this, "复核失效音乐记录失败，未做任何清理。\n" + failure.Message,
+                            "清理失效音乐记录", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        return;
+                    }
+                    if (confirmed.Count == 0)
+                    {
+                        ShowNotice("文件已恢复，未清理任何记录。");
+                        return;
+                    }
+                    int removed = RemoveMissingMusicEntries(confirmed);
+                    if (removed == 0)
+                    {
+                        ShowNotice("记录已变化，未清理任何内容。");
+                        return;
+                    }
+                    if (!config.Save("cleanup.missing.music"))
+                    {
+                        MessageBox.Show(this, "清理失效音乐记录未能保存。\n" + config.DatabaseError,
+                            "清理失效音乐记录", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        StartScan(false);
+                        return;
+                    }
+                    ShowNotice("已清理 " + removed + " 条失效音乐记录；磁盘文件未改动。");
+                    StartScan(false);
+                });
+            });
+        }
+
+        private static string MissingMusicPreview(List<string> paths)
+        {
+            StringBuilder text = new StringBuilder();
+            int count = Math.Min(8, paths.Count);
+            for (int i = 0; i < count; i++)
+            {
+                if (i > 0) text.Append('\n');
+                string name = Path.GetFileName(paths[i]);
+                text.Append(string.IsNullOrEmpty(name) ? paths[i] : name);
+            }
+            if (paths.Count > count) text.Append("\n……");
+            return text.ToString();
+        }
+
+        /// <summary>只移除「音乐」分类归属；同路径若仍属于其它分类，保留其记录与配置。</summary>
+        private int RemoveMissingMusicEntries(List<string> paths)
+        {
+            HashSet<string> target = new HashSet<string>(paths ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+            int removed = 0;
+            foreach (AddedEntry entry in new List<AddedEntry>(config.AddedItems.InCategory("音乐")))
+                if (target.Contains(entry.Path) && config.AddedItems.Remove(entry)) removed++;
+            if (removed > 0)
+            {
+                InvalidateAddedIndex();
+                foreach (string path in target)
+                    if (config.AddedItems.ByPath(path).Count == 0) PurgeEntryKeys(path, "add:" + path);
+            }
+            return removed;
+        }
 
         /// <summary>
         /// 扫描本机本地磁盘上的音频文件，并移动到资源页「音乐」分类。

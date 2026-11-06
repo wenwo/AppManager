@@ -5534,7 +5534,10 @@ namespace AppManager
             string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
             items.Add(MkMenu("添加" + typeName + "…", delegate { PickFiles(); }));
             if (string.Equals(currentCategory, "音乐", StringComparison.OrdinalIgnoreCase))
+            {
                 items.Add(MkMenu("扫描本机音乐…", delegate { ScanLocalMusic(); }));
+                items.Add(MkMenu("清理失效音乐记录…", delegate { CheckMissingMusicEntries(); }));
+            }
             items.Add(MkMenu("添加文件夹…", delegate { PickFolder(); }));
             MenuWindow mw = new MenuWindow(items, 180);
             mw.Location = FixLocation(addBtn.PointToScreen(new Point(0, addBtn.Height)), mw.Size);
