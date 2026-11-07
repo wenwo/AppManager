@@ -1618,6 +1618,20 @@ namespace AppManager
             return cat == "全部软件" || cat == "全部资源";
         }
 
+        /// <summary>当前网格排序的持久化作用域：集合内使用集合键，否则使用分类键。</summary>
+        private string ReorderScopeKey()
+        {
+            return string.IsNullOrEmpty(currentCollection) ? currentCategory : currentCollection;
+        }
+
+        /// <summary>当前页面是否允许网格内拖动排序：集合键有效，或当前分类可排序。</summary>
+        private bool CanReorderCurrentScope()
+        {
+            if (!string.IsNullOrEmpty(currentCollection))
+                return CanShowCollectionSidebar && FindCollectionByKey(currentCollection) != null;
+            return CanReorderCategory(currentCategory);
+        }
+
         /// <summary>
         /// 允许网格内拖动排序的分类：可编辑分类 +「常用」。
         /// 「常用」不可增删条目，但用户可调整其展示顺序（与「拖出加入其它分类」相互独立）。
@@ -2006,6 +2020,8 @@ namespace AppManager
                 }
                 cachedVisiblePool = catPool;
                 categoryTotal = catPool.Count;
+                if (kw.Length == 0 && CanReorderCurrentScope())
+                    ApplyItemOrder(shown, ReorderScopeKey());
             }
             else
             {
@@ -2018,8 +2034,8 @@ namespace AppManager
                 categoryTotal = cat.Count;
                 shown.AddRange(cat);
                 // 仅可排序分类（内置/自定义/快捷中心/常用，非搜索态）应用用户拖拽顺序
-                if (kw.Length == 0 && CanReorderCategory(currentCategory))
-                    ApplyItemOrder(shown, currentCategory);
+                if (kw.Length == 0 && CanReorderCurrentScope())
+                    ApplyItemOrder(shown, ReorderScopeKey());
             }
 
             if (listSortColumn != null && config.Database == null) SortShown(shown, listSortColumn, listSortAsc);
@@ -2030,10 +2046,9 @@ namespace AppManager
                 && currentCollection != null) ? "移除" : "删除";
             grid.SetApps(shown);
             StartIconLoad();
-            // 拖动排序仅在可排序分类的软件模式、非搜索态开放
+            // 拖动排序在可排序分类/集合、非搜索态开放；表头排序或分页内容不参与重排
             grid.AllowReorder = kw.Length == 0
-                && contentMode == SidebarControl.ContentMode.Software
-                && CanReorderCategory(currentCategory)
+                && CanReorderCurrentScope()
                 && (config.Database == null || categoryTotal <= DatabasePageSize)
                 && listSortColumn == null;   // 表头排序激活时禁用拖动排序，避免两套顺序语义冲突
             // 聚合页也接受拖入，由统一入口选择目标分类。
@@ -2120,13 +2135,14 @@ namespace AppManager
         {
             if (from < 0 || from >= shownApps.Count) return;
             if (to < 0 || to >= shownApps.Count) return;
+            if (from == to) return;
             AppInfo moved = shownApps[from];
             shownApps.RemoveAt(from);
             shownApps.Insert(to, moved);
 
             List<string> order = new List<string>();
             for (int i = 0; i < shownApps.Count; i++) order.Add(shownApps[i].Key ?? string.Empty);
-            config.ItemOrder[currentCategory] = order;
+            config.ItemOrder[ReorderScopeKey()] = order;
             config.Save();
             RefreshGrid();
         }

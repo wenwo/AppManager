@@ -119,6 +119,7 @@ namespace AppManager
                 Run("grid starts drag visuals only after the threshold and cancels on escape", GridDragVisualLifecycle);
                 Run("grid drag cleanup clears capture, cancel mode and list refresh without a drop", GridDragCleanup);
                 Run("drag intent maps reorder, category, collection and folder semantics", DragIntentSemantics);
+                Run("grid reorder persists in software, resource and collection scopes", GridReorderScopes);
                 Run("OLE export payload count follows the actual distinct exportable paths", DragExportPayload);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
@@ -5385,6 +5386,95 @@ namespace AppManager
                 object[] hit = { Message.Create(ghost.Handle, 0x0084, IntPtr.Zero, IntPtr.Zero) };
                 wndProc.Invoke(ghost, hit);
                 Check(((Message)hit[0]).Result == (IntPtr)(-1), "drag ghost did not return HTTRANSPARENT");
+            }
+        }
+
+        private static void GridReorderScopes()
+        {
+            AppConfig resourceConfig = RenameConfig("grid-reorder-resource");
+            resourceConfig.AutoScan = false;
+            AppInfo photo1 = AddEntry(resourceConfig, "照片",
+                Path.Combine(resourceConfig.ResourceStorePath, "照片", "01-photo.jpg"), false, true, "01 photo");
+            AppInfo photo2 = AddEntry(resourceConfig, "照片",
+                Path.Combine(resourceConfig.ResourceStorePath, "照片", "02-photo.jpg"), false, true, "02 photo");
+            AppInfo photo3 = AddEntry(resourceConfig, "照片",
+                Path.Combine(resourceConfig.ResourceStorePath, "照片", "03-photo.jpg"), false, true, "03 photo");
+            string trip = CollectionKeys.Make("照片", "旅行");
+            resourceConfig.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            CollectionOps.AddMember(resourceConfig, photo1.Key, trip);
+            CollectionOps.AddMember(resourceConfig, photo2.Key, trip);
+            Check(resourceConfig.Save(), resourceConfig.DatabaseError);
+
+            using (MainForm form = ResourceForm(resourceConfig, "照片", photo1, photo2, photo3))
+            {
+                Invoke(form, "RefreshGrid");
+                Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                Check(grid.AllowReorder, "resource category did not enable grid reorder");
+                long revision = resourceConfig.DatabaseRevision;
+                Invoke(form, "OnGridReorder", 0, 0);
+                Check(resourceConfig.DatabaseRevision == revision && !resourceConfig.ItemOrder.ContainsKey("照片"),
+                    "same-position drop changed the resource order or revision");
+
+                Invoke(form, "OnGridReorder", 0, 2);
+                List<AppInfo> shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                string expected = photo2.Key + "|" + photo3.Key + "|" + photo1.Key;
+                Check(string.Join("|", shown.Select(a => a.Key).ToArray()) == expected,
+                    "resource grid did not apply the dropped order");
+                List<string> order;
+                Check(resourceConfig.ItemOrder.TryGetValue("照片", out order)
+                    && string.Join("|", order.ToArray()) == expected,
+                    "resource order was not saved under the category key");
+                CatalogPage page = resourceConfig.Database.Page("照片", true, false, "", 500, null, false, false, null, null, "照片");
+                Check(string.Join("|", page.Items.Select(a => a.Key).ToArray()) == expected,
+                    "resource database projection did not follow the dropped order");
+
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, trip);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, true);
+                Invoke(form, "RefreshGrid");
+                Check(grid.AllowReorder, "collection view did not enable grid reorder");
+                string parentOrder = string.Join("|", resourceConfig.ItemOrder["照片"].ToArray());
+                Invoke(form, "OnGridReorder", 0, 1);
+                shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                expected = photo2.Key + "|" + photo1.Key;
+                Check(string.Join("|", shown.Select(a => a.Key).ToArray()) == expected,
+                    "collection grid did not apply the dropped order");
+                Check(resourceConfig.ItemOrder.TryGetValue(trip, out order)
+                    && string.Join("|", order.ToArray()) == expected,
+                    "collection order was not saved under the collection key");
+                Check(string.Join("|", resourceConfig.ItemOrder["照片"].ToArray()) == parentOrder,
+                    "collection reorder changed the parent category order");
+                CatalogPage collectionPage = resourceConfig.Database.Page(trip, true, false, "", 500, null, false, false, null, null, trip);
+                Check(string.Join("|", collectionPage.Items.Select(a => a.Key).ToArray()) == expected,
+                    "collection database projection did not follow the dropped order");
+            }
+
+            AppConfig softwareConfig = RenameConfig("grid-reorder-software");
+            softwareConfig.AutoScan = false;
+            AppInfo tool1 = AddEntry(softwareConfig, "开发工具",
+                Path.Combine(softwareConfig.ManageRootPath, "01-tool.exe"), false, false, "01 tool");
+            AppInfo tool2 = AddEntry(softwareConfig, "开发工具",
+                Path.Combine(softwareConfig.ManageRootPath, "02-tool.exe"), false, false, "02 tool");
+            AppInfo tool3 = AddEntry(softwareConfig, "开发工具",
+                Path.Combine(softwareConfig.ManageRootPath, "03-tool.exe"), false, false, "03 tool");
+            Check(softwareConfig.Save(), softwareConfig.DatabaseError);
+
+            using (MainForm form = CategoryForm(softwareConfig, tool1, tool2, tool3))
+            {
+                Invoke(form, "RefreshGrid");
+                Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                Check(grid.AllowReorder, "software category did not enable grid reorder");
+                Invoke(form, "OnGridReorder", 0, 1);
+                List<AppInfo> shown = (List<AppInfo>)typeof(MainForm).GetField("shownApps", Private).GetValue(form);
+                string expected = tool2.Key + "|" + tool1.Key + "|" + tool3.Key;
+                Check(string.Join("|", shown.Select(a => a.Key).ToArray()) == expected,
+                    "software grid did not apply the dropped order");
+                List<string> order;
+                Check(softwareConfig.ItemOrder.TryGetValue("开发工具", out order)
+                    && string.Join("|", order.ToArray()) == expected,
+                    "software order was not saved under the category key");
+                CatalogPage page = softwareConfig.Database.Page("开发工具", false, false, "", 500, null, false, false, null, null, "开发工具");
+                Check(string.Join("|", page.Items.Select(a => a.Key).ToArray()) == expected,
+                    "software database projection did not follow the dropped order");
             }
         }
 
