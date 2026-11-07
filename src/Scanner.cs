@@ -257,6 +257,18 @@ namespace AppManager
         [DllImport("shell32.dll")]
         private static extern int SHGetKnownFolderPath([MarshalAs(UnmanagedType.LPStruct)] Guid rfid, uint flags, IntPtr token, out IntPtr path);
 
+        internal static string KnownFolderPath(Guid folder)
+        {
+            IntPtr raw = IntPtr.Zero;
+            try
+            {
+                if (SHGetKnownFolderPath(folder, 0, IntPtr.Zero, out raw) != 0 || raw == IntPtr.Zero) return null;
+                return Marshal.PtrToStringUni(raw);
+            }
+            catch (Exception) { return null; }
+            finally { if (raw != IntPtr.Zero) Marshal.FreeCoTaskMem(raw); }
+        }
+
         /// <summary>
         /// AppsFolder 对 Program Files、System32 等位置下的 Win32 程序返回“{已知文件夹GUID}\相对路径”而不是真实路径；
         /// 不还原就会因文件“不存在”被当成 UWP：图标发糊、显示为打包应用、排除自身失效。还原后路径不存在时保持原值。
@@ -267,15 +279,14 @@ namespace AppManager
             Guid folder;
             try { folder = new Guid(id.Substring(0, 38)); }
             catch (FormatException) { return id; }
-            IntPtr raw = IntPtr.Zero;
             try
             {
-                if (SHGetKnownFolderPath(folder, 0, IntPtr.Zero, out raw) != 0 || raw == IntPtr.Zero) return id;
-                string resolved = Path.Combine(Marshal.PtrToStringUni(raw), id.Substring(39));
+                string folderPath = KnownFolderPath(folder);
+                if (string.IsNullOrEmpty(folderPath)) return id;
+                string resolved = Path.Combine(folderPath, id.Substring(39));
                 return File.Exists(resolved) || Directory.Exists(resolved) ? resolved : id;
             }
             catch (Exception) { return id; }
-            finally { if (raw != IntPtr.Zero) Marshal.FreeCoTaskMem(raw); }
         }
 
         /// <summary>

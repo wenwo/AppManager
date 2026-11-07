@@ -176,6 +176,10 @@ namespace AppManager
                         finally { File.Delete(appAudio); }
                         LocalMusicScanResult invalid = LocalMusicScanner.ScanRoots(new[] { "bad\0root" }, CancellationToken.None, null);
                         Check(invalid.Errors == 1 && invalid.ErrorSamples.Count == 1, "scan failure has no actionable sample");
+                        string missing = Path.Combine(Path.GetTempPath(), "AppManagerMissingMusic_" + Guid.NewGuid().ToString("N"));
+                        LocalMusicScanResult missingResult = LocalMusicScanner.ScanRoots(new[] { missing }, CancellationToken.None, null);
+                        Check(missingResult.Errors == 1 && missingResult.ErrorSamples.Count == 1
+                            && missingResult.Files.Count == 0, "missing scan root was treated as empty");
                     }
                     finally
                     {
@@ -296,6 +300,7 @@ namespace AppManager
                         };
                         LocalMusicScanResult result = LocalMusicScanner.Scan(request, CancellationToken.None, null);
                         Check(result.Files.Contains(keep1) && result.Files.Contains(keep2), "safe music directory was skipped");
+                        Check(result.AcceptedBytes == 140000, "accepted bytes: " + result.AcceptedBytes);
                         Check(!result.Files.Contains(included) && result.CountOf(MusicFilterReason.AlreadyIncluded) == 1, "included source was not skipped");
                         Check(!result.Files.Contains(excluded) && result.CountOf(MusicFilterReason.Excluded) == 1, "excluded source was not skipped");
                         Check(!result.Files.Contains(tiny) && result.CountOf(MusicFilterReason.TooSmall) == 1, "small file was not skipped");
@@ -327,6 +332,7 @@ namespace AppManager
                         LocalMusicScanResult result = LocalMusicScanner.Scan(request, CancellationToken.None, null);
                         Check(result.Files.Count == 0, "timed-out candidates were accepted");
                         Check(result.UnconfirmedCount == 5, "unconfirmed count: " + result.UnconfirmedCount);
+                        Check(result.UnconfirmedBytes == 350000, "unconfirmed bytes: " + result.UnconfirmedBytes);
                         Check(result.CountOf(MusicFilterReason.ProbeTimeout) == 3, "timeout count: " + result.CountOf(MusicFilterReason.ProbeTimeout));
                         Check(result.CountOf(MusicFilterReason.NotProbed) == 2, "not-probed count: " + result.CountOf(MusicFilterReason.NotProbed));
                         Check(sessions == 3, "probe sessions rebuilt: " + sessions);

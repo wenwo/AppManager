@@ -6,13 +6,27 @@ using System.Threading;
 
 namespace AppManager
 {
+    internal sealed class LocalPhotoScanProgress
+    {
+        internal int DirectoriesScanned;
+        internal int DirectoriesSkipped;
+        internal int PhotosFound;
+        internal long CopyBytes;
+        internal string Path = string.Empty;
+    }
+
     internal sealed class LocalPhotoScanResult
     {
         internal readonly SortedDictionary<int, List<string>> Years = new SortedDictionary<int, List<string>>();
+        internal readonly List<string> FailureSamples = new List<string>();
         internal int UnreadableDirectories;
         internal int ReadFailures;
         internal int Reused;
+        internal int DirectoriesScanned;
+        internal int DirectoriesSkipped;
+        internal int CloudFiles;
         internal long Bytes;
+        internal long CopyBytes;
 
         internal int Count { get { return Years.Values.Sum(paths => paths.Count); } }
 
@@ -23,32 +37,18 @@ namespace AppManager
             paths.Add(path);
             Bytes += bytes;
             if (reused) Reused++;
+            else CopyBytes += bytes;
+        }
+
+        internal void AddFailureSample(string path)
+        {
+            if (FailureSamples.Count < 5 && !string.IsNullOrEmpty(path)) FailureSamples.Add(path);
         }
     }
 
     internal static class LocalPhotoScanner
     {
         private const int PhotosPerSecond = 100;
-
-        internal static List<string> FixedRoots()
-        {
-            List<string> roots = new List<string>();
-            try
-            {
-                foreach (DriveInfo drive in DriveInfo.GetDrives())
-                {
-                    try
-                    {
-                        if (drive.IsReady && drive.DriveType == DriveType.Fixed) roots.Add(drive.RootDirectory.FullName);
-                    }
-                    catch (IOException) { }
-                    catch (UnauthorizedAccessException) { }
-                }
-            }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            return roots;
-        }
 
         internal static Dictionary<string, string> CompletedImportTargets(string journalDirectory,
             Func<List<string>, Dictionary<string, string>> registeredPaths, CancellationToken cancel)
@@ -83,29 +83,40 @@ namespace AppManager
         }
 
         internal static LocalPhotoScanResult Scan(IEnumerable<string> roots, IEnumerable<string> excludedRoots,
-            IDictionary<string, string> importedTargets, Action<int, string> progress, CancellationToken cancel)
+            IDictionary<string, string> importedTargets, Action<LocalPhotoScanProgress> progress, CancellationToken cancel)
         {
             LocalPhotoScanResult result = new LocalPhotoScanResult();
+            LocalPhotoScanProgress scanProgress = new LocalPhotoScanProgress();
             List<string> exclusions = (excludedRoots ?? Enumerable.Empty<string>()).Where(path => !string.IsNullOrEmpty(path))
                 .Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (string root in roots ?? Enumerable.Empty<string>())
             {
                 cancel.ThrowIfCancellationRequested();
-                if (string.IsNullOrEmpty(root) || IsExcluded(root, exclusions)) continue;
+                if (string.IsNullOrEmpty(root) || IsExcluded(root, exclusions))
+                {
+                    result.DirectoriesSkipped++;
+                    continue;
+                }
                 Stack<string> pending = new Stack<string>();
                 pending.Push(root);
                 while (pending.Count > 0)
                 {
                     cancel.ThrowIfCancellationRequested();
                     string directory = pending.Pop();
-                    if (IsExcluded(directory, exclusions)) continue;
+                    if (IsExcluded(directory, exclusions))
+                    {
+                        result.DirectoriesSkipped++;
+                        continue;
+                    }
+                    result.DirectoriesScanned++;
                     IEnumerable<string> entries;
                     try { entries = Directory.EnumerateFileSystemEntries(directory); }
                     catch (Exception ex)
                     {
                         if (!IsFileSystemError(ex)) throw;
                         result.UnreadableDirectories++;
+                        result.AddFailureSample(directory);
                         continue;
                     }
                     try
@@ -119,25 +130,54 @@ namespace AppManager
                             {
                                 if (!IsFileSystemError(ex)) throw;
                                 result.ReadFailures++;
+                                result.AddFailureSample(path);
                                 continue;
                             }
-                            if ((attributes & FileAttributes.ReparsePoint) != 0) continue;
+                            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                            {
+                                if ((attributes & FileAttributes.Directory) != 0) result.DirectoriesSkipped++;
+                                continue;
+                            }
                             if ((attributes & FileAttributes.Directory) != 0)
                             {
                                 string name = Path.GetFileName(path.TrimEnd('\\', '/'));
-                                if (!IsDeletedOrSystemDirectory(name) && !IsExcluded(path, exclusions)) pending.Push(path);
+                                if (IsDeletedOrSystemDirectory(name) || IsExcluded(path, exclusions)) result.DirectoriesSkipped++;
+                                else pending.Push(path);
                                 continue;
                             }
                             if (!MediaRules.FitsCategory("照片", path, false) || !seen.Add(path)) continue;
+                            if (MusicFileClassifier.IsCloudPlaceholder(attributes))
+                            {
+                                result.CloudFiles++;
+                                continue;
+                            }
                             AddPhoto(path, importedTargets, result);
                             Pace(cancel);
-                            if (progress != null) progress(result.Count, path);
+                            if (progress != null)
+                            {
+                                scanProgress.DirectoriesScanned = result.DirectoriesScanned;
+                                scanProgress.DirectoriesSkipped = result.DirectoriesSkipped;
+                                scanProgress.PhotosFound = result.Count;
+                                scanProgress.CopyBytes = result.CopyBytes;
+                                scanProgress.Path = path;
+                                progress(scanProgress);
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
                         if (!IsFileSystemError(ex)) throw;
                         result.UnreadableDirectories++;
+                        result.AddFailureSample(directory);
+                    }
+                    if (progress != null)
+                    {
+                        scanProgress.DirectoriesScanned = result.DirectoriesScanned;
+                        scanProgress.DirectoriesSkipped = result.DirectoriesSkipped;
+                        scanProgress.PhotosFound = result.Count;
+                        scanProgress.CopyBytes = result.CopyBytes;
+                        scanProgress.Path = directory;
+                        progress(scanProgress);
                     }
                 }
             }
@@ -164,6 +204,7 @@ namespace AppManager
             {
                 if (!IsFileSystemError(ex) && !(ex is ArgumentException) && !(ex is NotSupportedException)) throw;
                 result.ReadFailures++;
+                result.AddFailureSample(source);
             }
         }
 

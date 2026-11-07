@@ -14,6 +14,9 @@ namespace AppManager
         public int Total;
         public int Accepted;
         public int Candidates;
+        public int DirectoriesScanned;
+        public int DirectoriesSkipped;
+        public int AudioFilesFound;
         public string Path = "";
     }
 
@@ -49,6 +52,8 @@ namespace AppManager
         public int AbandonedProbes;
         public long ProbeMilliseconds;
         public long TotalMilliseconds;
+        public long AcceptedBytes;
+        public long UnconfirmedBytes;
 
         internal int UnconfirmedCount { get { return UnconfirmedFiles.Count; } }
 
@@ -105,6 +110,7 @@ namespace AppManager
         private sealed class Candidate
         {
             public string Path;
+            public long Size;
         }
 
         internal static List<string> UserMusicRoots()
@@ -218,7 +224,12 @@ namespace AppManager
                 {
                     string root = Path.GetFullPath(value).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
                     if (root.Length == 2 && root[1] == ':') root += Path.DirectorySeparatorChar;
-                    if (!Directory.Exists(root) || !queuedDirectories.Add(root)) continue;
+                    if (!Directory.Exists(root))
+                    {
+                        result.AddError(root + "：目录不存在或当前不可访问。");
+                        continue;
+                    }
+                    if (!queuedDirectories.Add(root)) continue;
                     if (IsSkippedDirectory(root, dataDir, excludedRoots))
                     {
                         result.DirectoriesSkipped++;
@@ -294,7 +305,7 @@ namespace AppManager
                                 result.Count(MusicFilterReason.TooSmall, entry);
                                 continue;
                             }
-                            candidates.Add(new Candidate { Path = entry });
+                            candidates.Add(new Candidate { Path = entry, Size = size });
                         }
                         catch (OperationCanceledException) { throw; }
                         catch (Exception ex)
@@ -319,6 +330,9 @@ namespace AppManager
                         {
                             Probing = false,
                             Candidates = candidates.Count,
+                            DirectoriesScanned = result.DirectoriesScanned,
+                            DirectoriesSkipped = result.DirectoriesSkipped,
+                            AudioFilesFound = result.AudioFilesFound,
                             Path = directory
                         });
                     }
@@ -338,6 +352,7 @@ namespace AppManager
                 {
                     cancel.ThrowIfCancellationRequested();
                     result.Files.Add(candidates[i].Path);
+                    result.AcceptedBytes += candidates[i].Size;
                     result.Count(MusicFilterReason.Accepted, candidates[i].Path);
                     ReportProbe(progress, i, candidates.Count, result, candidates[i].Path);
                 }
@@ -359,6 +374,7 @@ namespace AppManager
                         {
                             result.Count(MusicFilterReason.ProbeUnavailable, path);
                             result.UnconfirmedFiles.Add(path);
+                            result.UnconfirmedBytes += candidates[i].Size;
                             result.AddError("播放组件不可用：" + ex.Message);
                             AddRemainingUnconfirmed(candidates, i + 1, result);
                             break;
@@ -367,6 +383,7 @@ namespace AppManager
                         {
                             result.Count(MusicFilterReason.ProbeUnavailable, path);
                             result.UnconfirmedFiles.Add(path);
+                            result.UnconfirmedBytes += candidates[i].Size;
                             result.AddError("播放组件不可用：探测会话创建失败");
                             AddRemainingUnconfirmed(candidates, i + 1, result);
                             break;
@@ -399,6 +416,7 @@ namespace AppManager
                             ? MusicFilterReason.ProbeUnavailable : MusicFilterReason.ProbeTimeout;
                         result.Count(reason, path);
                         result.UnconfirmedFiles.Add(path);
+                        result.UnconfirmedBytes += candidates[i].Size;
                         session.Dispose();
                         session = null;
                         ReportProbe(progress, i, candidates.Count, result, path);
@@ -421,12 +439,14 @@ namespace AppManager
                     if (decision.Accepted)
                     {
                         result.Files.Add(path);
+                        result.AcceptedBytes += candidates[i].Size;
                         result.Count(MusicFilterReason.Accepted, path);
                     }
                     else if (decision.Reason == MusicFilterReason.Unconfirmed)
                     {
                         result.Count(decision.Reason, path);
                         result.UnconfirmedFiles.Add(path);
+                        result.UnconfirmedBytes += candidates[i].Size;
                     }
                     else result.Count(decision.Reason, path);
                     ReportProbe(progress, i, candidates.Count, result, path);
@@ -445,6 +465,7 @@ namespace AppManager
             {
                 result.Count(MusicFilterReason.NotProbed, candidates[i].Path);
                 result.UnconfirmedFiles.Add(candidates[i].Path);
+                result.UnconfirmedBytes += candidates[i].Size;
             }
         }
 
@@ -461,6 +482,9 @@ namespace AppManager
                     Total = total,
                     Accepted = result.Files.Count,
                     Candidates = result.Candidates,
+                    DirectoriesScanned = result.DirectoriesScanned,
+                    DirectoriesSkipped = result.DirectoriesSkipped,
+                    AudioFilesFound = result.AudioFilesFound,
                     Path = path
                 });
             }

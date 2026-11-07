@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -14,6 +15,7 @@ namespace AppManager
         private const int LocalPhotoCopyBytesPerSecond = 32 * 1024 * 1024;
         private bool localPhotoScanRunning;
         private CancellationTokenSource localPhotoScanCancel;
+        private List<string> lastPhotoScanRoots;
 
         private void OrganizeLocalPhotos()
         {
@@ -29,95 +31,160 @@ namespace AppManager
                     "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            List<string> roots = LocalPhotoScanner.FixedRoots();
-            if (roots.Count == 0)
+            List<string> roots;
+            using (LocalScanScopeDialog scope = new LocalScanScopeDialog("整理本机照片", LocalScanScopeKind.Photos,
+                lastPhotoScanRoots, LocalScanExcludedRoots()))
             {
-                MessageBox.Show(this, "未找到可读取的本地固定磁盘。", "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                if (scope.ShowDialog(this) != DialogResult.OK) return;
+                roots = new List<string>(scope.ResultRoots);
             }
-            string prompt = "将只读扫描所有本地固定磁盘中的照片文件，现有资源存储位置会跳过。\n"
-                + "扫描后可确认数量，再复制到当前已启用的存储位置；源照片保留，存储设置不会改变。\n\n"
-                + "全盘扫描可能需要几分钟，可随时取消。是否开始？";
-            if (MessageBox.Show(this, prompt, "整理本机照片", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+            if (roots.Count == 0) return;
+            lastPhotoScanRoots = new List<string>(roots);
 
             localPhotoScanRunning = true;
-            Func<List<string>, Dictionary<string, string>> registered = RegisteredPhotoPathsForBackground();
-            LocalPhotoScanResult result = null;
-            Exception failure = null;
-            CancellationTokenSource cancel = new CancellationTokenSource();
-            localPhotoScanCancel = cancel;
-            Label status, detail;
-            using (Form dialog = LocalPhotoProgressDialog(cancel, out status, out detail))
+            try
             {
-                dialog.Shown += delegate
+                Func<List<string>, Dictionary<string, string>> registered = RegisteredPhotoPathsForBackground();
+                List<string> exclusions = LocalScanExcludedRoots();
+                while (true)
                 {
-                    ThreadPool.QueueUserWorkItem(delegate
+                    LocalPhotoScanResult result = null;
+                    Exception failure = null;
+                    bool canceled = false;
+                    CancellationTokenSource cancel = new CancellationTokenSource();
+                    localPhotoScanCancel = cancel;
+                    Label status, detail;
+                    try
                     {
-                        try
+                        using (Form dialog = LocalPhotoProgressDialog(cancel, out status, out detail))
                         {
-                            Dictionary<string, string> previous = LocalPhotoScanner.CompletedImportTargets(ImportJournal, registered, cancel.Token);
-                            int lastUpdate = Environment.TickCount;
-                            result = LocalPhotoScanner.Scan(roots, KnownResourceStoreRoots().Concat(new[] { Paths.DataDir }), previous, delegate(int count, string path)
+                            dialog.Shown += delegate
                             {
-                                int now = Environment.TickCount;
-                                if (unchecked(now - lastUpdate) < 200) return;
-                                lastUpdate = now;
-                                UpdateLocalPhotoProgress(dialog, status, detail, "已发现 " + count + " 张照片，正在扫描…", path);
-                            }, cancel.Token);
+                                ThreadPool.QueueUserWorkItem(delegate
+                                {
+                                    try
+                                    {
+                                        Dictionary<string, string> previous = LocalPhotoScanner.CompletedImportTargets(ImportJournal, registered, cancel.Token);
+                                        int lastUpdate = Environment.TickCount;
+                                        result = LocalPhotoScanner.Scan(roots, exclusions, previous, delegate(LocalPhotoScanProgress value)
+                                        {
+                                            int now = Environment.TickCount;
+                                            if (unchecked(now - lastUpdate) < 200) return;
+                                            lastUpdate = now;
+                                            string text = "正在遍历：已检查 " + value.DirectoriesScanned + " 个目录，发现 "
+                                                + value.PhotosFound + " 张照片；预计复制 " + FormatLocalPhotoBytes(value.CopyBytes);
+                                            UpdateLocalPhotoProgress(dialog, status, detail, text, value.Path);
+                                        }, cancel.Token);
+                                    }
+                                    catch (OperationCanceledException) { canceled = true; }
+                                    catch (Exception ex) { failure = ex; }
+                                    CloseLocalScanProgressDialog(dialog);
+                                });
+                            };
+                            dialog.ShowDialog(this);
                         }
-                        catch (OperationCanceledException) { }
-                        catch (Exception ex) { failure = ex; }
-                        try
-                        {
-                            dialog.BeginInvoke((Action)delegate
-                            {
-                                if (dialog.IsDisposed || dialog.Disposing) return;
-                                dialog.DialogResult = result != null ? DialogResult.OK : DialogResult.Cancel;
-                            });
-                        }
-                        catch (ObjectDisposedException) { }
-                        catch (InvalidOperationException) { }
-                    });
-                };
-                dialog.ShowDialog(this);
-            }
-            localPhotoScanRunning = false;
-            localPhotoScanCancel = null;
-            bool wasCanceled = cancel.IsCancellationRequested;
-            cancel.Dispose();
-            if (failure != null)
-            {
-                Paths.LogError(new IOException("扫描本机照片失败。", failure));
-                MessageBox.Show(this, "扫描本机照片失败，尚未收录或创建年份集合。\n" + failure.Message,
-                    "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            if (result == null || wasCanceled) return;
-            if (result.Count == 0)
-            {
-                MessageBox.Show(this, "未发现可收录的照片。" + LocalPhotoScanWarnings(result),
-                    "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            string confirmation = "发现 " + result.Count + " 张照片（约 " + FormatLocalPhotoBytes(result.Bytes) + "）。\n\n"
-                + "将保留原照片，并复制到当前已启用的资源存储位置；不会新增或修改存储位置。\n"
-                + "拍摄时间优先读取 EXIF，无拍摄时间时按文件修改时间归入对应年份集合。\n"
-                + "为减少卡顿，扫描最多约 100 张/秒，复制限速约 32 MB/s，始终单个后台任务。";
-            if (result.Reused > 0) confirmation += "\n其中 " + result.Reused + " 张使用已收录副本，不会重复复制。";
-            confirmation += LocalPhotoScanWarnings(result) + "\n\n是否开始收录？";
-            if (MessageBox.Show(this, confirmation, "整理本机照片", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-            if (!EnsureLocalPhotoCollections(result.Years.Keys)) return;
+                    }
+                    finally
+                    {
+                        localPhotoScanCancel = null;
+                        canceled = canceled || cancel.IsCancellationRequested;
+                        cancel.Dispose();
+                    }
+                    if (canceled)
+                    {
+                        ShowNotice("已取消扫描本机照片，未导入任何文件。");
+                        return;
+                    }
+                    if (failure != null)
+                    {
+                        Paths.LogError(new IOException("扫描本机照片失败。", failure));
+                        LocalScanResultAction action = LocalScanResultDialog.Show(this, "扫描本机照片",
+                            "扫描失败，尚未收录或创建年份集合，源文件未改动。\n\n" + failure.Message, null, false);
+                        if (action == LocalScanResultAction.Retry) continue;
+                        return;
+                    }
+                    if (result == null)
+                    {
+                        LocalScanResultAction action = LocalScanResultDialog.Show(this, "扫描本机照片",
+                            "扫描未返回结果，尚未收录或创建年份集合。", null, false);
+                        if (action == LocalScanResultAction.Retry) continue;
+                        return;
+                    }
 
-            foreach (KeyValuePair<int, List<string>> year in result.Years.OrderByDescending(pair => pair.Key))
-            {
-                string collection = CollectionKeys.Make("照片", year.Key + "年");
-                for (int offset = 0; offset < year.Value.Count; offset += LocalPhotoImportBatchSize)
-                {
-                    string[] paths = year.Value.GetRange(offset, Math.Min(LocalPhotoImportBatchSize, year.Value.Count - offset)).ToArray();
-                    QueueImport(paths, ImportOperation.Copy, "照片", collection, true, 0, null, LocalPhotoCopyBytesPerSecond);
+                    string summary = BuildLocalPhotoScanSummary(result);
+                    LocalScanResultAction decision = LocalScanResultDialog.Show(this, "扫描本机照片", summary,
+                        "开始收录", result.Count > 0);
+                    if (decision == LocalScanResultAction.Retry) continue;
+                    if (decision != LocalScanResultAction.Import || result.Count == 0) return;
+                    if (!EnsureLocalPhotoCollections(result.Years.Keys)) return;
+
+                    foreach (KeyValuePair<int, List<string>> year in result.Years.OrderByDescending(pair => pair.Key))
+                    {
+                        string collection = CollectionKeys.Make("照片", year.Key + "年");
+                        for (int offset = 0; offset < year.Value.Count; offset += LocalPhotoImportBatchSize)
+                        {
+                            string[] paths = year.Value.GetRange(offset, Math.Min(LocalPhotoImportBatchSize, year.Value.Count - offset)).ToArray();
+                            QueueImport(paths, ImportOperation.Copy, "照片", collection, true, 0, null, LocalPhotoCopyBytesPerSecond);
+                        }
+                    }
+                    RefreshGrid();
+                    return;
                 }
             }
-            RefreshGrid();
+            finally
+            {
+                localPhotoScanRunning = false;
+                localPhotoScanCancel = null;
+            }
+        }
+
+        private List<string> LocalScanExcludedRoots()
+        {
+            List<string> roots = new List<string>();
+            foreach (string root in KnownResourceStoreRoots())
+                if (!string.IsNullOrWhiteSpace(root)) roots.Add(root);
+            roots.Add(Paths.DataDir);
+            return roots;
+        }
+
+        private static string BuildLocalPhotoScanSummary(LocalPhotoScanResult result)
+        {
+            StringBuilder text = new StringBuilder();
+            int added = result.Count - result.Reused;
+            text.Append("扫描完成：检查 ").Append(result.DirectoriesScanned).Append(" 个目录，跳过 ")
+                .Append(result.DirectoriesSkipped).Append(" 个目录。");
+            text.Append("\n新增 ").Append(added).Append(" 张，已收录复用 ").Append(result.Reused)
+                .Append(" 张，云端未下载 ").Append(result.CloudFiles).Append(" 张。");
+            text.Append("\n预计复制 ").Append(FormatLocalPhotoBytes(result.CopyBytes));
+            if (result.Reused > 0) text.Append("；另复用 ").Append(FormatLocalPhotoBytes(result.Bytes - result.CopyBytes));
+            if (result.UnreadableDirectories > 0 || result.ReadFailures > 0)
+            {
+                text.Append("\n失败：").Append(result.UnreadableDirectories).Append(" 个不可读目录，")
+                    .Append(result.ReadFailures).Append(" 个无法读取的文件。");
+                if (result.FailureSamples.Count > 0)
+                {
+                    text.Append("\n示例：");
+                    int count = Math.Min(5, result.FailureSamples.Count);
+                    for (int i = 0; i < count; i++) text.Append("\n").Append(result.FailureSamples[i]);
+                }
+                text.Append("\n可先处理失败项，再选择“重新扫描”。");
+            }
+            text.Append("\n\n将保留原照片，复制到当前已启用的资源存储位置；不会新增或修改存储位置。");
+            text.Append("\n拍摄时间优先读取 EXIF，无拍摄时间时按文件修改时间归入年份集合。");
+            text.Append("\n扫描最多约 100 张/秒，复制限速约 32 MB/s。");
+            return text.ToString();
+        }
+
+        private static void CloseLocalScanProgressDialog(Form dialog)
+        {
+            try
+            {
+                if (dialog.IsDisposed || dialog.Disposing) return;
+                if (!dialog.IsHandleCreated) { dialog.Close(); return; }
+                dialog.BeginInvoke((Action)delegate { if (!dialog.IsDisposed) dialog.Close(); });
+            }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
         }
 
         private Func<List<string>, Dictionary<string, string>> RegisteredPhotoPathsForBackground()
@@ -163,12 +230,12 @@ namespace AppManager
                 Text = "扫描本机照片", StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(520, 170),
                 FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ControlBox = false
             };
-            Label statusLabel = new Label { Text = "正在准备扫描…", AutoSize = true, Location = new Point(20, 18), Font = Theme.BodyFont };
-            Label detailLabel = new Label { Text = "扫描所有本地固定磁盘；现有资源存储位置会跳过。", Location = new Point(20, 50), Size = new Size(480, 48), AutoEllipsis = true };
+            Label statusLabel = new Label { Text = "正在准备扫描…", AutoSize = false, Location = new Point(20, 18), Size = new Size(480, 38), Font = Theme.BodyFont };
+            Label detailLabel = new Label { Text = "扫描所选磁盘/文件夹；现有资源存储位置会跳过。", Location = new Point(20, 58), Size = new Size(480, 36), AutoEllipsis = true };
             status = statusLabel;
             detail = detailLabel;
-            ProgressBar progress = new ProgressBar { Style = ProgressBarStyle.Marquee, Location = new Point(20, 106), Size = new Size(480, 12) };
-            Button stop = new Button { Text = "取消", Location = new Point(425, 130), Size = new Size(75, 28) };
+            ProgressBar progress = new ProgressBar { Style = ProgressBarStyle.Marquee, Location = new Point(20, 100), Size = new Size(480, 12) };
+            Button stop = new Button { Text = "取消", Location = new Point(425, 128), Size = new Size(75, 28) };
             stop.Click += delegate
             {
                 cancel.Cancel();
@@ -192,12 +259,6 @@ namespace AppManager
             }
             catch (ObjectDisposedException) { }
             catch (InvalidOperationException) { }
-        }
-
-        private static string LocalPhotoScanWarnings(LocalPhotoScanResult result)
-        {
-            if (result.UnreadableDirectories == 0 && result.ReadFailures == 0) return string.Empty;
-            return "\n跳过：" + result.UnreadableDirectories + " 个不可读目录，" + result.ReadFailures + " 个无法读取的文件。";
         }
 
         private static string FormatLocalPhotoBytes(long bytes)

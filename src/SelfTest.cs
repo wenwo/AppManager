@@ -124,6 +124,7 @@ namespace AppManager
             Case64_SelfTargetExclusion();
             Case65_CategoryNameValidation();
             Case66_LocalPhotoScan();
+            Case67_LocalScanScope();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1636,6 +1637,9 @@ namespace AppManager
                 File.Copy(exif, previous);
                 string previousTarget = Path.Combine(store, "registered.jpg");
                 File.Copy(exif, previousTarget);
+                string cloud = Path.Combine(root, "cloud.jpg");
+                File.Copy(exif, cloud);
+                File.SetAttributes(cloud, FileAttributes.Offline);
                 string journal = Path.Combine(root, "journal");
                 Directory.CreateDirectory(journal);
                 ImportBatch batch = new ImportBatch
@@ -1660,6 +1664,8 @@ namespace AppManager
                 bool normal = result.Count == 3 && result.Reused == 1
                     && result.Years[2020].Count == 2 && result.Years[2024].Count == 1
                     && result.Years[2020].Contains(previousTarget)
+                    && result.CloudFiles == 1
+                    && result.CopyBytes == result.Bytes - new FileInfo(previous).Length
                     && File.Exists(exif) && File.Exists(fallback) && File.Exists(previous);
 
                 bool canceled = false;
@@ -1673,6 +1679,34 @@ namespace AppManager
                 LocalPhotoScanResult failed = LocalPhotoScanner.Scan(new[] { missing }, null, null, null, CancellationToken.None);
                 Assert(normal && canceled && failed.UnreadableDirectories == 1,
                     "normal=" + normal + " canceled=" + canceled + " failures=" + failed.UnreadableDirectories);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(root); }
+        }
+
+        private static void Case67_LocalScanScope()
+        {
+            Begin("67 扫描范围：本地校验、重复与父子范围合并");
+            string root = Path.Combine(Path.GetTempPath(), "AppManagerScope_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string child = Path.Combine(root, "child");
+                string other = Path.Combine(root, "other");
+                Directory.CreateDirectory(child);
+                Directory.CreateDirectory(other);
+                LocalScanScopeResolution merged = LocalScanScope.Resolve(
+                    new[] { root, child, root.ToUpperInvariant(), other }, null);
+                bool mergeOk = merged.Roots.Count == 1 && merged.Merged == 3 && merged.Invalid.Count == 0;
+                bool driveRoot = LocalScanScope.IsDriveRoot(Path.GetPathRoot(root));
+
+                LocalScanScopeResolution invalid = LocalScanScope.Resolve(
+                    new[] { @"\\server\share", Path.Combine(root, "missing") }, null);
+                bool invalidOk = invalid.Roots.Count == 0 && invalid.Invalid.Count == 2;
+
+                LocalScanScopeResolution excluded = LocalScanScope.Resolve(new[] { child }, new[] { root });
+                bool excludedOk = excluded.Roots.Count == 0 && excluded.Invalid.Count == 1;
+                Assert(mergeOk && driveRoot && invalidOk && excludedOk,
+                    "merge=" + mergeOk + " drive=" + driveRoot + " invalid=" + invalidOk + " excluded=" + excludedOk);
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally { TryDeleteTree(root); }
