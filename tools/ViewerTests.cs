@@ -70,6 +70,7 @@ namespace AppManager
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
                 Run("music queue search maps filtered rows without changing playback order", MusicQueueSearch);
                 Run("music queue scrollbar drags, hides and keeps filtered row hit zones", MusicQueueScrollbar);
+                Run("long music title stays inside its scrolling region", MusicTitleClipping);
                 Run("music probe rejects short voice audio, accepts a normal song and surfaces corrupt files", MusicProbeContent);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
@@ -664,6 +665,37 @@ namespace AppManager
                 thumb = (Rectangle)Call(player, "QueueScrollThumbRect");
                 Check(thumb.IsEmpty, "short queue showed a scrollbar");
                 host.Hide();
+            }
+        }
+
+        private static void MusicTitleClipping()
+        {
+            using (MusicPlayerControl player = new MusicPlayerControl())
+            using (Bitmap frame = new Bitmap(480, 64, PixelFormat.Format32bppArgb))
+            {
+                Set(player, "track", new MusicTrackInfo { Title = "Whatever Takes (Jorgen Odegard Remix)", Artist = "Artist", Album = "Album" });
+                Set(player, "songRect", new Rectangle(80, 10, 120, 40));
+                Set(player, "titleScroll", 12F);
+                using (Graphics g = Graphics.FromImage(frame))
+                {
+                    g.Clear(Color.Magenta);
+                    Call(player, "DrawCurrentSong", g);
+                }
+
+                Rectangle song = (Rectangle)Field(player, "songRect");
+                int outside = 0, inside = 0;
+                for (int y = 0; y < frame.Height; y++)
+                {
+                    for (int x = 0; x < frame.Width; x++)
+                    {
+                        Color pixel = frame.GetPixel(x, y);
+                        if (pixel.R == Color.Magenta.R && pixel.G == Color.Magenta.G && pixel.B == Color.Magenta.B) continue;
+                        if (song.Contains(x, y)) inside++;
+                        else outside++;
+                    }
+                }
+                Check(outside == 0, "scrolling title painted " + outside + " pixels outside its region");
+                Check(inside > 0, "scrolling title did not paint inside its region");
             }
         }
 

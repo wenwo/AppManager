@@ -618,11 +618,13 @@ namespace AppManager.Controls
             float offset = titleScroll % cycle;
             GraphicsState state = g.Save();
             g.SetClip(songRect);
+            TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter
+                | TextFormatFlags.NoPadding | TextFormatFlags.PreserveGraphicsClipping;
             for (int copy = 0; copy < 2; copy++)
             {
                 int x = songRect.X + (int)(copy * cycle - offset);
                 TextRenderer.DrawText(g, title, font, new Rectangle(x, songRect.Y, measured.Width + 2, songRect.Height),
-                    Theme.TextPrimary, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                    Theme.TextPrimary, flags);
             }
             g.Restore(state);
         }
