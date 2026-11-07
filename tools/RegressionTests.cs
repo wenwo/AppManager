@@ -114,6 +114,12 @@ namespace AppManager
                 Run("grid caches category text and falls back when the provider fails", GridCategoryTextCache);
                 Run("selection footer resolves names, locations, sources and packaged ids", SelectionFooterText);
                 Run("grid selection fires once per change and restores a ten-thousand item selection", GridSelectionNotifications);
+                Run("drag ghost keeps independent snapshots, session ids and idempotent lifecycle", DragGhostLifecycle);
+                Run("drag ghost rapid begin/end reuses one layered window and releases GDI handles", DragGhostRapidLifecycle);
+                Run("grid starts drag visuals only after the threshold and cancels on escape", GridDragVisualLifecycle);
+                Run("grid drag cleanup clears capture, cancel mode and list refresh without a drop", GridDragCleanup);
+                Run("drag intent maps reorder, category, collection and folder semantics", DragIntentSemantics);
+                Run("OLE export payload count follows the actual distinct exportable paths", DragExportPayload);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
                 Run("tray hide keeps the music playlist and current track", TrayHideKeepsMusicPlaylist);
@@ -4695,6 +4701,447 @@ namespace AppManager
             string error;
             Check(!LayoutBackup.Restore("fixture", out error), "quota did not block restore");
             Check(before == Directory.GetDirectories(Paths.BackupsDir, "_prerestore_*").Length, "quota created new transaction");
+        }
+
+        private static void DragGhostLifecycle()
+        {
+            using (DpiAwareForm owner = new DpiAwareForm())
+            {
+                Initialize(owner);
+                using (Controls.DragGhostController controller = new Controls.DragGhostController(owner))
+                {
+                    Bitmap large = new Bitmap(56, 56);
+                    Bitmap small = new Bitmap(16, 16);
+                    using (Graphics g = Graphics.FromImage(large)) g.Clear(Color.RoyalBlue);
+                    using (Graphics g = Graphics.FromImage(small)) g.Clear(Color.OrangeRed);
+                    AppInfo app = new AppInfo { Name = "Alpha", IsFile = true, Icon = large, SmallIcon = small };
+                    List<AppInfo> one = new List<AppInfo> { app };
+
+                    Controls.DragGhostSession gridSession = controller.Begin(one, false, new Point(100, 100));
+                    Check(gridSession != null, "grid drag ghost did not start");
+                    Check(controller.HasVisibleSession, "grid drag ghost is not visible");
+                    Check(!ReferenceEquals(gridSession.Icon, large), "drag ghost retained the source icon");
+                    Check(gridSession.Icon.Width == 56, "grid drag ghost did not clone the large icon");
+                    controller.Move(gridSession, new Point(140, 130));
+                    controller.SetState(gridSession, Controls.DragDropIntent.Accept);
+                    Check(gridSession.State == Controls.DragDropIntent.Accept, "valid state was not applied");
+
+                    // 模拟后台图标刷新：源图释放后，拖影仍应使用自己的快照完成重绘。
+                    large.Dispose();
+                    small.Dispose();
+                    app.Icon = null;
+                    app.SmallIcon = null;
+                    controller.Move(gridSession, new Point(180, 160));
+                    controller.SetState(gridSession, Controls.DragDropIntent.Reject);
+                    Check(gridSession.State == Controls.DragDropIntent.Reject, "invalid state was not applied");
+
+                    int firstId = gridSession.Id;
+                    List<AppInfo> many = new List<AppInfo>();
+                    for (int i = 0; i < 10; i++) many.Add(new AppInfo { Name = "Item" + i, IsFile = true });
+                    Controls.DragGhostSession listSession = controller.Begin(many, true, new Point(220, 180));
+                    Check(listSession != null, "list drag ghost did not start");
+                    Check(listSession.Id > firstId, "drag ghost session id did not advance");
+                    Check(listSession.Count == 10, "drag ghost count is wrong");
+                    Check(listSession.Icon.Width >= 16 && listSession.Icon.Width <= 32,
+                        "list drag ghost forced the small icon to a large size");
+
+                    controller.Move(gridSession, new Point(500, 500));
+                    controller.SetState(gridSession, Controls.DragDropIntent.Accept);
+                    controller.End(gridSession);
+                    Check(ReferenceEquals(controller.CurrentSession, listSession),
+                        "stale session ended the current drag ghost");
+                    controller.End(listSession);
+                    controller.End(listSession);
+                    controller.Dispose();
+                    controller.Move(listSession, new Point(300, 300));
+                    controller.SetState(listSession, Controls.DragDropIntent.Accept);
+                    controller.End(listSession);
+                }
+            }
+
+            using (Controls.DragGhostForm ghost = new Controls.DragGhostForm())
+            {
+                PropertyInfo property = typeof(Controls.DragGhostForm).GetProperty("CreateParams", Private);
+                CreateParams cp = (CreateParams)property.GetValue(ghost, null);
+                Check((cp.ExStyle & 0x00080000) != 0, "drag ghost is not layered");
+                Check((cp.ExStyle & 0x00000020) != 0, "drag ghost is not hit-test transparent");
+                Check((cp.ExStyle & 0x00000080) != 0, "drag ghost is not a tool window");
+                Check((cp.ExStyle & 0x08000000) != 0, "drag ghost can activate");
+
+                MethodInfo wndProc = typeof(Controls.DragGhostForm).GetMethod("WndProc", Private);
+                object[] hit = { Message.Create(ghost.Handle, 0x0084, IntPtr.Zero, IntPtr.Zero) };
+                wndProc.Invoke(ghost, hit);
+                Check(((Message)hit[0]).Result == (IntPtr)(-1), "drag ghost did not return HTTRANSPARENT");
+            }
+        }
+
+        private static void GridDragVisualLifecycle()
+        {
+            using (Controls.AppGridControl grid = new Controls.AppGridControl
+            {
+                Size = new Size(640, 420),
+                AllowReorder = true
+            })
+            {
+                grid.SetApps(new List<AppInfo>
+                {
+                    new AppInfo { Name = "one" }, new AppInfo { Name = "two" }, new AppInfo { Name = "three" }
+                });
+                grid.CreateControl();
+                int started = 0, moved = 0, ended = 0;
+                bool usedSmallIcon = true;
+                Controls.DragDropIntent lastState = Controls.DragDropIntent.Reject;
+                grid.DragVisualStarted += delegate(List<AppInfo> apps, bool small, Point screen) { started++; usedSmallIcon = small; };
+                grid.DragVisualMoved += delegate(Point screen, Controls.DragDropIntent state) { moved++; lastState = state; };
+                grid.DragVisualEnded += delegate { ended++; };
+
+                Type type = typeof(Controls.AppGridControl);
+                MethodInfo down = type.GetMethod("OnMouseDown", Private);
+                MethodInfo move = type.GetMethod("OnMouseMove", Private);
+                MethodInfo processKey = type.GetMethod("ProcessCmdKey", Private);
+                down.Invoke(grid, new object[] { new MouseEventArgs(MouseButtons.Left, 1, 30, 30, 0) });
+                Check(started == 0, "drag visual started on mouse down");
+                move.Invoke(grid, new object[] { new MouseEventArgs(MouseButtons.Left, 0, 31, 31, 0) });
+                Check(started == 0, "drag visual started before the system threshold");
+                move.Invoke(grid, new object[] { new MouseEventArgs(MouseButtons.Left, 0, 220, 60, 0) });
+                Check(started == 1, "drag visual did not start after the threshold");
+                Check(moved > 0, "drag visual move was not reported");
+                Check(!usedSmallIcon, "grid drag visual incorrectly requested the list icon");
+                Check(lastState == Controls.DragDropIntent.Accept, "grid reorder did not report a valid state");
+
+                object[] escape = { Message.Create(grid.Handle, 0x0100, (IntPtr)Keys.Escape, IntPtr.Zero), Keys.Escape };
+                bool handled = (bool)processKey.Invoke(grid, escape);
+                Check(handled && ended == 1, "escape did not cancel and end the drag visual");
+            }
+
+            using (Controls.AppGridControl list = new Controls.AppGridControl
+            {
+                Size = new Size(640, 420),
+                GridMode = false,
+                DragOutData = delegate(List<AppInfo> apps) { return null; }
+            })
+            {
+                list.SetApps(new List<AppInfo> { new AppInfo { Name = "one" }, new AppInfo { Name = "two" } });
+                list.CreateControl();
+                int started = 0, moved = 0;
+                bool usedSmallIcon = false;
+                list.DragVisualStarted += delegate(List<AppInfo> apps, bool small, Point screen) { started++; usedSmallIcon = small; };
+                list.DragVisualMoved += delegate(Point screen, Controls.DragDropIntent state) { moved++; };
+
+                Type type = typeof(Controls.AppGridControl);
+                type.GetMethod("OnMouseDown", Private).Invoke(list,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, 30, 50, 0) });
+                type.GetMethod("OnMouseMove", Private).Invoke(list,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 0, 220, 80, 0) });
+                Check(started == 1, "drag-out-only item did not start the visual");
+                Check(moved > 0, "drag-out-only item did not report movement");
+                Check(usedSmallIcon, "list drag visual did not request the small icon");
+                type.GetMethod("OnMouseUp", Private).Invoke(list,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, 220, 80, 0) });
+            }
+        }
+
+        private static void DragGhostRapidLifecycle()
+        {
+            using (DpiAwareForm owner = new DpiAwareForm())
+            {
+                Initialize(owner);
+                using (Controls.DragGhostController controller = new Controls.DragGhostController(owner))
+                using (Bitmap icon = new Bitmap(56, 56))
+                {
+                    using (Graphics g = Graphics.FromImage(icon)) g.Clear(Color.CadetBlue);
+                    List<AppInfo> items = new List<AppInfo>
+                    {
+                        new AppInfo { Name = "rapid", IsFile = true, Icon = icon }
+                    };
+                    Controls.DragGhostSession warm = controller.Begin(items, false, new Point(10, 10));
+                    Check(warm != null, "rapid drag ghost did not start");
+                    controller.Begin(items, false, new Point(10, 10));   // Finish the warm-up session and create a stable window
+                    IntPtr window = controller.WindowHandle;
+                    Check(window != IntPtr.Zero, "drag ghost window was not created");
+                    uint before = GdiHandleCount();
+
+                    for (int i = 0; i < 100; i++)
+                    {
+                        Controls.DragGhostSession session = controller.Begin(items, false,
+                            new Point(20 + (i % 20), 20 + (i % 20)));
+                        Check(session != null, "rapid drag ghost failed at iteration " + i);
+                        controller.SetPayloadCount(session, 1 + (i % 3));
+                        controller.Move(session, new Point(40, 40));
+                        controller.SetState(session, (i & 1) == 0
+                            ? Controls.DragDropIntent.Accept : Controls.DragDropIntent.Reject);
+                        controller.End(session);
+                    }
+
+                    controller.Begin(items, false, new Point(10, 10));
+                    Check(controller.WindowHandle == window, "layered drag window was recreated during rapid cycles");
+                    controller.Dispose();
+                    Check(!controller.TimerRunning, "animation timer remained running after dispose");
+                    Check(controller.WindowHandle == IntPtr.Zero, "layered drag window remained after dispose");
+                    uint after = GdiHandleCount();
+                    if (before > 0 && after > before + 8)
+                        Check(false, "GDI handles grew from " + before + " to " + after);
+                }
+            }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern uint GetGuiResources(IntPtr hProcess, uint flags);
+
+        private static uint GdiHandleCount()
+        {
+            using (Process process = Process.GetCurrentProcess())
+                return GetGuiResources(process.Handle, 0);
+        }
+
+        private static void GridDragCleanup()
+        {
+            foreach (string mode in new string[] { "capture", "cancel-mode", "refresh" })
+            {
+                using (Controls.AppGridControl grid = new Controls.AppGridControl
+                {
+                    Size = new Size(640, 420),
+                    AllowReorder = true
+                })
+                {
+                    grid.SetApps(new List<AppInfo>
+                    {
+                        new AppInfo { Name = "one" }, new AppInfo { Name = "two" }, new AppInfo { Name = "three" }
+                    });
+                    grid.CreateControl();
+                    int ended = 0, drops = 0;
+                    grid.DragVisualEnded += delegate { ended++; };
+                    grid.ReorderRequested += delegate { drops++; };
+                    grid.MoveIntoFolder += delegate { drops++; };
+                    grid.DroppedOutside += delegate { drops++; };
+
+                    StartGridDragForTest(grid, new Point(30, 30), new Point(220, 60));
+                    Check(ended == 0 && drops == 0, "drag did not start cleanly: " + mode);
+                    if (mode == "capture")
+                    {
+                        grid.Capture = false;
+                        typeof(Controls.AppGridControl).GetMethod("OnMouseCaptureChanged", Private)
+                            .Invoke(grid, new object[] { EventArgs.Empty });
+                    }
+                    else if (mode == "cancel-mode")
+                    {
+                        object[] message = { Message.Create(grid.Handle, 0x001F, IntPtr.Zero, IntPtr.Zero) };
+                        typeof(Controls.AppGridControl).GetMethod("WndProc", Private).Invoke(grid, message);
+                    }
+                    else
+                    {
+                        grid.SetApps(new List<AppInfo> { new AppInfo { Name = "replacement" } });
+                    }
+                    Check(ended == 1, "cleanup did not end the drag visual: " + mode);
+                    typeof(Controls.AppGridControl).GetMethod("OnMouseUp", Private)
+                        .Invoke(grid, new object[] { new MouseEventArgs(MouseButtons.Left, 1, 220, 60, 0) });
+                    Check(drops == 0, "cleanup triggered a drop action: " + mode);
+                    Check((int)typeof(Controls.AppGridControl).GetField("dragFrom", Private).GetValue(grid) == -1,
+                        "cleanup left a stale drag source: " + mode);
+                }
+            }
+
+            using (MainForm form = CategoryForm(new AppConfig(), new AppInfo { Key = "af:drag-minimize", Name = "minimize" }))
+            {
+                Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                Check(grid != null, "main form grid was not created");
+                grid.AllowReorder = true;
+                grid.SetApps(new List<AppInfo> { new AppInfo { Name = "one" }, new AppInfo { Name = "two" } });
+                grid.CreateControl();
+                int ended = 0;
+                grid.DragVisualEnded += delegate { ended++; };
+                StartGridDragForTest(grid, new Point(30, 30), new Point(220, 60));
+                object[] message = { Message.Create(form.Handle, 0x0005, (IntPtr)1, IntPtr.Zero) };   // WM_SIZE / SIZE_MINIMIZED
+                typeof(MainForm).GetMethod("WndProc", Private).Invoke(form, message);
+                Check(ended == 1, "minimize did not clear the drag session");
+
+                typeof(MainForm).GetField("dragGhostSession", Private).SetValue(form, null);
+                Invoke(form, "OnGridDragVisualExternalStarting", new Point(0, 0), 1);
+                Check((bool)typeof(MainForm).GetField("dragGhostExternal", Private).GetValue(form),
+                    "OLE takeover without a visual did not mark the external session");
+                QueryContinueDragEventArgs query = new QueryContinueDragEventArgs(1, true, DragAction.Continue);
+                typeof(MainForm).GetMethod("OnGridQueryContinueDrag", Private)
+                    .Invoke(form, new object[] { null, query });
+                Check(query.Action == DragAction.Cancel, "OLE escape without a visual did not request cancellation");
+                typeof(MainForm).GetField("dragCategoryTarget", Private).SetValue(form, "照片");
+                Invoke(form, "CancelGridDragSession");
+                Check((bool)typeof(MainForm).GetField("dragGhostExternal", Private).GetValue(form)
+                    && (string)typeof(MainForm).GetField("dragCategoryTarget", Private).GetValue(form) == "照片",
+                    "cancel mode ended an OLE-owned drag session early");
+                typeof(MainForm).GetField("dragGhostExternal", Private).SetValue(form, false);
+                Invoke(form, "CancelGridDragSession");
+                Check(!(bool)typeof(MainForm).GetField("dragGhostExternal", Private).GetValue(form)
+                    && (string)typeof(MainForm).GetField("dragCategoryTarget", Private).GetValue(form) == null,
+                    "non-OLE cancel did not clear the drag session");
+            }
+        }
+
+        private static void StartGridDragForTest(Controls.AppGridControl grid, Point start, Point end)
+        {
+            if (!grid.IsHandleCreated) grid.CreateControl();
+            Type type = typeof(Controls.AppGridControl);
+            type.GetMethod("OnMouseDown", Private).Invoke(grid,
+                new object[] { new MouseEventArgs(MouseButtons.Left, 1, start.X, start.Y, 0) });
+            type.GetMethod("OnMouseMove", Private).Invoke(grid,
+                new object[] { new MouseEventArgs(MouseButtons.Left, 0, end.X, end.Y, 0) });
+        }
+
+        private static void DragIntentSemantics()
+        {
+            using (Controls.AppGridControl grid = new Controls.AppGridControl
+            {
+                Size = new Size(640, 420),
+                AllowReorder = true
+            })
+            {
+                grid.SetApps(new List<AppInfo>
+                {
+                    new AppInfo { Name = "one" }, new AppInfo { Name = "two" }, new AppInfo { Name = "three" }
+                });
+                grid.CreateControl();
+                Controls.DragDropIntent state = Controls.DragDropIntent.Reject;
+                grid.DragVisualMoved += delegate(Point screen, Controls.DragDropIntent value) { state = value; };
+                StartGridDragForTest(grid, new Point(30, 30), new Point(1, 30));
+                Check(state == Controls.DragDropIntent.Neutral, "dropping a row back at its original position was not neutral");
+                grid.CancelActiveDrag();
+            }
+
+            string photoPendingPath = Path.Combine(root, "drag-pending.jpg");
+            string photoMemberPath = Path.Combine(root, "drag-member.jpg");
+            string videoPath = Path.Combine(root, "drag-video.mp4");
+            File.WriteAllText(photoPendingPath, "photo");
+            File.WriteAllText(photoMemberPath, "photo");
+            File.WriteAllText(videoPath, "video");
+            AppConfig config = new AppConfig();
+            AppInfo pendingPhoto = new AppInfo { Key = "add:" + photoPendingPath, TargetPath = photoPendingPath,
+                Name = "pending", Category = "其他", IsFile = true };
+            AppInfo memberPhoto = new AppInfo { Key = "add:" + photoMemberPath, TargetPath = photoMemberPath,
+                Name = "member", Category = "照片", IsFile = true };
+            AppInfo video = new AppInfo { Key = "add:" + videoPath, TargetPath = videoPath,
+                Name = "video", Category = "其他", IsFile = true };
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "另一个" });
+            string trip = CollectionKeys.Make("照片", "旅行");
+            string other = CollectionKeys.Make("照片", "另一个");
+            CollectionOps.AddMember(config, memberPhoto.Key, trip);
+
+            using (MainForm form = CategoryForm(config, pendingPhoto, memberPhoto, video))
+            {
+                typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+                List<AppInfo> onePending = new List<AppInfo> { pendingPhoto };
+                List<AppInfo> oneMember = new List<AppInfo> { memberPhoto };
+                List<AppInfo> oneVideo = new List<AppInfo> { video };
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveAddIntent", onePending, "照片") == Controls.DragDropIntent.Accept,
+                    "valid photo category target was not accepted");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveAddIntent", oneMember, "照片") == Controls.DragDropIntent.Neutral,
+                    "already assigned category target was not neutral");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveAddIntent", oneVideo, "照片") == Controls.DragDropIntent.Reject,
+                    "type mismatch category target was not rejected");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveAddIntent", oneMember, trip) == Controls.DragDropIntent.Neutral,
+                    "already assigned collection target was not neutral");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveAddIntent", oneMember, other) == Controls.DragDropIntent.Accept,
+                    "eligible collection target was not accepted");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveAddIntent", onePending, trip) == Controls.DragDropIntent.Reject,
+                    "collection target outside the parent category was not rejected");
+            }
+
+            string baseDir = Path.Combine(root, "drag-folder-rules");
+            string sourceDir = Path.Combine(baseDir, "Source");
+            string childDir = Path.Combine(sourceDir, "Child");
+            string targetDir = Path.Combine(baseDir, "Target");
+            string filesDir = Path.Combine(baseDir, "Files");
+            Directory.CreateDirectory(childDir);
+            Directory.CreateDirectory(targetDir);
+            Directory.CreateDirectory(filesDir);
+            string movablePath = Path.Combine(filesDir, "move.txt");
+            string insidePath = Path.Combine(targetDir, "inside.txt");
+            File.WriteAllText(movablePath, "move");
+            File.WriteAllText(insidePath, "inside");
+            AppConfig folderConfig = new AppConfig { ManageRootPath = baseDir };
+            AppInfo sourceFile = new AppInfo { Key = "add:" + movablePath, TargetPath = movablePath,
+                Name = "move", IsFile = true };
+            AppInfo sourceFolder = new AppInfo { Key = "add:" + sourceDir, TargetPath = sourceDir,
+                Name = "source", IsFile = true, IsFolder = true };
+            AppInfo childFolder = new AppInfo { Key = "add:" + childDir, TargetPath = childDir,
+                Name = "child", IsFile = true, IsFolder = true };
+            AppInfo target = new AppInfo { Key = "add:" + targetDir, TargetPath = targetDir,
+                Name = "target", IsFile = true, IsFolder = true };
+            AppInfo insideFile = new AppInfo { Key = "add:" + insidePath, TargetPath = insidePath,
+                Name = "inside", IsFile = true };
+            AppInfo missingFile = new AppInfo { Key = "add:" + Path.Combine(baseDir, "missing.txt"),
+                TargetPath = Path.Combine(baseDir, "missing.txt"), Name = "missing", IsFile = true };
+            AppInfo missingTarget = new AppInfo { Key = "add:" + Path.Combine(baseDir, "missing-target"),
+                TargetPath = Path.Combine(baseDir, "missing-target"), Name = "missing-target", IsFile = true, IsFolder = true };
+            using (MainForm form = CategoryForm(folderConfig))
+            {
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveFolderDropIntentForGrid", sourceFile, target) == Controls.DragDropIntent.Accept,
+                    "valid file-to-folder move was not accepted");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveFolderDropIntentForGrid", sourceFolder, target) == Controls.DragDropIntent.Accept,
+                    "valid folder-to-folder move was not accepted");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveFolderDropIntentForGrid", sourceFolder, sourceFolder) == Controls.DragDropIntent.Reject,
+                    "folder dropped onto itself was not rejected");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveFolderDropIntentForGrid", sourceFolder, childFolder) == Controls.DragDropIntent.Reject,
+                    "folder dropped into its child was not rejected");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveFolderDropIntentForGrid", insideFile, target) == Controls.DragDropIntent.Neutral,
+                    "file already inside the target folder was not neutral");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveFolderDropIntentForGrid", missingFile, target) == Controls.DragDropIntent.Reject,
+                    "missing source was not rejected");
+                Check((Controls.DragDropIntent)Invoke(form, "ResolveFolderDropIntentForGrid", sourceFile, missingTarget) == Controls.DragDropIntent.Reject,
+                    "missing target was not rejected");
+            }
+        }
+
+        private static void DragExportPayload()
+        {
+            string dir = Path.Combine(root, "drag-export");
+            Directory.CreateDirectory(dir);
+            string firstPath = Path.Combine(dir, "one.txt");
+            string secondPath = Path.Combine(dir, "two.txt");
+            File.WriteAllText(firstPath, "one");
+            File.WriteAllText(secondPath, "two");
+            AppConfig config = new AppConfig { ManageRootPath = dir };
+            config.AddedItems.Add(new AddedEntry { Path = firstPath, Category = "文件" });
+            config.AddedItems.Add(new AddedEntry { Path = secondPath, Category = "文件" });
+            AppInfo first = new AppInfo { Key = "add:" + firstPath, TargetPath = firstPath,
+                Name = "one", Category = "文件", IsFile = true };
+            AppInfo second = new AppInfo { Key = "add:" + secondPath, TargetPath = secondPath,
+                Name = "two", Category = "文件", IsFile = true };
+            AppInfo nonExportable = new AppInfo { Key = "packaged:drag-export", TargetPath = "shell:AppsFolder\\drag-export",
+                Name = "packaged", Category = "文件", IsFile = true };
+
+            using (MainForm form = CategoryForm(config))
+            {
+                List<AppInfo> partial = new List<AppInfo> { first, second, first, nonExportable };
+                object[] partialArgs = { partial, false };
+                List<string> partialPaths = (List<string>)typeof(MainForm)
+                    .GetMethod("ExportPaths", StaticPrivate).Invoke(null, partialArgs);
+                Check(partialPaths.Count == 2 && !(bool)partialArgs[1],
+                    "partial export count did not match the distinct existing files");
+
+                Controls.ExternalDragRequest partialRequest = (Controls.ExternalDragRequest)Invoke(form, "ExportDragData", partial);
+                Check(partialRequest != null, "partial export did not produce a drag request");
+                Check(partialRequest.PayloadCount == partialPaths.Count,
+                    "partial payload count diverged from the data object");
+                Check(partialRequest.Data.GetFileDropList().Count == partialRequest.PayloadCount,
+                    "partial file drop list length diverged from payload count");
+                Check((partialRequest.Allowed & DragDropEffects.Move) == 0,
+                    "partial export incorrectly advertised move");
+
+                List<AppInfo> complete = new List<AppInfo> { first, second, first };
+                object[] completeArgs = { complete, false };
+                List<string> completePaths = (List<string>)typeof(MainForm)
+                    .GetMethod("ExportPaths", StaticPrivate).Invoke(null, completeArgs);
+                Check(completePaths.Count == 2 && (bool)completeArgs[1],
+                    "complete export count did not match the distinct existing files");
+                Controls.ExternalDragRequest completeRequest = (Controls.ExternalDragRequest)Invoke(form, "ExportDragData", complete);
+                Check(completeRequest != null, "complete export did not produce a drag request");
+                Check(completeRequest.PayloadCount == completePaths.Count,
+                    "complete payload count diverged from the data object");
+                Check(completeRequest.Data.GetFileDropList().Count == completeRequest.PayloadCount,
+                    "complete file drop list length diverged from payload count");
+                Check((completeRequest.Allowed & DragDropEffects.Move) != 0,
+                    "complete managed export did not advertise move");
+            }
         }
 
         private static void Initialize(Form form)

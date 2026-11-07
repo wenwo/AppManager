@@ -102,7 +102,11 @@ namespace AppManager
             bool movable = complete && CanMoveOut(apps);
             DataObject data = ExportData(paths, DragDropEffects.Copy);
             data.SetData(DragOutFormat, string.Empty);
-            ExternalDragRequest request = new ExternalDragRequest { Data = data, Allowed = DragDropEffects.Copy | DragDropEffects.Link };
+            ExternalDragRequest request = new ExternalDragRequest {
+                Data = data,
+                Allowed = DragDropEffects.Copy | DragDropEffects.Link,
+                PayloadCount = paths.Count
+            };
             if (movable)
             {
                 List<AppInfo> sources = new List<AppInfo>(apps);

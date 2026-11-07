@@ -11,52 +11,67 @@ namespace AppManager
 {
     public partial class MainForm
     {
-        private const int LocalPhotoImportBatchSize = 500;
-        private const int LocalPhotoCopyBytesPerSecond = 32 * 1024 * 1024;
-        private bool localPhotoScanRunning;
-        private CancellationTokenSource localPhotoScanCancel;
+        private const int LocalMediaImportBatchSize = 500;
+        private const int LocalMediaCopyBytesPerSecond = 32 * 1024 * 1024;
+        private bool localMediaScanRunning;
+        private CancellationTokenSource localMediaScanCancel;
         private List<string> lastPhotoScanRoots;
+        private List<string> lastVideoScanRoots;
 
         private void OrganizeLocalPhotos()
         {
-            if (localPhotoScanRunning) return;
-            if (!CanEditCategory("照片"))
+            OrganizeLocalMedia("照片", LocalScanScopeKind.Photos, "照片", "张",
+                "拍摄时间优先读取 EXIF，无拍摄时间时按文件修改时间归入年份集合。", ref lastPhotoScanRoots);
+        }
+
+        private void OrganizeLocalVideos()
+        {
+            OrganizeLocalMedia("视频", LocalScanScopeKind.Videos, "视频", "个",
+                "创建时间优先读取 MP4/MOV/M4V 元数据，无创建时间时按文件修改时间归入年份集合。", ref lastVideoScanRoots);
+        }
+
+        private void OrganizeLocalMedia(string category, LocalScanScopeKind kind, string noun, string unit,
+            string metadataHint, ref List<string> lastRoots)
+        {
+            if (localMediaScanRunning) return;
+            string title = "整理本机" + noun, scanTitle = "扫描本机" + noun;
+            if (!CanEditCategory(category))
             {
-                MessageBox.Show(this, "当前无法编辑「照片」分类。", "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(this, "当前无法编辑「" + category + "」分类。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             if (ActiveResourceStoreRoots().Count == 0)
             {
                 MessageBox.Show(this, "请先在设置 > 存储位置中启用至少一个现有资源存储位置。\n本功能不会新增或修改存储位置。",
-                    "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             List<string> roots;
-            using (LocalScanScopeDialog scope = new LocalScanScopeDialog("整理本机照片", LocalScanScopeKind.Photos,
-                lastPhotoScanRoots, LocalScanExcludedRoots()))
+            using (LocalScanScopeDialog scope = new LocalScanScopeDialog(title, kind,
+                lastRoots, LocalScanExcludedRoots()))
             {
                 if (scope.ShowDialog(this) != DialogResult.OK) return;
                 roots = new List<string>(scope.ResultRoots);
             }
             if (roots.Count == 0) return;
-            lastPhotoScanRoots = new List<string>(roots);
+            lastRoots = new List<string>(roots);
 
-            localPhotoScanRunning = true;
+            localMediaScanRunning = true;
             try
             {
-                Func<List<string>, Dictionary<string, string>> registered = RegisteredPhotoPathsForBackground();
+                Func<List<string>, Dictionary<string, string>> registered = RegisteredMediaPathsForBackground();
                 List<string> exclusions = LocalScanExcludedRoots();
                 while (true)
                 {
-                    LocalPhotoScanResult result = null;
+                    LocalMediaScanResult result = null;
                     Exception failure = null;
                     bool canceled = false;
                     CancellationTokenSource cancel = new CancellationTokenSource();
-                    localPhotoScanCancel = cancel;
+                    localMediaScanCancel = cancel;
                     Label status, detail;
                     try
                     {
-                        using (Form dialog = LocalPhotoProgressDialog(cancel, out status, out detail))
+                        using (Form dialog = LocalMediaProgressDialog(scanTitle, cancel, out status, out detail))
                         {
                             dialog.Shown += delegate
                             {
@@ -64,16 +79,16 @@ namespace AppManager
                                 {
                                     try
                                     {
-                                        Dictionary<string, string> previous = LocalPhotoScanner.CompletedImportTargets(ImportJournal, registered, cancel.Token);
+                                        Dictionary<string, string> previous = LocalMediaScanner.CompletedImportTargets(ImportJournal, registered, cancel.Token);
                                         int lastUpdate = Environment.TickCount;
-                                        result = LocalPhotoScanner.Scan(roots, exclusions, previous, delegate(LocalPhotoScanProgress value)
+                                        result = LocalMediaScanner.Scan(category, roots, exclusions, previous, delegate(LocalMediaScanProgress value)
                                         {
                                             int now = Environment.TickCount;
                                             if (unchecked(now - lastUpdate) < 200) return;
                                             lastUpdate = now;
                                             string text = "正在遍历：已检查 " + value.DirectoriesScanned + " 个目录，发现 "
-                                                + value.PhotosFound + " 张照片；预计复制 " + FormatLocalPhotoBytes(value.CopyBytes);
-                                            UpdateLocalPhotoProgress(dialog, status, detail, text, value.Path);
+                                                + value.FilesFound + " " + unit + noun + "；预计复制 " + FormatLocalMediaBytes(value.CopyBytes);
+                                            UpdateLocalMediaProgress(dialog, status, detail, text, value.Path);
                                         }, cancel.Token);
                                     }
                                     catch (OperationCanceledException) { canceled = true; }
@@ -86,45 +101,45 @@ namespace AppManager
                     }
                     finally
                     {
-                        localPhotoScanCancel = null;
+                        localMediaScanCancel = null;
                         canceled = canceled || cancel.IsCancellationRequested;
                         cancel.Dispose();
                     }
                     if (canceled)
                     {
-                        ShowNotice("已取消扫描本机照片，未导入任何文件。");
+                        ShowNotice("已取消扫描本机" + noun + "，未导入任何文件。");
                         return;
                     }
                     if (failure != null)
                     {
-                        Paths.LogError(new IOException("扫描本机照片失败。", failure));
-                        LocalScanResultAction action = LocalScanResultDialog.Show(this, "扫描本机照片",
+                        Paths.LogError(new IOException("扫描本机" + noun + "失败。", failure));
+                        LocalScanResultAction action = LocalScanResultDialog.Show(this, scanTitle,
                             "扫描失败，尚未收录或创建年份集合，源文件未改动。\n\n" + failure.Message, null, false);
                         if (action == LocalScanResultAction.Retry) continue;
                         return;
                     }
                     if (result == null)
                     {
-                        LocalScanResultAction action = LocalScanResultDialog.Show(this, "扫描本机照片",
+                        LocalScanResultAction action = LocalScanResultDialog.Show(this, scanTitle,
                             "扫描未返回结果，尚未收录或创建年份集合。", null, false);
                         if (action == LocalScanResultAction.Retry) continue;
                         return;
                     }
 
-                    string summary = BuildLocalPhotoScanSummary(result);
-                    LocalScanResultAction decision = LocalScanResultDialog.Show(this, "扫描本机照片", summary,
+                    string summary = BuildLocalMediaScanSummary(result, noun, unit, metadataHint);
+                    LocalScanResultAction decision = LocalScanResultDialog.Show(this, scanTitle, summary,
                         "开始收录", result.Count > 0);
                     if (decision == LocalScanResultAction.Retry) continue;
                     if (decision != LocalScanResultAction.Import || result.Count == 0) return;
-                    if (!EnsureLocalPhotoCollections(result.Years.Keys)) return;
+                    if (!EnsureLocalMediaCollections(category, noun, result.Years.Keys)) return;
 
                     foreach (KeyValuePair<int, List<string>> year in result.Years.OrderByDescending(pair => pair.Key))
                     {
-                        string collection = CollectionKeys.Make("照片", year.Key + "年");
-                        for (int offset = 0; offset < year.Value.Count; offset += LocalPhotoImportBatchSize)
+                        string collection = CollectionKeys.Make(category, year.Key + "年");
+                        for (int offset = 0; offset < year.Value.Count; offset += LocalMediaImportBatchSize)
                         {
-                            string[] paths = year.Value.GetRange(offset, Math.Min(LocalPhotoImportBatchSize, year.Value.Count - offset)).ToArray();
-                            QueueImport(paths, ImportOperation.Copy, "照片", collection, true, 0, null, LocalPhotoCopyBytesPerSecond);
+                            string[] paths = year.Value.GetRange(offset, Math.Min(LocalMediaImportBatchSize, year.Value.Count - offset)).ToArray();
+                            QueueImport(paths, ImportOperation.Copy, category, collection, true, 0, null, LocalMediaCopyBytesPerSecond);
                         }
                     }
                     RefreshGrid();
@@ -133,8 +148,8 @@ namespace AppManager
             }
             finally
             {
-                localPhotoScanRunning = false;
-                localPhotoScanCancel = null;
+                localMediaScanRunning = false;
+                localMediaScanCancel = null;
             }
         }
 
@@ -147,16 +162,16 @@ namespace AppManager
             return roots;
         }
 
-        private static string BuildLocalPhotoScanSummary(LocalPhotoScanResult result)
+        private static string BuildLocalMediaScanSummary(LocalMediaScanResult result, string noun, string unit, string metadataHint)
         {
             StringBuilder text = new StringBuilder();
             int added = result.Count - result.Reused;
             text.Append("扫描完成：检查 ").Append(result.DirectoriesScanned).Append(" 个目录，跳过 ")
                 .Append(result.DirectoriesSkipped).Append(" 个目录。");
-            text.Append("\n新增 ").Append(added).Append(" 张，已收录复用 ").Append(result.Reused)
-                .Append(" 张，云端未下载 ").Append(result.CloudFiles).Append(" 张。");
-            text.Append("\n预计复制 ").Append(FormatLocalPhotoBytes(result.CopyBytes));
-            if (result.Reused > 0) text.Append("；另复用 ").Append(FormatLocalPhotoBytes(result.Bytes - result.CopyBytes));
+            text.Append("\n新增 ").Append(added).Append(" ").Append(unit).Append("，已收录复用 ").Append(result.Reused)
+                .Append(" ").Append(unit).Append("，云端未下载 ").Append(result.CloudFiles).Append(" ").Append(unit).Append("。");
+            text.Append("\n预计复制 ").Append(FormatLocalMediaBytes(result.CopyBytes));
+            if (result.Reused > 0) text.Append("；另复用 ").Append(FormatLocalMediaBytes(result.Bytes - result.CopyBytes));
             if (result.UnreadableDirectories > 0 || result.ReadFailures > 0)
             {
                 text.Append("\n失败：").Append(result.UnreadableDirectories).Append(" 个不可读目录，")
@@ -169,9 +184,9 @@ namespace AppManager
                 }
                 text.Append("\n可先处理失败项，再选择“重新扫描”。");
             }
-            text.Append("\n\n将保留原照片，复制到当前已启用的资源存储位置；不会新增或修改存储位置。");
-            text.Append("\n拍摄时间优先读取 EXIF，无拍摄时间时按文件修改时间归入年份集合。");
-            text.Append("\n扫描最多约 100 张/秒，复制限速约 32 MB/s。");
+            text.Append("\n\n将保留原").Append(noun).Append("，复制到当前已启用的资源存储位置；不会新增或修改存储位置。");
+            text.Append("\n").Append(metadataHint);
+            text.Append("\n扫描最多约 100 ").Append(unit).Append("/秒，复制限速约 32 MB/s。");
             return text.ToString();
         }
 
@@ -187,7 +202,7 @@ namespace AppManager
             catch (InvalidOperationException) { }
         }
 
-        private Func<List<string>, Dictionary<string, string>> RegisteredPhotoPathsForBackground()
+        private Func<List<string>, Dictionary<string, string>> RegisteredMediaPathsForBackground()
         {
             if (config.Database != null)
             {
@@ -205,29 +220,30 @@ namespace AppManager
             };
         }
 
-        private bool EnsureLocalPhotoCollections(IEnumerable<int> years)
+        private bool EnsureLocalMediaCollections(string category, string noun, IEnumerable<int> years)
         {
-            List<int> missing = years.Distinct().Where(year => CollectionOps.Find(config, "照片", year + "年") == null)
+            List<int> missing = years.Distinct().Where(year => CollectionOps.Find(config, category, year + "年") == null)
                 .OrderByDescending(value => value).ToList();
             if (config.Collections.Count + missing.Count > CollectionKeys.MaxCollections)
             {
-                MessageBox.Show(this, "集合数量已达上限，尚未开始收录照片。", "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "集合数量已达上限，尚未开始收录" + noun + "。", "整理本机" + noun,
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
             foreach (int year in missing)
-                config.Collections.Add(new ResourceCollection { Parent = "照片", Name = year + "年" });
+                config.Collections.Add(new ResourceCollection { Parent = category, Name = year + "年" });
             if (missing.Count == 0) return true;
-            if (config.Save("photos.years")) return true;
-            MessageBox.Show(this, "年份集合未能保存，尚未开始收录照片。\n" + config.DatabaseError,
-                "整理本机照片", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            if (config.Save(category == "照片" ? "photos.years" : "videos.years")) return true;
+            MessageBox.Show(this, "年份集合未能保存，尚未开始收录" + noun + "。\n" + config.DatabaseError,
+                "整理本机" + noun, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
 
-        private static Form LocalPhotoProgressDialog(CancellationTokenSource cancel, out Label status, out Label detail)
+        private static Form LocalMediaProgressDialog(string title, CancellationTokenSource cancel, out Label status, out Label detail)
         {
             Form dialog = new BufferedDialogForm
             {
-                Text = "扫描本机照片", StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(520, 170),
+                Text = title, StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(520, 170),
                 FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ControlBox = false
             };
             Label statusLabel = new Label { Text = "正在准备扫描…", AutoSize = false, Location = new Point(20, 18), Size = new Size(480, 38), Font = Theme.BodyFont };
@@ -246,7 +262,7 @@ namespace AppManager
             return dialog;
         }
 
-        private static void UpdateLocalPhotoProgress(Form dialog, Label status, Label detail, string text, string path)
+        private static void UpdateLocalMediaProgress(Form dialog, Label status, Label detail, string text, string path)
         {
             try
             {
@@ -261,7 +277,7 @@ namespace AppManager
             catch (InvalidOperationException) { }
         }
 
-        private static string FormatLocalPhotoBytes(long bytes)
+        private static string FormatLocalMediaBytes(long bytes)
         {
             string[] units = { "B", "KB", "MB", "GB", "TB" };
             double value = bytes;

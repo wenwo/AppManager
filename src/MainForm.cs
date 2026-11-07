@@ -30,6 +30,14 @@ namespace AppManager
         // 控件
         private SidebarControl sidebar;
         private AppGridControl grid;
+        private DragGhostController dragGhost;   // 拖动图标浮层：单个会话，不抢焦点、不拦截命中
+        private DragGhostSession dragGhostSession;
+        private List<AppInfo> dragGhostApps;     // 本轮拖动快照；只用于落点预检，不参与视觉持有
+        private bool dragGhostExternal;          // OLE DoDragDrop 已接管，GiveFeedback 驱动跟随
+        private string dragCollectionTarget;     // 本轮内部拖动命中的集合键（供三态反馈复用）
+        private string dragCategoryTarget;       // 本轮内部拖动命中的侧栏分类键
+        private DragDropIntent dragCollectionIntent;
+        private DragDropIntent dragCategoryIntent;
         private ListHeaderStrip headerStrip;   // 列表栏位表头（固定条，不参与网格滚动）
         private CollectionSidebar collectionSidebar;   // 资源分类的第二级集合侧边栏（全部 + 自定义集合）
         private bool collectionSidebarShown;   // 集合侧边栏的期望显示状态；父窗体隐藏时 Visible 会失真
@@ -158,6 +166,9 @@ namespace AppManager
         // 无边框窗体默认不含「最大化/最小化框」样式，缺少 WS_MINIMIZEBOX 时点击任务栏图标无法最小化
         private const int WS_MINIMIZEBOX = 0x00020000;
         private const int WM_SYSCOMMAND = 0x0112;
+        private const int WM_CANCELMODE = 0x001F;
+        private const int WM_SIZE = 0x0005;
+        private const int SIZE_MINIMIZED = 1;
         private const int SC_MINIMIZE = 0xF020;
         private const int SC_MAXIMIZE = 0xF030;
         private const int SC_RESTORE = 0xF120;
@@ -271,6 +282,10 @@ namespace AppManager
         /// <summary>拦截系统最小化命令，兜底保证任务栏点击等入口都能收起为最小化。</summary>
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == WM_CANCELMODE)
+                CancelGridDragSession();
+            else if (m.Msg == WM_SIZE && m.WParam.ToInt32() == SIZE_MINIMIZED)
+                CancelGridDragSession();
             if (m.Msg == WM_SETCURSOR && resizingWindow)
             {
                 Cursor resizeCursor = ResizeCursor(ResizeHitTest(PointToClient(Cursor.Position)));
@@ -290,6 +305,7 @@ namespace AppManager
                 int command = m.WParam.ToInt32() & 0xFFF0;
                 if (command == SC_MINIMIZE)
                 {
+                    CancelGridDragSession();
                     WindowState = FormWindowState.Minimized;
                     return;
                 }
@@ -513,6 +529,14 @@ namespace AppManager
             {
                 Application.RemoveMessageFilter(this);
                 DisposeDatabaseMetadataRetryTimer();
+                try { EndDragSession(); } catch (Exception ex) { Paths.LogError(ex); }
+                if (dragGhost != null)
+                {
+                    dragGhost.Dispose();
+                    dragGhost = null;
+                    dragGhostSession = null;
+                    dragGhostApps = null;
+                }
                 // 托盘图标同理：只靠 OnFormClosed 移除时，未经 Close 释放的窗体会在进程退出后留下无主的托盘图标
                 if (tray != null)
                 {
@@ -526,13 +550,14 @@ namespace AppManager
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
+            try { EndDragSession(); } catch (Exception ex) { Paths.LogError(ex); }
             // 先收起播放器再走基类关闭：mpv 的视频输出挂在宿主窗口上，必须在窗口句柄销毁前终止；
             // 否则（尤其“关闭到托盘”时直接点×退出）终止发生在句柄销毁之后，能否顺利退出取决于 mpv 自身容错。
             try { if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { StopMusicPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { if (musicSession != null) musicSession.Dispose(); } catch (Exception ex) { Paths.LogError(ex); }
             try { if (localMusicScanCancel != null) localMusicScanCancel.Cancel(); } catch (Exception ex) { Paths.LogError(ex); }
-            try { if (localPhotoScanCancel != null) localPhotoScanCancel.Cancel(); } catch (Exception ex) { Paths.LogError(ex); }
+            try { if (localMediaScanCancel != null) localMediaScanCancel.Cancel(); } catch (Exception ex) { Paths.LogError(ex); }
             importTip.Dispose();
             if (importStatusTimer != null) importStatusTimer.Dispose();
             StopAutoScan();
@@ -832,6 +857,7 @@ namespace AppManager
             Controls.Add(sidebar);
 
             grid = new AppGridControl();
+            dragGhost = new DragGhostController(this);
             grid.LaunchRequested += OnLaunch;
             grid.MenuRequested += OnContextMenu;
             grid.RenameRequested += RenameAddedEntry;
@@ -840,11 +866,18 @@ namespace AppManager
             grid.CategoryTextProvider = GetCategoryText;
             grid.ReorderRequested += OnGridReorder;
             grid.DragMoved += OnGridDragMoved;
+            grid.DragVisualStarted += OnGridDragVisualStarted;
+            grid.DragVisualMoved += OnGridDragVisualMoved;
+            grid.DragVisualExternalStarting += OnGridDragVisualExternalStarting;
+            grid.DragVisualEnded += OnGridDragVisualEnded;
+            grid.GiveFeedback += OnGridGiveFeedback;
+            grid.QueryContinueDrag += OnGridQueryContinueDrag;
             grid.DroppedOutside += OnGridDroppedOutside;
             grid.ExternalDrop = delegate(DragEventArgs e, bool drop) { return HandleExternalImport(null, null, e, drop); };
             grid.DragOutData = ExportDragData;   // 拖出窗口：把条目实体文件交给资源管理器/其它程序
             grid.MoveIntoFolder += OnGridMoveIntoFolder;
             grid.CanMoveIntoFolder = CanMoveIntoFolder;
+            grid.ResolveFolderDropIntent = ResolveFolderDropIntentForGrid;
             grid.BlankRightClicked += OnGridBlankRightClicked;
             grid.SortRequested += OnGridSortRequested;   // 列表表头点击排序（名称/大小/时间）
             grid.MetadataReady += OnGridMetadataReady;
@@ -2098,28 +2131,166 @@ namespace AppManager
         /// <summary>网格拖动条目期间：优先联动集合侧边栏高亮，其次侧栏可投放分类。</summary>
         private void OnGridDragMoved(Point screen)
         {
-            string colKey = collectionSidebar.Visible ? collectionSidebar.DropCollectionAtScreen(screen) : null;
-            collectionSidebar.SetExternalDropHighlight(colKey);
-            sidebar.SetExternalDropHighlight(
-                colKey == null ? sidebar.DropCategoryAtScreen(screen) : null);
+            string colKey = collectionSidebar != null && collectionSidebar.Visible
+                ? collectionSidebar.DropCollectionAtScreen(screen) : null;
+            string catKey = colKey == null && sidebar != null ? sidebar.DropCategoryAtScreen(screen) : null;
+            List<AppInfo> sourceApps = dragGhostApps ?? (grid == null ? null : grid.SelectedApps);
+            if (!string.Equals(colKey, dragCollectionTarget, StringComparison.Ordinal))
+            {
+                dragCollectionTarget = colKey;
+                dragCollectionIntent = ResolveAddIntent(sourceApps, colKey);
+            }
+            if (!string.Equals(catKey, dragCategoryTarget, StringComparison.Ordinal))
+            {
+                dragCategoryTarget = catKey;
+                dragCategoryIntent = ResolveAddIntent(sourceApps, catKey);
+            }
+            if (collectionSidebar != null) collectionSidebar.SetExternalDropHighlight(colKey);
+            if (sidebar != null) sidebar.SetExternalDropHighlight(catKey);
+        }
+
+        /// <summary>拖动越过阈值：立即克隆图标快照，后续动画不依赖 AppInfo 中的可替换位图。</summary>
+        private void OnGridDragVisualStarted(List<AppInfo> apps, bool useSmallIcon, Point screen)
+        {
+            EndDragSession();   // 上一次会话若因异常未清理，先清空再开新会话
+            dragGhostApps = apps;
+            dragGhostSession = dragGhost != null
+                ? dragGhost.Begin(apps, useSmallIcon, screen)
+                : null;
+        }
+
+        /// <summary>内部拖动：移动拖影，并把网格状态与侧栏/集合真实命中合并为三态反馈。</summary>
+        private void OnGridDragVisualMoved(Point screen, DragDropIntent gridIntent)
+        {
+            if (dragGhost == null || dragGhostSession == null) return;
+            dragGhost.Move(dragGhostSession, screen);
+            dragGhost.SetState(dragGhostSession, ResolveInternalDragIntent(screen, gridIntent));
+        }
+
+        private DragDropIntent ResolveInternalDragIntent(Point screen, DragDropIntent gridIntent)
+        {
+            if (!string.IsNullOrEmpty(dragCollectionTarget)) return dragCollectionIntent;
+            if (!string.IsNullOrEmpty(dragCategoryTarget)) return dragCategoryIntent;
+
+            Point client = PointToClient(screen);
+            if (!ClientRectangle.Contains(client)) return DragDropIntent.Neutral;
+            if (collectionSidebar != null && collectionSidebar.Visible
+                && collectionSidebar.Bounds.Contains(client)) return DragDropIntent.Reject;
+            if (sidebar != null && sidebar.Bounds.Contains(client)) return DragDropIntent.Reject;
+            if (grid != null && grid.Bounds.Contains(client)) return gridIntent;
+            return DragDropIntent.Reject;
+        }
+
+        /// <summary>
+        /// 分类/集合的三态预检：与实际 AddItemsToCategory 使用同一套归属与类型规则。
+        /// Accept 只表示“这里有动作”，真正落盘仍可能因保存失败而回滚。
+        /// </summary>
+        private DragDropIntent ResolveAddIntent(List<AppInfo> apps, string category)
+        {
+            if (apps == null || apps.Count == 0 || string.IsNullOrEmpty(category))
+                return DragDropIntent.Neutral;
+
+            bool isCollection = CollectionKeys.IsCollectionKey(category);
+            ResourceCollection col = null;
+            if (isCollection)
+            {
+                col = FindCollectionByKey(category);
+                if (col == null) return DragDropIntent.Reject;
+            }
+            else if (!CanEditCategory(category))
+            {
+                return DragDropIntent.Reject;
+            }
+
+            int eligible = 0, already = 0;
+            for (int i = 0; i < apps.Count; i++)
+            {
+                AppInfo app = apps[i];
+                if (app == null || string.IsNullOrEmpty(app.Key)) continue;
+                if (isCollection && !CanJoinResourceCategory(app, col.Parent)) continue;
+                if (InCategory(app, category)) { already++; continue; }
+                if (!isCollection && !FitsTargetCategory(app, category)) continue;
+                eligible++;
+            }
+            if (eligible > 0) return DragDropIntent.Accept;
+            return already > 0 ? DragDropIntent.Neutral : DragDropIntent.Reject;
+        }
+
+        /// <summary>OLE 接管：保留当前拖影会话，后续位置和效果改由 GiveFeedback 驱动。</summary>
+        private void OnGridDragVisualExternalStarting(Point screen, int payloadCount)
+        {
+            dragGhostExternal = true;   // 视觉创建失败也必须让 OLE Esc 走系统取消，再由 finally 清理
+            if (dragGhost == null || dragGhostSession == null) return;
+            dragGhost.EnterExternal(dragGhostSession);
+            if (payloadCount > 0) dragGhost.SetPayloadCount(dragGhostSession, payloadCount);
+            dragGhost.Move(dragGhostSession, screen);
+        }
+
+        private void OnGridGiveFeedback(object sender, GiveFeedbackEventArgs e)
+        {
+            if (!dragGhostExternal || dragGhost == null || dragGhostSession == null) return;
+            Point screen = Cursor.Position;
+            dragGhost.Move(dragGhostSession, screen);
+            dragGhost.SetState(dragGhostSession,
+                e.Effect == DragDropEffects.None ? DragDropIntent.Reject : DragDropIntent.Accept);
+        }
+
+        private void OnGridQueryContinueDrag(object sender, QueryContinueDragEventArgs e)
+        {
+            // Esc 只请求系统取消；拖影由 DoDragDrop 返回后的 finally 统一结束，避免提前结束。
+            if (dragGhostExternal && e.EscapePressed) e.Action = DragAction.Cancel;
+        }
+
+        private void OnGridDragVisualEnded()
+        {
+            EndDragSession();
+        }
+
+        /// <summary>统一清理入口：拖影、两个侧栏高亮和会话快照一次清空，可重复调用。</summary>
+        private void EndDragSession()
+        {
+            dragGhostExternal = false;
+            dragGhostApps = null;
+            dragCollectionTarget = null;
+            dragCategoryTarget = null;
+            dragCollectionIntent = DragDropIntent.Neutral;
+            dragCategoryIntent = DragDropIntent.Neutral;
+            if (collectionSidebar != null) collectionSidebar.SetExternalDropHighlight(null);
+            if (sidebar != null) sidebar.SetExternalDropHighlight(null);
+            if (dragGhost != null) dragGhost.End(dragGhostSession);
+            dragGhostSession = null;
+        }
+
+        /// <summary>系统取消/最小化：先让网格清掉内部状态，再统一清理视觉与侧栏高亮。</summary>
+        private void CancelGridDragSession()
+        {
+            // OLE 接管后取消与结束由 DoDragDrop 的返回路径负责；提前结束会绕过 finally 的统一清理。
+            if (dragGhostExternal) return;
+            if (grid != null && !grid.IsDisposed) grid.CancelActiveDrag();
+            EndDragSession();
         }
 
         /// <summary>网格外松手：命中集合行则整批「加入集合」；否则落侧栏分类按原逻辑「加入」。</summary>
         private void OnGridDroppedOutside(List<AppInfo> apps, Point screen)
         {
-            if (apps == null || apps.Count == 0) return;
-            string colKey = collectionSidebar.Visible ? collectionSidebar.DropCollectionAtScreen(screen) : null;
-            collectionSidebar.SetExternalDropHighlight(null);
-            if (colKey != null)
+            try
             {
-                sidebar.SetExternalDropHighlight(null);
-                AddItemsToCategory(apps, colKey);
-                return;
+                if (apps == null || apps.Count == 0) return;
+                string colKey = collectionSidebar != null && collectionSidebar.Visible
+                    ? collectionSidebar.DropCollectionAtScreen(screen) : null;
+                if (colKey != null)
+                {
+                    AddItemsToCategory(apps, colKey);
+                    return;
+                }
+                string cat = sidebar != null ? sidebar.DropCategoryAtScreen(screen) : null;
+                if (string.IsNullOrEmpty(cat)) return;
+                AddItemsToCategory(apps, cat);
             }
-            string cat = sidebar.DropCategoryAtScreen(screen);
-            sidebar.SetExternalDropHighlight(null);
-            if (string.IsNullOrEmpty(cat)) return;
-            AddItemsToCategory(apps, cat);
+            finally
+            {
+                EndDragSession();   // 空列表、无效目标和异常路径同样清理高亮，绝不执行额外投放
+            }
         }
 
         /// <summary>
@@ -2147,6 +2318,60 @@ namespace AppManager
                 && IsManagedMutableEntry(app);
         }
 
+        private sealed class FolderMovePlan
+        {
+            public string Source;
+            public string TargetDir;
+            public bool IsDirectory;
+            public string DisplayName;
+        }
+
+        /// <summary>网格拖影使用的目录落点预检；不接受时不会在实际松手阶段再偷偷改走排序。</summary>
+        private DragDropIntent ResolveFolderDropIntentForGrid(AppInfo source, AppInfo folder)
+        {
+            FolderMovePlan plan;
+            return CheckFolderMove(source, folder, false, out plan);
+        }
+
+        /// <summary>目录搬迁的唯一校验入口：预检与实际搬迁共享，避免拖影显示 Accept 后落点行为不一致。</summary>
+        private DragDropIntent CheckFolderMove(AppInfo src, AppInfo folder, bool showHint, out FolderMovePlan plan)
+        {
+            plan = null;
+            if (moveIntoFolderRunning || src == null || folder == null
+                || !CanMoveIntoFolder(src) || !folder.IsFolder) return DragDropIntent.Reject;
+
+            string sp = src.TargetPath;
+            string dp = folder.TargetPath;
+            if (string.IsNullOrEmpty(sp) || string.IsNullOrEmpty(dp)) return DragDropIntent.Reject;
+            if (!Directory.Exists(dp)) return DragDropIntent.Reject;
+            bool srcIsDir = Directory.Exists(sp);
+            if (!srcIsDir && !File.Exists(sp)) return DragDropIntent.Reject;
+            if (IsUnder(sp, dp)) return DragDropIntent.Reject;
+
+            try
+            {
+                string fullSource = Path.GetFullPath(sp).TrimEnd('\\', '/');
+                string fullTarget = Path.GetFullPath(dp).TrimEnd('\\', '/');
+                string parent = Path.GetDirectoryName(fullSource);
+                if (parent != null && string.Equals(parent.TrimEnd('\\', '/'), fullTarget,
+                    StringComparison.OrdinalIgnoreCase)) return DragDropIntent.Neutral;
+            }
+            catch { return DragDropIntent.Reject; }
+
+            if (srcIsDir && config.AddedItems.EntriesUnder(sp).Count > 0)
+            {
+                if (showHint)
+                    MessageBox.Show(this, "「" + src.DisplayName() + "」内包含其它已收录的项目，移动后这些项目会失效。\n请先移除这些项目后再移动。",
+                        "移动", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return DragDropIntent.Reject;
+            }
+
+            plan = new FolderMovePlan {
+                Source = sp, TargetDir = dp, IsDirectory = srcIsDir, DisplayName = src.DisplayName()
+            };
+            return DragDropIntent.Accept;
+        }
+
         /// <summary>
         /// 文件类型条目拖入目录类型条目：把条目目标（文件/文件夹）搬迁进该目录，
         /// 并同步自建条目的持久化记录与归属配置（Key 由路径派生，需迁移）。
@@ -2154,17 +2379,11 @@ namespace AppManager
         /// </summary>
         private void OnGridMoveIntoFolder(AppInfo src, AppInfo folder)
         {
-            if (moveIntoFolderRunning || src == null || folder == null || !CanMoveIntoFolder(src) || !folder.IsFolder) return;
-            string sp = src.TargetPath;
-            string dp = folder.TargetPath;
-            if (string.IsNullOrEmpty(sp) || string.IsNullOrEmpty(dp)) return;
-            if (!Directory.Exists(dp)) return;               // 目录条目失效
-            bool srcIsDir = Directory.Exists(sp);
-            if (!srcIsDir && !File.Exists(sp)) return;       // 文件条目失效
-            if (IsUnder(sp, dp)) return;                     // 拖入自身或自身子目录
-            string parent = Path.GetDirectoryName(Path.GetFullPath(sp).TrimEnd('\\', '/'));
-            if (parent != null && string.Equals(parent.TrimEnd('\\', '/'), Path.GetFullPath(dp).TrimEnd('\\', '/'),
-                StringComparison.OrdinalIgnoreCase)) return;   // 已直接位于目标目录
+            FolderMovePlan plan;
+            if (CheckFolderMove(src, folder, true, out plan) != DragDropIntent.Accept) return;
+            string sp = plan.Source;
+            string dp = plan.TargetDir;
+            bool srcIsDir = plan.IsDirectory;
             // 文件夹内还有其它收录项时，移动会让它们全部指向旧路径而失效
             if (srcIsDir && config.AddedItems.EntriesUnder(sp).Count > 0)
             {
@@ -2174,7 +2393,7 @@ namespace AppManager
             }
 
             string dest = UniqueEntryDest(dp, Path.GetFileName(sp.TrimEnd('\\', '/')));
-            string displayName = src.DisplayName();
+            string displayName = plan.DisplayName;
             string oldKey = src.Key;
             moveIntoFolderRunning = true;
             grid.Enabled = false;
@@ -5622,6 +5841,7 @@ namespace AppManager
             items.Add(MkMenu("导入记录…", ShowImportHistory));
             items.Add(MkSep());
             if (currentCategory == "照片") items.Add(MkMenu("整理本机照片…", OrganizeLocalPhotos));
+            else if (currentCategory == "视频") items.Add(MkMenu("整理本机视频…", OrganizeLocalVideos));
             string typeName = MediaRules.ResourceCategoryTypeName(currentCategory);
             items.Add(MkMenu("添加" + typeName + "…", delegate { PickFiles(); }));
             if (string.Equals(currentCategory, "音乐", StringComparison.OrdinalIgnoreCase))

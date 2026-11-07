@@ -69,10 +69,17 @@ namespace AppManager.Controls
         private int dragFrom = -1;
         private int dragGap = -1;
         private int dropTarget = -1;   // 拖动悬停命中的目录条目（文件搬迁目标），-1 表示无
+        private DragDropIntent dropTargetIntent = DragDropIntent.Neutral;
         private Point dragStart;
         private bool suppressClick;
         private bool dragInternal;        // 本次拖动是否参与网格内排序/拖出加入分类（否则只能拖到窗口外）
         private bool externalDragTried;   // 本次拖动已尝试转为系统拖放（无可导出文件时不再重复读盘）
+        private bool dragVisualStarted;
+        private bool externalDragActive;
+        private bool handlingMouseUp;
+        private bool dragSourceCanMoveIntoFolder;
+
+        private const int WM_CANCELMODE = 0x001F;
 
         // iOS Grouped List 尺寸（单行表格：名称靠左，分类/大小/位置 靠右且上下对齐）
         private int ListRowH { get { return Dpi(30); } }
@@ -149,6 +156,14 @@ namespace AppManager.Controls
 
         /// <summary>网格内拖动条目期间持续触发（携带屏幕坐标），供外部（侧栏分类）联动高亮投放目标。</summary>
         public event Action<Point> DragMoved;
+        /// <summary>拖影开始：条目快照、是否使用列表小图标、屏幕坐标。主窗体负责创建视觉层。</summary>
+        internal event Action<List<AppInfo>, bool, Point> DragVisualStarted;
+        /// <summary>拖影移动：屏幕坐标与真实落点状态；无论是否允许网格内排序都会触发。</summary>
+        internal event Action<Point, DragDropIntent> DragVisualMoved;
+        /// <summary>即将由 OLE DoDragDrop 接管外部拖动；调用方切换跟随来源但保留当前视觉会话。</summary>
+        internal event Action<Point, int> DragVisualExternalStarting;
+        /// <summary>拖影结束；内部取消、内部落点、OLE 返回和捕获丢失共用。</summary>
+        internal event Action DragVisualEnded;
         /// <summary>拖动条目在网格外松手时触发（拖动条目列表 + 屏幕坐标）；多选时整批携带。</summary>
         public event Action<List<AppInfo>, Point> DroppedOutside;
 
@@ -156,6 +171,8 @@ namespace AppManager.Controls
         public event Action<AppInfo, AppInfo> MoveIntoFolder;
         /// <summary>条目能否作为「拖入目录」的来源（由主窗体按收录来源判定）；未设置时任何文件条目都可以。</summary>
         public Func<AppInfo, bool> CanMoveIntoFolder;
+        /// <summary>目录落点预检：与真正搬迁共用同一套规则，返回 Accept/Neutral/Reject。</summary>
+        internal Func<AppInfo, AppInfo, DragDropIntent> ResolveFolderDropIntent;
         /// <summary>空白区右键：请求弹出新建菜单（文件夹/文本文档），携带屏幕坐标。</summary>
         public event Action<Point> BlankRightClicked;
 
@@ -302,6 +319,13 @@ namespace AppManager.Controls
                 pathFormat.Dispose();
             }
             base.Dispose(disposing);
+        }
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_CANCELMODE && (dragPending || dragging))
+                CancelDrag();
+            base.WndProc(ref m);
         }
 
         /// <summary>路径列 StringFormat：贴右对齐、垂直居中、超宽时中间省略。</summary>
@@ -1221,6 +1245,7 @@ namespace AppManager.Controls
                     if (Math.Abs(e.X - dragStart.X) > d.Width || Math.Abs(e.Y - dragStart.Y) > d.Height)
                     {
                         dragging = true;
+                        BeginDragVisual(PointToScreen(e.Location));
                     }
                 }
                 if (dragging)
@@ -1231,38 +1256,10 @@ namespace AppManager.Controls
                     if (moved != null) moved(screen);
                     // 指针离开主窗口：转为系统拖放，把实体文件交给资源管理器/桌面/其它程序
                     if (StartExternalDrag(screen)) return;
-                    if (!dragInternal) { Cursor = Cursors.Default; return; }
-
-                    // 多选整批拖动：不做网格内排序/目录搬迁，落点只在网格外（集合/分类）
-                    if (MultiDrag)
-                    {
-                        if (dropTarget != -1) { dropTarget = -1; Invalidate(); }
-                        if (dragGap != -1) { dragGap = -1; Invalidate(); }
-                        Cursor = Cursors.Default;
-                        return;
-                    }
-
-                    // 命中「可接收的目录条目」→ 高亮为搬迁目标，隐藏插入缝隙指示
-                    int t = FolderDropTargetAt(e.Location);
-                    if (t != dropTarget) { dropTarget = t; Invalidate(); }
-                    if (t >= 0)
-                    {
-                        if (dragGap != -1) { dragGap = -1; Invalidate(); }
-                        Cursor = Cursors.Default;
-                        return;
-                    }
-
-                    // 指针移出网格边界，或当前分类仅支持拖出（不支持网格内排序）：
-                    // 隐藏网格内插入指示，交由外部（侧栏分类）处理
-                    if (!allowReorder || !ClientRectangle.Contains(e.Location))
-                    {
-                        if (dragGap != -1) { dragGap = -1; Invalidate(); }
-                        Cursor = Cursors.Default;
-                        return;
-                    }
-                    int gap = DropGap(e.Location);
-                    if (gap != dragGap) { dragGap = gap; Invalidate(); }
-                    Cursor = Cursors.SizeAll;
+                    DragDropIntent intent = UpdateInternalDragTarget(e.Location);
+                    RaiseDragVisualMoved(screen, intent);
+                    Cursor = dropTarget < 0 && dragGap >= 0 && intent == DragDropIntent.Accept
+                        ? Cursors.SizeAll : Cursors.Default;
                     return;
                 }
             }
@@ -1275,6 +1272,64 @@ namespace AppManager.Controls
                 InvalidateHover(old, idx);
                 Cursor = Cursors.Default;
             }
+        }
+
+        /// <summary>
+        /// 网格内部落点的一次性判定：视觉反馈与此处结果共用，真正松手时仍由主窗体复核磁盘与归属。
+        /// </summary>
+        private DragDropIntent UpdateInternalDragTarget(Point client)
+        {
+            if (!dragInternal)
+            {
+                ClearGridDropTarget();
+                return DragDropIntent.Neutral;
+            }
+
+            // 多选整批拖动不做网格内排序/目录搬迁，落点只在网格外（集合/分类）。
+            if (MultiDrag)
+            {
+                ClearGridDropTarget();
+                return ClientRectangle.Contains(client) ? DragDropIntent.Reject : DragDropIntent.Neutral;
+            }
+
+            int target = FolderDropTargetAt(client);
+            if (target != dropTarget)
+            {
+                dropTarget = target;
+                Invalidate();
+                if (target >= 0)
+                {
+                    AppInfo source = dragFrom >= 0 && dragFrom < apps.Count ? apps[dragFrom] : null;
+                    AppInfo folder = target >= 0 && target < apps.Count ? apps[target] : null;
+                    dropTargetIntent = ResolveFolderDropIntent == null
+                        ? DragDropIntent.Accept : ResolveFolderDropIntent(source, folder);
+                }
+            }
+            if (target >= 0)
+            {
+                if (dragGap != -1) { dragGap = -1; Invalidate(); }
+                return dropTargetIntent;
+            }
+            dropTargetIntent = DragDropIntent.Neutral;
+
+            if (!allowReorder || !ClientRectangle.Contains(client))
+            {
+                if (dragGap != -1) { dragGap = -1; Invalidate(); }
+                return DragDropIntent.Neutral;
+            }
+            int gap = DropGap(client);
+            if (gap != dragGap) { dragGap = gap; Invalidate(); }
+            int final = gap > dragFrom ? gap - 1 : gap;
+            return final == dragFrom ? DragDropIntent.Neutral : DragDropIntent.Accept;
+        }
+
+        private void ClearGridDropTarget()
+        {
+            bool changed = dropTarget != -1 || dragGap != -1;
+            dropTarget = -1;
+            dragGap = -1;
+            dropTargetIntent = DragDropIntent.Neutral;
+            if (changed) Invalidate();
         }
 
         /// <summary>悬停条目切换时只重绘新旧两个条目区域（外扩覆盖阴影/行按钮），避免整屏重绘造成鼠标划过时发卡。</summary>
@@ -1298,6 +1353,7 @@ namespace AppManager.Controls
         {
             hoverIndex = -1;
             if (dropTarget != -1) dropTarget = -1;   // 拖出网格时清除搬迁落点高亮
+            dropTargetIntent = DragDropIntent.Neutral;
             Invalidate();
             base.OnMouseLeave(e);
         }
@@ -1411,6 +1467,11 @@ namespace AppManager.Controls
         /// </summary>
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (keyData == Keys.Escape && (dragPending || dragging))
+            {
+                CancelDrag();
+                return true;
+            }
             if (apps.Count > 0)
             {
                 int delta = 0;
@@ -1546,6 +1607,7 @@ namespace AppManager.Controls
                     dragFrom = idx;
                     dragGap = -1;
                     dragStart = e.Location;
+                    Capture = true;   // 捕获后指针移到侧栏/窗口外仍能收到 MouseMove/MouseUp，统一取消与落点判定
                 }
             }
         }
@@ -1612,9 +1674,7 @@ namespace AppManager.Controls
         {
             if (!ClientRectangle.Contains(client)) return -1;
             if (dragFrom < 0 || dragFrom >= apps.Count) return -1;
-            AppInfo src = apps[dragFrom];
-            if (!src.IsFile) return -1;                       // 仅文件类型条目可拖入目录
-            if (CanMoveIntoFolder != null && !CanMoveIntoFolder(src)) return -1;
+            if (!dragSourceCanMoveIntoFolder) return -1;
             int idx = HitIndex(client);
             if (idx < 0 || idx >= apps.Count || idx == dragFrom) return -1;
             AppInfo t = apps[idx];
@@ -1624,47 +1684,64 @@ namespace AppManager.Controls
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            base.OnMouseUp(e);
-            // 文件条目拖入目录条目：请求搬迁（优先于重排与拖出；多选整批拖动不参与）
-            if (dragging && !MultiDrag && dropTarget >= 0 && dropTarget != dragFrom
-                && dragFrom >= 0 && dragFrom < apps.Count && dropTarget < apps.Count)
+            handlingMouseUp = true;
+            try
             {
-                Action<AppInfo, AppInfo> h = MoveIntoFolder;
-                if (h != null) h(apps[dragFrom], apps[dropTarget]);
-                collapseOnUp = false;
-                ResetDrag();
-                suppressClick = true;
-                Invalidate();
-                return;
-            }
-            bool wasDrag = dragging;
-            bool droppedOutside = wasDrag && dragInternal && !ClientRectangle.Contains(e.Location)
-                && dragFrom >= 0 && dragFrom < apps.Count;
-            if (droppedOutside)
-            {
-                Action<List<AppInfo>, Point> h = DroppedOutside;
-                if (h != null) h(DragApps(), PointToScreen(e.Location));
-            }
-            else if (wasDrag && dragFrom >= 0 && dragGap >= 0)
-            {
-                int to = dragGap > dragFrom ? dragGap - 1 : dragGap;
-                if (to != dragFrom)
+                base.OnMouseUp(e);
+                if (dragging) EndDragVisual();
+                // 文件条目拖入目录条目：请求搬迁（优先于重排与拖出；多选整批拖动不参与）
+                if (dragging && !MultiDrag && dropTarget >= 0 && dropTarget != dragFrom
+                    && dragFrom >= 0 && dragFrom < apps.Count && dropTarget < apps.Count)
                 {
-                    Action<int, int> h = ReorderRequested;
-                    if (h != null) h(dragFrom, to);
+                    Action<AppInfo, AppInfo> h = MoveIntoFolder;
+                    if (h != null) h(apps[dragFrom], apps[dropTarget]);
+                    collapseOnUp = false;
+                    ResetDrag();
+                    suppressClick = true;
+                    Invalidate();
+                    return;
                 }
+                bool wasDrag = dragging;
+                bool droppedOutside = wasDrag && dragInternal && !ClientRectangle.Contains(e.Location)
+                    && dragFrom >= 0 && dragFrom < apps.Count;
+                if (droppedOutside)
+                {
+                    Action<List<AppInfo>, Point> h = DroppedOutside;
+                    if (h != null) h(DragApps(), PointToScreen(e.Location));
+                }
+                else if (wasDrag && dragFrom >= 0 && dragGap >= 0)
+                {
+                    int to = dragGap > dragFrom ? dragGap - 1 : dragGap;
+                    if (to != dragFrom)
+                    {
+                        Action<int, int> h = ReorderRequested;
+                        if (h != null) h(dragFrom, to);
+                    }
+                }
+                if (!wasDrag && collapseOnUp)
+                {
+                    // 已选多项时普通点击（未拖动）：收敛为单项
+                    int idx = HitIndex(e.Location);
+                    if (idx >= 0 && IsSelected(idx)) SelectSingle(idx);
+                }
+                collapseOnUp = false;
+                if (wasDrag) suppressClick = true;
+                ResetDrag();
+                Cursor = Cursors.Default;
+                if (wasDrag) Invalidate();
             }
-            if (!wasDrag && collapseOnUp)
+            finally
             {
-                // 已选多项时普通点击（未拖动）：收敛为单项
-                int idx = HitIndex(e.Location);
-                if (idx >= 0 && IsSelected(idx)) SelectSingle(idx);
+                handlingMouseUp = false;
             }
-            collapseOnUp = false;
-            if (wasDrag) suppressClick = true;
-            ResetDrag();
-            Cursor = Cursors.Default;
-            if (wasDrag) Invalidate();
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            // OLE 接管时系统会释放鼠标捕获；松手时也会释放。两种都不应取消当前拖影会话。
+            if (!handlingMouseUp && !externalDragActive && (dragPending || dragging) && !Capture)
+                CancelDrag();
         }
 
         /// <summary>
@@ -1677,25 +1754,93 @@ namespace AppManager.Controls
             Form form = FindForm();
             if (source == null || externalDragTried || form == null || form.Bounds.Contains(screen)) return false;
             externalDragTried = true;
-            ExternalDragRequest request = source(DragApps());
+            List<AppInfo> apps = DragApps();
+            ExternalDragRequest request = source(apps);
             if (request == null || request.Data == null) return false;
-            ResetDrag();
+            externalDragActive = true;
             collapseOnUp = false;
             suppressClick = true;
             Cursor = Cursors.Default;
+            ResetDragState();
             Invalidate();
-            DragDropEffects effect = DoDragDrop(request.Data, request.Allowed);
-            if (request.Completed != null) request.Completed(effect);
+            try
+            {
+                Action<Point, int> external = DragVisualExternalStarting;
+                if (external != null)
+                    external(screen, request.PayloadCount > 0 ? request.PayloadCount : apps.Count);
+                DragDropEffects effect = DoDragDrop(request.Data, request.Allowed);
+                if (request.Completed != null) request.Completed(effect);
+            }
+            finally
+            {
+                externalDragActive = false;
+                ResetDragState();
+                EndDragVisual();
+            }
             return true;
         }
 
         private void ResetDrag()
+        {
+            ResetDragState();
+            EndDragVisual();
+        }
+
+        private void ResetDragState()
         {
             dragPending = false;
             dragging = false;
             dragFrom = -1;
             dragGap = -1;
             dropTarget = -1;
+            dropTargetIntent = DragDropIntent.Neutral;
+            dragSourceCanMoveIntoFolder = false;
+            if (Capture) Capture = false;
+        }
+
+        /// <summary>越过阈值时启动一次拖影；快照由主窗体中的控制器创建并独占。</summary>
+        private void BeginDragVisual(Point screen)
+        {
+            if (dragVisualStarted) return;
+            List<AppInfo> items = DragApps();
+            if (items.Count == 0) return;
+            AppInfo source = dragFrom >= 0 && dragFrom < apps.Count ? apps[dragFrom] : null;
+            dragSourceCanMoveIntoFolder = source != null && source.IsFile
+                && (CanMoveIntoFolder == null || CanMoveIntoFolder(source));
+            dragVisualStarted = true;
+            Action<List<AppInfo>, bool, Point> started = DragVisualStarted;
+            if (started != null) started(items, !grid, screen);
+        }
+
+        private void RaiseDragVisualMoved(Point screen, DragDropIntent intent)
+        {
+            Action<Point, DragDropIntent> moved = DragVisualMoved;
+            if (moved != null) moved(screen, intent);
+        }
+
+        private void EndDragVisual()
+        {
+            if (!dragVisualStarted) return;
+            dragVisualStarted = false;
+            Action ended = DragVisualEnded;
+            if (ended != null) ended();
+        }
+
+        /// <summary>取消内部拖动并同步清除拖影与侧栏高亮；左键仍按住时释放捕获。</summary>
+        private void CancelDrag()
+        {
+            bool wasDrag = dragging || dragPending;
+            ResetDragState();
+            EndDragVisual();
+            Cursor = Cursors.Default;
+            if (wasDrag) suppressClick = true;
+            Invalidate();
+        }
+
+        /// <summary>供主窗体在最小化/系统取消模式等入口调用；只结束会话，不执行投放动作。</summary>
+        internal void CancelActiveDrag()
+        {
+            CancelDrag();
         }
 
         /// <summary>计算插入缝隙位置（0..count），供拖动指示与落点判定。</summary>
@@ -1732,7 +1877,10 @@ namespace AppManager.Controls
         private void PaintFolderDropHighlight(Graphics g)
         {
             if (dropTarget < 0 || dropTarget >= apps.Count) return;
-            using (Pen pen = new Pen(Theme.Accent, 2F))
+            Color color = dropTargetIntent == DragDropIntent.Accept
+                ? Theme.Accent
+                : dropTargetIntent == DragDropIntent.Reject ? Theme.DeleteRed : Theme.TextSecondary;
+            using (Pen pen = new Pen(color, 2F))
             {
                 if (grid)
                 {
@@ -1822,6 +1970,7 @@ namespace AppManager.Controls
     {
         public DataObject Data;
         public DragDropEffects Allowed;
+        public int PayloadCount;   // 实际进入 DataObject 的路径数（已跳过不可导出项并去重）
         public Action<DragDropEffects> Completed;
     }
 }

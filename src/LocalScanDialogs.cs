@@ -15,7 +15,7 @@ namespace AppManager
     }
 
     /// <summary>
-    /// 照片/音乐共用的扫描范围选择窗口。磁盘列表在后台读取，文件夹选择留在 UI 线程。
+    /// 照片/视频/音乐共用的扫描范围选择窗口。磁盘列表在后台读取，文件夹选择留在 UI 线程。
     /// 只返回已校验、已去重并合并重叠项的根目录列表。
     /// </summary>
     internal sealed class LocalScanScopeDialog : BufferedDialogForm

@@ -125,6 +125,7 @@ namespace AppManager
             Case65_CategoryNameValidation();
             Case66_LocalPhotoScan();
             Case67_LocalScanScope();
+            Case68_LocalVideoScan();
 
             Log("==== 用例通过 " + _pass + "/" + _total + " ====");
             Flush();
@@ -1657,9 +1658,9 @@ namespace AppManager
                         if (string.Equals(path, previousTarget, StringComparison.OrdinalIgnoreCase)) registeredPaths[path] = path;
                     return registeredPaths;
                 };
-                Dictionary<string, string> imported = LocalPhotoScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
+                Dictionary<string, string> imported = LocalMediaScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
 
-                LocalPhotoScanResult result = LocalPhotoScanner.Scan(new[] { root, nested }, new[] { store }, imported,
+                LocalMediaScanResult result = LocalMediaScanner.Scan("照片", new[] { root, nested }, new[] { store }, imported,
                     null, CancellationToken.None);
                 bool normal = result.Count == 3 && result.Reused == 1
                     && result.Years[2020].Count == 2 && result.Years[2024].Count == 1
@@ -1672,11 +1673,11 @@ namespace AppManager
                 using (CancellationTokenSource cancel = new CancellationTokenSource())
                 {
                     cancel.Cancel();
-                    try { LocalPhotoScanner.Scan(new[] { root }, null, null, null, cancel.Token); }
+                    try { LocalMediaScanner.Scan("照片", new[] { root }, null, null, null, cancel.Token); }
                     catch (OperationCanceledException) { canceled = true; }
                 }
                 string missing = Path.Combine(root, "missing");
-                LocalPhotoScanResult failed = LocalPhotoScanner.Scan(new[] { missing }, null, null, null, CancellationToken.None);
+                LocalMediaScanResult failed = LocalMediaScanner.Scan("照片", new[] { missing }, null, null, null, CancellationToken.None);
                 Assert(normal && canceled && failed.UnreadableDirectories == 1,
                     "normal=" + normal + " canceled=" + canceled + " failures=" + failed.UnreadableDirectories);
             }
@@ -1705,8 +1706,87 @@ namespace AppManager
 
                 LocalScanScopeResolution excluded = LocalScanScope.Resolve(new[] { child }, new[] { root });
                 bool excludedOk = excluded.Roots.Count == 0 && excluded.Invalid.Count == 1;
-                Assert(mergeOk && driveRoot && invalidOk && excludedOk,
-                    "merge=" + mergeOk + " drive=" + driveRoot + " invalid=" + invalidOk + " excluded=" + excludedOk);
+                string videosRoot = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+                List<LocalScanScopeShortcut> videoShortcuts = LocalScanScope.Shortcuts(LocalScanScopeKind.Videos);
+                bool videoShortcut = string.IsNullOrEmpty(videosRoot) || !Directory.Exists(videosRoot)
+                    || (videoShortcuts.Count > 0 && videoShortcuts[0].Primary && videoShortcuts[0].Label == "视频"
+                        && string.Equals(LocalScanScope.NormalizePath(videoShortcuts[0].Path),
+                            LocalScanScope.NormalizePath(videosRoot), StringComparison.OrdinalIgnoreCase));
+                Assert(mergeOk && driveRoot && invalidOk && excludedOk && videoShortcut,
+                    "merge=" + mergeOk + " drive=" + driveRoot + " invalid=" + invalidOk + " excluded=" + excludedOk
+                    + " video=" + videoShortcut);
+            }
+            catch (Exception ex) { Assert(false, ex.Message); }
+            finally { TryDeleteTree(root); }
+        }
+
+        private static void Case68_LocalVideoScan()
+        {
+            Begin("68 本机视频扫描：扩展名、年份、排除、去重、云端与取消");
+            string root = Path.Combine(Path.GetTempPath(), "AppManagerVideos_" + Guid.NewGuid().ToString("N"));
+            try
+            {
+                string nested = Path.Combine(root, "nested");
+                string store = Path.Combine(root, "store");
+                Directory.CreateDirectory(nested);
+                Directory.CreateDirectory(store);
+                string mp4 = Path.Combine(nested, "dance.MP4");
+                File.WriteAllBytes(mp4, new byte[4096]);
+                File.SetLastWriteTime(mp4, new DateTime(2022, 3, 4, 5, 6, 7));
+                string mkv = Path.Combine(root, "movie.mkv");
+                File.WriteAllBytes(mkv, new byte[2048]);
+                File.SetLastWriteTime(mkv, new DateTime(2020, 7, 8, 9, 10, 11));
+                string ignored = Path.Combine(root, "notes.txt");
+                File.WriteAllText(ignored, "not a video");
+                string script = Path.Combine(root, "clip.ts");
+                File.WriteAllText(script, "not a video either");
+                string excluded = Path.Combine(store, "excluded.mp4");
+                File.Copy(mp4, excluded);
+                string previous = Path.Combine(root, "previous.mp4");
+                File.Copy(mp4, previous);
+                File.SetLastWriteTime(previous, new DateTime(2022, 3, 4, 5, 6, 7));
+                string previousTarget = Path.Combine(store, "registered.mp4");
+                File.Copy(mp4, previousTarget);
+                string cloud = Path.Combine(root, "cloud.mp4");
+                File.Copy(mp4, cloud);
+                File.SetAttributes(cloud, FileAttributes.Offline);
+                string journal = Path.Combine(root, "journal");
+                Directory.CreateDirectory(journal);
+                ImportBatch batch = new ImportBatch
+                {
+                    Id = "video-history", JournalDirectory = journal, Committed = true, Resource = true,
+                    Category = "视频", Operation = ImportOperation.Copy
+                };
+                batch.Items.Add(new ImportItem { Source = previous, Target = previousTarget, State = FileImport.Copied });
+                FileImport.Save(batch);
+                Func<List<string>, Dictionary<string, string>> registered = delegate(List<string> paths)
+                {
+                    Dictionary<string, string> registeredPaths = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (string path in paths)
+                        if (string.Equals(path, previousTarget, StringComparison.OrdinalIgnoreCase)) registeredPaths[path] = path;
+                    return registeredPaths;
+                };
+                Dictionary<string, string> imported = LocalMediaScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
+                LocalMediaScanResult result = LocalMediaScanner.Scan("视频", new[] { root, nested }, new[] { store }, imported,
+                    null, CancellationToken.None);
+                bool normal = result.Count == 3 && result.Reused == 1
+                    && result.Years[2022].Count == 2 && result.Years[2020].Count == 1
+                    && result.Years[2022].Contains(previousTarget)
+                    && result.CloudFiles == 1
+                    && result.CopyBytes == result.Bytes - new FileInfo(previous).Length
+                    && File.Exists(mp4) && File.Exists(mkv) && File.Exists(previous);
+
+                bool canceled = false;
+                using (CancellationTokenSource cancel = new CancellationTokenSource())
+                {
+                    cancel.Cancel();
+                    try { LocalMediaScanner.Scan("视频", new[] { root }, null, null, null, cancel.Token); }
+                    catch (OperationCanceledException) { canceled = true; }
+                }
+                string missing = Path.Combine(root, "missing");
+                LocalMediaScanResult failed = LocalMediaScanner.Scan("视频", new[] { missing }, null, null, null, CancellationToken.None);
+                Assert(normal && canceled && failed.UnreadableDirectories == 1,
+                    "normal=" + normal + " canceled=" + canceled + " failures=" + failed.UnreadableDirectories);
             }
             catch (Exception ex) { Assert(false, ex.Message); }
             finally { TryDeleteTree(root); }
