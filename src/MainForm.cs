@@ -46,6 +46,7 @@ namespace AppManager
         private bool collectionEntered;     // 是否已进入集合内容（false = 停留集合信息页）
         private readonly HashSet<string> expandedCollections = new HashSet<string>(StringComparer.Ordinal);
         private bool revealActiveCollection;    // 仅显式选择/进入/新建时强制展开祖先并滚入视口
+        private Dictionary<string, string> pendingCollectionSidebarKeyMap;   // 集合移动后本次重建映射滚动锚点
         private readonly List<string> visibleCollectionKeys = new List<string>();
         private sealed class CollectionRow
         {
@@ -901,6 +902,8 @@ namespace AppManager
             collectionSidebar.ItemActivated += EnterCollection;
             collectionSidebar.ToggleRequested += OnCollectionToggleRequested;
             collectionSidebar.ContextRequested += ShowCollectionMenu;
+            collectionSidebar.MoveFeedback = ResolveCollectionMoveFeedback;
+            collectionSidebar.MoveRequested += MoveCollection;
             collectionSidebar.CreateRequested += delegate
             {
                 string active = ActiveCollectionKey;
@@ -3057,6 +3060,8 @@ namespace AppManager
         /// <summary>刷新集合侧边栏与信息页：可见性、集合列表与封面、选中态、信息页数据。</summary>
         private void UpdateCollectionUi()
         {
+            Dictionary<string, string> keyMap = pendingCollectionSidebarKeyMap;
+            pendingCollectionSidebarKeyMap = null;
             if (search != null)
             {
                 bool all = string.Equals(currentCategory,
@@ -3069,6 +3074,7 @@ namespace AppManager
             coverIconWaiters.Clear();   // 本次重建中仍缺图标的封面成员会由 BuildCover 重新登记
             if (!CanShowCollectionSidebar)
             {
+                keyMap = null;
                 currentCollection = null;   // 离开可编辑资源分类/进入设置页：集合上下文失效
                 collectionEntered = false;
                 revealActiveCollection = false;
@@ -3092,7 +3098,7 @@ namespace AppManager
             collectionSidebar.SetCreateSubfolder(!string.IsNullOrEmpty(ActiveCollectionKey));
             // 页内编辑当前集合时保留其封面位图，避免后台刷新（自动重扫/图标回调）触发 DisposeCovers 造成闪烁
             string preserveKey = collectionInfo.IsEditing ? currentCollection : null;
-            collectionSidebar.SetItems(BuildCollectionItems(), preserveKey);
+            collectionSidebar.SetItems(BuildCollectionItems(), preserveKey, keyMap);
             collectionSidebar.SetActive(currentCollection == null ? string.Empty : currentCollection);
             UpdateCollectionInfo();
         }
@@ -3348,6 +3354,89 @@ namespace AppManager
             }
             expandedCollections.Clear();
             for (int i = 0; i < mapped.Count; i++) expandedCollections.Add(mapped[i]);
+        }
+
+        private bool CollectionMoveEditing
+        {
+            get { return collectionInfo != null && collectionInfo.IsEditing; }
+        }
+
+        /// <summary>集合拖动反馈：与最终落点共用同一 MovePlan，只接受会实际改变顺序/父级的请求。</summary>
+        private DragDropEffects ResolveCollectionMoveFeedback(CollectionMoveRequest request)
+        {
+            if (request == null || CollectionMoveEditing || !CanEditCategory(currentCategory))
+                return DragDropEffects.None;
+            CollectionMovePlan plan;
+            string error;
+            if (!CollectionOps.TryBuildMovePlan(config, request, out plan, out error)
+                || plan == null || plan.NoOp || plan.Source == null
+                || !string.Equals(plan.Source.Parent, currentCategory, StringComparison.Ordinal))
+                return DragDropEffects.None;
+            return DragDropEffects.Move;
+        }
+
+        /// <summary>执行集合拖动或右键移出：保存失败时恢复选中/进入/展开状态，不重复弹保存错误。</summary>
+        private void MoveCollection(CollectionMoveRequest request)
+        {
+            if (request == null || CollectionMoveEditing || !CanEditCategory(currentCategory)) return;
+            CollectionMovePlan plan;
+            string error;
+            if (!CollectionOps.TryBuildMovePlan(config, request, out plan, out error)
+                || plan == null || plan.NoOp || plan.Source == null
+                || !string.Equals(plan.Source.Parent, currentCategory, StringComparison.Ordinal))
+                return;
+
+            string previousCollection = currentCollection;
+            bool previousEntered = collectionEntered;
+            bool previousReveal = revealActiveCollection;
+            HashSet<string> previousExpanded = new HashSet<string>(expandedCollections, StringComparer.Ordinal);
+            int previousScroll = collectionSidebar.ScrollOffset;
+            try
+            {
+                CollectionOps.ApplyMovePlan(config, plan);
+            }
+            catch (Exception ex)
+            {
+                Paths.LogError(ex);
+                config.ReloadFromDatabase();
+                RestoreCollectionMoveUi(previousCollection, previousEntered, previousReveal, previousExpanded, previousScroll);
+                MessageBox.Show(this, "移动集合失败，已恢复原状态。\n" + ex.Message, "移动集合",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            if (!config.Save())
+            {
+                // Save 已整体回滚并重载配置；这里只需恢复不落库的导航与展开状态。
+                RestoreCollectionMoveUi(previousCollection, previousEntered, previousReveal, previousExpanded, previousScroll);
+                return;
+            }
+
+            string mapped;
+            if (currentCollection != null && plan.KeyMap.TryGetValue(currentCollection, out mapped))
+                currentCollection = mapped;
+            RemapExpandedCollections(plan.KeyMap);
+            if (!string.IsNullOrEmpty(plan.NewParentCollection)) expandedCollections.Add(plan.NewParentCollection);
+            ExpandCollectionAncestors(plan.NewRootKey);
+            revealActiveCollection = currentCollection != null;
+            if (plan.KeyMap.Count > 0) pendingCollectionSidebarKeyMap = plan.KeyMap;
+            collectionSidebar.SetActive(currentCollection ?? string.Empty);
+            RefreshGrid();
+            collectionSidebar.ScrollToKey(currentCollection ?? plan.NewRootKey);
+        }
+
+        private void RestoreCollectionMoveUi(string collection, bool entered, bool reveal, HashSet<string> expanded,
+            int scrollOffset)
+        {
+            currentCollection = collection != null && FindCollectionByKey(collection) != null ? collection : null;
+            collectionEntered = entered;
+            revealActiveCollection = reveal;
+            expandedCollections.Clear();
+            if (expanded != null)
+                foreach (string key in expanded)
+                    if (FindCollectionByKey(key) != null) expandedCollections.Add(key);
+            collectionSidebar.SetActive(currentCollection ?? string.Empty);
+            RefreshGrid();
+            collectionSidebar.SetScrollOffset(scrollOffset);
         }
 
         /// <summary>分类内「当前可见」的资源条目池：与网格过滤同口径（ShouldShow），保证卡片计数与网格显示一致。</summary>
@@ -3700,6 +3789,16 @@ namespace AppManager
             if (c == null) return;
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
             items.Add(MkMenu("新建子文件夹…", delegate { CreateCollectionUnder(key, null); }));
+            if (!string.IsNullOrEmpty(c.ParentCollection) && !CollectionMoveEditing)
+            {
+                items.Add(MkMenu("从母集合移出", delegate
+                {
+                    CollectionMoveRequest request = new CollectionMoveRequest();
+                    request.SourceKey = key;
+                    request.Kind = CollectionMoveKind.ToRoot;
+                    MoveCollection(request);
+                }));
+            }
             items.Add(MkSep());
             items.Add(MkMenu("编辑集合", delegate { EditCollection(c); }));   // 进入信息页页内编辑，不弹对话框
             items.Add(MkMenu("删除集合", delegate { DeleteCollection(c); }));
@@ -7705,6 +7804,11 @@ namespace AppManager
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (keyData == Keys.Escape && collectionSidebar != null && collectionSidebar.IsInternalDragActive)
+            {
+                collectionSidebar.CancelInternalDrag();
+                return true;
+            }
             if (keyData == (Keys.Control | Keys.F))
             {
                 search.Focus();

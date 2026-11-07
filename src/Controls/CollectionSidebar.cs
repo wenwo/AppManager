@@ -64,6 +64,17 @@ namespace AppManager.Controls
         private int arrowHoverIndex = -1;
         private int lastArrowToggleTick;
         private int lastArrowToggleIndex = -1;
+        private bool internalDragPending;
+        private bool internalDragging;
+        private bool suppressClick;
+        private bool handlingMouseUp;
+        private string internalDragSourceKey = string.Empty;
+        private Point internalDragStart;
+        private CollectionMoveKind internalDropKind;
+        private string internalDropTargetKey = string.Empty;
+        private DragDropEffects internalDropEffect = DragDropEffects.None;
+        private bool internalDropHasTarget;
+        private readonly System.Windows.Forms.Timer internalDragTimer;
 
         private readonly SolidBrush activeBrush = new SolidBrush(Theme.SelectionBg);
         private readonly SolidBrush hoverBrush = new SolidBrush(Color.FromArgb(140, 255, 255, 255));
@@ -87,11 +98,16 @@ namespace AppManager.Controls
         public event Action CreateRequested;
         /// <summary>集合行的外部拖放：统一计算效果，drop=true 时接收文件。</summary>
         public Func<string, DragEventArgs, bool, DragDropEffects> ExternalDrop;
+        /// <summary>集合内部拖动的落点反馈；必须在松手前重新调用，不能复用悬停结果。</summary>
+        public Func<CollectionMoveRequest, DragDropEffects> MoveFeedback;
+        /// <summary>集合内部拖动落点确认；参数包含源键、目标键与落点语义。</summary>
+        public event Action<CollectionMoveRequest> MoveRequested;
         /// <summary>集合栏收起或展开后触发，供主窗体重新布局。</summary>
         public event Action CollapsedChanged;
 
         public bool Collapsed { get { return collapsed; } }
         public int CurrentWidth { get { return collapsed ? CollapsedWidth : PreferredWidth; } }
+        public bool IsInternalDragActive { get { return internalDragPending || internalDragging; } }
 
         public CollectionSidebar()
         {
@@ -102,6 +118,8 @@ namespace AppManager.Controls
             BackColor = Theme.SidebarBg;
             AutoScroll = false;
             AllowDrop = true;
+            internalDragTimer = new System.Windows.Forms.Timer { Interval = 50 };
+            internalDragTimer.Tick += delegate { AutoScrollInternalDrag(); };
         }
 
         // ===== 数据注入（位图所有权随之转移） =====
@@ -109,16 +127,27 @@ namespace AppManager.Controls
         /// <summary>设置集合列表；旧封面位图由本控件释放。</summary>
         public void SetItems(List<Item> list)
         {
-            SetItems(list, null);
+            SetItems(list, null, null);
         }
 
         /// <summary>设置集合列表并保留指定键的旧封面（避免编辑中当前集合封面被释放重建）。</summary>
         public void SetItems(List<Item> list, string preserveCoverKey)
         {
+            SetItems(list, preserveCoverKey, null);
+        }
+
+        /// <summary>设置集合列表；keyMap 用于移动后同步滚动锚点、保留封面与拖动源键。</summary>
+        public void SetItems(List<Item> list, string preserveCoverKey, Dictionary<string, string> keyMap)
+        {
             string anchorKey = null;
             int anchorOffset = 0;
             List<string> anchorChain = null;
             CaptureScrollAnchor(out anchorKey, out anchorOffset, out anchorChain);
+            anchorKey = MapCollectionKey(anchorKey, keyMap);
+            if (anchorChain != null)
+                for (int i = 0; i < anchorChain.Count; i++)
+                    anchorChain[i] = MapCollectionKey(anchorChain[i], keyMap);
+            string mappedPreserveKey = MapCollectionKey(preserveCoverKey, keyMap);
             Bitmap preserved = null;
             if (!string.IsNullOrEmpty(preserveCoverKey))
             {
@@ -142,7 +171,7 @@ namespace AppManager.Controls
                 {
                     for (int i = 0; i < items.Count; i++)
                     {
-                        if (items[i].Key == preserveCoverKey && items[i].Cover == null)
+                        if (items[i].Key == mappedPreserveKey && items[i].Cover == null)
                         {
                             items[i].Cover = preserved;
                             preserved = null;
@@ -155,8 +184,21 @@ namespace AppManager.Controls
             externalDragIndex = -1;
             hoverIndex = -1;
             arrowHoverIndex = -1;
+            if (internalDragPending || internalDragging)
+            {
+                string mappedSource = MapCollectionKey(internalDragSourceKey, keyMap);
+                if (IndexOfKey(mappedSource) < 0) CancelInternalDrag();
+                else internalDragSourceKey = mappedSource;
+            }
             RestoreScrollAnchor(anchorKey, anchorOffset, anchorChain);
             Invalidate();
+        }
+
+        private static string MapCollectionKey(string key, Dictionary<string, string> keyMap)
+        {
+            if (key == null || keyMap == null) return key;
+            string mapped;
+            return keyMap.TryGetValue(key, out mapped) ? mapped : key;
         }
 
         /// <summary>设置选中集合键（空串 = 「全部」）。</summary>
@@ -180,6 +222,15 @@ namespace AppManager.Controls
             int index = IndexOfKey(key);
             if (index < 0 || ViewportHeight <= 0) return;
             EnsureVisible(index);
+        }
+
+        /// <summary>当前列表滚动偏移；供显式操作失败后恢复原位置。</summary>
+        internal int ScrollOffset { get { return scrollOffset; } }
+
+        /// <summary>恢复列表滚动偏移；越界时自动收敛到有效范围。</summary>
+        internal void SetScrollOffset(int offset)
+        {
+            SetScroll(offset);
         }
 
         private int IndexOfKey(string key)
@@ -254,6 +305,10 @@ namespace AppManager.Controls
         {
             if (disposing)
             {
+                internalDragTimer.Stop();
+                internalDragTimer.Dispose();
+                internalDragPending = false;
+                internalDragging = false;
                 DisposeCovers();
                 activeBrush.Dispose();
                 hoverBrush.Dispose();
@@ -298,17 +353,20 @@ namespace AppManager.Controls
         protected override void OnDragEnter(DragEventArgs e)
         {
             base.OnDragEnter(e);
+            if (IsInternalDragActive) { e.Effect = DragDropEffects.None; return; }
             UpdateExternalDropFeedback(e);
         }
 
         protected override void OnDragOver(DragEventArgs e)
         {
             base.OnDragOver(e);
+            if (IsInternalDragActive) { e.Effect = DragDropEffects.None; return; }
             UpdateExternalDropFeedback(e);
         }
 
         protected override void OnDragLeave(EventArgs e)
         {
+            if (IsInternalDragActive) return;
             SetExternalDropHighlight(null);
             base.OnDragLeave(e);
         }
@@ -316,6 +374,7 @@ namespace AppManager.Controls
         protected override void OnDragDrop(DragEventArgs e)
         {
             base.OnDragDrop(e);
+            if (IsInternalDragActive) { e.Effect = DragDropEffects.None; return; }
             string key = DropCollectionAtScreen(new Point(e.X, e.Y));
             SetExternalDropHighlight(null);
             if (key == null || ExternalDrop == null) return;
@@ -423,6 +482,7 @@ namespace AppManager.Controls
                 if (r.Bottom <= ListTop || r.Y >= ListBottom) continue;
                 PaintItem(g, items[i], i, r);
             }
+            PaintInternalDrop(g);
             g.Restore(st);
 
             // 滚动条：条目超出可视区时显示（iOS 细条）
@@ -454,6 +514,7 @@ namespace AppManager.Controls
 
         private void ToggleCollapsed()
         {
+            if (IsInternalDragActive) CancelInternalDrag();
             collapsed = !collapsed;
             hoverIndex = -1;
             hoverFooter = false;
@@ -507,6 +568,50 @@ namespace AppManager.Controls
             if (Focused && active)
                 ControlPaint.DrawFocusRectangle(g, new Rectangle(r.X + 2, r.Y + 2, r.Width - 4, r.Height - 4),
                     Theme.TextPrimary, Color.Empty);
+        }
+
+        private void PaintInternalDrop(Graphics g)
+        {
+            if (!internalDragging || internalDropEffect != DragDropEffects.Move || !internalDropHasTarget) return;
+            int index = IndexOfKey(internalDropKind == CollectionMoveKind.ToRoot ? string.Empty : internalDropTargetKey);
+            if (index < 0 || index >= items.Count) return;
+            Rectangle row = ItemRect(index);
+            if (internalDropKind == CollectionMoveKind.Into || internalDropKind == CollectionMoveKind.ToRoot)
+            {
+                using (SolidBrush fill = new SolidBrush(Color.FromArgb(44, Theme.Accent)))
+                    Draw.FillRoundedRect(g, fill, row, Radius);
+                Draw.DrawRoundedRect(g, dropPen, row, Radius);
+                return;
+            }
+
+            int y = internalDropKind == CollectionMoveKind.Before ? row.Top : row.Bottom - 1;
+            if (internalDropKind == CollectionMoveKind.After && items[index].Expanded)
+            {
+                int last = LastVisibleSubtreeIndex(index);
+                y = ItemRect(last).Bottom - 1;
+            }
+            int left = PadX + Dpi(4);
+            int right = ClientSize.Width - PadX - Dpi(4);
+            if (right <= left) return;
+            g.DrawLine(dropPen, left, y, right, y);
+            using (SolidBrush cap = new SolidBrush(Theme.Accent))
+            {
+                int r = Dpi(2);
+                g.FillEllipse(cap, left - r, y - r, r * 2 + 1, r * 2 + 1);
+                g.FillEllipse(cap, right - r, y - r, r * 2 + 1, r * 2 + 1);
+            }
+        }
+
+        private int LastVisibleSubtreeIndex(int index)
+        {
+            int depth = items[index].Depth;
+            int last = index;
+            for (int i = index + 1; i < items.Count; i++)
+            {
+                if (items[i].Depth <= depth) break;
+                last = i;
+            }
+            return last;
         }
 
         /// <summary>树形缩进：深层的后续层级不再继续右移，避免 16 层时文字完全消失。</summary>
@@ -632,11 +737,116 @@ namespace AppManager.Controls
                 new Rectangle(footRect.X + 32, footRect.Y, footRect.Width - 36, footRect.Height));
         }
 
+        // ===== 集合内部拖动 =====
+
+        private CollectionMoveRequest BuildInternalDropRequest(Point client)
+        {
+            if (!internalDragging) return null;
+            int index = IndexAt(client.Y);
+            if (index < 0 || index >= items.Count) return null;
+            Item target = items[index];
+            CollectionMoveRequest request = new CollectionMoveRequest();
+            request.SourceKey = internalDragSourceKey;
+            if (target.IsAll)
+            {
+                request.Kind = CollectionMoveKind.ToRoot;
+                return request;
+            }
+            if (string.Equals(target.Key, internalDragSourceKey, StringComparison.Ordinal)) return null;
+            Rectangle row = ItemRect(index);
+            int edge = Math.Max(1, row.Height / 4);
+            int y = client.Y - row.Y;
+            request.TargetKey = target.Key;
+            request.Kind = y < edge ? CollectionMoveKind.Before
+                : (y >= row.Height - edge ? CollectionMoveKind.After : CollectionMoveKind.Into);
+            return request;
+        }
+
+        private void UpdateInternalDropFeedback(Point client)
+        {
+            CollectionMoveRequest request = BuildInternalDropRequest(client);
+            DragDropEffects effect = DragDropEffects.None;
+            if (request != null && MoveFeedback != null)
+            {
+                try { effect = MoveFeedback(request); }
+                catch (Exception ex) { Paths.LogError(ex); effect = DragDropEffects.None; }
+            }
+            string targetKey = request == null ? string.Empty : (request.TargetKey ?? string.Empty);
+            bool changed = effect != internalDropEffect
+                || (request != null) != internalDropHasTarget
+                || (request != null && request.Kind != internalDropKind)
+                || !string.Equals(targetKey, internalDropTargetKey, StringComparison.Ordinal);
+            internalDropEffect = effect;
+            internalDropHasTarget = request != null;
+            internalDropTargetKey = targetKey;
+            if (request != null) internalDropKind = request.Kind;
+            Cursor = effect == DragDropEffects.Move ? Cursors.SizeAll : Cursors.Default;
+            if (changed) Invalidate();
+        }
+
+        private void BeginInternalDrag()
+        {
+            internalDragPending = false;
+            internalDragging = true;
+            internalDropEffect = DragDropEffects.None;
+            internalDropTargetKey = string.Empty;
+            internalDropHasTarget = false;
+            Capture = true;
+            internalDragTimer.Start();
+            UpdateInternalDropFeedback(PointToClient(Cursor.Position));
+            Invalidate();
+        }
+
+        private void AutoScrollInternalDrag()
+        {
+            if (!internalDragging) return;
+            Point client = PointToClient(Cursor.Position);
+            int edge = Dpi(24);
+            int step = Dpi(10);
+            if (client.Y < ListTop + edge) SetScroll(scrollOffset - step);
+            else if (client.Y > ListBottom - edge) SetScroll(scrollOffset + step);
+            UpdateInternalDropFeedback(client);
+        }
+
+        private void EndInternalDrag(bool suppressClickOnEnd)
+        {
+            bool active = internalDragPending || internalDragging;
+            internalDragPending = false;
+            internalDragging = false;
+            internalDragTimer.Stop();
+            internalDropEffect = DragDropEffects.None;
+            internalDropTargetKey = string.Empty;
+            internalDropHasTarget = false;
+            if (Capture) Capture = false;
+            if (active && suppressClickOnEnd) suppressClick = true;
+            Cursor = Cursors.Default;
+            Invalidate();
+        }
+
+        /// <summary>取消当前内部拖动；Esc、捕获丢失、无效松手和控件销毁共用。</summary>
+        public void CancelInternalDrag()
+        {
+            EndInternalDrag(true);
+        }
+
         // ===== 交互 =====
 
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+
+            if (internalDragPending && (Control.MouseButtons & MouseButtons.Left) == MouseButtons.Left)
+            {
+                Size threshold = SystemInformation.DragSize;
+                if (Math.Abs(e.X - internalDragStart.X) > threshold.Width
+                    || Math.Abs(e.Y - internalDragStart.Y) > threshold.Height)
+                    BeginInternalDrag();
+            }
+            if (internalDragging)
+            {
+                UpdateInternalDropFeedback(e.Location);
+                return;
+            }
 
             bool overCollapse = CollapseRect.Contains(e.Location);
             if (hoverCollapse != overCollapse) { hoverCollapse = overCollapse; Invalidate(); }
@@ -733,23 +943,71 @@ namespace AppManager.Controls
                     // 点击滑块外的轨道：按页滚动到点击位置
                     SetScroll((int)((long)(e.Y - ListTop) * MaxScroll / Math.Max(1, ViewportHeight - ScrollThumbHeight())));
                 }
+                return;
             }
+            if (e.Y >= ClientSize.Height - FooterH) return;
+            int index = IndexAt(e.Y);
+            if (index < 0 || index >= items.Count) return;
+            Item item = items[index];
+            if (item.IsAll || IsArrowAt(e.Location, index)) return;
+            internalDragPending = true;
+            internalDragging = false;
+            internalDragSourceKey = item.Key;
+            internalDragStart = e.Location;
+            internalDropEffect = DragDropEffects.None;
+            internalDropTargetKey = string.Empty;
+            suppressClick = false;
+            Capture = true;
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
-            base.OnMouseUp(e);
-            if (scrollDragging)
+            handlingMouseUp = true;
+            try
             {
-                scrollDragging = false;
-                Capture = false;
-                Invalidate();
+                base.OnMouseUp(e);
+                if (scrollDragging)
+                {
+                    scrollDragging = false;
+                    Capture = false;
+                    Invalidate();
+                }
+                if (internalDragging)
+                {
+                    UpdateInternalDropFeedback(e.Location);
+                    CollectionMoveRequest request = BuildInternalDropRequest(e.Location);
+                    DragDropEffects effect = internalDropEffect;
+                    EndInternalDrag(true);
+                    if (request != null && effect == DragDropEffects.Move)
+                    {
+                        Action<CollectionMoveRequest> handler = MoveRequested;
+                        if (handler != null) handler(request);
+                    }
+                    return;
+                }
+                if (internalDragPending) EndInternalDrag(false);
             }
+            finally
+            {
+                handlingMouseUp = false;
+            }
+        }
+
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!handlingMouseUp && !Capture && (internalDragPending || internalDragging))
+                EndInternalDrag(true);
         }
 
         protected override void OnMouseClick(MouseEventArgs e)
         {
             base.OnMouseClick(e);
+            if (suppressClick)
+            {
+                suppressClick = false;
+                return;
+            }
             if (CollapseRect.Contains(e.Location))
             {
                 if (e.Button == MouseButtons.Left) ToggleCollapsed();
@@ -788,6 +1046,11 @@ namespace AppManager.Controls
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
+            if (suppressClick)
+            {
+                suppressClick = false;
+                return;
+            }
             if (e.Button != MouseButtons.Left) return;
             if (collapsed || CollapseRect.Contains(e.Location)) return;
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location)) return;
@@ -822,7 +1085,8 @@ namespace AppManager.Controls
         {
             Keys key = keyData & Keys.KeyCode;
             if (key == Keys.Up || key == Keys.Down || key == Keys.Left || key == Keys.Right
-                || key == Keys.Home || key == Keys.End || key == Keys.Enter || key == Keys.Space)
+                || key == Keys.Home || key == Keys.End || key == Keys.Enter || key == Keys.Space
+                || key == Keys.Escape)
                 return true;
             return base.IsInputKey(keyData);
         }
@@ -830,6 +1094,13 @@ namespace AppManager.Controls
         protected override void OnKeyDown(KeyEventArgs e)
         {
             base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Escape && IsInternalDragActive)
+            {
+                CancelInternalDrag();
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+                return;
+            }
             if (collapsed || items.Count == 0) return;
             int index = CurrentIndex();
             if (index < 0) index = 0;

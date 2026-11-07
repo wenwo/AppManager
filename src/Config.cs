@@ -326,6 +326,43 @@ namespace AppManager
         }
     }
 
+    /// <summary>集合拖动落点语义；目标父节点和同级位置由 MovePlan 统一计算。</summary>
+    internal enum CollectionMoveKind
+    {
+        Before,
+        After,
+        Into,
+        ToRoot
+    }
+
+    /// <summary>一次集合移动的原始请求；Before/After/Into 使用 TargetKey，ToRoot 忽略 TargetKey。</summary>
+    public sealed class CollectionMoveRequest
+    {
+        internal string SourceKey = string.Empty;
+        internal string TargetKey = string.Empty;
+        internal CollectionMoveKind Kind;
+    }
+
+    /// <summary>
+    /// 集合移动计划：校验阶段一次性算出目标父节点、同级插入位置和整棵子树的新键。
+    /// 反馈与最终落点都重建同一计划，避免视觉接受但执行拒绝。
+    /// </summary>
+    internal sealed class CollectionMovePlan
+    {
+        internal ResourceCollection Source;
+        internal List<ResourceCollection> Subtree = new List<ResourceCollection>();
+        internal Dictionary<string, string> KeyMap = new Dictionary<string, string>(StringComparer.Ordinal);
+        internal string SourceKey = string.Empty;
+        internal string OldParentCollection = string.Empty;
+        internal string NewParentCollection = string.Empty;
+        internal string NewParentKey = string.Empty;
+        internal string DatabaseParentKey = string.Empty;
+        internal string NewRootKey = string.Empty;
+        internal int InsertIndex;
+        internal bool ChangesParent;
+        internal bool NoOp;
+    }
+
     /// <summary>集合的纯配置操作：查找/成员增删/重命名与删除时的归属键迁移，供 MainForm 与自测共用。</summary>
     internal static class CollectionOps
     {
@@ -396,6 +433,305 @@ namespace AppManager
                     result.Add(c);
             }
             return result;
+        }
+
+        /// <summary>
+        /// 构建集合移动计划。InsertIndex 的口径是“目标同级列表移除源节点后的插入索引”；
+        /// 同父且位置不变、拖到自身、拖入当前父节点和一级集合拖到「全部」均返回 NoOp。
+        /// </summary>
+        public static bool TryBuildMovePlan(AppConfig cfg, CollectionMoveRequest request,
+            out CollectionMovePlan plan, out string error)
+        {
+            plan = null;
+            error = null;
+            if (cfg == null) { error = "配置不可用。"; return false; }
+            if (request == null) { error = "移动请求为空。"; return false; }
+
+            ResourceCollection source = FindByKey(cfg, request.SourceKey);
+            if (source == null) { error = "源集合已不存在。"; return false; }
+            string sourceKey = CollectionKeys.GetKey(source);
+            string oldParent = source.ParentCollection ?? string.Empty;
+            string newParent;
+            int insertIndex;
+
+            if (request.Kind == CollectionMoveKind.ToRoot)
+            {
+                newParent = string.Empty;
+                if (string.IsNullOrEmpty(oldParent))
+                    return CompleteNoOp(source, sourceKey, oldParent, out plan);
+                insertIndex = ChildrenOf(cfg, source.Parent, newParent, source).Count;
+            }
+            else
+            {
+                ResourceCollection target = FindByKey(cfg, request.TargetKey);
+                if (target == null) { error = "目标集合已不存在。"; return false; }
+                if (target == source) return CompleteNoOp(source, sourceKey, oldParent, out plan);
+                if (!string.Equals(target.Parent, source.Parent, StringComparison.Ordinal))
+                {
+                    error = "集合不能移动到其他资源分类。";
+                    return false;
+                }
+                string targetKey = CollectionKeys.GetKey(target);
+                if (CollectionKeys.IsDescendantOrSelf(sourceKey, targetKey))
+                {
+                    error = "集合不能移动到自身或子集合中。";
+                    return false;
+                }
+
+                if (request.Kind == CollectionMoveKind.Into)
+                {
+                    newParent = targetKey;
+                    if (string.Equals(oldParent, newParent, StringComparison.Ordinal))
+                        return CompleteNoOp(source, sourceKey, oldParent, out plan);
+                    insertIndex = ChildrenOf(cfg, source.Parent, newParent, source).Count;
+                }
+                else if (request.Kind == CollectionMoveKind.Before
+                    || request.Kind == CollectionMoveKind.After)
+                {
+                    newParent = target.ParentCollection ?? string.Empty;
+                    List<ResourceCollection> siblings = ChildrenOf(cfg, source.Parent, newParent, source);
+                    int targetIndex = ReferenceIndex(siblings, target);
+                    if (targetIndex < 0)
+                    {
+                        error = "目标集合不在其父集合的同级列表中。";
+                        return false;
+                    }
+                    insertIndex = request.Kind == CollectionMoveKind.Before ? targetIndex : targetIndex + 1;
+                }
+                else
+                {
+                    error = "未知的集合移动方式。";
+                    return false;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(newParent))
+            {
+                ResourceCollection parent = FindByKey(cfg, newParent);
+                if (parent == null) { error = "目标父集合已不存在。"; return false; }
+                if (!string.Equals(parent.Parent, source.Parent, StringComparison.Ordinal))
+                {
+                    error = "目标父集合不属于当前资源分类。";
+                    return false;
+                }
+                if (CollectionKeys.IsDescendantOrSelf(sourceKey, newParent))
+                {
+                    error = "集合不能移动到自身或子集合中。";
+                    return false;
+                }
+            }
+
+            bool changesParent = !string.Equals(oldParent, newParent, StringComparison.Ordinal);
+            if (!changesParent)
+            {
+                int currentIndex = SiblingIndex(cfg, source);
+                if (currentIndex >= 0 && insertIndex == currentIndex)
+                    return CompleteNoOp(source, sourceKey, oldParent, out plan);
+            }
+
+            List<ResourceCollection> targetSiblings = ChildrenOf(cfg, source.Parent, newParent, source);
+            if (insertIndex < 0 || insertIndex > targetSiblings.Count)
+            {
+                error = "集合目标位置无效。";
+                return false;
+            }
+            for (int i = 0; i < targetSiblings.Count; i++)
+            {
+                ResourceCollection sibling = targetSiblings[i];
+                if (sibling != null && string.Equals(sibling.Name, source.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    error = "目标位置已存在同名集合「" + source.Name + "」。";
+                    return false;
+                }
+            }
+
+            List<ResourceCollection> subtree = Subtree(cfg, source);
+            if (subtree.Count == 0 || !subtree.Contains(source))
+            {
+                error = "集合定义不在当前配置中。";
+                return false;
+            }
+
+            string newRootKey = sourceKey;
+            Dictionary<string, string> keyMap = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (changesParent)
+            {
+                newRootKey = string.IsNullOrEmpty(newParent)
+                    ? CollectionKeys.Make(source.Parent, source.Name)
+                    : CollectionKeys.GetChildKey(newParent, source.Name);
+                HashSet<ResourceCollection> subtreeSet = new HashSet<ResourceCollection>(subtree);
+                HashSet<string> externalKeys = new HashSet<string>(StringComparer.Ordinal);
+                for (int i = 0; i < cfg.Collections.Count; i++)
+                {
+                    ResourceCollection other = cfg.Collections[i];
+                    if (other == null || subtreeSet.Contains(other)) continue;
+                    externalKeys.Add(CollectionKeys.GetKey(other));
+                }
+
+                HashSet<string> targets = new HashSet<string>(StringComparer.Ordinal);
+                for (int i = 0; i < subtree.Count; i++)
+                {
+                    ResourceCollection c = subtree[i];
+                    string oldKey = CollectionKeys.GetKey(c);
+                    string newKey = newRootKey + oldKey.Substring(sourceKey.Length);
+                    if (newKey.Length > CollectionKeys.MaxKeyLength)
+                    {
+                        error = "集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）：" + newKey;
+                        return false;
+                    }
+                    int depth = CollectionKeys.Depth(newKey);
+                    if (depth <= 0 || depth > CollectionKeys.MaxDepth)
+                    {
+                        error = "集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）：" + newKey;
+                        return false;
+                    }
+                    if (externalKeys.Contains(newKey))
+                    {
+                        error = "目标路径已存在集合：" + newKey;
+                        return false;
+                    }
+                    if (!targets.Add(newKey))
+                    {
+                        error = "集合移动产生了重复路径：" + newKey;
+                        return false;
+                    }
+                    keyMap[oldKey] = newKey;
+                }
+            }
+
+            plan = new CollectionMovePlan();
+            plan.Source = source;
+            plan.Subtree = subtree;
+            plan.KeyMap = keyMap;
+            plan.SourceKey = sourceKey;
+            plan.OldParentCollection = oldParent;
+            plan.NewParentCollection = newParent;
+            plan.NewParentKey = newParent;
+            plan.DatabaseParentKey = string.IsNullOrEmpty(newParent) ? source.Parent : newParent;
+            plan.NewRootKey = newRootKey;
+            plan.InsertIndex = insertIndex;
+            plan.ChangesParent = changesParent;
+            plan.NoOp = false;
+            return true;
+        }
+
+        private static bool CompleteNoOp(ResourceCollection source, string sourceKey, string oldParent,
+            out CollectionMovePlan plan)
+        {
+            plan = new CollectionMovePlan();
+            plan.Source = source;
+            plan.SourceKey = sourceKey;
+            plan.OldParentCollection = oldParent;
+            plan.NewParentCollection = oldParent;
+            plan.NewParentKey = oldParent;
+            plan.DatabaseParentKey = source.Parent;
+            plan.NewRootKey = sourceKey;
+            plan.ChangesParent = false;
+            plan.NoOp = true;
+            return true;
+        }
+
+        /// <summary>应用已校验的移动计划；改父时先迁移整棵子树键，再调整同级顺序。</summary>
+        public static void ApplyMovePlan(AppConfig cfg, CollectionMovePlan plan)
+        {
+            if (cfg == null) throw new ArgumentNullException("cfg");
+            if (plan == null) throw new ArgumentNullException("plan");
+            if (plan.NoOp) return;
+            ResourceCollection source = plan.Source;
+            if (source == null || !cfg.Collections.Contains(source))
+                throw new InvalidOperationException("集合定义不在当前配置中。");
+
+            if (plan.ChangesParent)
+            {
+                for (int i = 0; i < cfg.Collections.Count; i++)
+                {
+                    ResourceCollection c = cfg.Collections[i];
+                    if (c == null || string.IsNullOrEmpty(c.ParentCollection)) continue;
+                    string mapped;
+                    if (plan.KeyMap.TryGetValue(c.ParentCollection, out mapped)) c.ParentCollection = mapped;
+                }
+                source.ParentCollection = plan.NewParentCollection ?? string.Empty;
+                RemapCollectionReferences(cfg, plan.KeyMap);
+            }
+            MoveInCollections(cfg, source, plan.NewParentCollection ?? string.Empty, plan.InsertIndex);
+            if (plan.ChangesParent)
+                cfg.QueueCollectionMove(plan.SourceKey, plan.NewRootKey, plan.DatabaseParentKey);
+        }
+
+        private static List<ResourceCollection> ChildrenOf(AppConfig cfg, string parentCategory,
+            string parentCollection, ResourceCollection exclude)
+        {
+            List<ResourceCollection> result = new List<ResourceCollection>();
+            if (cfg == null || cfg.Collections == null) return result;
+            parentCollection = parentCollection ?? string.Empty;
+            for (int i = 0; i < cfg.Collections.Count; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c == null || ReferenceEquals(c, exclude)) continue;
+                if (!string.Equals(c.Parent, parentCategory, StringComparison.Ordinal)
+                    || !string.Equals(c.ParentCollection ?? string.Empty, parentCollection, StringComparison.Ordinal))
+                    continue;
+                result.Add(c);
+            }
+            return result;
+        }
+
+        private static int SiblingIndex(AppConfig cfg, ResourceCollection collection)
+        {
+            if (cfg == null || collection == null) return -1;
+            int sourceIndex = cfg.Collections.IndexOf(collection);
+            if (sourceIndex < 0) return -1;
+            string parentCollection = collection.ParentCollection ?? string.Empty;
+            int index = 0;
+            for (int i = 0; i < sourceIndex; i++)
+            {
+                ResourceCollection c = cfg.Collections[i];
+                if (c != null && string.Equals(c.Parent, collection.Parent, StringComparison.Ordinal)
+                    && string.Equals(c.ParentCollection ?? string.Empty, parentCollection, StringComparison.Ordinal))
+                    index++;
+            }
+            return index;
+        }
+
+        private static int ReferenceIndex(List<ResourceCollection> collections, ResourceCollection target)
+        {
+            if (collections == null || target == null) return -1;
+            for (int i = 0; i < collections.Count; i++)
+                if (ReferenceEquals(collections[i], target)) return i;
+            return -1;
+        }
+
+        private static void MoveInCollections(AppConfig cfg, ResourceCollection source,
+            string newParentCollection, int insertIndex)
+        {
+            int sourceIndex = cfg.Collections.IndexOf(source);
+            if (sourceIndex < 0) throw new InvalidOperationException("集合定义不在当前配置中。");
+            cfg.Collections.RemoveAt(sourceIndex);
+            List<ResourceCollection> siblings = ChildrenOf(cfg, source.Parent, newParentCollection, null);
+            if (insertIndex < 0) insertIndex = 0;
+            if (insertIndex > siblings.Count) insertIndex = siblings.Count;
+
+            int targetIndex;
+            if (insertIndex < siblings.Count)
+            {
+                targetIndex = cfg.Collections.IndexOf(siblings[insertIndex]);
+            }
+            else if (siblings.Count > 0)
+            {
+                targetIndex = cfg.Collections.IndexOf(siblings[siblings.Count - 1]) + 1;
+            }
+            else if (!string.IsNullOrEmpty(newParentCollection))
+            {
+                ResourceCollection parent = FindByKey(cfg, newParentCollection);
+                targetIndex = parent == null ? cfg.Collections.Count : cfg.Collections.IndexOf(parent) + 1;
+            }
+            else
+            {
+                targetIndex = cfg.Collections.Count;
+            }
+            if (targetIndex < 0 || targetIndex > cfg.Collections.Count)
+                throw new InvalidOperationException("集合目标位置无效。");
+            cfg.Collections.Insert(targetIndex, source);
         }
 
         /// <summary>统计会被这些集合移除归属的条目数；只算额外归属，不改条目所在分类。</summary>
@@ -749,6 +1085,10 @@ namespace AppManager
         internal void QueueCategoryRename(string oldName, string newName)
         {
             if (Database != null) Database.QueueRename(oldName, newName);
+        }
+        internal void QueueCollectionMove(string oldKey, string newKey, string newParentKey)
+        {
+            if (Database != null) Database.QueueCollectionMove(oldKey, newKey, newParentKey);
         }
         internal void QueueEntryRename(string oldKey, string newKey)
         {

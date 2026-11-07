@@ -127,6 +127,10 @@ namespace AppManager
                 Run("collection tree auto-expands and searches only direct members", CollectionTreeSearchAndInfo);
                 Run("collection creation uses active folder scope and enforces tree limits", CollectionCreateScopeAndLimits);
                 Run("collection deletion falls back to the nearest surviving ancestor", CollectionDeleteFallback);
+                Run("collection move keeps ids, order and references across parents", CollectionMovePersistence);
+                Run("collection move rejects invalid targets and failed saves stay retryable", CollectionMoveGuards);
+                Run("collection internal drag reports one final drop and cancels on escape", CollectionSidebarInternalDrag);
+                Run("collection move remaps the UI selection and is blocked while editing", CollectionMoveUi);
                 Run("grid delete handles every selected item; arrow starts at the first item", GridBatchDeleteAndArrow);
                 Run("icon cache evicts by bytes and LRU instead of clearing everything", IconCacheLru);
                 Run("auto scan pause keeps pending and paused changes, resume fires once", AutoScanPauseResume);
@@ -2966,6 +2970,615 @@ namespace AppManager
                     "deleting the whole tree did not return to all collections");
                 Check(config.Collections.Count == 0, "top-level deletion left collection definitions behind");
                 Check(AppConfig.Load().Collections.Count == 0, "top-level deletion was not persisted");
+            }
+        }
+
+        private static CollectionMoveRequest MoveRequest(CollectionMoveKind kind, string source, string target)
+        {
+            CollectionMoveRequest request = new CollectionMoveRequest();
+            request.Kind = kind;
+            request.SourceKey = source ?? string.Empty;
+            request.TargetKey = target ?? string.Empty;
+            return request;
+        }
+
+        private static CollectionMovePlan PlanMove(AppConfig config, CollectionMoveKind kind, string source, string target)
+        {
+            CollectionMovePlan plan;
+            string error;
+            Check(CollectionOps.TryBuildMovePlan(config, MoveRequest(kind, source, target), out plan, out error),
+                "collection move plan failed: " + error);
+            Check(plan != null, "collection move plan is null");
+            return plan;
+        }
+
+        private static void RejectMove(AppConfig config, CollectionMoveKind kind, string source, string target, string messagePart)
+        {
+            CollectionMovePlan plan;
+            string error;
+            Check(!CollectionOps.TryBuildMovePlan(config, MoveRequest(kind, source, target), out plan, out error),
+                "invalid collection move was accepted: " + kind + " " + source + " -> " + target);
+            Check(error != null && error.IndexOf(messagePart, StringComparison.Ordinal) >= 0,
+                "collection move error did not mention " + messagePart + ": " + error);
+        }
+
+        private static List<string> CollectionChildNames(AppConfig config, string category, string parentCollection)
+        {
+            List<string> names = new List<string>();
+            for (int i = 0; i < config.Collections.Count; i++)
+            {
+                ResourceCollection c = config.Collections[i];
+                if (c != null && c.Parent == category
+                    && string.Equals(c.ParentCollection ?? string.Empty, parentCollection ?? string.Empty,
+                        StringComparison.Ordinal))
+                    names.Add(c.Name);
+            }
+            return names;
+        }
+
+        private static long GroupIdAt(Sqlite db, string key)
+        {
+            string value = db.Scalar("SELECT id FROM groups WHERE key=?", key);
+            Check(value != null, "missing group: " + key);
+            return long.Parse(value);
+        }
+
+        private static long OperationCount(Sqlite db)
+        {
+            return long.Parse(db.Scalar("SELECT count(*) FROM operations"));
+        }
+
+        private static void CollectionMoveGuards()
+        {
+            AppConfig config = RenameConfig("collection-move-guards");
+            config.AutoScan = false;
+            string rootA = CollectionKeys.Make("照片", "旅行");
+            string rootB = CollectionKeys.Make("照片", "风景");
+            string rootC = CollectionKeys.Make("照片", "人物");
+            string childA = rootA + "/2024";
+            string grandA = childA + "/十月";
+            string childB = rootB + "/2025";
+            string childC = rootC + "/2024";
+            string videoTarget = CollectionKeys.Make("视频", "其他");
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "风景" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "人物" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "十月", ParentCollection = childA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2025", ParentCollection = rootB });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootC });
+            config.Collections.Add(new ResourceCollection { Parent = "视频", Name = "其他" });
+
+            string deepParent = string.Empty;
+            string deepKey = null;
+            for (int i = 1; i <= CollectionKeys.MaxDepth; i++)
+            {
+                ResourceCollection node = new ResourceCollection
+                {
+                    Parent = "照片",
+                    Name = "D" + i.ToString(),
+                    ParentCollection = deepParent
+                };
+                config.Collections.Add(node);
+                deepKey = CollectionKeys.GetKey(node);
+                deepParent = deepKey;
+            }
+            string deepSource = CollectionKeys.Make("照片", "深度源");
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "深度源" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "子", ParentCollection = deepSource });
+
+            string longParentName = "很长的目标父集合";
+            string longParent = CollectionKeys.Make("照片", longParentName);
+            string longName = new string('x', CollectionKeys.MaxKeyLength - 10);
+            string longSource = CollectionKeys.Make("照片", longName);
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = longParentName });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = longName });
+            Check(config.Save(), "collection move guard fixture save failed");
+            long revision = config.DatabaseRevision;
+            long operations;
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false)) operations = OperationCount(db);
+
+            RejectMove(config, CollectionMoveKind.After, "col:照片/不存在", rootA, "源集合");
+            RejectMove(config, CollectionMoveKind.After, rootA, "col:照片/不存在", "目标集合");
+            RejectMove(config, CollectionMoveKind.Into, rootA, videoTarget, "资源分类");
+            RejectMove(config, CollectionMoveKind.Into, childA, grandA, "自身或子集合");
+            RejectMove(config, CollectionMoveKind.After, childA, grandA, "自身或子集合");
+            RejectMove(config, CollectionMoveKind.Into, childA, rootC, "同名");
+            RejectMove(config, CollectionMoveKind.Into, longSource, longParent, "过长");
+            RejectMove(config, CollectionMoveKind.Into, deepSource, deepKey, "层级");
+
+            CollectionMovePlan noOp = PlanMove(config, CollectionMoveKind.Before, rootA, rootB);
+            Check(noOp.NoOp && !noOp.ChangesParent && noOp.KeyMap.Count == 0,
+                "same-parent insert before the next sibling was not a no-op");
+            noOp = PlanMove(config, CollectionMoveKind.After, rootB, rootA);
+            Check(noOp.NoOp && !noOp.ChangesParent && noOp.KeyMap.Count == 0,
+                "same-parent insert after the previous sibling was not a no-op");
+            noOp = PlanMove(config, CollectionMoveKind.Before, rootA, rootA);
+            Check(noOp.NoOp, "dropping a collection onto itself was not a no-op");
+            noOp = PlanMove(config, CollectionMoveKind.Into, childA, rootA);
+            Check(noOp.NoOp, "dropping into the current parent was not a no-op");
+            noOp = PlanMove(config, CollectionMoveKind.ToRoot, rootA, null);
+            Check(noOp.NoOp, "dropping a root collection on all was not a no-op");
+            CollectionOps.ApplyMovePlan(config, noOp);
+            Check(config.DatabaseRevision == revision && string.Join("|", CollectionChildNames(config, "照片", string.Empty).ToArray())
+                == "旅行|风景|人物|D1|深度源|" + longParentName + "|" + longName,
+                "a no-op changed the collection order or revision");
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                Check(OperationCount(db) == operations, "a no-op created an audit operation");
+
+            string persisted = AppConfig.Load().ToDocument().OuterXml;
+            long childAId;
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                childAId = GroupIdAt(db, childA);
+            CollectionMovePlan plan = PlanMove(config, CollectionMoveKind.Into, childA, rootB);
+            string movedChild = rootB + "/2024";
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+            {
+                db.Execute("BEGIN IMMEDIATE");
+                try
+                {
+                    CollectionOps.ApplyMovePlan(config, plan);
+                    Check(!config.Save(), "collection move save unexpectedly succeeded under a write lock");
+                }
+                finally { db.Execute("ROLLBACK"); }
+            }
+            Check(config.DatabaseRevision == revision, "failed collection move save changed the revision");
+            Check(CollectionOps.FindByKey(config, childA) != null
+                && CollectionOps.FindByKey(config, movedChild) == null,
+                "failed collection move save was not rolled back");
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                Check(GroupIdAt(db, childA) == childAId, "failed collection move save changed the group id");
+            Check(AppConfig.Load().ToDocument().OuterXml == persisted, "failed collection move save changed persisted config");
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                Check(OperationCount(db) == operations, "failed collection move save left an audit operation");
+
+            plan = PlanMove(config, CollectionMoveKind.Into, childA, rootB);
+            CollectionOps.ApplyMovePlan(config, plan);
+            Check(config.Save(), "collection move retry after save failure did not succeed");
+            Check(CollectionOps.FindByKey(config, movedChild) != null && CollectionOps.FindByKey(config, childA) == null,
+                "collection move retry was not persisted");
+            Check(config.DatabaseRevision > revision, "collection move retry did not create a revision");
+        }
+
+        private static void CollectionMovePersistence()
+        {
+            AppConfig config = RenameConfig("collection-move-persist");
+            config.AutoScan = false;
+            string rootA = CollectionKeys.Make("照片", "旅行");
+            string rootB = CollectionKeys.Make("照片", "风景");
+            string rootC = CollectionKeys.Make("照片", "人物");
+            string childA = rootA + "/2024";
+            string grandA = childA + "/十月";
+            string childB = rootB + "/2025";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "风景" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "人物" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "十月", ParentCollection = childA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2025", ParentCollection = rootB });
+            AppInfo item = AddEntry(config, "照片",
+                Path.Combine(config.ResourceStorePath, "照片", "move-photo.png"), false, true, "move photo");
+            CollectionOps.AddMember(config, item.Key, childA);
+            CollectionOps.AddMember(config, item.Key, grandA);
+            config.ExcludedCategories[item.Key] = new List<string> { childA };
+            config.ItemOrder[childA] = new List<string> { item.Key };
+            config.CategoryViewMode[childA] = false;
+            config.CategoryIconNames["resource:" + grandA] = "move-icon";
+            config.SidebarOrder.Add(childA);
+            Check(config.Save(), "collection move fixture save failed");
+            long revision = config.DatabaseRevision;
+            long categoryId, rootAId, rootBId, childAId, grandAId, recordGroup, addedId, addedGroup, listingRows;
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+            {
+                categoryId = GroupIdAt(db, "照片");
+                rootAId = GroupIdAt(db, rootA);
+                rootBId = GroupIdAt(db, rootB);
+                childAId = GroupIdAt(db, childA);
+                grandAId = GroupIdAt(db, grandA);
+                string itemId = db.Scalar("SELECT id FROM entries WHERE key=?", item.Key);
+                Check(itemId != null, "fixture entry was not persisted");
+                recordGroup = long.Parse(db.Scalar(
+                    "SELECT group_id FROM records WHERE section='ItemCategories' AND item_id=? AND group_id=?",
+                    itemId, childAId));
+                string[] added = db.Query("SELECT id,group_id FROM added_items WHERE path=?", item.TargetPath)[0];
+                addedId = long.Parse(added[0]);
+                addedGroup = long.Parse(added[1]);
+                listingRows = long.Parse(db.Scalar(
+                    "SELECT count(*) FROM listing l JOIN entries e ON e.id=l.item_id WHERE e.key=? AND l.group_id=?",
+                    item.Key, grandAId));
+                Check(listingRows > 0, "fixture listing row was not persisted");
+            }
+
+            CollectionMovePlan plan = PlanMove(config, CollectionMoveKind.After, rootA, rootB);
+            Check(!plan.NoOp && !plan.ChangesParent && plan.KeyMap.Count == 0,
+                "same-parent reorder was treated as a parent change or no-op");
+            CollectionOps.ApplyMovePlan(config, plan);
+            Check(string.Join("|", CollectionChildNames(config, "照片", string.Empty).ToArray()) == "风景|旅行|人物",
+                "same-parent reorder did not move the collection after its target");
+            Check(config.Save(), "same-parent reorder save failed");
+            Check(config.DatabaseRevision > revision, "same-parent reorder did not create a database revision");
+            Check(string.Join("|", CollectionChildNames(AppConfig.Load(), "照片", string.Empty).ToArray()) == "风景|旅行|人物",
+                "same-parent reorder was not persisted");
+
+            ResourceCollection source = CollectionOps.FindByKey(config, childA);
+            ResourceCollection target = CollectionOps.FindByKey(config, rootB);
+            Check(source != null && target != null, "fixture lost the child or target collection");
+            plan = PlanMove(config, CollectionMoveKind.Into, childA, rootB);
+            string movedChild = rootB + "/2024";
+            string movedGrand = movedChild + "/十月";
+            Check(plan.ChangesParent && plan.DatabaseParentKey == rootB && plan.NewRootKey == movedChild,
+                "moving into another collection computed the wrong target");
+            Check(plan.KeyMap.ContainsKey(childA) && plan.KeyMap[childA] == movedChild
+                && plan.KeyMap.ContainsKey(grandA) && plan.KeyMap[grandA] == movedGrand,
+                "moving a subtree did not map every descendant key");
+            CollectionOps.ApplyMovePlan(config, plan);
+            Check(CollectionOps.FindByKey(config, childA) == null && CollectionOps.FindByKey(config, grandA) == null,
+                "old subtree keys remained after the move");
+            Check(CollectionOps.FindByKey(config, movedChild) != null && CollectionOps.FindByKey(config, movedGrand) != null,
+                "new subtree keys were not created");
+            Check(string.Join("|", CollectionChildNames(config, "照片", rootB).ToArray()) == "2025|2024",
+                "moving into a collection did not append after its existing children");
+            List<string> categories;
+            Check(config.ItemCategories.TryGetValue(item.Key, out categories)
+                && categories.Contains(movedChild) && categories.Contains(movedGrand)
+                && !categories.Contains(childA) && !categories.Contains(grandA),
+                "member references were not remapped with the moved subtree");
+            Check(config.ExcludedCategories[item.Key].Contains(movedChild)
+                && config.ItemOrder.ContainsKey(movedChild) && config.CategoryViewMode.ContainsKey(movedChild)
+                && config.CategoryIconNames.ContainsKey("resource:" + movedGrand)
+                && config.SidebarOrder.Contains(movedChild),
+                "view, order, exclusion or icon references were not remapped");
+            Check(config.Save(), "cross-parent move save failed");
+            Check(config.DatabaseRevision > revision, "cross-parent move did not create a database revision");
+
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+            {
+                Check(db.Scalar("SELECT id FROM groups WHERE key=?", childA) == null
+                    && db.Scalar("SELECT id FROM groups WHERE key=?", grandA) == null,
+                    "old group keys remained in the database");
+                Check(GroupIdAt(db, movedChild) == childAId && GroupIdAt(db, movedGrand) == grandAId,
+                    "moving the subtree rebuilt group ids");
+                Check(long.Parse(db.Scalar("SELECT parent_id FROM groups WHERE id=?", childAId)) == rootBId,
+                    "moved root parent_id was not updated");
+                Check(long.Parse(db.Scalar("SELECT parent_id FROM groups WHERE id=?", grandAId)) == childAId,
+                    "descendant parent_id changed during the move");
+                string itemId = db.Scalar("SELECT id FROM entries WHERE key=?", item.Key);
+                Check(long.Parse(db.Scalar(
+                    "SELECT group_id FROM records WHERE section='ItemCategories' AND item_id=? AND group_id=?",
+                    itemId, childAId)) == recordGroup,
+                    "member record group_id changed during the move");
+                string[] added = db.Query("SELECT id,group_id FROM added_items WHERE path=?", item.TargetPath)[0];
+                Check(long.Parse(added[0]) == addedId && long.Parse(added[1]) == addedGroup,
+                    "added item identity or group changed during the move");
+                Check(long.Parse(db.Scalar(
+                    "SELECT count(*) FROM listing l JOIN entries e ON e.id=l.item_id WHERE e.key=? AND l.group_id=?",
+                    item.Key, grandAId)) == listingRows,
+                    "listing membership changed during the move");
+            }
+
+            string renamedRootA = CollectionKeys.Make("照片", "旅行旧");
+            Dictionary<string, string> oldParentRename = CollectionOps.RenameSubtree(config,
+                CollectionOps.FindByKey(config, rootA), "旅行旧");
+            Check(oldParentRename.Count == 1 && oldParentRename[rootA] == renamedRootA,
+                "renaming the old parent produced the wrong key map");
+            config.QueueCategoryRename(rootA, renamedRootA);
+            Check(config.Save(), "renaming the old parent after a move failed");
+            Check(CollectionOps.FindByKey(config, movedChild) != null && CollectionOps.FindByKey(config, movedGrand) != null,
+                "renaming the old parent moved the subtree that no longer belonged to it");
+
+            string renamedRootB = CollectionKeys.Make("照片", "风景新");
+            string renamedMovedChild = renamedRootB + "/2024";
+            string renamedMovedGrand = renamedMovedChild + "/十月";
+            Dictionary<string, string> newParentRename = CollectionOps.RenameSubtree(config,
+                CollectionOps.FindByKey(config, rootB), "风景新");
+            Check(newParentRename.ContainsKey(rootB) && newParentRename[rootB] == renamedRootB
+                && newParentRename.ContainsKey(movedChild) && newParentRename[movedChild] == renamedMovedChild,
+                "renaming the new parent did not map the moved subtree");
+            config.QueueCategoryRename(rootB, renamedRootB);
+            Check(config.Save(), "renaming the new parent after a move failed");
+            Check(CollectionOps.FindByKey(config, renamedMovedChild) != null
+                && CollectionOps.FindByKey(config, renamedMovedGrand) != null
+                && CollectionOps.FindByKey(config, movedChild) == null,
+                "renaming the new parent did not move its nested subtree");
+            Check(config.ItemCategories[item.Key].Contains(renamedMovedChild)
+                && config.ItemCategories[item.Key].Contains(renamedMovedGrand)
+                && config.ItemOrder.ContainsKey(renamedMovedChild)
+                && config.CategoryIconNames.ContainsKey("resource:" + renamedMovedGrand),
+                "renaming the new parent did not remap nested references");
+            movedChild = renamedMovedChild;
+            movedGrand = renamedMovedGrand;
+
+            plan = PlanMove(config, CollectionMoveKind.ToRoot, movedChild, null);
+            string rootKey = CollectionKeys.Make("照片", "2024");
+            string rootGrand = rootKey + "/十月";
+            Check(plan.ChangesParent && plan.DatabaseParentKey == "照片" && plan.NewRootKey == rootKey,
+                "moving a collection to the category root computed the wrong parent");
+            CollectionOps.ApplyMovePlan(config, plan);
+            Check(config.ItemCategories[item.Key].Contains(rootKey)
+                && config.ItemCategories[item.Key].Contains(rootGrand)
+                && config.ItemOrder.ContainsKey(rootKey)
+                && config.CategoryIconNames.ContainsKey("resource:" + rootGrand),
+                "moving to the root did not remap descendant references");
+            Check(config.Save(), "root move save failed");
+            Check(string.Join("|", CollectionChildNames(config, "照片", string.Empty).ToArray()) == "风景新|旅行旧|人物|2024",
+                "root move did not append at the end of the category");
+            AppConfig loaded = AppConfig.Load();
+            Check(CollectionOps.FindByKey(loaded, rootKey) != null && CollectionOps.FindByKey(loaded, rootGrand) != null
+                && CollectionOps.FindByKey(loaded, movedChild) == null,
+                "root move was not persisted");
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+            {
+                Check(GroupIdAt(db, rootKey) == childAId && GroupIdAt(db, rootGrand) == grandAId,
+                    "root move rebuilt subtree ids");
+                Check(long.Parse(db.Scalar("SELECT parent_id FROM groups WHERE id=?", childAId)) == categoryId,
+                    "root move left the old collection parent_id");
+                Check(long.Parse(db.Scalar("SELECT parent_id FROM groups WHERE id=?", grandAId)) == childAId,
+                    "root move altered a descendant parent_id");
+            }
+        }
+
+        private static void CollectionSidebarInternalDrag()
+        {
+            using (Form host = new Form
+            {
+                ShowInTaskbar = false,
+                StartPosition = FormStartPosition.Manual,
+                Location = new Point(-3000, -3000),
+                Size = new Size(320, 420)
+            })
+            using (Controls.CollectionSidebar sidebar = new Controls.CollectionSidebar { Dock = DockStyle.Fill })
+            {
+                host.Controls.Add(sidebar);
+                host.Show();
+                Application.DoEvents();
+
+                string rootA = CollectionKeys.Make("照片", "旅行");
+                string childA = rootA + "/2024";
+                string childB = rootA + "/2025";
+                string rootB = CollectionKeys.Make("照片", "风景");
+                List<Controls.CollectionSidebar.Item> items = new List<Controls.CollectionSidebar.Item>();
+                items.Add(new Controls.CollectionSidebar.Item { IsAll = true, Name = "全部" });
+                items.Add(new Controls.CollectionSidebar.Item
+                {
+                    Key = rootA, Name = "旅行", Depth = 0, HasChildren = true, Expanded = true
+                });
+                items.Add(new Controls.CollectionSidebar.Item { Key = childA, Name = "2024", Depth = 1, ParentKey = rootA });
+                items.Add(new Controls.CollectionSidebar.Item { Key = childB, Name = "2025", Depth = 1, ParentKey = rootA });
+                items.Add(new Controls.CollectionSidebar.Item { Key = rootB, Name = "风景", Depth = 0 });
+                sidebar.SetItems(items);
+
+                Type type = typeof(Controls.CollectionSidebar);
+                MethodInfo itemRect = type.GetMethod("ItemRect", Private);
+                CollectionMoveRequest last = null;
+                int feedback = 0, drops = 0;
+                sidebar.MoveFeedback = delegate(CollectionMoveRequest request)
+                {
+                    feedback++;
+                    last = request;
+                    return DragDropEffects.Move;
+                };
+                sidebar.MoveRequested += delegate(CollectionMoveRequest request) { drops++; last = request; };
+
+                Rectangle sourceRow = (Rectangle)itemRect.Invoke(sidebar, new object[] { 1 });
+                Rectangle targetRow = (Rectangle)itemRect.Invoke(sidebar, new object[] { 4 });
+                Point source = new Point(sourceRow.X + sourceRow.Width / 2, sourceRow.Y + sourceRow.Height / 2);
+                Point target = new Point(targetRow.X + targetRow.Width / 2, targetRow.Y + targetRow.Height / 2);
+                type.GetMethod("OnMouseDown", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, source.X, source.Y, 0) });
+                Check(sidebar.IsInternalDragActive, "mouse down did not start an internal drag candidate");
+                type.GetMethod("BeginInternalDrag", Private).Invoke(sidebar, null);
+                int beforeDropFeedback = feedback;
+                type.GetMethod("OnMouseUp", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, target.X, target.Y, 0) });
+                Check(drops == 1 && last != null && last.Kind == CollectionMoveKind.Into
+                    && last.SourceKey == rootA && last.TargetKey == rootB,
+                    "internal drag did not report exactly one final move");
+                Check(feedback > beforeDropFeedback && !sidebar.IsInternalDragActive && !sidebar.Capture,
+                    "internal drag feedback, capture or cleanup was incomplete");
+
+                last = null;
+                drops = 0;
+                sidebar.MoveFeedback = delegate(CollectionMoveRequest request) { last = request; return DragDropEffects.None; };
+                type.GetMethod("OnMouseDown", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, source.X, source.Y, 0) });
+                type.GetMethod("BeginInternalDrag", Private).Invoke(sidebar, null);
+                type.GetMethod("OnMouseUp", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, target.X, target.Y, 0) });
+                Check(drops == 0 && last != null && !sidebar.IsInternalDragActive,
+                    "a rejected drop still requested a collection move");
+
+                drops = 0;
+                sidebar.MoveFeedback = delegate(CollectionMoveRequest request) { last = request; return DragDropEffects.Move; };
+                type.GetMethod("OnMouseDown", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, source.X, source.Y, 0) });
+                type.GetMethod("BeginInternalDrag", Private).Invoke(sidebar, null);
+                type.GetMethod("OnKeyDown", Private).Invoke(sidebar, new object[] { new KeyEventArgs(Keys.Escape) });
+                Check(!sidebar.IsInternalDragActive && !sidebar.Capture, "escape did not end and release the internal drag");
+                type.GetMethod("OnMouseUp", Private).Invoke(sidebar,
+                    new object[] { new MouseEventArgs(MouseButtons.Left, 1, target.X, target.Y, 0) });
+                Check(drops == 0, "escape still requested a collection move");
+
+                int externalCalls = 0;
+                sidebar.ExternalDrop = delegate(string key, DragEventArgs args, bool drop)
+                {
+                    externalCalls++;
+                    return DragDropEffects.Move;
+                };
+                typeof(Controls.CollectionSidebar).GetField("internalDragging", Private).SetValue(sidebar, true);
+                DragEventArgs drag = new DragEventArgs(new DataObject(), 0, target.X, target.Y,
+                    DragDropEffects.Move, DragDropEffects.None);
+                type.GetMethod("OnDragEnter", Private).Invoke(sidebar, new object[] { drag });
+                Check(drag.Effect == DragDropEffects.None && externalCalls == 0,
+                    "an internal drag was treated as an external file import");
+                sidebar.CancelInternalDrag();
+
+                typeof(Controls.CollectionSidebar).GetField("internalDragging", Private).SetValue(sidebar, true);
+                typeof(Controls.CollectionSidebar).GetField("internalDragSourceKey", Private).SetValue(sidebar, rootB);
+                Rectangle expandedRow = (Rectangle)itemRect.Invoke(sidebar, new object[] { 1 });
+                CollectionMoveRequest after = (CollectionMoveRequest)type.GetMethod("BuildInternalDropRequest", Private)
+                    .Invoke(sidebar, new object[] { new Point(expandedRow.X + expandedRow.Width / 2, expandedRow.Bottom - 1) });
+                int lastSubtree = (int)type.GetMethod("LastVisibleSubtreeIndex", Private).Invoke(sidebar, new object[] { 1 });
+                Check(after != null && after.Kind == CollectionMoveKind.After && after.TargetKey == rootA && lastSubtree == 3,
+                    "expanded target did not draw the after indicator below its visible subtree");
+                sidebar.CancelInternalDrag();
+
+                List<Controls.CollectionSidebar.Item> scrollItems = new List<Controls.CollectionSidebar.Item>();
+                scrollItems.Add(new Controls.CollectionSidebar.Item { IsAll = true, Name = "全部" });
+                scrollItems.Add(new Controls.CollectionSidebar.Item { Key = rootA, Name = "旅行", Depth = 0 });
+                for (int i = 0; i < 40; i++)
+                    scrollItems.Add(new Controls.CollectionSidebar.Item
+                    {
+                        Key = CollectionKeys.Make("照片", "项目" + i.ToString()), Name = "项目" + i.ToString(), Depth = 0
+                    });
+                sidebar.SetItems(scrollItems);
+                int rowHeight = (int)type.GetProperty("RowH", Private).GetValue(sidebar, null);
+                type.GetMethod("SetScroll", Private).Invoke(sidebar, new object[] { rowHeight });
+
+                string mappedRoot = CollectionKeys.Make("照片", "旅行新");
+                Dictionary<string, string> keyMap = new Dictionary<string, string>(StringComparer.Ordinal);
+                keyMap[rootA] = mappedRoot;
+                List<Controls.CollectionSidebar.Item> mappedItems = new List<Controls.CollectionSidebar.Item>();
+                mappedItems.Add(new Controls.CollectionSidebar.Item { IsAll = true, Name = "全部" });
+                for (int i = 0; i < 40; i++)
+                    mappedItems.Add(new Controls.CollectionSidebar.Item
+                    {
+                        Key = i == 19 ? mappedRoot : CollectionKeys.Make("照片", "新项目" + i.ToString()),
+                        Name = i == 19 ? "旅行新" : "新项目" + i.ToString(),
+                        Depth = 0
+                    });
+                sidebar.SetItems(mappedItems, null, keyMap);
+                int mappedIndex = (int)type.GetMethod("IndexOfKey", Private).Invoke(sidebar, new object[] { mappedRoot });
+                int mappedOffset = (int)type.GetField("scrollOffset", Private).GetValue(sidebar);
+                Check(mappedIndex == 20 && mappedOffset == mappedIndex * rowHeight,
+                    "collection key map did not preserve the scroll anchor");
+            }
+        }
+
+        private static void CollectionMoveUi()
+        {
+            AppConfig config = RenameConfig("collection-move-ui");
+            config.AutoScan = false;
+            string rootA = CollectionKeys.Make("照片", "UI旅行");
+            string rootB = CollectionKeys.Make("照片", "UI风景");
+            string childA = rootA + "/UI2024";
+            string grandA = childA + "/UI十月";
+            string childB = rootB + "/UI2025";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "UI旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "UI风景" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "UI2024", ParentCollection = rootA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "UI十月", ParentCollection = childA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "UI2025", ParentCollection = rootB });
+            for (int i = 0; i < 30; i++)
+                config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "UI填充" + i.ToString() });
+            Check(config.Save(), "collection move UI fixture save failed");
+
+            using (MainForm form = ResourceForm(config, "照片"))
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1000, 680);
+                form.Show();
+                Application.DoEvents();
+
+                Controls.CollectionSidebar sidebar = (Controls.CollectionSidebar)
+                    typeof(MainForm).GetField("collectionSidebar", Private).GetValue(form);
+                HashSet<string> expanded = (HashSet<string>)typeof(MainForm).GetField("expandedCollections", Private).GetValue(form);
+                typeof(MainForm).GetField("currentCollection", Private).SetValue(form, grandA);
+                typeof(MainForm).GetField("collectionEntered", Private).SetValue(form, true);
+                typeof(MainForm).GetField("revealActiveCollection", Private).SetValue(form, false);
+                expanded.Add(rootA);
+                expanded.Add(childA);
+                Invoke(form, "UpdateCollectionUi");
+                Check((string)typeof(Controls.CollectionSidebar).GetField("activeKey", Private).GetValue(sidebar) == grandA,
+                    "collection move UI fixture did not select the descendant collection");
+
+                long revision = config.DatabaseRevision;
+                CollectionMoveRequest noOp = MoveRequest(CollectionMoveKind.After, rootB, rootA);
+                Check((DragDropEffects)Invoke(form, "ResolveCollectionMoveFeedback", noOp) == DragDropEffects.None,
+                    "the UI offered a move for a same-parent no-op");
+                Invoke(form, "MoveCollection", noOp);
+                Check(config.DatabaseRevision == revision, "the UI saved a same-parent no-op");
+
+                CollectionMoveRequest request = MoveRequest(CollectionMoveKind.Into, childA, rootB);
+                Invoke(form, "MoveCollection", request);
+                string movedChild = rootB + "/UI2024";
+                string movedGrand = movedChild + "/UI十月";
+                string actualCurrent = (string)typeof(MainForm).GetField("currentCollection", Private).GetValue(form);
+                Check(actualCurrent == movedGrand,
+                    "moving a collection did not remap the selected descendant: current=" + actualCurrent
+                    + "; saved=" + config.DatabaseRevision + "; error=" + config.DatabaseError
+                    + "; old=" + (CollectionOps.FindByKey(config, childA) != null)
+                    + "; moved=" + (CollectionOps.FindByKey(config, movedChild) != null));
+                Check((bool)typeof(MainForm).GetField("collectionEntered", Private).GetValue(form),
+                    "moving a collection lost the entered content state");
+                Check(expanded.Contains(rootB) && expanded.Contains(movedChild) && !expanded.Contains(childA),
+                    "moving a collection did not expand and remap its new parent chain");
+                Check((string)typeof(Controls.CollectionSidebar).GetField("activeKey", Private).GetValue(sidebar) == movedGrand,
+                    "the sidebar did not select the remapped descendant");
+                Check(config.DatabaseRevision > revision, "the UI collection move was not saved");
+                Check(string.Join("|", CollectionChildNames(config, "照片", rootB).ToArray()) == "UI2025|UI2024",
+                    "the UI collection move did not append after the target's children");
+                AppConfig loaded = AppConfig.Load();
+                Check(CollectionOps.FindByKey(loaded, movedGrand) != null && CollectionOps.FindByKey(loaded, childA) == null,
+                    "the UI collection move was not persisted");
+
+                string beforeFailure = string.Join("|", CollectionChildNames(config, "照片", string.Empty).ToArray());
+                long failureRevision = config.DatabaseRevision;
+                FieldInfo saveFailed = typeof(AppConfig).GetField("SaveFailed",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                Check(saveFailed != null, "save failure event was not found");
+                saveFailed.SetValue(config, null);   // 本用例自行验证恢复，避免模态保存失败提示阻塞
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                {
+                    db.Execute("BEGIN IMMEDIATE");
+                    try { Invoke(form, "MoveCollection", MoveRequest(CollectionMoveKind.Into, rootB, rootA)); }
+                    finally { db.Execute("ROLLBACK"); }
+                }
+                Check(config.DatabaseRevision == failureRevision, "failed UI collection move changed the revision");
+                Check((string)typeof(MainForm).GetField("currentCollection", Private).GetValue(form) == movedGrand
+                    && (bool)typeof(MainForm).GetField("collectionEntered", Private).GetValue(form),
+                    "failed UI collection move lost the selected collection or content state");
+                Check(expanded.Contains(rootB) && expanded.Contains(movedChild),
+                    "failed UI collection move lost the expanded parent chain");
+                Check((string)typeof(Controls.CollectionSidebar).GetField("activeKey", Private).GetValue(sidebar) == movedGrand,
+                    "failed UI collection move lost the sidebar selection");
+                Check(string.Join("|", CollectionChildNames(config, "照片", string.Empty).ToArray()) == beforeFailure,
+                    "failed UI collection move changed the collection tree");
+
+                int rowHeight = (int)typeof(Controls.CollectionSidebar).GetProperty("RowH", Private)
+                    .GetValue(sidebar, null);
+                Type sidebarType = typeof(Controls.CollectionSidebar);
+                sidebarType.GetMethod("SetScrollOffset", Private).Invoke(sidebar,
+                    new object[] { rowHeight * 3 + 7 });
+                int failureScroll = (int)sidebarType.GetProperty("ScrollOffset", Private)
+                    .GetValue(sidebar, null);
+                Check(failureScroll > 0, "collection move failure fixture could not scroll the sidebar");
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                {
+                    db.Execute("BEGIN IMMEDIATE");
+                    try { Invoke(form, "MoveCollection", MoveRequest(CollectionMoveKind.Into, rootB, rootA)); }
+                    finally { db.Execute("ROLLBACK"); }
+                }
+                int restoredScroll = (int)sidebarType.GetProperty("ScrollOffset", Private)
+                    .GetValue(sidebar, null);
+                Check(restoredScroll == failureScroll,
+                    "failed UI collection move restored a different scroll offset: " + restoredScroll
+                    + " != " + failureScroll);
+
+                Invoke(form, "EditCollection", CollectionOps.FindByKey(config, movedChild));
+                Controls.CollectionInfoPanel info = (Controls.CollectionInfoPanel)
+                    typeof(MainForm).GetField("collectionInfo", Private).GetValue(form);
+                Check(info.IsEditing, "collection edit state did not start");
+                long editingRevision = config.DatabaseRevision;
+                CollectionMoveRequest blocked = MoveRequest(CollectionMoveKind.ToRoot, movedChild, null);
+                Check((DragDropEffects)Invoke(form, "ResolveCollectionMoveFeedback", blocked) == DragDropEffects.None,
+                    "editing did not reject collection drag feedback");
+                Invoke(form, "MoveCollection", blocked);
+                Check(info.IsEditing && config.DatabaseRevision == editingRevision
+                    && CollectionOps.FindByKey(config, movedChild) != null,
+                    "editing did not block a collection move");
+                info.EndEdit();
             }
         }
 

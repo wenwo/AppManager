@@ -43,6 +43,7 @@ namespace AppManager
         private readonly Dictionary<string, long> entries = new Dictionary<string, long>(StringComparer.Ordinal);
         private readonly List<string[]> renames = new List<string[]>();
         private readonly List<string[]> entryRenames = new List<string[]>();
+        private readonly List<string[]> groupMoves = new List<string[]>();
         private const int ApplicationId = DatabaseCompatibility.ApplicationId;
         private const int SchemaVersion = DatabaseCompatibility.CurrentVersion;
         private static readonly string Session = Guid.NewGuid().ToString("N");
@@ -471,6 +472,14 @@ namespace AppManager
             id = Number(db.Scalar("SELECT id FROM entries WHERE key=?", key)); if (entries.Count >= 4096) entries.Clear(); entries[key] = id; return id;
         }
         internal void QueueRename(string oldKey, string newKey) { lock (gate) { if (oldKey != newKey) renames.Add(new string[] { oldKey, newKey }); } }
+        internal void QueueCollectionMove(string oldKey, string newKey, string newParentKey)
+        {
+            lock (gate)
+            {
+                if (oldKey != newKey)
+                    groupMoves.Add(new string[] { oldKey, newKey, newParentKey ?? string.Empty });
+            }
+        }
         internal void QueueEntryRename(string oldKey, string newKey) { lock (gate) { if (oldKey != newKey) entryRenames.Add(new string[] { oldKey, newKey }); } }
 
         private void ApplyRenames(Sqlite db)
@@ -490,13 +499,15 @@ namespace AppManager
             }
             foreach (string[] rename in renames)
                 ApplyGroupRename(db, rename[0], rename[1]);
+            foreach (string[] move in groupMoves)
+                ApplyGroupRename(db, move[0], move[1], move[2]);
         }
 
         /// <summary>
         /// 一次改名迁移整棵分组子树。按 parent_id 读取真实层级并从新根重建完整键，
         /// 避免嵌套键只改一层，或把完整旧键再次传给 CollectionKeys.Make。
         /// </summary>
-        private void ApplyGroupRename(Sqlite db, string oldKey, string newKey)
+        private void ApplyGroupRename(Sqlite db, string oldKey, string newKey, string newParentKey = null)
         {
             long rootId;
             if (!groups.TryGetValue(oldKey, out rootId)) return;
@@ -591,6 +602,24 @@ namespace AppManager
                 groups.Remove(previous); groups[entry.Value] = entry.Key;
             }
             db.Execute("UPDATE groups SET name=? WHERE id=?", displayName, rootId);
+            if (newParentKey != null)
+            {
+                long parentId = 0;
+                if (!string.IsNullOrEmpty(newParentKey) && !groups.TryGetValue(newParentKey, out parentId))
+                {
+                    string value = db.Scalar("SELECT id FROM groups WHERE key=?", newParentKey);
+                    if (value != null)
+                    {
+                        parentId = Number(value);
+                        groups[newParentKey] = parentId;
+                    }
+                }
+                if (parentId == 0)
+                    throw new IOException("目标父集合在数据库中不存在：" + newParentKey);
+                if (parentId == rootId || newKeys.ContainsKey(parentId))
+                    throw new IOException("集合不能移动到自身或子集合中。");
+                db.Execute("UPDATE groups SET parent_id=? WHERE id=?", parentId, rootId);
+            }
         }
 
         private static bool GroupHasReferences(Sqlite db, long id)
@@ -666,7 +695,7 @@ namespace AppManager
                             db.Execute("INSERT OR REPLACE INTO metadata(key,value) VALUES('migrated','1')");
                             int addedCount = Convert.ToInt32(db.Scalar("SELECT count(*) FROM added_items"));
                             db.Execute("COMMIT");
-                            revision = newRevision; baseline = next; renames.Clear(); entryRenames.Clear();
+                            revision = newRevision; baseline = next; renames.Clear(); entryRenames.Clear(); groupMoves.Clear();
                             config.Database = this; config.DatabaseRevision = revision; config.DatabaseError = null;
                             if (config.AddedItems.Store == this) config.AddedItems.Accept(addedCount);
                             else config.AddedItems = new AddedEntryList(this, addedCount);
@@ -678,7 +707,7 @@ namespace AppManager
                             foreach (AddedEntry entry in config.AddedItems.New) { entry.RecordId = 0; entry.ItemId = 0; }
                             // 改名是本次保存的待办状态，失败后不能留在队列里反复重试；
                             // 调用方还会从数据库重载配置，保证内存状态与已提交状态一致。
-                            renames.Clear(); entryRenames.Clear();
+                            renames.Clear(); entryRenames.Clear(); groupMoves.Clear();
                             LoadBaseline(db); throw;
                         }
                     }
@@ -744,7 +773,8 @@ namespace AppManager
                     { item = Entry(db, "add:" + node.GetAttribute("path")); group = Group(db, node.GetAttribute("category")); node.RemoveAttribute("category"); }
                     string slot = name == "DesktopBackup" ? node.GetAttribute("path") + "\n" + node.GetAttribute("current") : "";
                     AddRecord(result, name, item, group,
-                        name == "SidebarOrder" || name == "CustomCategories" || name == "ResourceCategories" ? ordinal : 0, slot, node.OuterXml);
+                        name == "SidebarOrder" || name == "CustomCategories" || name == "ResourceCategories"
+                            || name == "Collections" ? ordinal : 0, slot, node.OuterXml);
                     ordinal++;
                 }
             }
@@ -897,7 +927,7 @@ namespace AppManager
                     NewOperation(db, "restore.snapshot", "safety=" + Path.GetFileName(safety));
                     db.Execute("UPDATE metadata SET value=? WHERE key='revision'", nextRevision.ToString(CultureInfo.InvariantCulture));
                     db.Execute("COMMIT");
-                    LoadBaseline(db); renames.Clear(); entryRenames.Clear();
+                    LoadBaseline(db); renames.Clear(); entryRenames.Clear(); groupMoves.Clear();
                 }
                 catch
                 {
@@ -975,7 +1005,7 @@ namespace AppManager
                     db.Execute("UPDATE write_context SET operation_id=NULL WHERE id=1");
                     db.Execute("UPDATE metadata SET value=CAST(value AS INTEGER)+1 WHERE key='revision'");
                     db.Execute("COMMIT");
-                    LoadBaseline(db); renames.Clear();
+                    LoadBaseline(db); renames.Clear(); groupMoves.Clear();
                 }
                 catch { db.Rollback(); throw; }
             }
