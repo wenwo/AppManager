@@ -2665,22 +2665,41 @@ namespace AppManager
         {
             List<AppInfo> valid = DeletableEntries(apps);
             if (valid.Count == 0) return false;
+            int missing = 0;
             bool permanent = false;
             foreach (AppInfo app in valid)
+            {
+                if (!File.Exists(app.TargetPath) && !Directory.Exists(app.TargetPath))
+                {
+                    missing++;
+                    continue;
+                }
                 if (!Launcher.CanUseRecycleBin(app.TargetPath)) { permanent = true; break; }
+            }
+            bool allMissing = missing == valid.Count;
             string msg = valid.Count == 1
-                ? "确认删除「" + valid[0].DisplayName() + "」？\n文件将从资源库移除。"
-                : "确认删除这 " + valid.Count + " 个项目？\n文件将从资源库移除。";
-            msg += permanent
-                ? "\n\n警告：选中的位置没有可用回收站，将继续永久删除，无法恢复。"
-                : "\n文件将移入回收站，可恢复；如系统无法放入回收站，会先再次确认。";
-            if (!ConfirmDialog.Show("删除文件", msg)) return false;
+                ? "确认删除「" + valid[0].DisplayName() + "」？"
+                : "确认删除这 " + valid.Count + " 个项目？";
+            if (allMissing)
+            {
+                msg += "\n原文件已不存在，将仅移除收录记录。";
+            }
+            else
+            {
+                msg += "\n文件将从资源库移除。";
+                if (missing > 0)
+                    msg += "\n其中 " + missing + " 个项目的原文件已不存在，将仅移除收录记录。";
+                msg += permanent
+                    ? "\n\n警告：选中的位置没有可用回收站，将继续永久删除，无法恢复。"
+                    : "\n文件将移入回收站，可恢复；如系统无法放入回收站，会先再次确认。";
+            }
+            if (!ConfirmDialog.Show(allMissing ? "删除条目" : "删除文件", msg)) return false;
             if (!ConfirmTextViewerMutation(valid)) return false;
             DeleteEntriesDisk(valid);
             return true;
         }
 
-        /// <summary>过滤出可实际删除的条目：自建收录且磁盘上仍存在。</summary>
+        /// <summary>过滤出可删除处理的条目：自建收录的文件/文件夹；原文件缺失时仅清理收录记录。</summary>
         private List<AppInfo> DeletableEntries(List<AppInfo> apps)
         {
             List<AppInfo> valid = new List<AppInfo>();
@@ -2691,35 +2710,37 @@ namespace AppManager
                 if (!CanDeleteEntryDisk(a)) continue;
                 string p = a.TargetPath;
                 if (string.IsNullOrEmpty(p)) continue;
-                if (!File.Exists(p) && !Directory.Exists(p)) continue;   // 条目已失效
                 valid.Add(a);
             }
             return valid;
         }
 
         /// <summary>
-        /// 批量删除收录的文档/目录（磁盘文件进回收站，可恢复），并清理收录与归属配置后统一刷新。
+        /// 批量删除收录的文档/目录：仍存在的磁盘文件进回收站（可恢复），已缺失的条目仅清理收录与归属配置，最后统一刷新。
         /// 与键盘/行按钮的 DeleteAddedEntry（仅移除记录）区分：本方法删除磁盘文件本身。
         /// </summary>
         private void DeleteEntriesDisk(List<AppInfo> apps)
         {
             if (apps == null || apps.Count == 0) return;
             int deleted = 0;
+            int purged = 0;
             int failed = 0;
             for (int i = 0; i < apps.Count; i++)
             {
                 AppInfo a = apps[i];
                 if (a == null) continue;
+                bool exists = File.Exists(a.TargetPath) || Directory.Exists(a.TargetPath);
                 // 删除范围已在上一步确认；无回收站的位置按永久删除执行，绝不静默降级。
-                if (!Launcher.DeletePath(a.TargetPath, Launcher.CanUseRecycleBin(a.TargetPath)))
+                if (exists && !Launcher.DeletePath(a.TargetPath, Launcher.CanUseRecycleBin(a.TargetPath)))
                 {
                     failed++;
                     continue;
                 }
                 PurgeEntryConfig(a);
-                deleted++;
+                if (exists) deleted++;
+                else purged++;
             }
-            if (deleted == 0)
+            if (deleted + purged == 0)
             {
                 if (failed > 0)
                     MessageBox.Show("删除失败，文件可能正被占用或权限不足。", "删除",
@@ -2728,7 +2749,7 @@ namespace AppManager
             }
             if (!config.Save("physical.files.delete"))
             {
-                MessageBox.Show("删除记录未能保存，文件可能已进入回收站。\n" + config.DatabaseError,
+                MessageBox.Show("删除结果未能保存，磁盘文件可能已进入回收站。\n" + config.DatabaseError,
                     "删除", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             StartScan(false);

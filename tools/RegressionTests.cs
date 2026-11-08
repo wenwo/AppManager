@@ -141,6 +141,7 @@ namespace AppManager
                 Run("viewer delete cancel/failure and escape keep the viewer open", ViewerActionOutcomeKeepsViewer);
                 Run("viewer external deletion closes and removes the stale record", ViewerMissingResource);
                 Run("viewer closes without purging a valid resource outside the current list", ViewerResourceOutsideCurrentList);
+                Run("missing resources can be deleted from the context menu", MissingResourceDelete);
                 Run("viewer lazy submenu actions are wrapped before execution", ViewerLazySubmenuAction);
                 Run("confirm dialog follows escape/enter and round buttons respond to space", DialogKeyboard);
                 Run("scan cache drops XML-invalid control characters", ScanCacheInvalidXml);
@@ -5022,6 +5023,29 @@ namespace AppManager
                 ClickConfirmation(delegate { Invoke(form, "DeleteAddedEntry", inside); }, true);
                 Check(!config.Favorites.Contains(inside.Key) && !config.Hidden.Contains(inside.Key), "record delete left favorite/hidden behind");
                 Check(File.Exists(path), "record delete touched the disk file");
+            }
+        }
+
+        private static void MissingResourceDelete()
+        {
+            AppConfig config = RenameConfig("missing-resource-delete");
+            AppInfo first = AddEntry(config, "文档",
+                Path.Combine(config.ResourceStorePath, "文档", "gone-1.txt"), false, true, "gone-1");
+            AppInfo second = AddEntry(config, "文档",
+                Path.Combine(config.ResourceStorePath, "文档", "gone-2.txt"), false, true, "gone-2");
+            File.Delete(first.TargetPath);
+            File.Delete(second.TargetPath);
+
+            using (MainForm form = ResourceForm(config, "文档", first, second))
+            {
+                List<MenuWindow.MenuItem> items = (List<MenuWindow.MenuItem>)Invoke(form, "BuildContextMenu", first,
+                    new List<AppInfo> { first, second });
+                MenuWindow.MenuItem delete = FindMenuItem(items, "删除");
+                Check(delete != null && !delete.Disabled, "missing resources did not offer delete");
+                ClickConfirmation(delegate { delete.Action(); }, true);
+                Check(config.AddedItems.ByPath(first.TargetPath).Count == 0
+                    && config.AddedItems.ByPath(second.TargetPath).Count == 0,
+                    "missing resource delete kept the stale records");
             }
         }
 
