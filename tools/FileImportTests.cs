@@ -2,6 +2,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -30,6 +32,48 @@ namespace AppManager
             return batch;
         }
         private static ImportBatch Reload(ImportBatch batch) { return FileImport.Load(Path.Combine(batch.JournalDirectory, batch.Id + ".xml")); }
+        private static string HashFile(string path)
+        {
+            using (SHA256 sha = SHA256.Create()) return Convert.ToBase64String(sha.ComputeHash(File.ReadAllBytes(path)));
+        }
+        private static ImportItem StampedItem(string source, string target, bool linked)
+        {
+            File.WriteAllText(source, "original-content");
+            File.WriteAllText(target, "original-content");
+            File.SetLastWriteTimeUtc(target, File.GetLastWriteTimeUtc(source));
+            ImportItem item = new ImportItem { Source = source, Target = target, TargetId = FileImport.Identity(target) };
+            item.Files.Add(new ImportFileStamp { Relative = string.Empty, Length = new FileInfo(source).Length,
+                Modified = File.GetLastWriteTimeUtc(source).Ticks, Hash = HashFile(source), TargetId = item.TargetId, Linked = linked });
+            return item;
+        }
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool CreateHardLink(string newFileName, string existingFileName, IntPtr securityAttributes);
+        private static ImportItem LinkedStampedItem(string source, string target)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(source));
+            Directory.CreateDirectory(Path.GetDirectoryName(target));
+            File.WriteAllText(source, "original-content");
+            if (!CreateHardLink(target, source, IntPtr.Zero))
+                throw new IOException("hard link setup failed: " + Marshal.GetLastWin32Error());
+            ImportItem item = new ImportItem { Source = source, Target = target, TargetId = FileImport.Identity(target) };
+            item.Files.Add(new ImportFileStamp { Relative = string.Empty, Length = new FileInfo(source).Length,
+                Modified = File.GetLastWriteTimeUtc(source).Ticks, TargetId = item.TargetId, Linked = true });
+            return item;
+        }
+        private static ImportBatch JournalBatch(string id, ImportOperation operation, params ImportItem[] items)
+        {
+            ImportBatch batch = new ImportBatch { Id = id, JournalDirectory = Path.Combine(root, "journal-" + id),
+                Committed = true, Resource = true, Operation = operation, Category = "照片" };
+            batch.Items.AddRange(items);
+            FileImport.Save(batch);
+            return batch;
+        }
+        private static Dictionary<string, string> RegisteredExisting(List<string> paths)
+        {
+            Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (string path in paths) if (File.Exists(path)) result[path] = path;
+            return result;
+        }
         private sealed class FailingProbeSession : IMusicProbeSession
         {
             private readonly MusicProbeStatus status;
@@ -281,20 +325,22 @@ namespace AppManager
                         string keep1 = Path.Combine(live, "a.mp3");
                         string keep2 = Path.Combine(music, "b.flac");
                         string included = Path.Combine(scanRoot, "included.mp3");
+                        string pending = Path.Combine(scanRoot, "pending.mp3");
                         string excluded = Path.Combine(scanRoot, "excluded.mp3");
                         string tiny = Path.Combine(scanRoot, "tiny.mp3");
                         string cloud = Path.Combine(scanRoot, "cloud.mp3");
                         string common = Path.Combine(steamCommon, "game.mp3");
                         string program = Path.Combine(programData, "prompt.mp3");
                         WriteSized(keep1, 70000); WriteSized(keep2, 70000);
-                        WriteSized(included, 70000); WriteSized(excluded, 70000);
+                        WriteSized(included, 70000); WriteSized(pending, 70000); WriteSized(excluded, 70000);
                         WriteSized(tiny, 1024); WriteSized(cloud, 70000);
                         WriteSized(common, 70000); WriteSized(program, 70000);
                         File.SetAttributes(cloud, FileAttributes.Offline);
                         MusicScanRequest request = new MusicScanRequest
                         {
                             Roots = new List<string> { scanRoot },
-                            IncludedPaths = new List<string> { included },
+                            IncludedPaths = new List<string> { included, pending },
+                            PendingCleanupPaths = new List<string> { pending },
                             ExcludedPaths = new List<string> { excluded },
                             ExtensionOnly = true
                         };
@@ -302,6 +348,8 @@ namespace AppManager
                         Check(result.Files.Contains(keep1) && result.Files.Contains(keep2), "safe music directory was skipped");
                         Check(result.AcceptedBytes == 140000, "accepted bytes: " + result.AcceptedBytes);
                         Check(!result.Files.Contains(included) && result.CountOf(MusicFilterReason.AlreadyIncluded) == 1, "included source was not skipped");
+                        Check(!result.Files.Contains(pending) && result.CountOf(MusicFilterReason.AlreadyIncludedPendingCleanup) == 1,
+                            "pending cleanup source was not reported separately");
                         Check(!result.Files.Contains(excluded) && result.CountOf(MusicFilterReason.Excluded) == 1, "excluded source was not skipped");
                         Check(!result.Files.Contains(tiny) && result.CountOf(MusicFilterReason.TooSmall) == 1, "small file was not skipped");
                         Check(!result.Files.Contains(cloud) && result.CloudFiles == 1, "cloud placeholder was not skipped");
@@ -491,6 +539,81 @@ namespace AppManager
                     }, null);
                     Check(batch.Items.All(i => !File.Exists(i.Source) && File.Exists(i.Target) && i.State == FileImport.Moved), "move");
                 });
+                Test("partial move cleanup deletes successful sources without detaching links", delegate
+                {
+                    ImportBatch batch = Batch(ImportOperation.Move, "a.txt", "b.txt");
+                    batch.DeleteSuccessfulSourcesOnPartial = true;
+                    File.Delete(batch.Items[1].Source);
+                    Run(batch);
+                    Check(batch.Committed && batch.DeleteAuthorized, "partial cleanup not authorized");
+                    Check(batch.Items[0].State == FileImport.Moved && !File.Exists(batch.Items[0].Source) && File.Exists(batch.Items[0].Target),
+                        "successful item was not moved");
+                    Check(batch.Items[0].Files[0].Linked, "successful hard link was detached");
+                    Check(batch.Items[1].State == FileImport.Failed, "failed item state changed");
+                    Check(!Directory.GetFiles(Path.GetDirectoryName(batch.Items[0].Target), "*.detach-*", SearchOption.AllDirectories).Any(),
+                        "partial cleanup created a detached copy");
+                    Check(Reload(batch).DeleteSuccessfulSourcesOnPartial, "new option was not persisted");
+                });
+                Test("partial cleanup recovery keeps successful links and detaches retained failures", delegate
+                {
+                    string dir = Path.Combine(root, "recover-partial-cleanup");
+                    Directory.CreateDirectory(dir);
+                    ImportItem copied = LinkedStampedItem(Path.Combine(dir, "copied-source.jpg"), Path.Combine(dir, "copied-target.jpg"));
+                    copied.State = FileImport.Copied;
+                    ImportItem deleteFailedItem = LinkedStampedItem(Path.Combine(dir, "failed-source.jpg"), Path.Combine(dir, "failed-target.jpg"));
+                    deleteFailedItem.State = FileImport.DeleteFailed;
+                    ImportBatch batch = JournalBatch("recover-partial-cleanup", ImportOperation.Move, copied, deleteFailedItem);
+                    batch.DeleteSuccessfulSourcesOnPartial = true;
+                    batch.DeleteAuthorized = true;
+                    FileImport.Save(batch);
+
+                    ImportBatch restored = Reload(batch);
+                    FileImport.Recover(restored, true);
+                    Check(FileImport.Identity(copied.Source) == FileImport.Identity(copied.Target),
+                        "successful hard link was detached during recovery");
+                    Check(FileImport.Identity(deleteFailedItem.Source) != FileImport.Identity(deleteFailedItem.Target),
+                        "retained failure was left sharing a hard link");
+                    Check(restored.Items[0].State == FileImport.Copied && File.Exists(copied.Source),
+                        "successful source was removed during recovery");
+
+                    FileImport.DeleteSources(restored);
+                    Check(!File.Exists(copied.Source) && !File.Exists(deleteFailedItem.Source), "source deletion retry did not finish");
+                    Check(File.Exists(copied.Target) && File.Exists(deleteFailedItem.Target) && restored.Items.All(i => i.State == FileImport.Moved),
+                        "target or state changed after deletion retry");
+                });
+                Test("cleanup option defaults false and persists when selected", delegate
+                {
+                    ImportBatch defaults = Batch(ImportOperation.Copy, "a.txt");
+                    Check(!defaults.DeleteSuccessfulSourcesOnPartial, "cleanup option defaulted true");
+                    FileImport.Save(defaults);
+                    Check(!Reload(defaults).DeleteSuccessfulSourcesOnPartial, "cleanup option default was not preserved");
+                    ImportBatch selected = Batch(ImportOperation.Move, "b.txt");
+                    selected.DeleteSuccessfulSourcesOnPartial = true;
+                    FileImport.Save(selected);
+                    Check(Reload(selected).DeleteSuccessfulSourcesOnPartial, "cleanup option selection was not persisted");
+                });
+                Test("scan result defaults to cancel before the user chooses", delegate
+                {
+                    LocalScanResultDecision decision = new LocalScanResultDecision();
+                    Check(decision.Action == LocalScanResultAction.Cancel, "scan result defaulted to import");
+                    Check(decision.Operation == ImportOperation.Copy, "scan result defaulted to a destructive operation");
+                });
+                Test("copy never deletes sources even with partial cleanup flag", delegate
+                {
+                    ImportBatch batch = Batch(ImportOperation.Copy, "a.txt");
+                    batch.DeleteSuccessfulSourcesOnPartial = true;
+                    Run(batch);
+                    Check(File.Exists(batch.Items[0].Source) && File.Exists(batch.Items[0].Target), "copy lost a source or target");
+                    Check(batch.Items[0].State == FileImport.Copied && !batch.DeleteAuthorized, "copy authorized source deletion");
+                });
+                Test("cancelled partial cleanup keeps every source", delegate
+                {
+                    ImportBatch batch = Batch(ImportOperation.Move, "a.txt", "b.txt");
+                    batch.DeleteSuccessfulSourcesOnPartial = true;
+                    using (CancellationTokenSource cancel = new CancellationTokenSource())
+                        FileImport.Run(batch, delegate { return true; }, delegate(int index, string name) { if (index == 1) cancel.Cancel(); }, cancel.Token);
+                    Check(batch.Items.All(i => File.Exists(i.Source)) && !batch.DeleteAuthorized, "cancelled batch deleted a source");
+                });
                 Test("one missing source prevents deletion of whole batch", delegate
                 {
                     ImportBatch batch = Batch(ImportOperation.Move, "a.txt", "b.txt"); File.Delete(batch.Items[1].Source); Run(batch);
@@ -515,6 +638,162 @@ namespace AppManager
                     FileImport.Run(batch, delegate { return false; }, null); FileImport.DeleteSources(Reload(batch));
                     Check(batch.Items.All(i => File.Exists(i.Source) && !File.Exists(i.Target) && i.State == FileImport.RolledBack), "database failure");
                     Check(!File.Exists(Path.Combine(batch.JournalDirectory, batch.Id + ".pending")) && Reload(batch).Finished, "journal not finished");
+                });
+                Test("journal reuse validates source and status before skipping a file", delegate
+                {
+                    string copyDir = Path.Combine(root, "reuse-copy"); Directory.CreateDirectory(copyDir);
+                    string copySource = Path.Combine(copyDir, "source.jpg"), copyTarget = Path.Combine(copyDir, "target.jpg");
+                    ImportItem copyItem = StampedItem(copySource, copyTarget, false);
+                    copyItem.State = FileImport.Copied;
+                    ImportBatch copyBatch = JournalBatch("reuse-copy", ImportOperation.Copy, copyItem);
+                    Dictionary<string, LocalMediaImportTarget> copied = LocalMediaScanner.CompletedImportTargets(
+                        copyBatch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(copied.ContainsKey(copySource) && copied[copySource].Target == copyTarget && !copied[copySource].PendingCleanup,
+                        "unchanged copied source was not reused");
+
+                    string failedDir = Path.Combine(root, "reuse-failed"); Directory.CreateDirectory(failedDir);
+                    string failedSource = Path.Combine(failedDir, "source.jpg"), failedTarget = Path.Combine(failedDir, "target.jpg");
+                    ImportItem failedItem = StampedItem(failedSource, failedTarget, false);
+                    failedItem.State = FileImport.DeleteFailed;
+                    ImportBatch failedBatch = JournalBatch("reuse-failed", ImportOperation.Move, failedItem);
+                    Dictionary<string, LocalMediaImportTarget> failedMap = LocalMediaScanner.CompletedImportTargets(
+                        failedBatch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(failedMap.ContainsKey(failedSource) && failedMap[failedSource].PendingCleanup, "delete-failed residue was not reported");
+                    LocalMediaScanResult pendingResult = LocalMediaScanner.Scan("照片", new[] { failedDir }, null, failedMap, null,
+                        CancellationToken.None);
+                    Check(pendingResult.Reused == 1 && pendingResult.CleanupPending == 1,
+                        "media scan falsely reported a pending source as cleaned");
+
+                    DateTime modified = File.GetLastWriteTimeUtc(failedSource);
+                    File.WriteAllText(failedSource, "changed-content!");
+                    File.SetLastWriteTimeUtc(failedSource, modified);
+                    failedMap = LocalMediaScanner.CompletedImportTargets(failedBatch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(!failedMap.ContainsKey(failedSource), "modified delete-failed source was reused");
+
+                    string movedDir = Path.Combine(root, "reuse-moved"); Directory.CreateDirectory(movedDir);
+                    string movedSource = Path.Combine(movedDir, "source.jpg"), movedTarget = Path.Combine(movedDir, "target.jpg");
+                    ImportItem movedItem = StampedItem(movedSource, movedTarget, false);
+                    movedItem.State = FileImport.Moved;
+                    ImportBatch movedBatch = JournalBatch("reuse-moved", ImportOperation.Move, movedItem);
+                    Dictionary<string, LocalMediaImportTarget> moved = LocalMediaScanner.CompletedImportTargets(
+                        movedBatch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(!moved.ContainsKey(movedSource), "new file at a moved source path was reused");
+
+                    string legacyDir = Path.Combine(root, "reuse-legacy"); Directory.CreateDirectory(legacyDir);
+                    string legacySource = Path.Combine(legacyDir, "source.jpg"), legacyTarget = Path.Combine(legacyDir, "target.jpg");
+                    File.WriteAllText(legacySource, "legacy"); File.WriteAllText(legacyTarget, "legacy");
+                    ImportBatch legacyBatch = JournalBatch("reuse-legacy", ImportOperation.Copy,
+                        new ImportItem { Source = legacySource, Target = legacyTarget, State = FileImport.Copied });
+                    Dictionary<string, LocalMediaImportTarget> legacy = LocalMediaScanner.CompletedImportTargets(
+                        legacyBatch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(!legacy.ContainsKey(legacySource), "record without verification stamps was reused");
+
+                    string combinedDir = Path.Combine(root, "journal-combined"); Directory.CreateDirectory(combinedDir);
+                    string combinedSource = Path.Combine(combinedDir, "source.jpg"), combinedTarget = Path.Combine(combinedDir, "target.jpg");
+                    ImportItem oldCopyItem = StampedItem(combinedSource, combinedTarget, false);
+                    oldCopyItem.State = FileImport.Copied;
+                    ImportBatch oldCopyBatch = new ImportBatch { Id = "combined-old", JournalDirectory = combinedDir,
+                        Committed = true, Resource = true, Operation = ImportOperation.Copy, Category = "照片" };
+                    oldCopyBatch.Items.Add(oldCopyItem); FileImport.Save(oldCopyBatch);
+                    File.SetLastWriteTimeUtc(Path.Combine(combinedDir, "combined-old.xml"), DateTime.UtcNow.AddMinutes(-1));
+                    ImportBatch laterMovedBatch = new ImportBatch { Id = "combined-new", JournalDirectory = combinedDir,
+                        Committed = true, Resource = true, Operation = ImportOperation.Move, Category = "照片" };
+                    laterMovedBatch.Items.Add(new ImportItem { Source = combinedSource, Target = combinedTarget, State = FileImport.Moved });
+                    FileImport.Save(laterMovedBatch);
+                    Dictionary<string, LocalMediaImportTarget> combined = LocalMediaScanner.CompletedImportTargets(
+                        combinedDir, RegisteredExisting, CancellationToken.None);
+                    Check(!combined.ContainsKey(combinedSource), "older copy record survived a later completed move");
+                });
+                Test("completed hard-link move reuse rejects a replacement source", delegate
+                {
+                    string dir = Path.Combine(root, "reuse-linked-identity"); Directory.CreateDirectory(dir);
+                    string source = Path.Combine(dir, "source.jpg"), target = Path.Combine(dir, "target.jpg");
+                    ImportItem item = LinkedStampedItem(source, target);
+                    item.State = FileImport.DeleteFailed;
+                    ImportBatch batch = JournalBatch("reuse-linked-identity", ImportOperation.Move, item);
+                    Dictionary<string, LocalMediaImportTarget> imported = LocalMediaScanner.CompletedImportTargets(
+                        batch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(imported.ContainsKey(source) && imported[source].PendingCleanup,
+                        "unchanged hard-link residue was not reused");
+
+                    DateTime modified = File.GetLastWriteTimeUtc(source);
+                    string content = File.ReadAllText(source);
+                    File.Delete(source);
+                    File.WriteAllText(source, content);
+                    File.SetLastWriteTimeUtc(source, modified);
+                    imported = LocalMediaScanner.CompletedImportTargets(batch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(!imported.ContainsKey(source), "replacement source at a hard-link move path was reused");
+                });
+                Test("completed copy reuse follows a renamed target before validation", delegate
+                {
+                    string dir = Path.Combine(root, "reuse-renamed-target"); Directory.CreateDirectory(dir);
+                    string source = Path.Combine(dir, "source.jpg"), target = Path.Combine(dir, "target.jpg");
+                    string renamed = Path.Combine(dir, "renamed.jpg");
+                    ImportItem item = StampedItem(source, target, false);
+                    item.State = FileImport.Copied;
+                    ImportBatch batch = JournalBatch("reuse-renamed-target", ImportOperation.Copy, item);
+                    File.Move(target, renamed);
+                    Func<List<string>, Dictionary<string, string>> registered = delegate(List<string> paths)
+                    {
+                        Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (string path in paths)
+                            if (string.Equals(path, source, StringComparison.OrdinalIgnoreCase)) result[path] = renamed;
+                        return result;
+                    };
+                    Dictionary<string, LocalMediaImportTarget> imported = LocalMediaScanner.CompletedImportTargets(
+                        batch.JournalDirectory, registered, CancellationToken.None);
+                    Check(imported.ContainsKey(source) && imported[source].Target == renamed && !imported[source].PendingCleanup,
+                        "renamed copy target was not reused");
+                });
+                Test("file system access failures are ignored instead of aborting reuse", delegate
+                {
+                    string dir = Path.Combine(root, "reuse-locked-source"); Directory.CreateDirectory(dir);
+                    string source = Path.Combine(dir, "source.jpg"), target = Path.Combine(dir, "target.jpg");
+                    ImportItem item = StampedItem(source, target, false);
+                    item.State = FileImport.DeleteFailed;
+                    ImportBatch batch = JournalBatch("reuse-locked-source", ImportOperation.Move, item);
+                    using (new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.None))
+                    {
+                        Dictionary<string, LocalMediaImportTarget> imported = LocalMediaScanner.CompletedImportTargets(
+                            batch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                        Check(imported.Count == 0, "locked source was reused or aborted the scan");
+                    }
+
+                    System.Reflection.MethodInfo classify = typeof(LocalMediaScanner).GetMethod("IsFileSystemError",
+                        System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic);
+                    Check(classify != null, "file system error classifier is missing");
+                    Check((bool)classify.Invoke(null, new object[] { new System.ComponentModel.Win32Exception(5) }),
+                        "Win32 target access failure must be treated as unreusable");
+                    Check((bool)classify.Invoke(null, new object[] { new IOException("sharing violation") }),
+                        "I/O target access failure must be treated as unreusable");
+                    Check((bool)classify.Invoke(null, new object[] { new UnauthorizedAccessException("denied") }),
+                        "access denied must be treated as unreusable");
+                    Check(!(bool)classify.Invoke(null, new object[] { new InvalidOperationException("bug") }),
+                        "unexpected failures must still abort the scan");
+                });
+                Test("move residue without a source hash is not reused", delegate
+                {
+                    string dir = Path.Combine(root, "reuse-missing-hash"); Directory.CreateDirectory(dir);
+                    string source = Path.Combine(dir, "source.jpg"), target = Path.Combine(dir, "target.jpg");
+                    ImportItem item = StampedItem(source, target, false);
+                    item.State = FileImport.DeleteFailed;
+                    item.Files[0].Hash = null;
+                    ImportBatch batch = JournalBatch("reuse-missing-hash", ImportOperation.Move, item);
+                    Dictionary<string, LocalMediaImportTarget> imported = LocalMediaScanner.CompletedImportTargets(
+                        batch.JournalDirectory, RegisteredExisting, CancellationToken.None);
+                    Check(!imported.ContainsKey(source), "move residue without a hash was reused");
+                });
+                Test("every 500-item media import plan keeps the selected operation and cleanup flag", delegate
+                {
+                    List<string> paths = Enumerable.Range(0, 1001).Select(i => "item-" + i).ToList();
+                    List<LocalMediaImportPlan> movePlans = LocalMediaScanner.PlanImports(paths, ImportOperation.Move, 500);
+                    List<LocalMediaImportPlan> copyPlans = LocalMediaScanner.PlanImports(paths, ImportOperation.Copy, 500);
+                    Check(movePlans.Count == 3 && movePlans[0].Paths.Length == 500 && movePlans[1].Paths.Length == 500
+                        && movePlans[2].Paths.Length == 1, "media batch boundary changed");
+                    Check(movePlans.All(p => p.Operation == ImportOperation.Move && p.DeleteSuccessfulSourcesOnPartial),
+                        "move cleanup flag was not carried by every batch");
+                    Check(copyPlans.All(p => p.Operation == ImportOperation.Copy && !p.DeleteSuccessfulSourcesOnPartial),
+                        "copy plan requested source deletion");
                 });
                 Test("source changed after copy is never deleted", delegate
                 {

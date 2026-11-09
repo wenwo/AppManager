@@ -79,7 +79,8 @@ namespace AppManager
                                 {
                                     try
                                     {
-                                        Dictionary<string, string> previous = LocalMediaScanner.CompletedImportTargets(ImportJournal, registered, cancel.Token);
+                                        Dictionary<string, LocalMediaImportTarget> previous =
+                                            LocalMediaScanner.CompletedImportTargets(ImportJournal, registered, cancel.Token);
                                         int lastUpdate = Environment.TickCount;
                                         result = LocalMediaScanner.Scan(category, roots, exclusions, previous, delegate(LocalMediaScanProgress value)
                                         {
@@ -113,33 +114,34 @@ namespace AppManager
                     if (failure != null)
                     {
                         Paths.LogError(new IOException("扫描本机" + noun + "失败。", failure));
-                        LocalScanResultAction action = LocalScanResultDialog.Show(this, scanTitle,
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, scanTitle,
                             "扫描失败，尚未收录或创建年份集合，源文件未改动。\n\n" + failure.Message, null, false);
-                        if (action == LocalScanResultAction.Retry) continue;
+                        if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
                     if (result == null)
                     {
-                        LocalScanResultAction action = LocalScanResultDialog.Show(this, scanTitle,
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, scanTitle,
                             "扫描未返回结果，尚未收录或创建年份集合。", null, false);
-                        if (action == LocalScanResultAction.Retry) continue;
+                        if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
 
                     string summary = BuildLocalMediaScanSummary(result, noun, unit, metadataHint);
-                    LocalScanResultAction decision = LocalScanResultDialog.Show(this, scanTitle, summary,
-                        "开始收录", result.Count > 0);
-                    if (decision == LocalScanResultAction.Retry) continue;
-                    if (decision != LocalScanResultAction.Import || result.Count == 0) return;
+                    LocalScanResultDecision importDecision = LocalScanResultDialog.Show(this, scanTitle, summary,
+                        "开始收录", result.Count > 0, result.Count > result.Reused);
+                    if (importDecision.Action == LocalScanResultAction.Retry) continue;
+                    if (importDecision.Action != LocalScanResultAction.Import || result.Count == 0) return;
                     if (!EnsureLocalMediaCollections(category, noun, result.Years.Keys)) return;
 
                     foreach (KeyValuePair<int, List<string>> year in result.Years.OrderByDescending(pair => pair.Key))
                     {
                         string collection = CollectionKeys.Make(category, year.Key + "年");
-                        for (int offset = 0; offset < year.Value.Count; offset += LocalMediaImportBatchSize)
+                        foreach (LocalMediaImportPlan plan in LocalMediaScanner.PlanImports(year.Value, importDecision.Operation,
+                            LocalMediaImportBatchSize))
                         {
-                            string[] paths = year.Value.GetRange(offset, Math.Min(LocalMediaImportBatchSize, year.Value.Count - offset)).ToArray();
-                            QueueImport(paths, ImportOperation.Copy, category, collection, true, 0, null, LocalMediaCopyBytesPerSecond);
+                            QueueImport(plan.Paths, plan.Operation, category, collection, true, 0, null,
+                                LocalMediaCopyBytesPerSecond, false, plan.DeleteSuccessfulSourcesOnPartial);
                         }
                     }
                     RefreshGrid();
@@ -172,6 +174,9 @@ namespace AppManager
                 .Append(" ").Append(unit).Append("，云端未下载 ").Append(result.CloudFiles).Append(" ").Append(unit).Append("。");
             text.Append("\n预计复制 ").Append(FormatLocalMediaBytes(result.CopyBytes));
             if (result.Reused > 0) text.Append("；另复用 ").Append(FormatLocalMediaBytes(result.Bytes - result.CopyBytes));
+            if (result.CleanupPending > 0)
+                text.Append("\n已收录复用中有 ").Append(result.CleanupPending)
+                    .Append(" 个原文件仍存在（上次移入未完成删源）；本次扫描不会删除，请在导入记录中重试“删除已入库项的源文件”。");
             if (result.UnreadableDirectories > 0 || result.ReadFailures > 0)
             {
                 text.Append("\n失败：").Append(result.UnreadableDirectories).Append(" 个不可读目录，")
@@ -184,7 +189,7 @@ namespace AppManager
                 }
                 text.Append("\n可先处理失败项，再选择“重新扫描”。");
             }
-            text.Append("\n\n将保留原").Append(noun).Append("，复制到当前已启用的资源存储位置；不会新增或修改存储位置。");
+            text.Append("\n\n导入时可选择移入资源库（成功项删源、失败项保留）或仅复制保留原件；不会新增或修改存储位置。");
             text.Append("\n").Append(metadataHint);
             text.Append("\n扫描最多约 100 ").Append(unit).Append("/秒，复制限速约 32 MB/s。");
             return text.ToString();
@@ -209,13 +214,23 @@ namespace AppManager
                 string databaseFile = config.Database.FilePath;
                 return paths => AddedEntryList.RegisteredPaths(databaseFile, paths);
             }
-            HashSet<string> snapshot = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> byPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> byOrigin = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (AddedEntry entry in config.AddedItems)
-                if (entry.IsResource && !string.IsNullOrEmpty(entry.Path)) snapshot.Add(entry.Path);
+            {
+                if (!entry.IsResource || string.IsNullOrEmpty(entry.Path)) continue;
+                byPath[entry.Path] = entry.Path;
+                if (!string.IsNullOrEmpty(entry.OriginPath) && !byOrigin.ContainsKey(entry.OriginPath))
+                    byOrigin[entry.OriginPath] = entry.Path;
+            }
             return delegate(List<string> paths)
             {
                 Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                foreach (string path in paths) if (snapshot.Contains(path)) result[path] = path;
+                foreach (string path in paths)
+                {
+                    string target;
+                    if (byPath.TryGetValue(path, out target) || byOrigin.TryGetValue(path, out target)) result[path] = target;
+                }
                 return result;
             };
         }

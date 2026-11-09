@@ -25,6 +25,7 @@ namespace AppManager
         public List<string> Roots;
         public List<string> ExcludedRoots = new List<string>();
         public List<string> IncludedPaths = new List<string>();
+        public List<string> PendingCleanupPaths = new List<string>();
         public List<string> ExcludedPaths = new List<string>();
         public List<string> MusicRoots = LocalMusicScanner.UserMusicRoots();
         public Func<IMusicProbeSession> ProbeFactory;
@@ -209,6 +210,7 @@ namespace AppManager
             HashSet<string> seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> queuedDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             HashSet<string> included = NormalizeSet(request.IncludedPaths);
+            HashSet<string> pendingCleanup = NormalizeSet(request.PendingCleanupPaths);
             HashSet<string> excluded = NormalizeSet(request.ExcludedPaths);
             List<string> excludedRoots = NormalizeList(request.ExcludedRoots);
             string dataDir = null;
@@ -278,7 +280,8 @@ namespace AppManager
                             result.AudioFilesFound++;
                             if (included.Contains(entry))
                             {
-                                result.Count(MusicFilterReason.AlreadyIncluded, entry);
+                                result.Count(pendingCleanup.Contains(entry)
+                                    ? MusicFilterReason.AlreadyIncludedPendingCleanup : MusicFilterReason.AlreadyIncluded, entry);
                                 continue;
                             }
                             if (excluded.Contains(entry))

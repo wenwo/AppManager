@@ -14,6 +14,12 @@ namespace AppManager
         Cancel
     }
 
+    internal sealed class LocalScanResultDecision
+    {
+        internal LocalScanResultAction Action = LocalScanResultAction.Cancel;
+        internal ImportOperation Operation = ImportOperation.Copy;
+    }
+
     /// <summary>
     /// 照片/视频/音乐共用的扫描范围选择窗口。磁盘列表在后台读取，文件夹选择留在 UI 线程。
     /// 只返回已校验、已去重并合并重叠项的根目录列表。
@@ -489,10 +495,10 @@ namespace AppManager
     /// <summary>扫描结果确认窗口：汇总、失败样例、重试和继续导入。</summary>
     internal static class LocalScanResultDialog
     {
-        internal static LocalScanResultAction Show(IWin32Window owner, string title, string summary,
-            string importText, bool canImport)
+        internal static LocalScanResultDecision Show(IWin32Window owner, string title, string summary,
+            string importText, bool canImport, bool hasNewItems = true)
         {
-            LocalScanResultAction action = LocalScanResultAction.Cancel;
+            LocalScanResultDecision decision = new LocalScanResultDecision();
             using (Form form = new BufferedDialogForm())
             {
                 form.Text = title;
@@ -502,7 +508,8 @@ namespace AppManager
                 form.MaximizeBox = false;
                 form.ControlBox = false;
                 form.ShowInTaskbar = false;
-                form.ClientSize = new Size(680, 470);
+                bool allowMove = canImport && hasNewItems;
+                form.ClientSize = new Size(680, allowMove ? 560 : 470);
                 form.BackColor = Theme.Background;
 
                 Label heading = new Label
@@ -518,7 +525,7 @@ namespace AppManager
                 {
                     Text = summary ?? string.Empty,
                     Location = new Point(20, 50),
-                    Size = new Size(640, 350),
+                    Size = new Size(640, allowMove ? 320 : 350),
                     Multiline = true,
                     ReadOnly = true,
                     ScrollBars = ScrollBars.Both,
@@ -528,26 +535,83 @@ namespace AppManager
                     Font = Theme.BodyFont
                 };
 
+                RadioButton move = null, copy = null;
+                Label warning = null;
+                if (allowMove)
+                {
+                    Label modeLabel = new Label
+                    {
+                        Text = "导入方式",
+                        AutoSize = true,
+                        Location = new Point(20, 380),
+                        Font = Theme.SectionTitleFont,
+                        ForeColor = Theme.TextPrimary
+                    };
+                    move = new RadioButton
+                    {
+                        Text = "移入资源库并清理原件（推荐：成功项删源，失败项保留）",
+                        AutoSize = true,
+                        Location = new Point(20, 404),
+                        Checked = true,
+                        ForeColor = Theme.TextPrimary
+                    };
+                    copy = new RadioButton
+                    {
+                        Text = "仅复制，保留原件",
+                        AutoSize = true,
+                        Location = new Point(20, 428),
+                        ForeColor = Theme.TextPrimary
+                    };
+                    warning = new Label
+                    {
+                        Text = "移入会在数据库提交并逐项校验后删除已成功的原文件，失败项保留。删除不进入回收站；可移动磁盘或同步目录中的删除会同步生效。",
+                        AutoSize = false,
+                        Location = new Point(20, 456),
+                        Size = new Size(640, 46),
+                        ForeColor = Theme.TextSecondary
+                    };
+                    form.Controls.AddRange(new Control[] { modeLabel, move, copy, warning });
+                }
+
+                int buttonY = allowMove ? 510 : 418;
                 Button cancel = StandardButton("取消");
-                cancel.Location = new Point(556, 418);
+                cancel.Location = new Point(556, buttonY);
                 cancel.Size = new Size(100, 30);
                 cancel.DialogResult = DialogResult.Cancel;
+                cancel.Click += delegate { decision.Action = LocalScanResultAction.Cancel; };
                 Button retry = StandardButton("重新扫描");
-                retry.Location = new Point(430, 418);
+                retry.Location = new Point(430, buttonY);
                 retry.Size = new Size(112, 30);
-                retry.Click += delegate { action = LocalScanResultAction.Retry; form.DialogResult = DialogResult.OK; form.Close(); };
+                retry.Click += delegate { decision.Action = LocalScanResultAction.Retry; form.DialogResult = DialogResult.OK; form.Close(); };
                 Button import = StandardButton(string.IsNullOrEmpty(importText) ? "继续" : importText);
-                import.Location = new Point(292, 418);
-                import.Size = new Size(124, 30);
-                import.Click += delegate { action = LocalScanResultAction.Import; form.DialogResult = DialogResult.OK; form.Close(); };
+                import.Location = new Point(220, buttonY);
+                import.Size = new Size(190, 30);
+                import.Click += delegate
+                {
+                    decision.Action = LocalScanResultAction.Import;
+                    decision.Operation = move != null && move.Checked ? ImportOperation.Move : ImportOperation.Copy;
+                    form.DialogResult = DialogResult.OK;
+                    form.Close();
+                };
                 import.Visible = canImport;
-                form.AcceptButton = canImport ? (IButtonControl)import : (IButtonControl)retry;
+                Action updateButtons = delegate
+                {
+                    bool destructive = allowMove && move != null && move.Checked;
+                    import.Text = destructive ? "开始移动并清理原件…"
+                        : (canImport && !hasNewItems ? "更新已收录归属" : (string.IsNullOrEmpty(importText) ? "继续" : importText));
+                    // 回车不触发永久删除；移入模式必须用鼠标或键盘焦点明确激活按钮。
+                    form.AcceptButton = canImport && !destructive ? (IButtonControl)import : null;
+                    if (warning != null) warning.Visible = destructive;
+                };
+                if (move != null) move.CheckedChanged += delegate { updateButtons(); };
+                if (copy != null) copy.CheckedChanged += delegate { updateButtons(); };
+                updateButtons();
                 form.CancelButton = cancel;
 
                 form.Controls.AddRange(new Control[] { heading, details, cancel, retry, import });
                 form.ShowDialog(owner);
             }
-            return action;
+            return decision;
         }
 
         private static Button StandardButton(string text)

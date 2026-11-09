@@ -8,6 +8,7 @@ namespace AppManager
     {
         Accepted,
         AlreadyIncluded,
+        AlreadyIncludedPendingCleanup,
         Excluded,
         TooSmall,
         CloudPlaceholder,

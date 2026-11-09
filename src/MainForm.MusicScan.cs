@@ -151,8 +151,8 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 扫描本机本地磁盘上的音频文件，按内容识别歌曲后复制到资源页「音乐」分类。
-        /// 已登记的同一路径由现有导入流程跳过重复入库；扫描只读，源文件保留。
+        /// 扫描本机本地磁盘上的音频文件，按内容识别歌曲后导入资源页「音乐」分类。
+        /// 扫描只读；是否在导入成功后清理原件由结果确认框决定。
         /// </summary>
         private void ScanLocalMusic()
         {
@@ -187,6 +187,7 @@ namespace AppManager
                     CancellationTokenSource cancel = new CancellationTokenSource();
                     localMusicScanCancel = cancel;
                     MusicScanRequest request = BuildLocalMusicScanRequest(roots);
+                    Func<List<string>, Dictionary<string, string>> registered = RegisteredMediaPathsForBackground();
                     LocalMusicScanResult result = null;
                     Exception failure = null;
                     bool canceled = false;
@@ -254,6 +255,15 @@ namespace AppManager
                                         if (cancel.IsCancellationRequested) return;
                                         request.ExtensionOnly = extensionOnly;
                                         request.ProbeFactory = extensionOnly ? null : new Func<IMusicProbeSession>(delegate { return new MpvAudioProbeSession(); });
+                                        Dictionary<string, LocalMediaImportTarget> previous = LocalMediaScanner.CompletedImportTargets(
+                                            ImportJournal, registered, cancel.Token);
+                                        HashSet<string> seenIncluded = new HashSet<string>(request.IncludedPaths, StringComparer.OrdinalIgnoreCase);
+                                        HashSet<string> seenPending = new HashSet<string>(request.PendingCleanupPaths, StringComparer.OrdinalIgnoreCase);
+                                        foreach (KeyValuePair<string, LocalMediaImportTarget> pair in previous)
+                                        {
+                                            AddMusicPath(request.IncludedPaths, seenIncluded, pair.Key);
+                                            if (pair.Value.PendingCleanup) AddMusicPath(request.PendingCleanupPaths, seenPending, pair.Key);
+                                        }
                                         int lastUpdate = Environment.TickCount - 250;
                                         result = LocalMusicScanner.Scan(request, cancel.Token, delegate(MusicScanProgress value)
                                         {
@@ -294,25 +304,25 @@ namespace AppManager
                     }
                     if (failure != null)
                     {
-                        LocalScanResultAction action = LocalScanResultDialog.Show(this, "扫描本机音乐",
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, "扫描本机音乐",
                             "扫描失败，未导入任何文件，源文件未改动。\n\n" + failure.Message, null, false);
-                        if (action == LocalScanResultAction.Retry) continue;
+                        if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
                     if (result == null)
                     {
-                        LocalScanResultAction action = LocalScanResultDialog.Show(this, "扫描本机音乐",
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, "扫描本机音乐",
                             "扫描未返回结果，未导入任何文件。", null, false);
-                        if (action == LocalScanResultAction.Retry) continue;
+                        if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
 
                     bool canImport = result.Files.Count > 0 || result.UnconfirmedCount > 0;
-                    LocalScanResultAction decision = LocalScanResultDialog.Show(this, "扫描本机音乐",
-                        BuildMusicScanSummary(result), "继续", canImport);
-                    if (decision == LocalScanResultAction.Retry) continue;
-                    if (decision != LocalScanResultAction.Import || !canImport) return;
-                    FinishLocalMusicScan(result);
+                    LocalScanResultDecision importDecision = LocalScanResultDialog.Show(this, "扫描本机音乐",
+                        BuildMusicScanSummary(result), "继续", canImport, canImport);
+                    if (importDecision.Action == LocalScanResultAction.Retry) continue;
+                    if (importDecision.Action != LocalScanResultAction.Import || !canImport) return;
+                    FinishLocalMusicScan(result, importDecision.Operation);
                     return;
                 }
             }
@@ -447,7 +457,7 @@ namespace AppManager
             catch (InvalidOperationException) { }
         }
 
-        private void FinishLocalMusicScan(LocalMusicScanResult result)
+        private void FinishLocalMusicScan(LocalMusicScanResult result, ImportOperation operation)
         {
             if (ActiveResourceStoreRoots().Count == 0)
             {
@@ -472,7 +482,8 @@ namespace AppManager
                 ShowNotice("未导入任何内容。");
                 return;
             }
-            QueueImport(import.ToArray(), ImportOperation.Copy, "音乐", null, true, 0, null, 0, true);
+            QueueImport(import.ToArray(), operation, "音乐", null, true, 0, null, 0, true,
+                operation == ImportOperation.Move);
         }
 
         private static string BuildMusicScanSummary(LocalMusicScanResult result)
@@ -488,6 +499,8 @@ namespace AppManager
             if (result.UnconfirmedBytes > 0)
                 text.Append("；若一并导入无法确认文件，另约 ").Append(LocalScanScope.FormatBytes(result.UnconfirmedBytes));
             AppendMusicReason(text, result, MusicFilterReason.AlreadyIncluded, "已收录跳过");
+            AppendMusicReason(text, result, MusicFilterReason.AlreadyIncludedPendingCleanup,
+                "已收录但原件待清理（请在导入记录中重试删源）");
             AppendMusicReason(text, result, MusicFilterReason.Excluded, "已排除跳过");
             AppendMusicReason(text, result, MusicFilterReason.TooSmall, "文件过小");
             AppendMusicReason(text, result, MusicFilterReason.CloudPlaceholder, "云端未下载");

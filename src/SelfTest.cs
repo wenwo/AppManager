@@ -1648,7 +1648,11 @@ namespace AppManager
                     Id = "photo-history", JournalDirectory = journal, Committed = true, Resource = true,
                     Category = "照片", Operation = ImportOperation.Copy
                 };
-                batch.Items.Add(new ImportItem { Source = previous, Target = previousTarget, State = FileImport.Copied });
+                ImportItem previousItem = new ImportItem { Source = previous, Target = previousTarget, State = FileImport.Copied,
+                    TargetId = FileImport.Identity(previousTarget) };
+                previousItem.Files.Add(new ImportFileStamp { Relative = string.Empty, Length = new FileInfo(previous).Length,
+                    Modified = File.GetLastWriteTimeUtc(previous).Ticks, TargetId = previousItem.TargetId });
+                batch.Items.Add(previousItem);
                 batch.Items.Add(new ImportItem { Source = fallback, Target = Path.Combine(store, "missing.jpg"), State = FileImport.Copied });
                 FileImport.Save(batch);
                 Func<List<string>, Dictionary<string, string>> registered = delegate(List<string> paths)
@@ -1658,7 +1662,7 @@ namespace AppManager
                         if (string.Equals(path, previousTarget, StringComparison.OrdinalIgnoreCase)) registeredPaths[path] = path;
                     return registeredPaths;
                 };
-                Dictionary<string, string> imported = LocalMediaScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
+                Dictionary<string, LocalMediaImportTarget> imported = LocalMediaScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
 
                 LocalMediaScanResult result = LocalMediaScanner.Scan("照片", new[] { root, nested }, new[] { store }, imported,
                     null, CancellationToken.None);
@@ -1666,6 +1670,7 @@ namespace AppManager
                     && result.Years[2020].Count == 2 && result.Years[2024].Count == 1
                     && result.Years[2020].Contains(previousTarget)
                     && result.CloudFiles == 1
+                    && result.CleanupPending == 0
                     && result.CopyBytes == result.Bytes - new FileInfo(previous).Length
                     && File.Exists(exif) && File.Exists(fallback) && File.Exists(previous);
 
@@ -1747,6 +1752,7 @@ namespace AppManager
                 File.SetLastWriteTime(previous, new DateTime(2022, 3, 4, 5, 6, 7));
                 string previousTarget = Path.Combine(store, "registered.mp4");
                 File.Copy(mp4, previousTarget);
+                File.SetLastWriteTime(previousTarget, File.GetLastWriteTime(previous));
                 string cloud = Path.Combine(root, "cloud.mp4");
                 File.Copy(mp4, cloud);
                 File.SetAttributes(cloud, FileAttributes.Offline);
@@ -1757,7 +1763,11 @@ namespace AppManager
                     Id = "video-history", JournalDirectory = journal, Committed = true, Resource = true,
                     Category = "视频", Operation = ImportOperation.Copy
                 };
-                batch.Items.Add(new ImportItem { Source = previous, Target = previousTarget, State = FileImport.Copied });
+                ImportItem previousItem = new ImportItem { Source = previous, Target = previousTarget, State = FileImport.Copied,
+                    TargetId = FileImport.Identity(previousTarget) };
+                previousItem.Files.Add(new ImportFileStamp { Relative = string.Empty, Length = new FileInfo(previous).Length,
+                    Modified = File.GetLastWriteTimeUtc(previous).Ticks, TargetId = previousItem.TargetId });
+                batch.Items.Add(previousItem);
                 FileImport.Save(batch);
                 Func<List<string>, Dictionary<string, string>> registered = delegate(List<string> paths)
                 {
@@ -1766,13 +1776,14 @@ namespace AppManager
                         if (string.Equals(path, previousTarget, StringComparison.OrdinalIgnoreCase)) registeredPaths[path] = path;
                     return registeredPaths;
                 };
-                Dictionary<string, string> imported = LocalMediaScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
+                Dictionary<string, LocalMediaImportTarget> imported = LocalMediaScanner.CompletedImportTargets(journal, registered, CancellationToken.None);
                 LocalMediaScanResult result = LocalMediaScanner.Scan("视频", new[] { root, nested }, new[] { store }, imported,
                     null, CancellationToken.None);
                 bool normal = result.Count == 3 && result.Reused == 1
                     && result.Years[2022].Count == 2 && result.Years[2020].Count == 1
                     && result.Years[2022].Contains(previousTarget)
                     && result.CloudFiles == 1
+                    && result.CleanupPending == 0
                     && result.CopyBytes == result.Bytes - new FileInfo(previous).Length
                     && File.Exists(mp4) && File.Exists(mkv) && File.Exists(previous);
 

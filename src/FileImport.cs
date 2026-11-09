@@ -55,6 +55,8 @@ namespace AppManager
         public string Id = Guid.NewGuid().ToString("N"), Category, Collection, Error;
         public bool Resource, Committed, DeleteAuthorized, Finished, SpaceLimited, Stopped;
         public bool PreserveCategoryExclusions;
+        // 本地批量整理显式选择“移入”后：成功项删源、失败项保留；普通导入默认 false。
+        public bool DeleteSuccessfulSourcesOnPartial;
         public ImportOperation Operation;
         public int CopyBytesPerSecond;
         public List<ImportItem> Items = new List<ImportItem>();
@@ -986,9 +988,10 @@ namespace AppManager
         // ===== 撤回与恢复 =====
 
         // 仅保源异常路径复制数据；正常同卷移动保持零数据复制。
-        private static void DetachRetained(ImportBatch batch, CancellationToken cancel = default(CancellationToken))
+        private static void DetachRetained(ImportBatch batch, CancellationToken cancel = default(CancellationToken), bool deleteFailedOnly = false)
         {
-            foreach (ImportItem item in batch.Items.Where(i => !i.Reference && (i.State == Copied || i.State == DeleteFailed)))
+            foreach (ImportItem item in batch.Items.Where(i => !i.Reference && (i.State == Copied || i.State == DeleteFailed)
+                && (!deleteFailedOnly || i.State == DeleteFailed)))
             {
                 foreach (ImportFileStamp stamp in item.Files.Where(f => f.Linked && !f.Deleted))
                 {
@@ -1195,7 +1198,12 @@ namespace AppManager
                 if (item.Files.Any(f => !string.IsNullOrEmpty(f.DetachedPath)))
                     item.Error = "上次分离共享链接时中断；请核对保留副本：" + string.Join("、", item.Files.Where(f => !string.IsNullOrEmpty(f.DetachedPath)).Select(f => f.DetachedPath));
             }
-            if (batch.Committed) DetachRetained(batch);
+            if (batch.Committed)
+            {
+                // 部分清理批次保留成功项的硬链接，等待导入记录重试删源；仅分离确实保留源的失败项。
+                bool partialCleanup = batch.Operation == ImportOperation.Move && batch.DeleteSuccessfulSourcesOnPartial;
+                DetachRetained(batch, default(CancellationToken), partialCleanup);
+            }
             Finish(batch);
         }
 
@@ -1205,12 +1213,16 @@ namespace AppManager
             Save(batch); // 不能持久化任务时，不开始文件 IO。
             File.WriteAllText(Marker(batch), string.Empty);
             CopyAll(batch, progress, cancel);
+            bool deleteSuccessfulSources = batch.Operation == ImportOperation.Move
+                && batch.DeleteSuccessfulSourcesOnPartial && !cancel.IsCancellationRequested;
             if (batch.Operation == ImportOperation.Move && cancel.IsCancellationRequested) WithdrawLinkedOnCancel(batch);
             if (batch.Operation == ImportOperation.Move && (cancel.IsCancellationRequested || batch.Items.Any(i => i.State == Failed)))
-                DetachRetained(batch, cancel);
+                DetachRetained(batch, cancel, deleteSuccessfulSources);
             try { batch.Committed = commit(batch); }
             catch (Exception ex) { batch.Committed = false; batch.Error = "入库记录保存失败：" + ex.Message; }
-            batch.DeleteAuthorized = batch.Committed && batch.Items.All(i => i.State == Copied || i.State == Linked || i.State == Skipped);
+            batch.DeleteAuthorized = batch.Committed && batch.Operation == ImportOperation.Move && !cancel.IsCancellationRequested
+                && (batch.DeleteSuccessfulSourcesOnPartial
+                    || batch.Items.All(i => i.State == Copied || i.State == Linked || i.State == Skipped));
             if (!batch.Committed)
             {
                 Rollback(batch);

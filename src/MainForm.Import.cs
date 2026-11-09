@@ -415,15 +415,16 @@ namespace AppManager
         }
 
         private void QueueImport(string[] paths, ImportOperation operation, string category, string collection, bool resource, uint sequence,
-            Action<ImportBatch> completed = null, int copyBytesPerSecond = 0, bool preserveCategoryExclusions = false)
+            Action<ImportBatch> completed = null, int copyBytesPerSecond = 0, bool preserveCategoryExclusions = false,
+            bool deleteSuccessfulSourcesOnPartial = false)
         {
             QueueImportWithCancellation(paths, operation, category, collection, resource, sequence, completed, importCancel.Token,
-                copyBytesPerSecond, preserveCategoryExclusions);
+                copyBytesPerSecond, preserveCategoryExclusions, deleteSuccessfulSourcesOnPartial);
         }
 
         private void QueueImportWithCancellation(string[] paths, ImportOperation operation, string category, string collection, bool resource,
             uint sequence, Action<ImportBatch> completed, CancellationToken cancel, int copyBytesPerSecond = 0,
-            bool preserveCategoryExclusions = false)
+            bool preserveCategoryExclusions = false, bool deleteSuccessfulSourcesOnPartial = false)
         {
             // 目标与动作均在投放/粘贴时冻结；存储目录也在此算好（只读配置、不建目录）。
             // 路径归属、文件夹内收录检查等预处理放进导入队列在后台执行，批量拖入几千个文件时不卡界面；
@@ -441,6 +442,7 @@ namespace AppManager
                         RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
                 prepared.CopyBytesPerSecond = copyBytesPerSecond;
                 prepared.PreserveCategoryExclusions = preserveCategoryExclusions;
+                prepared.DeleteSuccessfulSourcesOnPartial = deleteSuccessfulSourcesOnPartial && operation == ImportOperation.Move;
                 if (prepared.Items.Count == 0) { if (completed != null) completed(prepared); return; }
                 EnqueueImport(delegate { RunPreparedImport(prepared, activeRoots, completed, cancel); });
                 return;
@@ -475,6 +477,7 @@ namespace AppManager
                 }
                 prepared.CopyBytesPerSecond = copyBytesPerSecond;
                 prepared.PreserveCategoryExclusions = preserveCategoryExclusions;
+                prepared.DeleteSuccessfulSourcesOnPartial = deleteSuccessfulSourcesOnPartial && operation == ImportOperation.Move;
                 if (prepared.Items.Count == 0) { RunOnUi(delegate { if (completed != null) completed(prepared); }); return; }
                 RunPreparedImport(prepared, activeRoots, completed, cancel);
             });
@@ -822,7 +825,12 @@ namespace AppManager
                 {
                     if (list.SelectedIndex < 0 || list.SelectedIndex >= batches.Count) { retry.Enabled = false; return; }
                     ImportBatch batch = batches[list.SelectedIndex];
-                    details.Text = (batch.Error ?? "") + "\r\n" + string.Join("\r\n\r\n", batch.Items.Select(i => i.State + "：" + i.Source + "\r\n目标：" + i.Target + (string.IsNullOrEmpty(i.Error) ? "" : "\r\n" + i.Error)));
+                    string retryHint = batch.Items.Any(i => i.State == FileImport.DeleteFailed)
+                        ? "可重试删除已入库项的源文件；复制失败项需重新扫描或重新导入。"
+                        : batch.Items.Any(i => i.State == FileImport.Failed)
+                            ? "复制失败项需重新扫描或重新导入；本记录不能重试复制。" : "";
+                    details.Text = (batch.Error ?? "") + "\r\n" + string.Join("\r\n\r\n", batch.Items.Select(i => i.State + "：" + i.Source + "\r\n目标：" + i.Target + (string.IsNullOrEmpty(i.Error) ? "" : "\r\n" + i.Error)))
+                        + (string.IsNullOrEmpty(retryHint) ? "" : "\r\n\r\n" + retryHint);
                     retry.Enabled = !importRunning && CanRetryDelete(batch);
                 };
                 retry.Click += delegate
