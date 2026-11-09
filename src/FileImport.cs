@@ -43,6 +43,8 @@ namespace AppManager
         public string Source, Target, Origin, Error, TargetId, StagingId, State = FileImport.Waiting;
         public string TargetRoot;
         public long RequiredBytes;
+        // 重复检查时读取到的完整哈希；复制期间内容变化则失败并保留源文件。
+        public string ExpectedHash;
         public bool SizeKnown;
         public bool Folder, Reference;
         public List<string> Directories = new List<string>();
@@ -60,6 +62,7 @@ namespace AppManager
         public ImportOperation Operation;
         public int CopyBytesPerSecond;
         public List<ImportItem> Items = new List<ImportItem>();
+        [XmlIgnore] internal ImportDuplicateReport DuplicateReport;
         [XmlIgnore] public string JournalDirectory;
         [XmlIgnore] public uint ClipboardSequence;
         [XmlIgnore] internal Func<ImportItem, string> ResolveTarget;
@@ -516,6 +519,13 @@ namespace AppManager
             }
         }
 
+        internal static string HashFile(string path, CancellationToken cancel)
+        {
+            using (FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete,
+                1 << 16, FileOptions.SequentialScan))
+                return Digest(stream, cancel);
+        }
+
         private static string At(ImportItem item, string root, string relative)
         {
             string path = item.Folder ? Path.GetFullPath(Path.Combine(root, relative)) : Path.GetFullPath(root);
@@ -602,7 +612,7 @@ namespace AppManager
 
         // 落地单个文件，返回后续文件是否继续尝试硬链接。
         private static bool Place(string source, string target, ImportFileStamp stamp, bool link, CancellationToken cancel,
-            CopyRateLimiter limiter = null)
+            CopyRateLimiter limiter = null, string expectedHash = null)
         {
             // 共享读打开：其他进程正在写入的文件直接失败，避免搬走写了一半的数据。
             using (FileStream input = new FileStream(source, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 1 << 16, FileOptions.SequentialScan))
@@ -610,6 +620,13 @@ namespace AppManager
                 if (input.Length != stamp.Length || File.GetLastWriteTimeUtc(source).Ticks != stamp.Modified) throw new IOException("复制前源文件已变化。");
                 if (link)
                 {
+                    // 硬链接不会经过复制循环；有重复检查哈希时先完整复核，避免链接到检查后变化的内容。
+                    if (!string.IsNullOrEmpty(expectedHash))
+                    {
+                        if (Digest(input, cancel) != expectedHash)
+                            throw new IOException("文件内容在重复检查后发生变化，已停止复制并保留源文件。");
+                        input.Position = 0;
+                    }
                     // 同卷移动：硬链接不复制数据、不占额外空间，且保留属性、ACL 与备用数据流。
                     if (CreateHardLink(target, source, IntPtr.Zero)) { stamp.Linked = true; stamp.TargetId = Identity(target); return true; }
                     int error = Marshal.GetLastWin32Error();
@@ -669,6 +686,11 @@ namespace AppManager
             }
             finally { FindClose(find); }
             return result;
+        }
+
+        internal static bool HasAlternateDataStreams(string path)
+        {
+            return Streams(path).Count > 0;
         }
 
         private static List<ImportStreamStamp> CopyStreams(string source, string target, CancellationToken cancel, CopyRateLimiter limiter)
@@ -827,7 +849,11 @@ namespace AppManager
                         foreach (ImportFileStamp stamp in item.Files)
                         {
                             cancel.ThrowIfCancellationRequested();
-                            link = Place(At(item, item.Source, stamp.Relative), At(item, staging, stamp.Relative), stamp, link, cancel, limiter);
+                            link = Place(At(item, item.Source, stamp.Relative), At(item, staging, stamp.Relative), stamp, link, cancel,
+                                limiter, item.ExpectedHash);
+                            if (!item.Folder && !stamp.Linked && !string.IsNullOrEmpty(item.ExpectedHash)
+                                && stamp.Hash != item.ExpectedHash)
+                                throw new IOException("文件内容在重复检查后发生变化，已停止复制并保留源文件。");
                         }
                         if (!item.Folder) item.StagingId = item.Files[0].TargetId;
                             if (item.Folder) CopyDirectoryInfo(item, staging, cancel, limiter);

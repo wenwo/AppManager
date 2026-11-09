@@ -1708,6 +1708,9 @@ namespace AppManager
                 new[] { origin.ToUpperInvariant(), staged });
             Check(registeredOrigins[origin.ToUpperInvariant()] == staged && registeredOrigins[staged] == staged,
                 "stored origin lookup or direct-path precedence failed");
+            Check(AddedEntryList.RegisteredPaths(c.Database.FilePath, new[] { origin }, false).Count == 0
+                && AddedEntryList.RegisteredPaths(c.Database.FilePath, new[] { origin }, true)[origin] == staged,
+                "resource/software mode filter was ignored");
             AppConfig reloaded = ConfigDatabase.Load(Path.Combine(root, "bulk-lookup", "config.xml"));
             Check(reloaded.AddedItems.ByPath(staged).Single().OriginPath == origin, "origin did not survive reload");
             c.AddedItems.Prefetch(new string[] { "C:\\FILE.TXT", staged.ToUpperInvariant() });

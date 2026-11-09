@@ -169,7 +169,12 @@ namespace AppManager
                 string collection = Source("collection.txt", "collection");
                 texts.Add(Hash(File.ReadAllBytes(collection))); Invoke(form, "QueueImport", new string[] { collection }, ImportOperation.Move, "资料", Collection, true, (uint)0, null); PumpUntil(() => c.AddedItems.Count == 4);
                 string existing = c.AddedItems.First().Path;
-                Invoke(form, "AddPaths", new string[] { existing }, "资料", Collection); PumpUntil(() => c.AddedItems.Count == 4);
+                ImportDuplicateReport duplicate = ImportDuplicateInspector.InspectPaths(new string[] { existing }, "资料", true,
+                    new ImportDuplicateContext { DatabaseFile = c.Database.FilePath }, CancellationToken.None);
+                Check(duplicate.ExistingPathCurrent == 1, "existing path was not reported as a duplicate");
+                Invoke(form, "QueueImport", new string[] { existing }, ImportOperation.Move, "资料", Collection, true, (uint)0,
+                    null, 0, false, false, ImportDuplicateDecision.FromReport(duplicate), false);
+                PumpUntil(() => c.AddedItems.Count == 4);
                 Check(!File.Exists(a) && !File.Exists(b) && !File.Exists(grid) && !File.Exists(collection), "source not moved");
             }
             AppConfig read = Reload(); Check(read.AddedItems.Count == 4, "duplicate or lost ingestion");
@@ -287,7 +292,11 @@ namespace AppManager
                 Check(c.AddedItems.Count == 2 && c.AddedItems.All(i => i.Category == "资料"), "destination changed while queued");
                 Check(c.AddedItems.Select(i => i.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 2, "queued filename conflict");
                 string existing = c.AddedItems.First().Path;
-                Invoke(form, "QueueImport", new string[] { existing.ToUpperInvariant() }, ImportOperation.Copy, "另一分类", null, true, (uint)0, null);
+                ImportDuplicateReport crossCategory = ImportDuplicateInspector.InspectPaths(new string[] { existing.ToUpperInvariant() }, "另一分类", true,
+                    new ImportDuplicateContext { DatabaseFile = c.Database.FilePath }, CancellationToken.None);
+                Check(crossCategory.ExistingPathOther == 1, "cross-category path was not reported as reusable");
+                Invoke(form, "QueueImport", new string[] { existing.ToUpperInvariant() }, ImportOperation.Copy, "另一分类", null, true, (uint)0,
+                    null, 0, false, false, ImportDuplicateDecision.FromReport(crossCategory), false);
                 PumpUntil(() => !(bool)typeof(MainForm).GetField("importRunning", Private).GetValue(form));
                 Check(c.AddedItems.Count == 2 && File.Exists(existing), "reference was copied or duplicated by casing");
                 Check(Reload().Database.Page("资料", true, true, "", 10, null, true, false).Total == 2, "original category lost after copy");
@@ -319,7 +328,12 @@ namespace AppManager
             using (MainForm form = Form(c, true))
             using (FileStream input = new FileStream(locked, FileMode.Open, FileAccess.Read, FileShare.None))
             {
-                Invoke(form, "AddPaths", new string[] { good, locked }, "资料", Collection); PumpUntil(() => c.AddedItems.Count == 1);
+                ImportDuplicateReport lockedReport = ImportDuplicateInspector.InspectPaths(new string[] { locked }, "资料", true,
+                    new ImportDuplicateContext { DatabaseFile = c.Database.FilePath }, CancellationToken.None);
+                Check(lockedReport.Unchecked == 1, "locked source was not reported as unchecked");
+                Invoke(form, "QueueImport", new string[] { good, locked }, ImportOperation.Move, "资料", Collection, true, (uint)0,
+                    null, 0, false, false, null, false);
+                PumpUntil(() => c.AddedItems.Count == 1);
                 Check(File.Exists(locked) && File.Exists(good), "batch failure must preserve every source");
                 Check(c.AddedItems.All(a => Path.GetFileName(a.Path) != "locked.txt"), "failed file was registered");
                 Check(File.ReadAllText(c.AddedItems.First().Path) == "good bytes", "successful move lost bytes");

@@ -92,6 +92,7 @@ namespace AppManager
                 Run("desktop stash moves software shortcuts only; folder and document shortcuts stay on the desktop", StashOnlySoftwareShortcuts);
                 Run("import recovery and history still recognise old software batches after migration", ImportRecoveryAfterMigration);
                 Run("music scan reuses copied origins after repeat, rename and category changes", MusicScanReusesCopiedOrigins);
+                Run("queued in-memory imports see the earlier commit before the final duplicate check", QueuedMemoryImportsUseFreshSnapshot);
                 Run("music cleanup skips unreachable parents and removes only music memberships", MissingMusicCleanup);
                 Run("layout listing exposes pre-restore leftovers", PrerestoreListing);
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
@@ -2178,7 +2179,7 @@ namespace AppManager
         {
             MethodInfo registered = typeof(MainForm).GetMethod("RegisteredPathsInMemory", Private);
             Func<List<string>, Dictionary<string, string>> lookup = delegate(List<string> paths)
-            { return (Dictionary<string, string>)registered.Invoke(form, new object[] { paths }); };
+            { return (Dictionary<string, string>)registered.Invoke(form, new object[] { paths, true }); };
             MethodInfo prepare = typeof(MainForm).GetMethod("PrepareImportBatchMultiStore", Private);
             ImportBatch batch = (ImportBatch)prepare.Invoke(form, new object[] { new[] { source }, ImportOperation.Copy, "音乐", null, true, (uint)0,
                 config.ResourceStorePath, Path.Combine(config.ResourceStorePath, "音乐"), lookup,
@@ -2247,8 +2248,43 @@ namespace AppManager
             using (MainForm form = new MainForm(memory))
             {
                 Dictionary<string, string> found = (Dictionary<string, string>)Invoke(form, "RegisteredPathsInMemory",
-                    new List<string> { "c:\\SOURCE\\SONG.MP3" });
+                    new List<string> { "c:\\SOURCE\\SONG.MP3" }, true);
                 Check(found["c:\\SOURCE\\SONG.MP3"] == "D:\\library\\song.mp3", "in-memory origin lookup failed");
+            }
+        }
+
+        private static void QueuedMemoryImportsUseFreshSnapshot()
+        {
+            string dir = Path.Combine(root, "queued-memory-duplicates");
+            Directory.CreateDirectory(dir);
+            string first = Path.Combine(dir, "first.txt"), second = Path.Combine(dir, "second.txt");
+            File.WriteAllText(first, "same queued content");
+            File.WriteAllText(second, "same queued content");
+            AppConfig config = new AppConfig
+            {
+                ManageRootPath = Path.Combine(dir, "manage"),
+                ResourceStorePath = Path.Combine(dir, "store")
+            };
+            using (MainForm form = new MainForm(config))
+            {
+                Invoke(form, "BuildControls");
+                IntPtr handle = form.Handle;
+                typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "文档");
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                MethodInfo queue = typeof(MainForm).GetMethod("QueueImport", Private, null, new[]
+                {
+                    typeof(string[]), typeof(ImportOperation), typeof(string), typeof(string), typeof(bool), typeof(uint),
+                    typeof(Action<ImportBatch>), typeof(int), typeof(bool), typeof(bool), typeof(ImportDuplicateDecision), typeof(bool)
+                }, null);
+                queue.Invoke(form, new object[] { new[] { first }, ImportOperation.Copy, "文档", null, true, (uint)0,
+                    null, 0, false, false, null, false });
+                queue.Invoke(form, new object[] { new[] { second }, ImportOperation.Copy, "文档", null, true, (uint)0,
+                    null, 0, false, false, null, false });
+                FieldInfo running = typeof(MainForm).GetField("importRunning", Private);
+                PumpUntil(() => !(bool)running.GetValue(form));
+                Check(config.AddedItems.Count == 1, "queued duplicate was copied before the first commit became visible");
+                Check(File.Exists(first) && File.Exists(second), "copy duplicate check removed a source");
             }
         }
 

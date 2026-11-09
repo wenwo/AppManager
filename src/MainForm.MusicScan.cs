@@ -482,8 +482,11 @@ namespace AppManager
                 ShowNotice("未导入任何内容。");
                 return;
             }
+            ImportDuplicateDecision duplicateDecision = PrecheckImportDuplicates(import, "音乐", true, "扫描本机音乐");
+            if (duplicateDecision == null) { ShowNotice("已取消本次导入，源文件未改动。"); return; }
+
             QueueImport(import.ToArray(), operation, "音乐", null, true, 0, null, 0, true,
-                operation == ImportOperation.Move);
+                operation == ImportOperation.Move, duplicateDecision, true);
         }
 
         private static string BuildMusicScanSummary(LocalMusicScanResult result)

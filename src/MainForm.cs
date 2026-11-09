@@ -6180,7 +6180,11 @@ namespace AppManager
             // 软件页面只原位登记程序，不复制文件：跨磁盘提示只对资源导入有意义。
             // 走 ShowNotice：导入进行中/结果展示中改用浮层，避免清掉正在显示的进度条。
             if (crossVolume && resource) ShowNotice("跨磁盘添加：将复制到存储位置并保留源文件…");
-            QueueImport(paths, crossVolume ? ImportOperation.Copy : ImportOperation.Move, category, collectionKey, resource, 0);
+            ImportDuplicateDecision duplicateDecision = PrecheckImportDuplicates(paths, category, resource,
+                resource ? "添加文件" : "添加软件");
+            if (duplicateDecision == null) { ShowNotice("已取消本次导入，源文件未改动。"); return; }
+            QueueImport(paths, crossVolume ? ImportOperation.Copy : ImportOperation.Move, category, collectionKey, resource, 0,
+                duplicateDecision: duplicateDecision, promptDuplicates: true);
         }
 
         /// <summary>目录 dir 下不重名的落点路径：重名时追加 _1、_2…（与入库规则一致）。internal 供自测验证。</summary>

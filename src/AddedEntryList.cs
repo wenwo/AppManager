@@ -249,7 +249,7 @@ namespace AppManager
         }
 
         /// <summary>后台线程用：直接读库、不经过实例缓存。返回 输入路径 → 已登记的路径（最早一条，保留登记时的大小写）。</summary>
-        internal static Dictionary<string, string> RegisteredPaths(string databaseFile, IEnumerable<string> paths)
+        internal static Dictionary<string, string> RegisteredPaths(string databaseFile, IEnumerable<string> paths, bool? resource = null)
         {
             Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, string> byKey = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -268,14 +268,17 @@ namespace AppManager
                 {
                     List<string> chunk = distinct.GetRange(offset, Math.Min(256, distinct.Count - offset));
                     List<string> marks = chunk.ConvertAll(delegate(string value) { return "?"; });
-                    foreach (string[] row in db.Query("SELECT path,path_key FROM added_items WHERE path_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY id",
-                        chunk.ConvertAll(delegate(string value) { return (object)value; }).ToArray()))
+                    List<object> args = chunk.ConvertAll(delegate(string value) { return (object)value; });
+                    string mode = resource.HasValue ? " AND resource=?" : "";
+                    if (resource.HasValue) args.Add(resource.Value ? 1 : 0);
+                    foreach (string[] row in db.Query("SELECT path,path_key FROM added_items WHERE path_key IN (" + string.Join(",", marks.ToArray()) + ")" + mode + " ORDER BY id",
+                        args.ToArray()))
                     {
                         string input;
                         if (byKey.TryGetValue(row[1], out input) && !result.ContainsKey(input)) result[input] = row[0];
                     }
-                    foreach (string[] row in db.Query("SELECT path,origin_key FROM added_items WHERE origin_key IN (" + string.Join(",", marks.ToArray()) + ") ORDER BY id",
-                        chunk.ConvertAll(delegate(string value) { return (object)value; }).ToArray()))
+                    foreach (string[] row in db.Query("SELECT path,origin_key FROM added_items WHERE origin_key IN (" + string.Join(",", marks.ToArray()) + ")" + mode + " ORDER BY id",
+                        args.ToArray()))
                     {
                         string input;
                         if (byKey.TryGetValue(row[1], out input) && !result.ContainsKey(input)) result[input] = row[0];

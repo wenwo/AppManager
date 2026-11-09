@@ -345,7 +345,10 @@ namespace AppManager
                     ShowUnsupportedFormats(category, paths);
                     return true;
                 }
-                QueueImport(paths, operation, category, choose ? null : ImportCollectionKey, resource, sequence);
+                ImportDuplicateDecision duplicateDecision = PrecheckImportDuplicates(paths, category, resource, "粘贴文件");
+                if (duplicateDecision == null) { ShowNotice("已取消本次导入，源文件未改动。"); return true; }
+                QueueImport(paths, operation, category, choose ? null : ImportCollectionKey, resource, sequence,
+                    duplicateDecision: duplicateDecision, promptDuplicates: true);
                 return true;
             }
             catch (Exception ex)
@@ -416,15 +419,16 @@ namespace AppManager
 
         private void QueueImport(string[] paths, ImportOperation operation, string category, string collection, bool resource, uint sequence,
             Action<ImportBatch> completed = null, int copyBytesPerSecond = 0, bool preserveCategoryExclusions = false,
-            bool deleteSuccessfulSourcesOnPartial = false)
+            bool deleteSuccessfulSourcesOnPartial = false, ImportDuplicateDecision duplicateDecision = null, bool promptDuplicates = true)
         {
             QueueImportWithCancellation(paths, operation, category, collection, resource, sequence, completed, importCancel.Token,
-                copyBytesPerSecond, preserveCategoryExclusions, deleteSuccessfulSourcesOnPartial);
+                copyBytesPerSecond, preserveCategoryExclusions, deleteSuccessfulSourcesOnPartial, duplicateDecision, promptDuplicates);
         }
 
         private void QueueImportWithCancellation(string[] paths, ImportOperation operation, string category, string collection, bool resource,
             uint sequence, Action<ImportBatch> completed, CancellationToken cancel, int copyBytesPerSecond = 0,
-            bool preserveCategoryExclusions = false, bool deleteSuccessfulSourcesOnPartial = false)
+            bool preserveCategoryExclusions = false, bool deleteSuccessfulSourcesOnPartial = false,
+            ImportDuplicateDecision duplicateDecision = null, bool promptDuplicates = true)
         {
             // 目标与动作均在投放/粘贴时冻结；存储目录也在此算好（只读配置、不建目录）。
             // 路径归属、文件夹内收录检查等预处理放进导入队列在后台执行，批量拖入几千个文件时不卡界面；
@@ -437,14 +441,41 @@ namespace AppManager
             {
                 ImportBatch prepared = resource
                     ? PrepareImportBatchMultiStore(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
-                        RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; }, knownRoots)
+                        delegate(List<string> list) { return RegisteredPathsInMemory(list, resource); },
+                        delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; }, knownRoots)
                     : PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
-                        RegisteredPathsInMemory, delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
+                        delegate(List<string> list) { return RegisteredPathsInMemory(list, resource); },
+                        delegate(string folder) { return config.AddedItems.EntriesUnder(folder).Count > 0; });
                 prepared.CopyBytesPerSecond = copyBytesPerSecond;
                 prepared.PreserveCategoryExclusions = preserveCategoryExclusions;
                 prepared.DeleteSuccessfulSourcesOnPartial = deleteSuccessfulSourcesOnPartial && operation == ImportOperation.Move;
                 if (prepared.Items.Count == 0) { if (completed != null) completed(prepared); return; }
-                EnqueueImport(delegate { RunPreparedImport(prepared, activeRoots, completed, cancel); });
+                EnqueueImport(delegate
+                {
+                    bool inspected;
+                    try
+                    {
+                        // 无数据库会话的批次可能连续排队：在真正执行时重新取快照，才能看见前一批刚提交的条目。
+                        List<AddedEntry> snapshot = (List<AddedEntry>)Invoke(new Func<List<AddedEntry>>(SnapshotAddedEntriesForImport));
+                        inspected = InspectPreparedImport(prepared, paths, null, snapshot, duplicateDecision, promptDuplicates, cancel);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        RunOnUi(delegate { if (completed != null) completed(prepared); ShowNotice("已取消本次导入。"); });
+                        return;
+                    }
+                    catch (Exception ex)
+                    {
+                        FailPreparedImport(prepared, completed, ex);
+                        return;
+                    }
+                    if (!inspected)
+                    {
+                        RunOnUi(delegate { if (completed != null) completed(prepared); ShowNotice("已取消本次导入。"); });
+                        return;
+                    }
+                    RunPreparedImport(prepared, activeRoots, completed, cancel);
+                });
                 return;
             }
             EnqueueImport(delegate
@@ -454,10 +485,10 @@ namespace AppManager
                 {
                     prepared = resource
                         ? PrepareImportBatchMultiStore(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
-                            delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list); },
+                            delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list, resource); },
                             delegate(string folder) { return AddedEntryList.HasEntriesUnder(databaseFile, folder); }, knownRoots)
                         : PrepareImportBatch(paths, operation, category, collection, resource, sequence, folderDir, fileDir,
-                            delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list); },
+                            delegate(List<string> list) { return AddedEntryList.RegisteredPaths(databaseFile, list, resource); },
                             delegate(string folder) { return AddedEntryList.HasEntriesUnder(databaseFile, folder); });
                 }
                 catch (Exception ex)
@@ -478,17 +509,131 @@ namespace AppManager
                 prepared.CopyBytesPerSecond = copyBytesPerSecond;
                 prepared.PreserveCategoryExclusions = preserveCategoryExclusions;
                 prepared.DeleteSuccessfulSourcesOnPartial = deleteSuccessfulSourcesOnPartial && operation == ImportOperation.Move;
+                bool inspected;
+                try
+                {
+                    inspected = InspectPreparedImport(prepared, paths, databaseFile, null, duplicateDecision, promptDuplicates, cancel);
+                }
+                catch (OperationCanceledException)
+                {
+                    RunOnUi(delegate { if (completed != null) completed(prepared); ShowNotice("已取消本次导入。"); });
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    FailPreparedImport(prepared, completed, ex);
+                    return;
+                }
+                if (!inspected)
+                {
+                    RunOnUi(delegate { if (completed != null) completed(prepared); ShowNotice("已取消本次导入。"); });
+                    return;
+                }
                 if (prepared.Items.Count == 0) { RunOnUi(delegate { if (completed != null) completed(prepared); }); return; }
                 RunPreparedImport(prepared, activeRoots, completed, cancel);
             });
         }
 
+        private bool InspectPreparedImport(ImportBatch batch, string[] paths, string databaseFile, IList<AddedEntry> entries,
+            ImportDuplicateDecision decision, bool prompt, CancellationToken cancel)
+        {
+            ImportDuplicateContext context = new ImportDuplicateContext
+            {
+                DatabaseFile = databaseFile,
+                MemoryEntries = entries,
+                Decision = decision,
+                Confirm = prompt ? new Func<ImportDuplicateReport, ICollection<string>>(ConfirmImportDuplicates) : null
+            };
+            return ImportDuplicateInspector.InspectAndApply(batch, paths, batch.Category, batch.Resource, context, cancel);
+        }
+
+        private void FailPreparedImport(ImportBatch batch, Action<ImportBatch> completed, Exception ex)
+        {
+            string message = "重复检查失败，本次未导入任何文件，源文件均已保留。\n" + ex.Message;
+            Paths.LogError(new IOException("导入重复检查失败（" + batch.Items.Count + " 项）", ex));
+            batch.Error = message;
+            foreach (ImportItem item in batch.Items)
+                if (item != null && item.State == FileImport.Waiting)
+                {
+                    item.State = FileImport.Failed;
+                    item.Error = message;
+                }
+            RunOnUi(delegate
+            {
+                if (completed != null) completed(batch);
+                MessageBox.Show(this, message, "导入文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            });
+        }
+
+        private ICollection<string> ConfirmImportDuplicates(ImportDuplicateReport report)
+        {
+            if (IsDisposed || !IsHandleCreated) return null;
+            try
+            {
+                return (ICollection<string>)Invoke(new Func<ICollection<string>>(delegate
+                { return ImportDuplicateDialog.Show(this, report); }));
+            }
+            catch (ObjectDisposedException) { return null; }
+            catch (InvalidOperationException) { return null; }
+        }
+
+        private List<AddedEntry> SnapshotAddedEntriesForImport()
+        {
+            List<AddedEntry> result = new List<AddedEntry>();
+            foreach (AddedEntry entry in config.AddedItems)
+            {
+                if (entry == null) continue;
+                result.Add(new AddedEntry { Path = entry.Path, Category = entry.Category, Name = entry.Name,
+                    OriginPath = entry.OriginPath, IsFolder = entry.IsFolder, IsResource = entry.IsResource });
+            }
+            return result;
+        }
+
+        /// <summary>扫描结果批量导入前只提示一次；最终每个批次仍会重新复核，并沿用这里的覆盖/跳过决定。</summary>
+        private ImportDuplicateDecision PrecheckImportDuplicates(IEnumerable<string> paths, string category, bool resource, string title,
+            bool quietKnownCurrent = false)
+        {
+            if (paths == null) return new ImportDuplicateDecision();
+            List<string> snapshot = paths.Where(path => !string.IsNullOrEmpty(path)).ToList();
+            if (snapshot.Count == 0) return new ImportDuplicateDecision();
+            try
+            {
+                ImportDuplicateContext context = new ImportDuplicateContext
+                {
+                    DatabaseFile = config.Database != null ? config.Database.FilePath : null,
+                    MemoryEntries = config.Database == null ? SnapshotAddedEntriesForImport() : null
+                };
+                ImportDuplicateReport report = ImportDuplicateDialog.InspectWithProgress(this, title, snapshot, category, resource, context);
+                if (report == null) return null;
+                if (!report.NeedsPrompt) return ImportDuplicateDecision.FromReport(report);
+                // 扫描结果里的“已收录复用”按原样回到库中，不把它当成用户本次新选的重复项反复弹窗。
+                if (quietKnownCurrent && report.Findings.All(finding => finding.Kind == ImportDuplicateKind.ExistingPathCurrent))
+                    return ImportDuplicateDecision.FromReport(report);
+                ICollection<string> keep = ImportDuplicateDialog.Show(this, report);
+                if (keep == null) return null;
+                HashSet<string> set = new HashSet<string>(keep, StringComparer.OrdinalIgnoreCase);
+                foreach (ImportDuplicateFinding finding in report.Findings)
+                    if (finding.CanKeep && !string.IsNullOrEmpty(finding.Source)) finding.Keep = set.Contains(finding.Source);
+                return ImportDuplicateDecision.FromReport(report);
+            }
+            catch (Exception ex)
+            {
+                Paths.LogError(new IOException("导入重复检查失败（" + snapshot.Count + " 项）", ex));
+                MessageBox.Show(this, "重复检查失败，本次未导入任何文件，源文件均已保留。\n" + ex.Message,
+                    title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return null;
+            }
+        }
+
         /// <summary>无数据库会话：用内存索引查已登记路径（只能在界面线程调用）。</summary>
-        private Dictionary<string, string> RegisteredPathsInMemory(List<string> paths)
+        private Dictionary<string, string> RegisteredPathsInMemory(List<string> paths, bool resource)
         {
             Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             foreach (KeyValuePair<string, List<AddedEntry>> kv in AddedIndexLookups(paths, true))
-                if (kv.Value != null && kv.Value.Count > 0) result[kv.Key] = kv.Value[0].Path;
+            {
+                AddedEntry match = kv.Value == null ? null : kv.Value.FirstOrDefault(entry => entry.IsResource == resource);
+                if (match != null) result[kv.Key] = match.Path;
+            }
             return result;
         }
 
@@ -539,6 +684,8 @@ namespace AppManager
                     string registered;
                     bool known = knownPaths.TryGetValue(source, out registered);
                     if (known) source = registered;
+                    if (known && !File.Exists(source) && !Directory.Exists(source))
+                    { known = false; source = origin; }
                     bool folder = Directory.Exists(source);
                     string dir = folder ? folderDir : fileDir;
                     bool reference = (!resource && !folder && IsSoftwareFile(source)) || known
@@ -690,7 +837,7 @@ namespace AppManager
                 List<AddedEntry> known;
                 knownTargets.TryGetValue(item.Target, out known);
                 if (known != null && known.Count == 0) known = null;
-                bool alreadyInCategory = known != null && known.Any(entry => entry.Category == batch.Category);
+                bool alreadyInCategory = AddedTargetInCategory(item.Target, batch.Category, batch.Resource, known);
                 if (!alreadyInCategory)
                 {
                     if (known != null && known.Any(entry => entry.IsResource == batch.Resource))
@@ -719,6 +866,21 @@ namespace AppManager
                 InvalidateAddedIndex();
             }
             return saved;
+        }
+
+        /// <summary>目标在指定分类中是否有效：同时考虑附加归属与分类覆盖，不能只看 added_items 的原始分类。</summary>
+        private bool AddedTargetInCategory(string target, string category, bool resource, List<AddedEntry> known)
+        {
+            string key = "add:" + target;
+            List<string> extras;
+            if (config.ItemCategories.TryGetValue(key, out extras) && extras.Contains(category)) return true;
+            string overridden;
+            if (config.CategoryOverride.TryGetValue(key, out overridden) && !string.IsNullOrEmpty(overridden))
+            {
+                if (overridden == category) return true;
+                if (IsResourceCategoryName(overridden) == IsResourceCategoryName(category)) return false;
+            }
+            return known != null && known.Any(entry => entry.IsResource == resource && entry.Category == category);
         }
 
         private void FinishImport(ImportBatch batch)

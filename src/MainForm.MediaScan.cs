@@ -132,6 +132,10 @@ namespace AppManager
                         "开始收录", result.Count > 0, result.Count > result.Reused);
                     if (importDecision.Action == LocalScanResultAction.Retry) continue;
                     if (importDecision.Action != LocalScanResultAction.Import || result.Count == 0) return;
+                    List<string> importPaths = result.Years.Values.SelectMany(paths => paths).ToList();
+                    ImportDuplicateDecision duplicateDecision = PrecheckImportDuplicates(importPaths, category, true, scanTitle, true);
+                    if (duplicateDecision == null) { ShowNotice("已取消本次导入，源文件未改动。"); return; }
+
                     if (!EnsureLocalMediaCollections(category, noun, result.Years.Keys)) return;
 
                     foreach (KeyValuePair<int, List<string>> year in result.Years.OrderByDescending(pair => pair.Key))
@@ -141,7 +145,7 @@ namespace AppManager
                             LocalMediaImportBatchSize))
                         {
                             QueueImport(plan.Paths, plan.Operation, category, collection, true, 0, null,
-                                LocalMediaCopyBytesPerSecond, false, plan.DeleteSuccessfulSourcesOnPartial);
+                                LocalMediaCopyBytesPerSecond, false, plan.DeleteSuccessfulSourcesOnPartial, duplicateDecision, true);
                         }
                     }
                     RefreshGrid();
@@ -212,7 +216,7 @@ namespace AppManager
             if (config.Database != null)
             {
                 string databaseFile = config.Database.FilePath;
-                return paths => AddedEntryList.RegisteredPaths(databaseFile, paths);
+                return paths => AddedEntryList.RegisteredPaths(databaseFile, paths, true);
             }
             Dictionary<string, string> byPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, string> byOrigin = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

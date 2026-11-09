@@ -1054,6 +1054,242 @@ namespace AppManager
                     Check(BitConverter.ToUInt32(stream.ToArray(), 0) == 0,
                         "wrong effect");
                 });
+                Test("duplicate inspector skips later same-batch content and keeps sources", delegate
+                {
+                    string dir = Path.Combine(root, "dup-batch-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string first = Path.Combine(dir, "first.bin"), second = Path.Combine(dir, "second.bin");
+                    File.WriteAllBytes(first, new byte[] { 1, 2, 3, 4, 5 });
+                    File.Copy(first, second);
+                    ImportBatch batch = new ImportBatch { Category = "照片", Resource = true, Operation = ImportOperation.Move };
+                    batch.Items.Add(new ImportItem { Source = first, Origin = first, Target = Path.Combine(dir, "target", "first.bin") });
+                    batch.Items.Add(new ImportItem { Source = second, Origin = second, Target = Path.Combine(dir, "target", "second.bin") });
+                    Check(ImportDuplicateInspector.InspectAndApply(batch, new[] { first, second }, "照片", true,
+                        new ImportDuplicateContext(), CancellationToken.None), "inspection cancelled");
+                    Check(batch.DuplicateReport.BatchContentDuplicate == 1, "same-batch duplicate not counted");
+                    Check(batch.Items[0].State != FileImport.Skipped && batch.Items[1].State == FileImport.Skipped, "later duplicate not skipped");
+                    Check(!string.IsNullOrEmpty(batch.Items[0].ExpectedHash), "first item hash missing");
+                    Check(File.Exists(first) && File.Exists(second), "duplicate inspection deleted a source");
+                });
+                Test("duplicate paths and nested selections are reported only as path overlap", delegate
+                {
+                    string dir = Path.Combine(root, "dup-selection-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string folder = Path.Combine(dir, "album");
+                    Directory.CreateDirectory(folder);
+                    string image = Path.Combine(folder, "one.bin");
+                    File.WriteAllBytes(image, new byte[] { 91, 92, 93 });
+                    ImportDuplicateReport duplicate = ImportDuplicateInspector.InspectPaths(new[] { image, image }, "照片", true,
+                        new ImportDuplicateContext(), CancellationToken.None);
+                    Check(duplicate.BatchPathOverlap == 1 && duplicate.BatchContentDuplicate == 0,
+                        "duplicate selection was counted as a content duplicate");
+                    ImportDuplicateReport nested = ImportDuplicateInspector.InspectPaths(new[] { folder, image }, "照片", true,
+                        new ImportDuplicateContext(), CancellationToken.None);
+                    Check(nested.BatchPathOverlap == 1 && nested.SameCategoryContent == 0,
+                        "nested selection was inspected as a separate content item");
+                });
+                Test("same-category content reuses target and can be kept explicitly", delegate
+                {
+                    string dir = Path.Combine(root, "dup-reuse-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, "existing.bin"), source = Path.Combine(dir, "incoming.bin");
+                    File.WriteAllBytes(target, new byte[] { 7, 8, 9, 10 });
+                    File.Copy(target, source);
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { RecordId = 1, Path = target, Category = "照片", IsResource = true } };
+                    ImportBatch reuse = new ImportBatch { Category = "照片", Resource = true, Operation = ImportOperation.Move };
+                    reuse.Items.Add(new ImportItem { Source = source, Origin = source, Target = Path.Combine(dir, "dest", "incoming.bin") });
+                    ImportDuplicateContext context = new ImportDuplicateContext { MemoryEntries = entries };
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true, context, CancellationToken.None);
+                    Check(report.SameCategoryContent == 1 && report.Findings[0].CanKeep, "same-category content not found");
+                    Check(ImportDuplicateInspector.InspectAndApply(reuse, new[] { source }, "照片", true, context, CancellationToken.None),
+                        "reuse inspection cancelled");
+                    Check(reuse.Items[0].Reference && reuse.Items[0].Source == target, "duplicate did not reuse existing target");
+                    Check(File.Exists(source), "reuse deleted the source");
+                    reuse.JournalDirectory = Path.Combine(dir, "journal");
+                    FileImport.Run(reuse, delegate { return true; }, null);
+                    Check(reuse.Items[0].State == FileImport.Linked && File.Exists(source) && File.Exists(target),
+                        "reuse move did not preserve the selected source");
+
+                    ImportDuplicateFinding finding = report.Findings.First(value => value.Kind == ImportDuplicateKind.SameCategoryContent);
+                    finding.Keep = true;
+                    ImportDuplicateDecision keep = ImportDuplicateDecision.FromReport(report);
+                    ImportBatch kept = new ImportBatch { Category = "照片", Resource = true, Operation = ImportOperation.Move };
+                    kept.Items.Add(new ImportItem { Source = source, Origin = source, Target = Path.Combine(dir, "dest", "incoming.bin") });
+                    Check(ImportDuplicateInspector.InspectAndApply(kept, new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries, Decision = keep }, CancellationToken.None), "keep inspection cancelled");
+                    Check(!kept.Items[0].Reference && !string.IsNullOrEmpty(kept.Items[0].ExpectedHash), "explicit keep was ignored");
+                    Check(File.Exists(source), "explicit keep deleted the source");
+                });
+                Test("cross-category content reuses target without keep option", delegate
+                {
+                    string dir = Path.Combine(root, "dup-cross-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, "video.bin"), source = Path.Combine(dir, "photo.bin");
+                    File.WriteAllBytes(target, new byte[] { 11, 12, 13 });
+                    File.Copy(target, source);
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { Path = target, Category = "视频", IsResource = true } };
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    Check(report.OtherCategoryContent == 1 && !report.Findings[0].CanKeep, "cross-category reuse/keep mismatch");
+                    ImportBatch batch = new ImportBatch { Category = "照片", Resource = true };
+                    batch.Items.Add(new ImportItem { Source = source, Origin = source, Target = Path.Combine(dir, "dest", "photo.bin") });
+                    Check(ImportDuplicateInspector.InspectAndApply(batch, new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None), "cross-category inspection cancelled");
+                    Check(batch.Items[0].Reference && batch.Items[0].Source == target, "cross-category target not reused");
+                    Check(File.Exists(source), "cross-category reuse deleted the source");
+                });
+                Test("duplicate inspector keeps resource and software records isolated", delegate
+                {
+                    string dir = Path.Combine(root, "dup-mode-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, "software.bin"), source = Path.Combine(dir, "resource.bin");
+                    File.WriteAllBytes(target, new byte[] { 21, 22, 23, 24 });
+                    File.Copy(target, source);
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { Path = target, Category = "照片", IsResource = false } };
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    Check(!report.NeedsPrompt, "software record was reused by a resource import");
+                });
+                Test("alternate data streams are reported unchecked instead of content duplicates", delegate
+                {
+                    string dir = Path.Combine(root, "dup-ads-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, "existing.bin"), source = Path.Combine(dir, "incoming.bin");
+                    File.WriteAllBytes(target, new byte[] { 31, 32, 33 });
+                    File.Copy(target, source);
+                    WriteStream(source + ":Zone.Identifier", "[ZoneTransfer]\r\nZoneId=3");
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { Path = target, Category = "照片", IsResource = true } };
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    Check(report.Unchecked == 1 && report.SameCategoryContent == 0, "ADS file was treated as a main-stream duplicate");
+                });
+                Test("changed source invalidates a precheck skip decision", delegate
+                {
+                    string dir = Path.Combine(root, "dup-stale-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string first = Path.Combine(dir, "first.bin"), second = Path.Combine(dir, "second.bin");
+                    File.WriteAllBytes(first, new byte[] { 41, 42, 43 });
+                    File.Copy(first, second);
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { first, second }, "照片", true,
+                        new ImportDuplicateContext(), CancellationToken.None);
+                    ImportDuplicateDecision decision = ImportDuplicateDecision.FromReport(report);
+                    Check(decision.SkipSources.Contains(second) && decision.SkipHashes.ContainsKey(second), "skip decision/hash not captured");
+                    File.WriteAllBytes(second, new byte[] { 51, 52, 53, 54, 55 });
+                    ImportBatch batch = new ImportBatch { Category = "照片", Resource = true };
+                    batch.Items.Add(new ImportItem { Source = second, Origin = second, Target = Path.Combine(dir, "dest", "second.bin") });
+                    Check(ImportDuplicateInspector.InspectAndApply(batch, new[] { second }, "照片", true,
+                        new ImportDuplicateContext { Decision = decision }, CancellationToken.None), "stale decision inspection cancelled");
+                    Check(batch.Items[0].State != FileImport.Skipped, "changed source was still skipped");
+                    Check(!string.IsNullOrEmpty(batch.Items[0].ExpectedHash), "changed source was not re-hashed");
+                });
+                Test("missing existing target is never reused", delegate
+                {
+                    string dir = Path.Combine(root, "dup-missing-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string missing = Path.Combine(dir, "missing.bin"), source = Path.Combine(dir, "incoming.bin");
+                    File.WriteAllBytes(missing, new byte[] { 61, 62, 63 });
+                    File.Copy(missing, source);
+                    File.Delete(missing);
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { Path = missing, Category = "照片", IsResource = true } };
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    Check(report.ExistingPathCurrent == 0 && report.SameCategoryContent == 0, "missing target was reused");
+                });
+                Test("same path prefers the record already in the current category", delegate
+                {
+                    string dir = Path.Combine(root, "dup-priority-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string path = Path.Combine(dir, "shared.bin");
+                    File.WriteAllBytes(path, new byte[] { 71, 72, 73 });
+                    List<AddedEntry> entries = new List<AddedEntry>
+                    {
+                        new AddedEntry { RecordId = 1, Path = path, Category = "视频", IsResource = true },
+                        new AddedEntry { RecordId = 2, Path = path, Category = "照片", IsResource = true }
+                    };
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { path }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    Check(report.ExistingPathCurrent == 1 && report.ExistingPathOther == 0, "current-category record was not preferred");
+                });
+                Test("final review prompts only for findings not already confirmed", delegate
+                {
+                    string dir = Path.Combine(root, "dup-prompt-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, "existing.bin"), source = Path.Combine(dir, "incoming.bin");
+                    File.WriteAllBytes(target, new byte[] { 81, 82, 83 });
+                    File.Copy(target, source);
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { Path = target, Category = "照片", IsResource = true } };
+                    int prompts = 0;
+                    ImportBatch unreviewed = new ImportBatch { Category = "照片", Resource = true };
+                    unreviewed.Items.Add(new ImportItem { Source = source, Origin = source, Target = Path.Combine(dir, "dest", "incoming.bin") });
+                    Check(ImportDuplicateInspector.InspectAndApply(unreviewed, new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries, Confirm = delegate { prompts++; return new string[0]; } },
+                        CancellationToken.None), "unreviewed inspection cancelled");
+                    Check(prompts == 1, "new duplicate finding did not prompt");
+
+                    ImportDuplicateReport precheck = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    ImportDuplicateDecision decision = ImportDuplicateDecision.FromReport(precheck);
+                    ImportBatch reviewed = new ImportBatch { Category = "照片", Resource = true };
+                    reviewed.Items.Add(new ImportItem { Source = source, Origin = source, Target = Path.Combine(dir, "dest", "incoming.bin") });
+                    Check(ImportDuplicateInspector.InspectAndApply(reviewed, new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries, Decision = decision, Confirm = delegate { prompts++; return new string[0]; } },
+                        CancellationToken.None), "reviewed inspection cancelled");
+                    Check(prompts == 1, "already confirmed finding prompted again");
+                });
+                Test("reviewed unchecked source prompts when final hash finds a duplicate", delegate
+                {
+                    string dir = Path.Combine(root, "dup-unchecked-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, "existing.bin"), source = Path.Combine(dir, "incoming.bin");
+                    File.WriteAllBytes(target, new byte[] { 61, 62, 63 });
+                    File.WriteAllBytes(source, new byte[0]);
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { Path = target, Category = "照片", IsResource = true } };
+                    ImportDuplicateReport precheck = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    Check(precheck.Unchecked == 1, "empty source was not treated as unchecked");
+                    ImportDuplicateDecision decision = ImportDuplicateDecision.FromReport(precheck);
+
+                    File.WriteAllBytes(source, new byte[] { 61, 62, 63 });
+                    int prompts = 0;
+                    ImportBatch batch = new ImportBatch { Category = "照片", Resource = true };
+                    batch.Items.Add(new ImportItem { Source = source, Origin = source, Target = Path.Combine(dir, "dest", "incoming.bin") });
+                    Check(ImportDuplicateInspector.InspectAndApply(batch, new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries, Decision = decision,
+                            Confirm = delegate { prompts++; return new string[0]; } }, CancellationToken.None), "inspection cancelled");
+                    Check(prompts == 1, "new duplicate after an unchecked precheck was silently accepted");
+                    Check(batch.Items[0].Reference, "new duplicate was not reused after confirmation");
+                });
+                Test("quick fingerprint collision still requires full sha256", delegate
+                {
+                    string dir = Path.Combine(root, "dup-quick-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string target = Path.Combine(dir, "existing.bin"), source = Path.Combine(dir, "incoming.bin");
+                    int size = 200 * 1024;
+                    byte[] first = new byte[size], second = new byte[size];
+                    first[100000] = 1; second[100000] = 2;
+                    File.WriteAllBytes(target, first);
+                    File.WriteAllBytes(source, second);
+                    List<AddedEntry> entries = new List<AddedEntry> { new AddedEntry { Path = target, Category = "照片", IsResource = true } };
+                    ImportDuplicateReport report = ImportDuplicateInspector.InspectPaths(new[] { source }, "照片", true,
+                        new ImportDuplicateContext { MemoryEntries = entries }, CancellationToken.None);
+                    Check(report.SameCategoryContent == 0 && report.OtherCategoryContent == 0 && report.BatchContentDuplicate == 0,
+                        "quick fingerprint collision was treated as a full duplicate");
+                    Check(report.ExpectedHashes.Count == 1, "different full hash was not retained for copy verification");
+                });
+                Test("same-volume move checks expected hash before hard link", delegate
+                {
+                    string dir = Path.Combine(root, "dup-hardlink-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(dir);
+                    string source = Path.Combine(dir, "source.bin"), target = Path.Combine(dir, "target", "moved.bin");
+                    File.WriteAllText(source, "actual-content");
+                    ImportBatch batch = new ImportBatch { JournalDirectory = Path.Combine(dir, "journal"),
+                        Operation = ImportOperation.Move, Category = "照片", Resource = true };
+                    batch.Items.Add(new ImportItem { Source = source, Target = target,
+                        ExpectedHash = Convert.ToBase64String(SHA256.Create().ComputeHash(System.Text.Encoding.UTF8.GetBytes("different"))) });
+                    Run(batch);
+                    Check(batch.Items[0].State == FileImport.Failed, "changed hard-link source was imported");
+                    Check(File.Exists(source) && !File.Exists(target), "hard-link verification did not preserve source");
+                });
                 Test("staging residue is logged and reported instead of silently left behind", delegate
                 {
                     System.Reflection.MethodInfo remove = typeof(FileImport).GetMethod("RemoveStaging",
