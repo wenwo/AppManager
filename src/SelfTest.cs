@@ -1367,7 +1367,15 @@ namespace AppManager
                 && Math.Abs(lines[2].Time - 63.75) < 0.001
                 && lines[2].Text == "下一行"
                 && MusicMetadata.ParseLyrics("").Count == 0;
-            Assert(ok, "行数=" + lines.Count + " 多时间戳=True 排序=True 无效行忽略=True");
+            // 部分播放器（如乐町音乐盒）导出秒级时间戳：[29.91]，需与标准格式同样解析并排序
+            List<LyricLine> seconds = MusicMetadata.ParseLyrics(
+                "[by:乐町音乐盒]\r\n[0.0]第一句\r\n[9.97]第二句\r\n[29.91][31.5]重复行\r\n[-1]负数\r\n[NaN]非数\r\n[bad]忽略");
+            ok = ok && seconds.Count == 4
+                && Math.Abs(seconds[0].Time - 0) < 0.001 && seconds[0].Text == "第一句"
+                && Math.Abs(seconds[1].Time - 9.97) < 0.001 && seconds[1].Text == "第二句"
+                && Math.Abs(seconds[2].Time - 29.91) < 0.001 && seconds[2].Text == "重复行"
+                && Math.Abs(seconds[3].Time - 31.5) < 0.001 && seconds[3].Text == "重复行";
+            Assert(ok, "行数=" + lines.Count + " 秒级行数=" + seconds.Count + " 多时间戳=True 排序=True 无效行忽略=True");
         }
 
         private static void Case56_MusicMetadata()

@@ -84,7 +84,17 @@ namespace AppManager
         private static bool TryTimestamp(string text, out double seconds)
         {
             seconds = 0;
+            if (string.IsNullOrEmpty(text)) return false;
             string[] parts = text.Split(':');
+            if (parts.Length == 1)
+            {
+                // 兼容部分播放器导出的秒级时间戳：[29.91]
+                double only;
+                if (!double.TryParse(parts[0], NumberStyles.Float, CultureInfo.InvariantCulture, out only)) return false;
+                if (only < 0 || double.IsNaN(only) || double.IsInfinity(only)) return false;
+                seconds = only;
+                return true;
+            }
             if (parts.Length != 2) return false;
             double minutes;
             double rest;

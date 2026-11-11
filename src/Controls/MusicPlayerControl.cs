@@ -497,7 +497,8 @@ namespace AppManager.Controls
                 string message = track != null && !string.IsNullOrWhiteSpace(track.Lyrics)
                     ? track.Lyrics : "暂无歌词\n\n将同名 .lrc 文件放在音乐旁\n即可显示同步歌词";
                 TextRenderer.DrawText(g, message, Theme.FontOf(10.5F), clip, Theme.TextTertiary,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak
+                    | TextFormatFlags.PreserveGraphicsClipping);
                 g.Restore(state);
                 return;
             }
@@ -511,9 +512,11 @@ namespace AppManager.Controls
             {
                 Rectangle row = new Rectangle(clip.X + 8, centerY + (i - active) * lineHeight - 17, clip.Width - 16, 34);
                 string text = lyrics[i].Text == "" ? "♪" : lyrics[i].Text;
+                // GDI 文本默认不继承 Graphics 裁剪区，必须显式带上，否则边缘行会画到下方播放条上
                 TextRenderer.DrawText(g, text, i == active ? Theme.FontOf(12F, FontStyle.Bold) : Theme.FontOf(10F), row,
                     i == active ? Theme.AccentText : Theme.TextTertiary,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+                    | TextFormatFlags.PreserveGraphicsClipping);
             }
             g.Restore(state);
         }
