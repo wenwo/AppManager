@@ -98,7 +98,7 @@ namespace AppManager
                 Run("layout restore keeps stash entries created after the snapshot", RestoreKeepsNewerStash);
                 Run("search results only offer removal for items in the category; record delete purges keyed config", SearchContextRemoval);
                 Run("search follows the selected category and direct collection scope in database and fallback", SearchScopeFollowsCategory);
-                Run("search field clear button follows input and clears it", SearchFieldClearButton);
+                Run("search field scales once and clear button follows input", SearchFieldClearButton);
                 Run("scanner name merge never lets files or document shortcuts swallow software", ScannerNameMerge);
                 Run("scanner merges duplicate launch targets only when arguments also match", ScannerLaunchIdentityMerge);
                 Run("restored shortcut aliases merge through resolve, add and name merge", RestoreAliasShortcutScan);
@@ -5258,7 +5258,7 @@ namespace AppManager
 
         private static void SearchFieldClearButton()
         {
-            using (Form host = new Form())
+            using (DpiAwareForm host = new DpiAwareForm())
             using (Controls.SearchField search = new Controls.SearchField())
             using (TextBox other = new TextBox())
             {
@@ -5272,6 +5272,8 @@ namespace AppManager
                 host.Controls.Add(other);
                 host.Controls.Add(search);
                 Control clear = (Control)typeof(Controls.SearchField).GetField("clearButton", Private).GetValue(search);
+                Control placeholder = (Control)typeof(Controls.SearchField).GetField("placeholderLabel", Private).GetValue(search);
+                TextBox input = (TextBox)typeof(Controls.SearchField).GetField("box", Private).GetValue(search);
                 Check(clear.AccessibleName == "清空搜索", "clear button accessible name changed");
                 Check(clear.AccessibleRole == AccessibleRole.PushButton, "clear button accessible role changed");
                 Check(!clear.Visible, "clear button visible without input");
@@ -5281,6 +5283,18 @@ namespace AppManager
                     host.Activate();
                     other.Focus();
                     Application.DoEvents();
+                    foreach (int dpi in new int[] { 120, 144, 168, 96 })
+                    {
+                        SetDpi(host, dpi, host.Bounds);
+                        Check(placeholder.Top == 0 && placeholder.Height == search.Height,
+                            "placeholder height diverged at " + dpi + " DPI: " + placeholder.Bounds + " vs " + search.ClientSize);
+                        Check(placeholder.Left == input.Left && placeholder.Width == input.Width,
+                            "placeholder and input bounds diverged at " + dpi + " DPI");
+                        Check(input.Top == (search.Height - input.PreferredHeight) / 2,
+                            "input was not vertically centered at " + dpi + " DPI");
+                        Check(clear.Left >= 0 && clear.Top >= 0 && clear.Right <= search.Width && clear.Bottom <= search.Height,
+                            "clear button escaped the search field at " + dpi + " DPI: " + clear.Bounds);
+                    }
                     Check(other.Focused, "test host did not receive focus");
                     search.Text = "idea";
                     Check(clear.Visible, "clear button hidden with input");

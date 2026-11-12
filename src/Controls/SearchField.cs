@@ -80,6 +80,8 @@ namespace AppManager.Controls
             set { placeholder = value; placeholderLabel.Text = value; UpdatePlaceholder(); Invalidate(); }
         }
 
+        protected override bool ScaleChildren { get { return false; } }
+
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
