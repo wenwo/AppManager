@@ -1158,6 +1158,9 @@ namespace AppManager
 
         private void LayoutControls()
         {
+            // 最小化时客户区为 0×0：此时排版会把全部控件压成空尺寸，还原时再整体撑开重绘，表现为窗口闪烁。
+            // 还原必然改变窗体尺寸并触发 OnSizeChanged，届时按真实客户区补排。
+            if (WindowState == FormWindowState.Minimized) return;
             int top = Dpi(Theme.TopBarHeight);
             int row1 = Dpi(Theme.TitleRowHeight);    // 行1：标题 + 窗口按钮
             int row2 = Dpi(Theme.ToolbarRowHeight);  // 行2：搜索/计数 + 视图切换 + 操作按钮

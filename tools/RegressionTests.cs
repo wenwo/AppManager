@@ -124,6 +124,7 @@ namespace AppManager
                 Run("OLE export payload count follows the actual distinct exportable paths", DragExportPayload);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
+                Run("minimize keeps the laid-out controls and restore lays out at the real size", MinimizeKeepsLayout);
                 Run("tray hide keeps the music playlist and current track", TrayHideKeepsMusicPlaylist);
                 Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
                 Run("collection tree auto-expands and searches only direct members", CollectionTreeSearchAndInfo);
@@ -1314,6 +1315,9 @@ namespace AppManager
 
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int command);
 
         private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
 
@@ -2653,6 +2657,77 @@ namespace AppManager
                 Check(!settings.Visible, "settings page did not close");
                 Check(collection.Visible && collection.Width == expandedWidth, "collection sidebar did not return after closing settings");
                 Check(collection.Left == sidebar.Width && grid.Left == collection.Right, "grid and collection sidebar are misaligned after closing settings");
+            }
+        }
+
+        private static void MinimizeKeepsLayout()
+        {
+            AppConfig config = RenameConfig("minimize-layout");
+            config.AutoScan = false;
+            using (MainForm form = new MainForm(config))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1200, 720);
+                form.Show();
+                Application.DoEvents();
+
+                Control sidebar = (Control)typeof(MainForm).GetField("sidebar", Private).GetValue(form);
+                Control grid = (Control)typeof(MainForm).GetField("grid", Private).GetValue(form);
+                Control search = (Control)typeof(MainForm).GetField("search", Private).GetValue(form);
+                Size client = form.ClientSize;
+                Rectangle gridBounds = grid.Bounds;
+                Rectangle sidebarBounds = sidebar.Bounds;
+                Rectangle searchBounds = search.Bounds;
+                Check(gridBounds.Width > 0 && gridBounds.Height > 0, "fixture grid has no size");
+
+                // 途径一：任务栏点击走 SC_MINIMIZE，由窗体自己把 WindowState 置为最小化。
+                form.WindowState = FormWindowState.Minimized;
+                Application.DoEvents();
+                // 夹具必须真正出现 0×0 客户区，否则后续断言没有意义。
+                Check(form.ClientSize.IsEmpty, "fixture client area did not collapse while minimized: " + form.ClientSize);
+                Check(grid.Bounds == gridBounds && sidebar.Bounds == sidebarBounds && search.Bounds == searchBounds,
+                    "minimizing collapsed the laid-out controls: grid " + grid.Bounds);
+                // 最小化期间的后台回调（导入进度、扫描完成）也会请求布局，同样不能按 0×0 排版。
+                Invoke(form, "LayoutControls");
+                Check(grid.Bounds == gridBounds && sidebar.Bounds == sidebarBounds && search.Bounds == searchBounds,
+                    "layout requested while minimized collapsed the controls: grid " + grid.Bounds);
+                // 还原时必须按真实客户区重新排版：先人为破坏一个控件的几何，还原后应被纠正。
+                grid.Size = new Size(10, 10);
+                form.WindowState = FormWindowState.Normal;
+                Application.DoEvents();
+                Check(form.ClientSize == client, "restore changed the client size: " + form.ClientSize);
+                Check(grid.Bounds == gridBounds && sidebar.Bounds == sidebarBounds && search.Bounds == searchBounds,
+                    "restore did not lay out at the real size: grid " + grid.Bounds);
+
+                // 途径二：Win+D、任务栏还原等由系统直接改窗口状态，不经过 WindowState 赋值。
+                ShowWindow(form.Handle, 6);   // SW_MINIMIZE
+                Application.DoEvents();
+                Check(form.WindowState == FormWindowState.Minimized && form.ClientSize.IsEmpty,
+                    "native minimize did not collapse the client area: " + form.ClientSize);
+                Check(grid.Bounds == gridBounds && sidebar.Bounds == sidebarBounds,
+                    "native minimize collapsed the laid-out controls: grid " + grid.Bounds);
+                ShowWindow(form.Handle, 9);   // SW_RESTORE
+                Application.DoEvents();
+                Check(form.WindowState == FormWindowState.Normal && form.ClientSize == client, "native restore changed the window: " + form.ClientSize);
+                Check(grid.Bounds == gridBounds && sidebar.Bounds == sidebarBounds && search.Bounds == searchBounds,
+                    "native restore did not lay out at the real size: grid " + grid.Bounds);
+
+                // 相邻边界：整屏状态下最小化再还原，仍按整屏尺寸排版。
+                Invoke(form, "MaximizeOnCurrentScreen");
+                Application.DoEvents();
+                Rectangle maximizedBounds = form.Bounds;
+                Rectangle maximizedGrid = grid.Bounds;
+                Check(maximizedGrid != gridBounds, "fixture maximize did not change the grid bounds");
+                form.WindowState = FormWindowState.Minimized;
+                Application.DoEvents();
+                Check(grid.Bounds == maximizedGrid, "minimizing a maximized window collapsed the grid: " + grid.Bounds);
+                ShowWindow(form.Handle, 9);
+                Application.DoEvents();
+                Check(form.Bounds == maximizedBounds && grid.Bounds == maximizedGrid,
+                    "restoring a maximized window lost its layout: form " + form.Bounds + " grid " + grid.Bounds);
             }
         }
 
