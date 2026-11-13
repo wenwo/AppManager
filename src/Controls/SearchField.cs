@@ -42,6 +42,8 @@ namespace AppManager.Controls
             placeholderLabel.BackColor = Color.Transparent;
             placeholderLabel.ForeColor = Theme.TextTertiary;
             placeholderLabel.Font = box.Font;
+            // 关闭自动尺寸后 TextAlign 的垂直对齐才会生效，避免占位文案贴在输入框上沿。
+            placeholderLabel.AutoSize = false;
             placeholderLabel.Text = placeholder;
             placeholderLabel.TextAlign = ContentAlignment.MiddleLeft;
             placeholderLabel.Cursor = Cursors.IBeam;

@@ -5276,6 +5276,7 @@ namespace AppManager
                 TextBox input = (TextBox)typeof(Controls.SearchField).GetField("box", Private).GetValue(search);
                 Check(clear.AccessibleName == "清空搜索", "clear button accessible name changed");
                 Check(clear.AccessibleRole == AccessibleRole.PushButton, "clear button accessible role changed");
+                Check(!placeholder.AutoSize, "placeholder label must use explicit bounds for vertical alignment");
                 Check(!clear.Visible, "clear button visible without input");
                 host.Show();
                 try
