@@ -14,6 +14,41 @@ namespace AppManager.Controls
         private int _minimum;
         private int _maximum = 100;
         private int _value;
+        private bool _marquee;
+        private Timer _marqueeTimer;
+
+        /// <summary>进度未知时的往复滑块；关闭后按 Value 绘制。定时器只在打开期间存在。</summary>
+        public bool Marquee
+        {
+            get { return _marquee; }
+            set
+            {
+                if (_marquee == value) return;
+                _marquee = value;
+                if (value)
+                {
+                    _marqueeTimer = new Timer { Interval = 30 };
+                    _marqueeTimer.Tick += delegate { Invalidate(); };
+                    _marqueeTimer.Start();
+                }
+                else StopMarquee();
+                Invalidate();
+            }
+        }
+
+        private void StopMarquee()
+        {
+            if (_marqueeTimer == null) return;
+            _marqueeTimer.Stop();
+            _marqueeTimer.Dispose();
+            _marqueeTimer = null;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) StopMarquee();
+            base.Dispose(disposing);
+        }
 
         public IosProgressBar()
         {
@@ -62,6 +97,24 @@ namespace AppManager.Controls
             // 轨道：iOS 浅灰圆角
             using (SolidBrush b = new SolidBrush(Theme.SegmentBg))
                 Draw.FillRoundedRect(g, b, r, radius);
+
+            if (_marquee)
+            {
+                // 滑块宽为轨道的 30%，1.4 秒从左侧外滑到右侧外；裁剪到圆角轨道内
+                const int period = 1400;
+                int segment = Math.Max(r.Height, r.Width * 3 / 10);
+                int phase = (int)((uint)Environment.TickCount % period);
+                int x = r.X - segment + (int)((long)(r.Width + segment) * phase / period);
+                using (GraphicsPath track = Draw.RoundedPath(r, radius))
+                using (SolidBrush b = new SolidBrush(Theme.Accent))
+                {
+                    GraphicsState state = g.Save();
+                    g.SetClip(track, CombineMode.Intersect);
+                    Draw.FillRoundedRect(g, b, new Rectangle(x, r.Y, segment, r.Height), radius);
+                    g.Restore(state);
+                }
+                return;
+            }
 
             // 填充：强调色，按比例绘制
             int span = _maximum - _minimum;

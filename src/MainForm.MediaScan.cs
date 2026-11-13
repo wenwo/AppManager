@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -46,32 +45,35 @@ namespace AppManager
                     title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            List<string> roots;
-            using (LocalScanScopeDialog scope = new LocalScanScopeDialog(title, kind,
-                lastRoots, LocalScanExcludedRoots()))
-            {
-                if (scope.ShowDialog(this) != DialogResult.OK) return;
-                roots = new List<string>(scope.ResultRoots);
-            }
-            if (roots.Count == 0) return;
-            lastRoots = new List<string>(roots);
-
             localMediaScanRunning = true;
             try
             {
                 Func<List<string>, Dictionary<string, string>> registered = RegisteredMediaPathsForBackground();
                 List<string> exclusions = LocalScanExcludedRoots();
+                List<string> roots = null;   // null：需要（重新）选择范围
                 while (true)
                 {
+                    if (roots == null)
+                    {
+                        using (LocalScanScopeDialog scope = new LocalScanScopeDialog(title, kind, lastRoots, exclusions))
+                        {
+                            ConfirmDialog.ShowModal(scope);   // 模态 + 遮罩层
+                            if (scope.DialogResult != DialogResult.OK) return;
+                            roots = new List<string>(scope.ResultRoots);
+                        }
+                        if (roots.Count == 0) return;
+                        lastRoots = new List<string>(roots);
+                    }
+                    List<string> scanRoots = roots;
                     LocalMediaScanResult result = null;
                     Exception failure = null;
                     bool canceled = false;
                     CancellationTokenSource cancel = new CancellationTokenSource();
                     localMediaScanCancel = cancel;
-                    Label status, detail;
                     try
                     {
-                        using (Form dialog = LocalMediaProgressDialog(scanTitle, cancel, out status, out detail))
+                        using (LocalScanProgressDialog dialog = new LocalScanProgressDialog(scanTitle, "正在准备扫描…",
+                            "扫描所选磁盘/文件夹；现有资源存储位置会跳过。", cancel))
                         {
                             dialog.Shown += delegate
                             {
@@ -82,22 +84,22 @@ namespace AppManager
                                         Dictionary<string, LocalMediaImportTarget> previous =
                                             LocalMediaScanner.CompletedImportTargets(ImportJournal, registered, cancel.Token);
                                         int lastUpdate = Environment.TickCount;
-                                        result = LocalMediaScanner.Scan(category, roots, exclusions, previous, delegate(LocalMediaScanProgress value)
+                                        result = LocalMediaScanner.Scan(category, scanRoots, exclusions, previous, delegate(LocalMediaScanProgress value)
                                         {
                                             int now = Environment.TickCount;
                                             if (unchecked(now - lastUpdate) < 200) return;
                                             lastUpdate = now;
                                             string text = "正在遍历：已检查 " + value.DirectoriesScanned + " 个目录，发现 "
                                                 + value.FilesFound + " " + unit + noun + "；预计复制 " + FormatLocalMediaBytes(value.CopyBytes);
-                                            UpdateLocalMediaProgress(dialog, status, detail, text, value.Path);
+                                            dialog.Report(text, value.Path, 0, 0);
                                         }, cancel.Token);
                                     }
                                     catch (OperationCanceledException) { canceled = true; }
                                     catch (Exception ex) { failure = ex; }
-                                    CloseLocalScanProgressDialog(dialog);
+                                    finally { dialog.Finish(); }
                                 });
                             };
-                            dialog.ShowDialog(this);
+                            ConfirmDialog.ShowModal(dialog);
                         }
                     }
                     finally
@@ -114,22 +116,26 @@ namespace AppManager
                     if (failure != null)
                     {
                         Paths.LogError(new IOException("扫描本机" + noun + "失败。", failure));
-                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, scanTitle,
-                            "扫描失败，尚未收录或创建年份集合，源文件未改动。\n\n" + failure.Message, null, false);
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show(scanTitle,
+                            "扫描失败，尚未收录或创建年份集合，源文件未改动。", null, failure.Message, null, false);
+                        if (decision.Action == LocalScanResultAction.ChangeScope) { roots = null; continue; }
                         if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
                     if (result == null)
                     {
-                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, scanTitle,
-                            "扫描未返回结果，尚未收录或创建年份集合。", null, false);
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show(scanTitle,
+                            "扫描未返回结果，尚未收录或创建年份集合。", null, null, null, false);
+                        if (decision.Action == LocalScanResultAction.ChangeScope) { roots = null; continue; }
                         if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
 
-                    string summary = BuildLocalMediaScanSummary(result, noun, unit, metadataHint);
-                    LocalScanResultDecision importDecision = LocalScanResultDialog.Show(this, scanTitle, summary,
+                    LocalScanResultDecision importDecision = LocalScanResultDialog.Show(scanTitle,
+                        LocalMediaScanHeadline(result, noun, unit), LocalMediaScanStats(result, unit),
+                        BuildLocalMediaScanSummary(result, unit, metadataHint),
                         "开始收录", result.Count > 0, result.Count > result.Reused);
+                    if (importDecision.Action == LocalScanResultAction.ChangeScope) { roots = null; continue; }
                     if (importDecision.Action == LocalScanResultAction.Retry) continue;
                     if (importDecision.Action != LocalScanResultAction.Import || result.Count == 0) return;
                     List<string> importPaths = result.Years.Values.SelectMany(paths => paths).ToList();
@@ -168,14 +174,35 @@ namespace AppManager
             return roots;
         }
 
-        private static string BuildLocalMediaScanSummary(LocalMediaScanResult result, string noun, string unit, string metadataHint)
+        /// <summary>结果窗口的一句话结论：有没有新内容、要复制多少。</summary>
+        internal static string LocalMediaScanHeadline(LocalMediaScanResult result, string noun, string unit)
+        {
+            int added = result.Count - result.Reused;
+            if (added > 0)
+                return "发现 " + added + " " + unit + "新" + noun + "，预计复制 " + FormatLocalMediaBytes(result.CopyBytes) + "。";
+            if (result.Reused > 0)
+                return "没有新" + noun + "；" + result.Reused + " " + unit + "已收录，可更新年份集合归属。";
+            return "没有发现可收录的" + noun + "。";
+        }
+
+        /// <summary>结果窗口顶部的关键数字：新增、已收录、云端未下载、读取失败。</summary>
+        internal static List<LocalScanStat> LocalMediaScanStats(LocalMediaScanResult result, string unit)
+        {
+            int failed = result.UnreadableDirectories + result.ReadFailures;
+            return new List<LocalScanStat>
+            {
+                new LocalScanStat("新增", (result.Count - result.Reused) + " " + unit),
+                new LocalScanStat("已收录", result.Reused + " " + unit),
+                new LocalScanStat("云端未下载", result.CloudFiles + " " + unit),
+                new LocalScanStat("读取失败", failed + " 项", failed > 0)
+            };
+        }
+
+        private static string BuildLocalMediaScanSummary(LocalMediaScanResult result, string unit, string metadataHint)
         {
             StringBuilder text = new StringBuilder();
-            int added = result.Count - result.Reused;
-            text.Append("扫描完成：检查 ").Append(result.DirectoriesScanned).Append(" 个目录，跳过 ")
+            text.Append("检查 ").Append(result.DirectoriesScanned).Append(" 个目录，跳过 ")
                 .Append(result.DirectoriesSkipped).Append(" 个目录。");
-            text.Append("\n新增 ").Append(added).Append(" ").Append(unit).Append("，已收录复用 ").Append(result.Reused)
-                .Append(" ").Append(unit).Append("，云端未下载 ").Append(result.CloudFiles).Append(" ").Append(unit).Append("。");
             text.Append("\n预计复制 ").Append(FormatLocalMediaBytes(result.CopyBytes));
             if (result.Reused > 0) text.Append("；另复用 ").Append(FormatLocalMediaBytes(result.Bytes - result.CopyBytes));
             if (result.CleanupPending > 0)
@@ -197,18 +224,6 @@ namespace AppManager
             text.Append("\n").Append(metadataHint);
             text.Append("\n扫描最多约 100 ").Append(unit).Append("/秒，复制限速约 32 MB/s。");
             return text.ToString();
-        }
-
-        private static void CloseLocalScanProgressDialog(Form dialog)
-        {
-            try
-            {
-                if (dialog.IsDisposed || dialog.Disposing) return;
-                if (!dialog.IsHandleCreated) { dialog.Close(); return; }
-                dialog.BeginInvoke((Action)delegate { if (!dialog.IsDisposed) dialog.Close(); });
-            }
-            catch (ObjectDisposedException) { }
-            catch (InvalidOperationException) { }
         }
 
         private Func<List<string>, Dictionary<string, string>> RegisteredMediaPathsForBackground()
@@ -256,44 +271,6 @@ namespace AppManager
             MessageBox.Show(this, "年份集合未能保存，尚未开始收录" + noun + "。\n" + config.DatabaseError,
                 "整理本机" + noun, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
-        }
-
-        private static Form LocalMediaProgressDialog(string title, CancellationTokenSource cancel, out Label status, out Label detail)
-        {
-            Form dialog = new BufferedDialogForm
-            {
-                Text = title, StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(520, 170),
-                FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ControlBox = false
-            };
-            Label statusLabel = new Label { Text = "正在准备扫描…", AutoSize = false, Location = new Point(20, 18), Size = new Size(480, 38), Font = Theme.BodyFont };
-            Label detailLabel = new Label { Text = "扫描所选磁盘/文件夹；现有资源存储位置会跳过。", Location = new Point(20, 58), Size = new Size(480, 36), AutoEllipsis = true };
-            status = statusLabel;
-            detail = detailLabel;
-            ProgressBar progress = new ProgressBar { Style = ProgressBarStyle.Marquee, Location = new Point(20, 100), Size = new Size(480, 12) };
-            Button stop = new Button { Text = "取消", Location = new Point(425, 128), Size = new Size(75, 28) };
-            stop.Click += delegate
-            {
-                cancel.Cancel();
-                stop.Enabled = false;
-                statusLabel.Text = "正在取消扫描…";
-            };
-            dialog.Controls.AddRange(new Control[] { status, detail, progress, stop });
-            return dialog;
-        }
-
-        private static void UpdateLocalMediaProgress(Form dialog, Label status, Label detail, string text, string path)
-        {
-            try
-            {
-                dialog.BeginInvoke((Action)delegate
-                {
-                    if (dialog.IsDisposed || dialog.Disposing) return;
-                    status.Text = text;
-                    detail.Text = path;
-                });
-            }
-            catch (ObjectDisposedException) { }
-            catch (InvalidOperationException) { }
         }
 
         private static string FormatLocalMediaBytes(long bytes)

@@ -185,6 +185,7 @@ namespace AppManager
                 app.Source = "AppsFolder";
                 app.Key = "af:" + NormalizeEntryName(name);
                 app.Category = CategoryRules.Classify(name);
+                app.LinkTarget = it[2];
 
                 if (!string.IsNullOrEmpty(id) && Directory.Exists(id))
                 {
@@ -252,6 +253,48 @@ namespace AppManager
             if (app.IsFolder || string.IsNullOrEmpty(target)) return false;
             if (target.IndexOf("://", StringComparison.Ordinal) >= 0) return true;
             return HasExtension(target, ProgramExt);
+        }
+
+        /// <summary>Windows 系统应用包的发布者标识（设置、入门等随系统提供的打包应用）。</summary>
+        private const string SystemPackagePublisher = "_cw5n1h2txyewy!";
+
+        private static readonly string WindowsDirPrefix = ResolveWindowsDirPrefix();
+
+        private static string ResolveWindowsDirPrefix()
+        {
+            try
+            {
+                string dir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+                return string.IsNullOrEmpty(dir) ? string.Empty : dir.TrimEnd('\\') + "\\";
+            }
+            catch (Exception) { return string.Empty; }
+        }
+
+        /// <summary>
+        /// 是否为 Windows 自带的系统工具或组件（命令提示符、注册表编辑器、控制面板、设置等），区别于用户安装的软件。
+        /// 按实际启动目标判断，不靠名称表：程序位于 Windows 目录、目标是 shell 虚拟项（::{CLSID}），或属于系统应用包。
+        /// 目标未知的条目（应用商店应用、解析不出目标的快捷方式）不算系统组件。internal 供回归测试。
+        /// </summary>
+        internal static bool IsSystemComponent(AppInfo app)
+        {
+            if (app == null) return false;
+            string target = app.TargetPath ?? string.Empty;
+            string path;
+            if (IsAppsFolderTarget(target))
+            {
+                if (target.IndexOf(SystemPackagePublisher, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+                path = app.LinkTarget ?? string.Empty;
+            }
+            else
+            {
+                // 指向应用商店应用的快捷方式目标是 explorer.exe 或为空，不能按路径判断
+                if (app.IsUwp) return false;
+                path = string.IsNullOrEmpty(app.LinkTarget) ? target : app.LinkTarget;
+            }
+            path = path.Trim();
+            if (path.Length == 0) return false;
+            if (path.StartsWith("::", StringComparison.Ordinal)) return true;
+            return WindowsDirPrefix.Length > 0 && path.StartsWith(WindowsDirPrefix, StringComparison.OrdinalIgnoreCase);
         }
 
         [DllImport("shell32.dll")]
@@ -328,7 +371,8 @@ namespace AppManager
                             CultureInfo.InvariantCulture);
                         string id = Convert.ToString(itemType.InvokeMember("Path", BindingFlags.GetProperty, null, item, null),
                             CultureInfo.InvariantCulture);
-                        if (!string.IsNullOrEmpty(name)) result.Add(new string[] { name, id ?? string.Empty });
+                        if (!string.IsNullOrEmpty(name))
+                            result.Add(new string[] { name, id ?? string.Empty, ReadLinkTarget(itemType, item) });
                     }
                     catch (Exception ex)
                     {
@@ -354,6 +398,24 @@ namespace AppManager
                 ReleaseCom(shell);
             }
             return result;
+        }
+
+        /// <summary>
+        /// 「全部应用」条目实际启动的程序路径（任务管理器 → taskmgr.exe、Excel → EXCEL.EXE）；打包应用没有该属性，返回空串。
+        /// 只用于区分系统自带工具，读取失败按“未知”处理，不能因此丢掉条目。
+        /// </summary>
+        private static string ReadLinkTarget(Type itemType, object item)
+        {
+            try
+            {
+                return Convert.ToString(itemType.InvokeMember("ExtendedProperty", BindingFlags.InvokeMethod, null, item,
+                    new object[] { "System.Link.TargetParsingPath" }), CultureInfo.InvariantCulture) ?? string.Empty;
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("读取 AppsFolder 条目链接目标失败: " + ex.Message);
+                return string.Empty;
+            }
         }
 
         /// <summary>释放单个 COM 引用；非 COM 对象或释放失败时静默忽略。</summary>
@@ -792,6 +854,7 @@ namespace AppManager
             exist.IsFile = candidate.IsFile;
             exist.IsFolder = candidate.IsFolder;
             exist.LaunchArguments = candidate.LaunchArguments;
+            exist.LinkTarget = candidate.LinkTarget;
             exist.ShortcutLastWriteTimeUtc = candidate.ShortcutLastWriteTimeUtc;
             exist.IsCurrentDesktopShortcut = candidate.IsCurrentDesktopShortcut;
             MergeDetails(exist, candidate);
@@ -989,6 +1052,7 @@ namespace AppManager
                     a.Name = el.GetAttribute("name");
                     a.TargetPath = el.GetAttribute("target");
                     a.ShortcutPath = el.GetAttribute("shortcut");
+                    a.LinkTarget = el.GetAttribute("link");
                     a.InstallLocation = el.GetAttribute("install");
                     a.UninstallString = el.GetAttribute("uninstall");
                     a.DisplayIcon = el.GetAttribute("icon");
@@ -1027,6 +1091,7 @@ namespace AppManager
                         WriteSafeAttribute(w, "name", a.Name);
                         if (!string.IsNullOrEmpty(a.TargetPath)) WriteSafeAttribute(w, "target", a.TargetPath);
                         if (!string.IsNullOrEmpty(a.ShortcutPath)) WriteSafeAttribute(w, "shortcut", a.ShortcutPath);
+                        if (!string.IsNullOrEmpty(a.LinkTarget)) WriteSafeAttribute(w, "link", a.LinkTarget);
                         if (!string.IsNullOrEmpty(a.InstallLocation)) WriteSafeAttribute(w, "install", a.InstallLocation);
                         if (!string.IsNullOrEmpty(a.UninstallString)) WriteSafeAttribute(w, "uninstall", a.UninstallString);
                         if (!string.IsNullOrEmpty(a.DisplayIcon)) WriteSafeAttribute(w, "icon", a.DisplayIcon);

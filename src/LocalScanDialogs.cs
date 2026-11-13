@@ -1,9 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.IO;
+using System.Drawing.Drawing2D;
 using System.Threading;
 using System.Windows.Forms;
+using AppManager.Controls;
 
 namespace AppManager
 {
@@ -11,6 +12,7 @@ namespace AppManager
     {
         Import,
         Retry,
+        ChangeScope,
         Cancel
     }
 
@@ -20,609 +22,406 @@ namespace AppManager
         internal ImportOperation Operation = ImportOperation.Copy;
     }
 
-    /// <summary>
-    /// 照片/视频/音乐共用的扫描范围选择窗口。磁盘列表在后台读取，文件夹选择留在 UI 线程。
-    /// 只返回已校验、已去重并合并重叠项的根目录列表。
-    /// </summary>
-    internal sealed class LocalScanScopeDialog : BufferedDialogForm
+    /// <summary>扫描结果顶部的一个关键数字，例如「新增 128 张」。Warn 用于失败类数字，大于零时标红。</summary>
+    internal sealed class LocalScanStat
     {
-        private readonly string dialogTitle;
-        private readonly LocalScanScopeKind kind;
-        private readonly List<string> excludedRoots;
-        private readonly List<string> selectedRoots = new List<string>();
-        private readonly CheckedListBox driveList;
-        private readonly ListBox selectedList;
-        private readonly Label unavailableLabel;
-        private readonly Label summaryLabel;
-        private readonly Button startButton;
-        private readonly Control shortcutsPanel;
-        private bool populating;
+        internal readonly string Label;
+        internal readonly string Value;
+        internal readonly bool Warn;
 
-        internal List<string> ResultRoots = new List<string>();
-
-        internal LocalScanScopeDialog(string title, LocalScanScopeKind kind, IEnumerable<string> initialRoots,
-            IEnumerable<string> excludedRoots)
+        internal LocalScanStat(string label, string value, bool warn = false)
         {
-            this.dialogTitle = title;
-            this.kind = kind;
-            this.excludedRoots = excludedRoots == null
-                ? new List<string>() : new List<string>(excludedRoots);
-            Text = title;
+            Label = label;
+            Value = value;
+            Warn = warn;
+        }
+    }
+
+    /// <summary>
+    /// 照片/视频/音乐共用的扫描进度窗口。后台线程通过 Report 更新文字和进度，结束时调用 Finish 关闭。
+    /// 扫描结束前用户关闭窗口只会发出取消请求，窗口等后台线程退出后才关闭，避免后台仍在跑而界面已继续往下走。
+    /// </summary>
+    internal sealed class LocalScanProgressDialog : BufferedDialogForm
+    {
+        private readonly CancellationTokenSource cancel;
+        private readonly Label statusLabel = new Label();
+        private readonly Label detailLabel = new Label();
+        private readonly IosProgressBar progress = new IosProgressBar();
+        private readonly RoundButton cancelButton = new RoundButton();
+        private volatile bool finished;
+        private bool cancelRequested;
+
+        internal LocalScanProgressDialog(string title, string status, string detail, CancellationTokenSource cancel)
+        {
+            this.cancel = cancel;
+            FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
-            MinimizeBox = false;
-            MaximizeBox = false;
-            ControlBox = false;
-            ShowInTaskbar = false;
-            ClientSize = new Size(760, 540);
+            ClientSize = new Size(520, 196);
             BackColor = Theme.Background;
+            ShowInTaskbar = false;
+            Text = title;
 
-            Label titleLabel = new Label
-            {
-                Text = title,
-                AutoSize = false,
-                Location = new Point(20, 14),
-                Size = new Size(720, 28),
-                Font = Theme.DialogTitleFont,
-                ForeColor = Theme.TextPrimary
-            };
-            Label description = new Label
-            {
-                Text = "选择要扫描的磁盘或文件夹。默认包含子文件夹；现有资源存储位置和 AppManager 数据目录会自动跳过。",
-                AutoSize = false,
-                Location = new Point(20, 44),
-                Size = new Size(720, 24),
-                ForeColor = Theme.TextSecondary
-            };
+            Label titleLabel = new Label();
+            titleLabel.Text = title;
+            titleLabel.Font = Theme.DialogTitleFont;
+            titleLabel.ForeColor = Theme.TextPrimary;
+            titleLabel.AutoSize = false;
+            titleLabel.UseMnemonic = false;
+            titleLabel.SetBounds(24, 18, 472, 28);
+            Controls.Add(titleLabel);
 
-            Label drivesTitle = new Label
-            {
-                Text = "磁盘",
-                AutoSize = true,
-                Location = new Point(20, 78),
-                Font = Theme.SectionTitleFont,
-                ForeColor = Theme.TextPrimary
-            };
-            driveList = new CheckedListBox
-            {
-                Location = new Point(20, 100),
-                Size = new Size(330, 174),
-                CheckOnClick = true,
-                IntegralHeight = false,
-                HorizontalScrollbar = true,
-                Font = Theme.CaptionFont
-            };
-            driveList.ItemCheck += DriveList_ItemCheck;
+            statusLabel.Text = status;
+            statusLabel.Font = Theme.BodyFont;
+            statusLabel.ForeColor = Theme.TextPrimary;
+            statusLabel.AutoSize = false;
+            statusLabel.AutoEllipsis = true;
+            statusLabel.UseMnemonic = false;
+            statusLabel.SetBounds(24, 56, 472, 22);
+            Controls.Add(statusLabel);
 
-            Label shortcutsTitle = new Label
-            {
-                Text = "快捷范围",
-                AutoSize = true,
-                Location = new Point(20, 284),
-                Font = Theme.SectionTitleFont,
-                ForeColor = Theme.TextPrimary
-            };
-            shortcutsPanel = new Panel
-            {
-                Location = new Point(20, 306),
-                Size = new Size(330, 36),
-                BackColor = Theme.Background
-            };
-            BuildShortcuts();
+            // 这里显示正在处理的路径：路径里的 & 不能被当成快捷键标记
+            detailLabel.Text = detail;
+            detailLabel.Font = Theme.CaptionFont;
+            detailLabel.ForeColor = Theme.TextSecondary;
+            detailLabel.AutoSize = false;
+            detailLabel.AutoEllipsis = true;
+            detailLabel.UseMnemonic = false;
+            detailLabel.SetBounds(24, 80, 472, 20);
+            Controls.Add(detailLabel);
 
-            Label unavailableTitle = new Label
-            {
-                Text = "不可用位置",
-                AutoSize = true,
-                Location = new Point(20, 350),
-                Font = Theme.SectionTitleFont,
-                ForeColor = Theme.TextPrimary
-            };
-            unavailableLabel = new Label
-            {
-                Text = "正在读取磁盘…",
-                AutoSize = false,
-                Location = new Point(20, 372),
-                Size = new Size(330, 48),
-                ForeColor = Theme.TextSecondary
-            };
+            progress.BackColor = Theme.Background;
+            progress.SetBounds(24, 110, 472, 10);
+            progress.Marquee = true;
+            Controls.Add(progress);
 
-            Button addFolder = MakeButton("添加文件夹…", false);
-            addFolder.Location = new Point(20, 426);
-            addFolder.Size = new Size(150, 30);
-            addFolder.Click += delegate { AddFolder(); };
-
-            Label selectedTitle = new Label
-            {
-                Text = "已选范围（完整路径）",
-                AutoSize = true,
-                Location = new Point(370, 78),
-                Font = Theme.SectionTitleFont,
-                ForeColor = Theme.TextPrimary
-            };
-            selectedList = new ListBox
-            {
-                Location = new Point(370, 100),
-                Size = new Size(370, 286),
-                SelectionMode = SelectionMode.MultiExtended,
-                HorizontalScrollbar = true,
-                IntegralHeight = false,
-                Font = Theme.CaptionFont
-            };
-            selectedList.SelectedIndexChanged += delegate { RefreshSummary(); };
-
-            Button removeButton = MakeButton("移除所选", false);
-            removeButton.Location = new Point(370, 394);
-            removeButton.Size = new Size(110, 30);
-            removeButton.Click += delegate { RemoveSelected(); };
-            Button clearButton = MakeButton("清空", false);
-            clearButton.Location = new Point(490, 394);
-            clearButton.Size = new Size(90, 30);
-            clearButton.Click += delegate { ClearSelected(); };
-
-            summaryLabel = new Label
-            {
-                Text = "请选择至少一个磁盘或文件夹。",
-                AutoSize = false,
-                Location = new Point(20, 454),
-                Size = new Size(720, 38),
-                ForeColor = Theme.TextSecondary
-            };
-
-            startButton = MakeButton("开始扫描", true);
-            startButton.Location = new Point(640, 498);
-            startButton.Size = new Size(100, 30);
-            startButton.Click += delegate { StartScan(); };
-            Button cancelButton = MakeButton("取消", false);
-            cancelButton.Location = new Point(530, 498);
-            cancelButton.Size = new Size(94, 30);
-            cancelButton.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
-            AcceptButton = startButton;
-            CancelButton = cancelButton;
-
-            Controls.AddRange(new Control[] {
-                titleLabel, description, drivesTitle, driveList, shortcutsTitle, shortcutsPanel,
-                unavailableTitle, unavailableLabel, addFolder, selectedTitle, selectedList,
-                removeButton, clearButton, summaryLabel, startButton, cancelButton
-            });
-
-            ApplyInitialRoots(initialRoots);
-            RefreshSummary();
+            cancelButton.Text = "取消";
+            cancelButton.SetBounds(406, 140, 90, 34);
+            cancelButton.Click += delegate { RequestCancel(); };
+            Controls.Add(cancelButton);
         }
 
-        protected override void OnShown(EventArgs e)
-        {
-            base.OnShown(e);
-            LoadDrivesAsync();
-        }
-
-        private void BuildShortcuts()
-        {
-            List<LocalScanScopeShortcut> shortcuts = LocalScanScope.Shortcuts(kind);
-            int x = 0;
-            for (int i = 0; i < shortcuts.Count; i++)
-            {
-                LocalScanScopeShortcut shortcut = shortcuts[i];
-                Button button = MakeButton(shortcut.Label, false);
-                button.Location = new Point(x, 0);
-                button.Size = new Size(Math.Max(84, 84 + (shortcut.Label.Length - 2) * 8), 30);
-                button.Tag = shortcut;
-                button.Click += delegate(object sender, EventArgs args)
-                {
-                    Button source = sender as Button;
-                    LocalScanScopeShortcut value = source == null ? null : source.Tag as LocalScanScopeShortcut;
-                    if (value == null) return;
-                    AddSelectedRoot(value.Path, true);
-                };
-                shortcutsPanel.Controls.Add(button);
-                x += button.Width + 8;
-            }
-        }
-
-        private void ApplyInitialRoots(IEnumerable<string> initialRoots)
-        {
-            if (initialRoots == null)
-            {
-                List<LocalScanScopeShortcut> shortcuts = LocalScanScope.Shortcuts(kind);
-                for (int i = 0; i < shortcuts.Count; i++)
-                {
-                    if (!shortcuts[i].Primary) continue;
-                    AddSelectedRoot(shortcuts[i].Path, false);
-                    break;
-                }
-                return;
-            }
-            foreach (string root in initialRoots) AddSelectedRoot(root, false);
-        }
-
-        private void LoadDrivesAsync()
+        /// <summary>更新状态文字和进度，可在任意线程调用。total 大于零时显示确定进度，否则显示进行中动画。</summary>
+        internal void Report(string status, string detail, int index, int total)
         {
             try
             {
-                ThreadPool.QueueUserWorkItem(delegate
+                if (IsDisposed || !IsHandleCreated) return;
+                BeginInvoke((Action)delegate
                 {
-                    List<LocalScanScopeDrive> drives = null;
-                    Exception failure = null;
-                    try { drives = LocalScanScope.Drives(); }
-                    catch (Exception ex) { failure = ex; }
-                    try
+                    // 已请求取消后保留「正在取消」的提示，不再被后台迟到的进度覆盖
+                    if (IsDisposed || Disposing || cancelRequested) return;
+                    statusLabel.Text = status;
+                    detailLabel.Text = detail ?? string.Empty;
+                    if (total > 0)
                     {
-                        BeginInvoke((Action)delegate
-                        {
-                            if (IsDisposed || Disposing) return;
-                            PopulateDrives(drives, failure);
-                        });
+                        progress.Marquee = false;
+                        progress.Maximum = total;
+                        progress.Value = Math.Max(0, Math.Min(index, total));
                     }
-                    catch (ObjectDisposedException) { }
-                    catch (InvalidOperationException) { }
+                    else progress.Marquee = true;
                 });
             }
             catch (ObjectDisposedException) { }
             catch (InvalidOperationException) { }
         }
 
-        private void PopulateDrives(List<LocalScanScopeDrive> drives, Exception failure)
+        /// <summary>后台工作结束（成功、失败或取消）后调用，可在任意线程调用；窗口随后关闭。</summary>
+        internal void Finish()
         {
-            populating = true;
-            driveList.Items.Clear();
-            List<string> unavailable = new List<string>();
-            if (failure != null) unavailable.Add("读取磁盘失败：" + failure.Message);
-            if (drives != null)
-            {
-                foreach (LocalScanScopeDrive drive in drives)
-                {
-                    if (!drive.Supported)
-                    {
-                        if (!string.IsNullOrEmpty(drive.UnsupportedReason))
-                            unavailable.Add(drive.Path + "：" + drive.UnsupportedReason);
-                        continue;
-                    }
-                    driveList.Items.Add(drive);
-                }
-                foreach (string root in selectedRoots)
-                {
-                    int index = FindDriveIndex(root);
-                    if (index >= 0) driveList.SetItemChecked(index, true);
-                }
-            }
-            populating = false;
-            unavailableLabel.Text = unavailable.Count == 0
-                ? "仅支持已就绪的本地固定磁盘和可移动磁盘；网络位置、光驱和未就绪磁盘不会显示为可扫描项。"
-                : JoinLines(unavailable);
-            unavailableLabel.ForeColor = unavailable.Count == 0 ? Theme.TextSecondary : Theme.DeleteRed;
-            RefreshSummary();
-        }
-
-        private void DriveList_ItemCheck(object sender, ItemCheckEventArgs e)
-        {
-            if (populating || e.Index < 0 || e.Index >= driveList.Items.Count) return;
-            LocalScanScopeDrive drive = driveList.Items[e.Index] as LocalScanScopeDrive;
-            if (drive == null || !drive.Supported) return;
-            if (e.NewValue == CheckState.Checked)
-            {
-                if (!ContainsRoot(drive.Path) && !AddSelectedRoot(drive.Path, true))
-                    e.NewValue = CheckState.Unchecked;
-            }
-            else RemoveSelectedRoot(drive.Path);
-        }
-
-        private void AddFolder()
-        {
-            using (FolderBrowserDialog dialog = new FolderBrowserDialog())
-            {
-                dialog.Description = "选择要扫描的文件夹";
-                dialog.ShowNewFolderButton = false;
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                AddSelectedRoot(dialog.SelectedPath, true);
-            }
-        }
-
-        private bool AddSelectedRoot(string path, bool showError)
-        {
-            string normalized;
-            string reason;
-            if (!LocalScanScope.TryValidate(path, excludedRoots, out normalized, out reason))
-            {
-                if (showError) MessageBox.Show(this, reason, dialogTitle, MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return false;
-            }
-            for (int i = 0; i < selectedRoots.Count; i++)
-            {
-                if (!string.Equals(selectedRoots[i], normalized, StringComparison.OrdinalIgnoreCase)) continue;
-                return false;
-            }
-            selectedRoots.Add(normalized);
-            RefreshSelectedList();
-            RefreshSummary();
-            return true;
-        }
-
-        private void RemoveSelectedRoot(string path)
-        {
-            string normalized = LocalScanScope.NormalizePath(path);
-            if (normalized == null) return;
-            for (int i = selectedRoots.Count - 1; i >= 0; i--)
-                if (string.Equals(selectedRoots[i], normalized, StringComparison.OrdinalIgnoreCase))
-                    selectedRoots.RemoveAt(i);
-            RefreshSelectedList();
-            RefreshSummary();
-        }
-
-        private void RemoveSelected()
-        {
-            List<int> indices = new List<int>();
-            foreach (int index in selectedList.SelectedIndices) indices.Add(index);
-            indices.Sort(delegate(int a, int b) { return b.CompareTo(a); });
-            for (int i = 0; i < indices.Count; i++)
-            {
-                if (indices[i] >= 0 && indices[i] < selectedRoots.Count)
-                    selectedRoots.RemoveAt(indices[i]);
-            }
-            SyncDriveChecks();
-            RefreshSelectedList();
-            RefreshSummary();
-        }
-
-        private void ClearSelected()
-        {
-            selectedRoots.Clear();
-            SyncDriveChecks();
-            RefreshSelectedList();
-            RefreshSummary();
-        }
-
-        private void SyncDriveChecks()
-        {
-            if (driveList.Items.Count == 0) return;
-            populating = true;
-            for (int i = 0; i < driveList.Items.Count; i++)
-            {
-                LocalScanScopeDrive drive = driveList.Items[i] as LocalScanScopeDrive;
-                bool selected = drive != null && ContainsRoot(drive.Path);
-                driveList.SetItemChecked(i, selected);
-            }
-            populating = false;
-        }
-
-        private bool ContainsRoot(string path)
-        {
-            string normalized = LocalScanScope.NormalizePath(path);
-            if (normalized == null) return false;
-            for (int i = 0; i < selectedRoots.Count; i++)
-                if (string.Equals(selectedRoots[i], normalized, StringComparison.OrdinalIgnoreCase)) return true;
-            return false;
-        }
-
-        private int FindDriveIndex(string path)
-        {
-            string normalized = LocalScanScope.NormalizePath(path);
-            if (normalized == null) return -1;
-            for (int i = 0; i < driveList.Items.Count; i++)
-            {
-                LocalScanScopeDrive drive = driveList.Items[i] as LocalScanScopeDrive;
-                if (drive != null && string.Equals(LocalScanScope.NormalizePath(drive.Path), normalized,
-                    StringComparison.OrdinalIgnoreCase)) return i;
-            }
-            return -1;
-        }
-
-        private void RefreshSelectedList()
-        {
-            object[] selected = new object[selectedRoots.Count];
-            for (int i = 0; i < selectedRoots.Count; i++)
-                selected[i] = (LocalScanScope.IsDriveRoot(selectedRoots[i]) ? "[磁盘] " : "[文件夹] ") + selectedRoots[i];
-            selectedList.BeginUpdate();
+            finished = true;
             try
             {
-                selectedList.Items.Clear();
-                selectedList.Items.AddRange(selected);
+                if (IsDisposed || Disposing) return;
+                if (!IsHandleCreated) { Close(); return; }
+                BeginInvoke((Action)delegate { if (!IsDisposed) Close(); });
             }
-            finally { selectedList.EndUpdate(); }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
         }
 
-        private void RefreshSummary()
+        private void RequestCancel()
         {
-            LocalScanScopeResolution resolution = LocalScanScope.Resolve(selectedRoots, excludedRoots);
-            int folders = resolution.Roots.Count - resolution.DriveCount;
-            string text;
-            if (resolution.Roots.Count == 0)
-            {
-                text = resolution.Invalid.Count == 0
-                    ? "请选择至少一个磁盘或文件夹，选择后才会开始扫描。"
-                    : "没有可用范围：" + resolution.Invalid[0];
-            }
-            else
-            {
-                text = "将扫描 " + resolution.DriveCount + " 个磁盘、" + folders + " 个文件夹。";
-                if (resolution.Merged > 0) text += "已合并 " + resolution.Merged + " 个重复或重叠范围。";
-                if (resolution.DriveCount > 0) text += "包含整盘扫描，可能耗时较长。";
-                if (resolution.Invalid.Count > 0) text += "另有 " + resolution.Invalid.Count + " 个范围不可用。";
-            }
-            summaryLabel.Text = text;
-            summaryLabel.ForeColor = resolution.Invalid.Count > 0 ? Theme.DeleteRed
-                : resolution.DriveCount > 0 ? Theme.AccentText : Theme.TextSecondary;
-            startButton.Enabled = resolution.Roots.Count > 0;
+            if (cancelRequested) return;
+            cancelRequested = true;
+            try { cancel.Cancel(); }
+            catch (ObjectDisposedException) { }   // 扫描已经结束并释放了取消源：没有可取消的工作
+            cancelButton.Enabled = false;
+            cancelButton.Text = "正在取消…";
+            statusLabel.Text = "正在取消扫描…";
         }
 
-        private void StartScan()
+        protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            LocalScanScopeResolution resolution = LocalScanScope.Resolve(selectedRoots, excludedRoots);
-            if (resolution.Invalid.Count > 0)
+            if (!finished)
             {
-                string message = "以下范围当前不可用：\n\n" + JoinLines(resolution.Invalid)
-                    + "\n\n是否排除这些范围并继续扫描可用部分？";
-                if (MessageBox.Show(this, message, dialogTitle, MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                selectedRoots.Clear();
-                selectedRoots.AddRange(resolution.Roots);
-                SyncDriveChecks();
-                RefreshSelectedList();
+                RequestCancel();
+                if (e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
             }
-            if (resolution.Roots.Count == 0)
-            {
-                MessageBox.Show(this, "没有可用的扫描范围。请选择磁盘或添加文件夹。", dialogTitle,
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            ResultRoots = new List<string>(resolution.Roots);
-            DialogResult = DialogResult.OK;
-            Close();
+            base.OnFormClosing(e);
         }
 
-        private static string JoinLines(List<string> lines)
+        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            int count = Math.Min(5, lines.Count);
-            string text = string.Empty;
-            for (int i = 0; i < count; i++) text += (i == 0 ? "" : "\n") + lines[i];
-            if (lines.Count > count) text += "\n…另有 " + (lines.Count - count) + " 项";
-            return text;
-        }
-
-        private static Button MakeButton(string text, bool accent)
-        {
-            Button button = new Button
+            if (keyData == Keys.Escape || (keyData == Keys.Enter && cancelButton.Focused))
             {
-                Text = text,
-                Font = Theme.ButtonFont,
-                UseVisualStyleBackColor = true,
-                FlatStyle = FlatStyle.System
-            };
-            if (accent) button.Font = Theme.ButtonFont;
-            return button;
+                RequestCancel();
+                return true;
+            }
+            return base.ProcessCmdKey(ref msg, keyData);
         }
     }
 
-    /// <summary>扫描结果确认窗口：汇总、失败样例、重试和继续导入。</summary>
+    /// <summary>扫描结果确认窗口：一句话结论、关键数字、可滚动明细，以及导入方式、修改范围、重新扫描。</summary>
     internal static class LocalScanResultDialog
     {
-        internal static LocalScanResultDecision Show(IWin32Window owner, string title, string summary,
-            string importText, bool canImport, bool hasNewItems = true)
+        internal static LocalScanResultDecision Show(string title, string headline, IList<LocalScanStat> stats,
+            string details, string importText, bool canImport, bool hasNewItems = true)
         {
-            LocalScanResultDecision decision = new LocalScanResultDecision();
-            using (Form form = new BufferedDialogForm())
+            using (ResultForm form = new ResultForm(title, headline, stats, details, importText, canImport, hasNewItems))
             {
-                form.Text = title;
-                form.StartPosition = FormStartPosition.CenterParent;
-                form.FormBorderStyle = FormBorderStyle.FixedDialog;
-                form.MinimizeBox = false;
-                form.MaximizeBox = false;
-                form.ControlBox = false;
-                form.ShowInTaskbar = false;
-                bool allowMove = canImport && hasNewItems;
-                form.ClientSize = new Size(680, allowMove ? 560 : 470);
-                form.BackColor = Theme.Background;
-
-                Label heading = new Label
-                {
-                    Text = title,
-                    AutoSize = false,
-                    Location = new Point(20, 14),
-                    Size = new Size(640, 28),
-                    Font = Theme.DialogTitleFont,
-                    ForeColor = Theme.TextPrimary
-                };
-                TextBox details = new TextBox
-                {
-                    Text = summary ?? string.Empty,
-                    Location = new Point(20, 50),
-                    Size = new Size(640, allowMove ? 320 : 350),
-                    Multiline = true,
-                    ReadOnly = true,
-                    ScrollBars = ScrollBars.Both,
-                    WordWrap = false,
-                    BackColor = Theme.Card,
-                    BorderStyle = BorderStyle.FixedSingle,
-                    Font = Theme.BodyFont
-                };
-
-                RadioButton move = null, copy = null;
-                Label warning = null;
-                if (allowMove)
-                {
-                    Label modeLabel = new Label
-                    {
-                        Text = "导入方式",
-                        AutoSize = true,
-                        Location = new Point(20, 380),
-                        Font = Theme.SectionTitleFont,
-                        ForeColor = Theme.TextPrimary
-                    };
-                    move = new RadioButton
-                    {
-                        Text = "移入资源库并清理原件（推荐：成功项删源，失败项保留）",
-                        AutoSize = true,
-                        Location = new Point(20, 404),
-                        Checked = true,
-                        ForeColor = Theme.TextPrimary
-                    };
-                    copy = new RadioButton
-                    {
-                        Text = "仅复制，保留原件",
-                        AutoSize = true,
-                        Location = new Point(20, 428),
-                        ForeColor = Theme.TextPrimary
-                    };
-                    warning = new Label
-                    {
-                        Text = "移入会在数据库提交并逐项校验后删除已成功的原文件，失败项保留。删除不进入回收站；可移动磁盘或同步目录中的删除会同步生效。",
-                        AutoSize = false,
-                        Location = new Point(20, 456),
-                        Size = new Size(640, 46),
-                        ForeColor = Theme.TextSecondary
-                    };
-                    form.Controls.AddRange(new Control[] { modeLabel, move, copy, warning });
-                }
-
-                int buttonY = allowMove ? 510 : 418;
-                Button cancel = StandardButton("取消");
-                cancel.Location = new Point(556, buttonY);
-                cancel.Size = new Size(100, 30);
-                cancel.DialogResult = DialogResult.Cancel;
-                cancel.Click += delegate { decision.Action = LocalScanResultAction.Cancel; };
-                Button retry = StandardButton("重新扫描");
-                retry.Location = new Point(430, buttonY);
-                retry.Size = new Size(112, 30);
-                retry.Click += delegate { decision.Action = LocalScanResultAction.Retry; form.DialogResult = DialogResult.OK; form.Close(); };
-                Button import = StandardButton(string.IsNullOrEmpty(importText) ? "继续" : importText);
-                import.Location = new Point(220, buttonY);
-                import.Size = new Size(190, 30);
-                import.Click += delegate
-                {
-                    decision.Action = LocalScanResultAction.Import;
-                    decision.Operation = move != null && move.Checked ? ImportOperation.Move : ImportOperation.Copy;
-                    form.DialogResult = DialogResult.OK;
-                    form.Close();
-                };
-                import.Visible = canImport;
-                Action updateButtons = delegate
-                {
-                    bool destructive = allowMove && move != null && move.Checked;
-                    import.Text = destructive ? "开始移动并清理原件…"
-                        : (canImport && !hasNewItems ? "更新已收录归属" : (string.IsNullOrEmpty(importText) ? "继续" : importText));
-                    // 回车不触发永久删除；移入模式必须用鼠标或键盘焦点明确激活按钮。
-                    form.AcceptButton = canImport && !destructive ? (IButtonControl)import : null;
-                    if (warning != null) warning.Visible = destructive;
-                };
-                if (move != null) move.CheckedChanged += delegate { updateButtons(); };
-                if (copy != null) copy.CheckedChanged += delegate { updateButtons(); };
-                updateButtons();
-                form.CancelButton = cancel;
-
-                form.Controls.AddRange(new Control[] { heading, details, cancel, retry, import });
-                form.ShowDialog(owner);
+                ConfirmDialog.ShowModal(form);   // 模态 + 遮罩层
+                return form.Decision;
             }
-            return decision;
         }
 
-        private static Button StandardButton(string text)
+        private sealed class ResultForm : BufferedDialogForm
         {
-            return new Button
+            private readonly string importText;
+            private readonly bool canImport;
+            private readonly bool hasNewItems;
+            private readonly TextBox details;
+            private readonly Rectangle detailsFrame;   // 明细外框（96 DPI 设计坐标）
+            private readonly RadioButton move;
+            private readonly Label warning;
+            private readonly RoundButton importButton = new RoundButton();
+            private readonly RoundButton cancelButton = new RoundButton();
+            private readonly RoundButton scopeButton = new RoundButton();
+            private readonly RoundButton retryButton = new RoundButton();
+
+            internal readonly LocalScanResultDecision Decision = new LocalScanResultDecision();
+
+            internal ResultForm(string title, string headline, IList<LocalScanStat> stats, string detailText,
+                string importText, bool canImport, bool hasNewItems)
             {
-                Text = text,
-                Font = Theme.ButtonFont,
-                UseVisualStyleBackColor = true,
-                FlatStyle = FlatStyle.System
-            };
+                this.importText = importText;
+                this.canImport = canImport;
+                this.hasNewItems = hasNewItems;
+                bool allowMove = canImport && hasNewItems;
+
+                FormBorderStyle = FormBorderStyle.None;
+                StartPosition = FormStartPosition.CenterParent;
+                BackColor = Theme.Background;
+                ShowInTaskbar = false;
+                Text = title;
+
+                Label titleLabel = new Label();
+                titleLabel.Text = title;
+                titleLabel.Font = Theme.DialogTitleFont;
+                titleLabel.ForeColor = Theme.TextPrimary;
+                titleLabel.AutoSize = false;
+                titleLabel.UseMnemonic = false;
+                titleLabel.SetBounds(24, 18, 552, 28);
+                Controls.Add(titleLabel);
+
+                Label headlineLabel = new Label();
+                headlineLabel.Text = headline ?? string.Empty;
+                headlineLabel.Font = Theme.SectionTitleFont;
+                headlineLabel.ForeColor = Theme.TextPrimary;
+                headlineLabel.AutoSize = false;
+                headlineLabel.AutoEllipsis = true;
+                headlineLabel.UseMnemonic = false;
+                headlineLabel.SetBounds(24, 52, 552, 24);
+                Controls.Add(headlineLabel);
+
+                int y = 86;
+                if (stats != null && stats.Count > 0)
+                {
+                    StatStrip strip = new StatStrip(stats);
+                    strip.SetBounds(24, y, 552, 60);
+                    Controls.Add(strip);
+                    y += 72;
+                }
+
+                if (!string.IsNullOrEmpty(detailText))
+                {
+                    detailsFrame = new Rectangle(24, y, 552, allowMove ? 150 : 200);
+                    details = new TextBox();
+                    details.Multiline = true;
+                    details.ReadOnly = true;
+                    details.WordWrap = true;
+                    details.ScrollBars = ScrollBars.Vertical;
+                    details.BorderStyle = BorderStyle.None;
+                    details.BackColor = Theme.Card;
+                    details.ForeColor = Theme.TextPrimary;
+                    details.Font = Theme.BodyFont;
+                    details.TabStop = false;
+                    // 多行文本框只认 CRLF 换行
+                    details.Text = detailText.Replace("\r\n", "\n").Replace("\n", "\r\n");
+                    details.SetBounds(detailsFrame.X + 12, detailsFrame.Y + 10, detailsFrame.Width - 16, detailsFrame.Height - 20);
+                    Controls.Add(details);
+                    y += detailsFrame.Height + 14;
+                }
+
+                if (allowMove)
+                {
+                    Label modeLabel = new Label();
+                    modeLabel.Text = "导入方式";
+                    modeLabel.Font = Theme.SectionTitleFont;
+                    modeLabel.ForeColor = Theme.TextPrimary;
+                    modeLabel.AutoSize = true;
+                    modeLabel.Location = new Point(24, y);
+                    Controls.Add(modeLabel);
+                    y += 26;
+
+                    move = new RadioButton();
+                    move.Text = "移入资源库并清理原件（推荐：成功项删源，失败项保留）";
+                    move.Font = Theme.BodyFont;
+                    move.ForeColor = Theme.TextPrimary;
+                    move.AutoSize = true;
+                    move.Location = new Point(24, y);
+                    move.Checked = true;
+                    Controls.Add(move);
+                    y += 26;
+
+                    RadioButton copy = new RadioButton();
+                    copy.Text = "仅复制，保留原件";
+                    copy.Font = Theme.BodyFont;
+                    copy.ForeColor = Theme.TextPrimary;
+                    copy.AutoSize = true;
+                    copy.Location = new Point(24, y);
+                    Controls.Add(copy);
+                    y += 28;
+
+                    warning = new Label();
+                    warning.Text = "移入会在数据库提交并逐项校验后删除已成功的原文件，失败项保留。删除不进入回收站；可移动磁盘或同步目录中的删除会同步生效。";
+                    warning.Font = Theme.CaptionFont;
+                    warning.ForeColor = Theme.TextSecondary;
+                    warning.AutoSize = false;
+                    warning.SetBounds(24, y, 552, 36);
+                    Controls.Add(warning);
+                    y += 44;
+
+                    move.CheckedChanged += delegate { UpdateButtons(); };
+                }
+
+                importButton.Accent = true;
+                importButton.Visible = canImport;
+                importButton.SetBounds(312, y, 176, 34);
+                importButton.Click += delegate { Finish(LocalScanResultAction.Import); };
+                Controls.Add(importButton);
+
+                cancelButton.Text = canImport ? "取消" : "关闭";
+                cancelButton.SetBounds(496, y, 80, 34);
+                cancelButton.Click += delegate { Finish(LocalScanResultAction.Cancel); };
+                Controls.Add(cancelButton);
+
+                scopeButton.Text = "修改范围";
+                scopeButton.SetBounds(24, y, 92, 34);
+                scopeButton.Click += delegate { Finish(LocalScanResultAction.ChangeScope); };
+                Controls.Add(scopeButton);
+
+                retryButton.Text = "重新扫描";
+                retryButton.SetBounds(124, y, 92, 34);
+                retryButton.Click += delegate { Finish(LocalScanResultAction.Retry); };
+                Controls.Add(retryButton);
+
+                ClientSize = new Size(600, y + 34 + 22);
+                UpdateButtons();
+                // 移入模式下初始焦点放在单选项上：回车不会直接触发永久删除
+                ActiveControl = move != null ? (Control)move : (canImport ? importButton : cancelButton);
+            }
+
+            private bool Destructive
+            {
+                get { return move != null && move.Checked; }
+            }
+
+            private void UpdateButtons()
+            {
+                bool destructive = Destructive;
+                importButton.Text = destructive ? "开始移动并清理原件…"
+                    : (canImport && !hasNewItems ? "更新已收录归属" : (string.IsNullOrEmpty(importText) ? "继续" : importText));
+                if (warning != null) warning.Visible = destructive;
+            }
+
+            private void Finish(LocalScanResultAction action)
+            {
+                Decision.Action = action;
+                if (action == LocalScanResultAction.Import)
+                    Decision.Operation = Destructive ? ImportOperation.Move : ImportOperation.Copy;
+                DialogResult = action == LocalScanResultAction.Cancel ? DialogResult.Cancel : DialogResult.OK;
+                Close();
+            }
+
+            protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+            {
+                if (keyData == Keys.Escape) { Finish(LocalScanResultAction.Cancel); return true; }
+                if (keyData == Keys.Enter && (details == null || !details.Focused))
+                {
+                    // 自绘按钮不是系统默认按钮：焦点在哪个按钮上，回车就执行哪个。
+                    // 其余情况回车等同主按钮，但移入模式例外——永久删除必须明确点按钮或把焦点移到按钮上。
+                    if (cancelButton.Focused) Finish(LocalScanResultAction.Cancel);
+                    else if (scopeButton.Focused) Finish(LocalScanResultAction.ChangeScope);
+                    else if (retryButton.Focused) Finish(LocalScanResultAction.Retry);
+                    else if (canImport && (importButton.Focused || !Destructive)) Finish(LocalScanResultAction.Import);
+                    return true;
+                }
+                return base.ProcessCmdKey(ref msg, keyData);
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+                if (details == null) return;
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                Rectangle frame = new Rectangle(Dpi(detailsFrame.X), Dpi(detailsFrame.Y), Dpi(detailsFrame.Width), Dpi(detailsFrame.Height));
+                using (SolidBrush fill = new SolidBrush(Theme.Card)) Draw.FillRoundedRect(g, fill, frame, Dpi(8));
+                using (Pen border = new Pen(Theme.ControlBorder, 1)) Draw.DrawRoundedRect(g, border, frame, Dpi(8));
+            }
+        }
+
+        /// <summary>一排等宽的数字卡片：上面是数值，下面是说明。只负责显示，不接收焦点。</summary>
+        private sealed class StatStrip : Control
+        {
+            private readonly IList<LocalScanStat> stats;
+
+            internal StatStrip(IList<LocalScanStat> stats)
+            {
+                this.stats = stats;
+                SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                    | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
+                SetStyle(ControlStyles.Selectable, false);
+                BackColor = Theme.Background;
+                TabStop = false;
+                List<string> names = new List<string>();
+                foreach (LocalScanStat stat in stats) names.Add(stat.Label + " " + stat.Value);
+                AccessibleName = string.Join("，", names.ToArray());
+            }
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                Graphics g = e.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                int dpi = DpiHelper.ForControl(this);
+                int gap = DpiHelper.Scale(8, dpi), pad = DpiHelper.Scale(12, dpi), radius = DpiHelper.Scale(8, dpi);
+                int count = stats.Count;
+                int width = (Width - gap * (count - 1)) / count;
+                if (width <= pad * 2) return;
+                for (int i = 0; i < count; i++)
+                {
+                    Rectangle tile = new Rectangle(i * (width + gap), 0, width - 1, Height - 1);
+                    using (SolidBrush fill = new SolidBrush(Theme.Card)) Draw.FillRoundedRect(g, fill, tile, radius);
+                    using (Pen border = new Pen(Theme.ControlBorder, 1)) Draw.DrawRoundedRect(g, border, tile, radius);
+                    Rectangle text = new Rectangle(tile.X + pad, tile.Y, tile.Width - pad * 2, tile.Height);
+                    using (SolidBrush value = new SolidBrush(stats[i].Warn ? Theme.DeleteRed : Theme.TextPrimary))
+                        Draw.DrawStringLeft(g, stats[i].Value, Theme.FontOf(13F, FontStyle.Bold), value,
+                            new Rectangle(text.X, text.Y + DpiHelper.Scale(6, dpi), text.Width, DpiHelper.Scale(28, dpi)));
+                    using (SolidBrush label = new SolidBrush(Theme.TextSecondary))
+                        Draw.DrawStringLeft(g, stats[i].Label, Theme.CaptionFont, label,
+                            new Rectangle(text.X, text.Y + DpiHelper.Scale(34, dpi), text.Width, DpiHelper.Scale(20, dpi)));
+                }
+            }
         }
     }
 }

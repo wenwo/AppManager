@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.IO;
 using System.Text;
 using System.Threading;
@@ -169,21 +168,24 @@ namespace AppManager
                     "扫描本机音乐", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            List<string> roots;
-            using (LocalScanScopeDialog scope = new LocalScanScopeDialog("扫描本机音乐", LocalScanScopeKind.Music,
-                lastMusicScanRoots, LocalScanExcludedRoots()))
-            {
-                if (scope.ShowDialog(this) != DialogResult.OK) return;
-                roots = new List<string>(scope.ResultRoots);
-            }
-            if (roots.Count == 0) return;
-            lastMusicScanRoots = new List<string>(roots);
-
             localMusicScanRunning = true;
             try
             {
+                List<string> roots = null;   // null：需要（重新）选择范围
                 while (true)
                 {
+                    if (roots == null)
+                    {
+                        using (LocalScanScopeDialog scope = new LocalScanScopeDialog("扫描本机音乐", LocalScanScopeKind.Music,
+                            lastMusicScanRoots, LocalScanExcludedRoots()))
+                        {
+                            ConfirmDialog.ShowModal(scope);   // 模态 + 遮罩层
+                            if (scope.DialogResult != DialogResult.OK) return;
+                            roots = new List<string>(scope.ResultRoots);
+                        }
+                        if (roots.Count == 0) return;
+                        lastMusicScanRoots = new List<string>(roots);
+                    }
                     CancellationTokenSource cancel = new CancellationTokenSource();
                     localMusicScanCancel = cancel;
                     MusicScanRequest request = BuildLocalMusicScanRequest(roots);
@@ -194,19 +196,9 @@ namespace AppManager
                     bool extensionOnly = false;
                     try
                     {
-                        using (Form dialog = BuildMusicScanDialog())
+                        using (LocalScanProgressDialog dialog = new LocalScanProgressDialog("扫描本机音乐",
+                            "正在检查播放组件…", "准备扫描…", cancel))
                         {
-                            Label status = (Label)dialog.Tag;
-                            Label detail = dialog.Controls["scanDetail"] as Label;
-                            ProgressBar progress = dialog.Controls["scanProgress"] as ProgressBar;
-                            Button cancelButton = dialog.Controls["scanCancel"] as Button;
-                            cancelButton.Click += delegate
-                            {
-                                cancel.Cancel();
-                                cancelButton.Enabled = false;
-                                cancelButton.Text = "正在取消…";
-                                status.Text = "正在停止扫描…";
-                            };
                             dialog.Shown += delegate
                             {
                                 ThreadPool.QueueUserWorkItem(delegate
@@ -245,12 +237,10 @@ namespace AppManager
                                             if (!fallback)
                                             {
                                                 canceled = true;
-                                                CloseMusicScanDialog(dialog);
                                                 return;
                                             }
                                             extensionOnly = true;
-                                            UpdateMusicScanStatus(dialog, status, detail, progress,
-                                                "播放组件缺失，按扩展名扫描…", "准备扫描…", false, 0, 0);
+                                            dialog.Report("播放组件缺失，按扩展名扫描…", "准备扫描…", 0, 0);
                                         }
                                         if (cancel.IsCancellationRequested) return;
                                         request.ExtensionOnly = extensionOnly;
@@ -273,22 +263,22 @@ namespace AppManager
                                             if (value.Probing && !finalProbe && unchecked(now - lastUpdate) < 200) return;
                                             lastUpdate = now;
                                             if (value.Probing)
-                                                UpdateMusicScanStatus(dialog, status, detail, progress,
+                                                dialog.Report(
                                                     "正在识别音乐：" + value.Index + " / " + value.Total + "，已通过 " + value.Accepted,
-                                                    value.Path, true, value.Index, value.Total);
+                                                    value.Path, value.Index, value.Total);
                                             else
-                                                UpdateMusicScanStatus(dialog, status, detail, progress,
+                                                dialog.Report(
                                                     "正在遍历：已检查 " + value.DirectoriesScanned + " 个目录，发现 "
                                                     + value.AudioFilesFound + " 个音频文件，候选 " + value.Candidates,
-                                                    value.Path, false, 0, 0);
+                                                    value.Path, 0, 0);
                                         });
                                     }
                                     catch (OperationCanceledException) { canceled = true; }
                                     catch (Exception ex) { failure = ex; Paths.LogError(ex); }
-                                    finally { CloseMusicScanDialog(dialog); }
+                                    finally { dialog.Finish(); }
                                 });
                             };
-                            dialog.ShowDialog(this);
+                            ConfirmDialog.ShowModal(dialog);
                         }
                     }
                     finally
@@ -304,22 +294,26 @@ namespace AppManager
                     }
                     if (failure != null)
                     {
-                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, "扫描本机音乐",
-                            "扫描失败，未导入任何文件，源文件未改动。\n\n" + failure.Message, null, false);
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show("扫描本机音乐",
+                            "扫描失败，未导入任何文件，源文件未改动。", null, failure.Message, null, false);
+                        if (decision.Action == LocalScanResultAction.ChangeScope) { roots = null; continue; }
                         if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
                     if (result == null)
                     {
-                        LocalScanResultDecision decision = LocalScanResultDialog.Show(this, "扫描本机音乐",
-                            "扫描未返回结果，未导入任何文件。", null, false);
+                        LocalScanResultDecision decision = LocalScanResultDialog.Show("扫描本机音乐",
+                            "扫描未返回结果，未导入任何文件。", null, null, null, false);
+                        if (decision.Action == LocalScanResultAction.ChangeScope) { roots = null; continue; }
                         if (decision.Action == LocalScanResultAction.Retry) continue;
                         return;
                     }
 
                     bool canImport = result.Files.Count > 0 || result.UnconfirmedCount > 0;
-                    LocalScanResultDecision importDecision = LocalScanResultDialog.Show(this, "扫描本机音乐",
-                        BuildMusicScanSummary(result), "继续", canImport, canImport);
+                    LocalScanResultDecision importDecision = LocalScanResultDialog.Show("扫描本机音乐",
+                        MusicScanHeadline(result), MusicScanStats(result), BuildMusicScanSummary(result),
+                        "继续", canImport, canImport);
+                    if (importDecision.Action == LocalScanResultAction.ChangeScope) { roots = null; continue; }
                     if (importDecision.Action == LocalScanResultAction.Retry) continue;
                     if (importDecision.Action != LocalScanResultAction.Import || !canImport) return;
                     FinishLocalMusicScan(result, importDecision.Operation);
@@ -366,97 +360,6 @@ namespace AppManager
             paths.Add(path);
         }
 
-        private static Form BuildMusicScanDialog()
-        {
-            Form dialog = new BufferedDialogForm
-            {
-                Text = "扫描本机音乐",
-                StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
-                MinimizeBox = false,
-                MaximizeBox = false,
-                ControlBox = false,
-                ShowInTaskbar = false,
-                ClientSize = new Size(560, 166),
-                BackColor = Theme.Background
-            };
-            Label status = new Label
-            {
-                Name = "scanStatus",
-                Text = "正在检查播放组件…",
-                AutoSize = false,
-                Location = new Point(18, 18),
-                Size = new Size(524, 26),
-                Font = Theme.DialogTitleFont,
-                ForeColor = Theme.TextPrimary
-            };
-            Label detail = new Label
-            {
-                Name = "scanDetail",
-                Text = "准备扫描…",
-                AutoSize = false,
-                AutoEllipsis = true,
-                Location = new Point(18, 50),
-                Size = new Size(524, 30),
-                ForeColor = Theme.TextSecondary
-            };
-            ProgressBar progress = new ProgressBar
-            {
-                Name = "scanProgress",
-                Style = ProgressBarStyle.Marquee,
-                Location = new Point(18, 86),
-                Size = new Size(524, 12)
-            };
-            Button cancel = new Button
-            {
-                Name = "scanCancel",
-                Text = "取消",
-                Location = new Point(448, 116),
-                Size = new Size(94, 30)
-            };
-            dialog.Controls.AddRange(new Control[] { status, detail, progress, cancel });
-            dialog.CancelButton = cancel;
-            dialog.Tag = status;
-            return dialog;
-        }
-
-        private static void UpdateMusicScanStatus(Form dialog, Label status, Label detail, ProgressBar progress,
-            string statusText, string detailText, bool probing, int index, int total)
-        {
-            try
-            {
-                if (dialog.IsDisposed || !dialog.IsHandleCreated) return;
-                dialog.BeginInvoke((Action)delegate
-                {
-                    if (dialog.IsDisposed || status.IsDisposed || detail.IsDisposed) return;
-                    status.Text = statusText;
-                    detail.Text = detailText;
-                    if (progress == null || progress.IsDisposed) return;
-                    if (probing && total > 0)
-                    {
-                        progress.Style = ProgressBarStyle.Continuous;
-                        progress.Maximum = total;
-                        progress.Value = Math.Max(0, Math.Min(index, total));
-                    }
-                    else progress.Style = ProgressBarStyle.Marquee;
-                });
-            }
-            catch (ObjectDisposedException) { }
-            catch (InvalidOperationException) { }
-        }
-
-        private static void CloseMusicScanDialog(Form dialog)
-        {
-            try
-            {
-                if (dialog.IsDisposed || dialog.Disposing) return;
-                if (!dialog.IsHandleCreated) { dialog.Close(); return; }
-                dialog.BeginInvoke((Action)delegate { if (!dialog.IsDisposed) dialog.Close(); });
-            }
-            catch (ObjectDisposedException) { }
-            catch (InvalidOperationException) { }
-        }
-
         private void FinishLocalMusicScan(LocalMusicScanResult result, ImportOperation operation)
         {
             if (ActiveResourceStoreRoots().Count == 0)
@@ -487,6 +390,30 @@ namespace AppManager
 
             QueueImport(import.ToArray(), operation, "音乐", null, true, 0, null, 0, true,
                 operation == ImportOperation.Move, duplicateDecision, true);
+        }
+
+        /// <summary>结果窗口的一句话结论：有多少首可导入、要复制多少。</summary>
+        internal static string MusicScanHeadline(LocalMusicScanResult result)
+        {
+            if (result.Files.Count > 0)
+                return "发现 " + result.Files.Count + " 首可导入的音乐，预计复制 " + LocalScanScope.FormatBytes(result.AcceptedBytes) + "。";
+            if (result.UnconfirmedCount > 0)
+                return "没有确认是歌曲的文件，另有 " + result.UnconfirmedCount + " 个无法确认。";
+            return "没有发现可导入的音乐。";
+        }
+
+        /// <summary>结果窗口顶部的关键数字：可导入、无法确认、已收录、读取失败。</summary>
+        internal static List<LocalScanStat> MusicScanStats(LocalMusicScanResult result)
+        {
+            int included = result.CountOf(MusicFilterReason.AlreadyIncluded)
+                + result.CountOf(MusicFilterReason.AlreadyIncludedPendingCleanup);
+            return new List<LocalScanStat>
+            {
+                new LocalScanStat("可导入", result.Files.Count + " 首"),
+                new LocalScanStat("无法确认", result.UnconfirmedCount + " 个"),
+                new LocalScanStat("已收录", included + " 首"),
+                new LocalScanStat("读取失败", result.Errors + " 项", result.Errors > 0)
+            };
         }
 
         private static string BuildMusicScanSummary(LocalMusicScanResult result)

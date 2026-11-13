@@ -16,6 +16,7 @@ namespace AppManager
         internal string LaunchArguments = string.Empty; // 快捷方式启动参数，仅用于扫描期识别同一入口
         internal DateTime ShortcutLastWriteTimeUtc; // 快捷方式修改时间，仅用于扫描期选择新入口
         internal bool IsCurrentDesktopShortcut; // 来自当前用户/公共桌面顶层，仅用于扫描期优先
+        internal string LinkTarget = string.Empty; // 「全部应用」条目实际启动的程序路径（打包应用为空），用于识别系统自带工具
         public string InstallLocation = string.Empty;
         public string UninstallString = string.Empty;
         public string DisplayIcon = string.Empty;  // 注册表 DisplayIcon 或快捷方式图标定位

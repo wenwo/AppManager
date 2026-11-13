@@ -45,7 +45,7 @@ namespace AppManager
             Run("path move preserves stable identity, favorites, hidden, ordering and collection", Move);
             Run("move guards: shortcut targets stay, reused path key saves, folder contents are found", MoveGuards);
             Run("import preparation runs in the queue: folder guard reads the database, empty batch calls back", QueuedPreparation);
-            Run("add-software picker lists only registrable executables", SoftwarePicker);
+            Run("add-software picker lists installed apps not yet in the category and joins them", SoftwarePicker);
             Run("cut and move-out: vanished sources purge entries, unavailable folders do not, in-app paste moves", MoveOut);
             Run("in-app move into a folder drops the old path's move-out watch and cut state", MoveIntoFolderForgetsWatch);
             Run("resource types: drag, batch add, move menu, cut paste, hover and picker share one rule", ResourceTypes);
@@ -433,30 +433,49 @@ namespace AppManager
             read.AddedItems.Add(new AddedEntry { Path = Path.Combine(box, "new.txt"), Category = "资料", IsResource = true });
             Check(read.AddedItems.EntriesUnder(box + "\\").Count == 1, "unsaved addition inside the folder ignored");
         }
-        // “添加软件”候选只列可登记的 .exe：已登记（含大小写变体）、UWP、网址、文件夹/文档快捷方式和重复目标都不列。
+        // “添加软件”候选是已安装的软件：应用商店应用照常列出；文件夹/文档快捷方式、网址、无启动目标、隐藏项，
+        // 以及已在该分类的（规则归类、已加入、旧版按路径登记含大小写变体）都不列；按路径登记在别的分类不影响。
+        // 勾选后按「加入分类」加入，不再把程序文件登记一遍。
         private static void SoftwarePicker()
         {
             AppConfig c = Fixture();
-            string tool = Source("apps\\tool.exe", "exe"), known = Source("apps\\known.exe", "exe"), folder = Path.Combine(scope, "source", "apps");
-            c.AddedItems.Add(new AddedEntry { Path = known, Category = "软件测试" }); Save(c);
+            string tool = Source("apps\\tool.exe", "exe"), known = Source("apps\\known.exe", "exe"), elsewhere = Source("apps\\elsewhere.exe", "exe");
+            string folder = Path.Combine(scope, "source", "apps");
+            c.AddedItems.Add(new AddedEntry { Path = known, Category = "软件测试" });
+            c.AddedItems.Add(new AddedEntry { Path = elsewhere, Category = "开发工具" }); Save(c);
+            int registered = c.AddedItems.Count;
             using (MainForm form = Form(c, false))
             {
+                AppInfo plain = new AppInfo { Key = "lnk:tool", Name = "B tool", TargetPath = tool, Category = "其他" };
+                AppInfo store = new AppInfo { Key = "af:store", Name = "A store app", TargetPath = "shell:AppsFolder\\Microsoft.App_8wekyb3d8bbwe!App", IsUwp = true, Category = "其他" };
+                AppInfo joined = new AppInfo { Key = "lnk:joined", Name = "D joined", TargetPath = Source("apps\\joined.exe", "exe"), Category = "其他" };
                 List<AppInfo> apps = new List<AppInfo>
                 {
-                    new AppInfo { Name = "B tool", TargetPath = tool },
-                    new AppInfo { Name = "A tool again", TargetPath = tool.ToUpperInvariant() },
-                    new AppInfo { Name = "known", TargetPath = known.ToUpperInvariant() },
-                    new AppInfo { Name = "folder link", TargetPath = folder, ShortcutPath = Path.Combine(scope, "folder.lnk") },
-                    new AppInfo { Name = "document link", TargetPath = Source("apps\\readme.txt", "doc") },
-                    new AppInfo { Name = "store app", TargetPath = "shell:AppsFolder\\Microsoft.App!App" },
-                    new AppInfo { Name = "web", TargetPath = "https://example.com/setup.exe" },
-                    new AppInfo { Name = "empty", ShortcutPath = Path.Combine(scope, "empty.lnk") },
+                    plain, store, joined,
+                    new AppInfo { Key = "lnk:tool", Name = "B tool again", TargetPath = tool, Category = "其他" },
+                    new AppInfo { Key = "lnk:elsewhere", Name = "C elsewhere", TargetPath = elsewhere.ToUpperInvariant(), Category = "开发工具" },
+                    new AppInfo { Key = "lnk:known", Name = "known", TargetPath = known.ToUpperInvariant(), Category = "其他" },
+                    new AppInfo { Key = "lnk:member", Name = "member", TargetPath = tool, Category = "软件测试" },
+                    new AppInfo { Key = "lnk:hidden", Name = "hidden", TargetPath = tool, Category = "其他", IsHidden = true },
+                    new AppInfo { Key = "lnk:folder", Name = "folder link", TargetPath = folder, ShortcutPath = Path.Combine(scope, "folder.lnk"), IsFile = true, IsFolder = true },
+                    new AppInfo { Key = "lnk:doc", Name = "document link", TargetPath = Source("apps\\readme.txt", "doc"), IsFile = true },
+                    new AppInfo { Key = "lnk:web", Name = "web", TargetPath = "https://example.com/setup.exe" },
+                    new AppInfo { Key = "lnk:empty", Name = "empty", ShortcutPath = Path.Combine(scope, "empty.lnk") },
+                    new AppInfo { Name = "no key", TargetPath = tool },
                     null,
                 };
-                List<AppInfo> picked = (List<AppInfo>)Invoke(form, "PickableSoftware", apps);
-                Check(picked.Count == 1 && string.Equals(picked[0].TargetPath, tool, StringComparison.OrdinalIgnoreCase),
-                    "picker listed non-software or registered items: " + string.Join("|", picked.Select(a => a.Name).ToArray()));
+                Func<string> names = () => string.Join("|", ((List<AppInfo>)Invoke(form, "PickableSoftware", apps, "软件测试")).Select(a => a.Name).ToArray());
+                Check(names() == "A store app|B tool|C elsewhere|D joined", "picker candidates wrong: " + names());
+                Invoke(form, "AddPickedSoftware", new List<AppInfo> { plain, store, joined }, "软件测试");
+                Check(names() == "C elsewhere", "added software still offered or others dropped: " + names());
+                Invoke(form, "AddPickedSoftware", new List<AppInfo>(), "软件测试");
+                Check(c.AddedItems.Count == registered && c.AddedItems.ByPath(tool).Count == 0, "picker registered the program file again");
             }
+            AppConfig read = Reload();
+            foreach (string key in new[] { "lnk:tool", "af:store", "lnk:joined" })
+                Check(read.ItemCategories.ContainsKey(key) && read.ItemCategories[key].Contains("软件测试"), "picked software membership lost after reload: " + key);
+            Check(read.AddedItems.Count == registered, "picker changed registrations");
+            Integrity(read.Database);
         }
         // 导入预处理在导入队列（后台）里读库完成：入队调用立即返回，文件夹内有收录项时拒绝移动，空批次也异步回调。
         private static void QueuedPreparation()

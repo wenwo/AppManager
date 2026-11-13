@@ -6010,7 +6010,7 @@ namespace AppManager
         /// <summary>添加软件（.exe）：只登记不搬运。</summary>
         private void PickSoftware()
         {
-            // R7：优先从全量已扫描应用列表中勾选添加，避免手动浏览目录
+            // 优先从已安装的软件里勾选加入当前分类；便携程序等不在列表里的 exe 再用文件浏览器选择
             if (PickFromAppList()) return;
             using (OpenFileDialog dlg = new OpenFileDialog())
             {
@@ -6028,118 +6028,74 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 弹出全量应用列表供勾选添加。返回 true 表示用户操作完毕（勾选添加或取消），
+        /// 弹出已安装软件列表供勾选，加入当前分类。返回 true 表示用户操作完毕（勾选添加或取消），
         /// false 表示用户点了「浏览其它程序…」，回退到文件浏览器选择 exe。
         /// </summary>
         private bool PickFromAppList()
         {
-            Form f = new BufferedDialogForm();
-            f.FormBorderStyle = FormBorderStyle.None;
-            f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(480, 560);
-            f.BackColor = Theme.Background;
-            f.ShowInTaskbar = false;
-            ApplyRoundedCorners(f);
-
-            Label title = new Label();
-            title.Text = "选择要添加的软件";
-            title.Font = Theme.DialogTitleFont;
-            title.ForeColor = Theme.TextPrimary;
-            title.Location = new Point(20, 16);
-            title.AutoSize = true;
-            f.Controls.Add(title);
-
-            Label hint = new Label();
-            hint.Text = "已收录的应用（可多选）：";
-            hint.Font = Theme.CaptionFont;
-            hint.ForeColor = Theme.TextSecondary;
-            hint.Location = new Point(20, 48);
-            hint.AutoSize = true;
-            f.Controls.Add(hint);
-
-            CheckedListBox list = new CheckedListBox();
-            list.BorderStyle = BorderStyle.None;
-            list.BackColor = Theme.Card;
-            list.ForeColor = Theme.TextPrimary;
-            list.Font = Theme.BodyFont;
-            list.CheckOnClick = true;
-            list.Location = new Point(20, 74);
-            list.Size = new Size(440, 420);
-            // 只列能登记的软件（目标是 .exe）：UWP、网址、指向文件夹或文档的快捷方式勾了也不会添加，不再出现在列表里。
-            // 已登记判断只查候选路径，不遍历整张收录表；文件是否存在留到确定时再查，避免列表打开时逐个访问磁盘/网络路径。
-            List<AppInfo> candidates = PickableSoftware(allApps);
-            if (candidates.Count == 0) hint.Text = "列表中没有可添加的软件，可点「浏览其它程序…」选择 .exe。";
-            foreach (AppInfo a in candidates) list.Items.Add(a);
-            list.DisplayMember = "Name";
-            f.Controls.Add(list);
-
-            RoundButton ok = new RoundButton();
-            ok.Text = "添加 (" + 0 + ")";
-            ok.Accent = true;
-            ok.Size = new Size(100, 32);
-            ok.Location = new Point(f.Width - 220, f.Height - 52);
-            f.Controls.Add(ok);
-            RoundButton cancel = new RoundButton();
-            cancel.Text = "取消";
-            cancel.Accent = false;
-            cancel.Size = new Size(100, 32);
-            cancel.Location = new Point(f.Width - 110, f.Height - 52);
-            f.Controls.Add(cancel);
-            // 便携程序等不在扫描列表里的 exe：改用文件浏览器选择（软件页面已不接受拖入/粘贴，这是唯一入口）
-            bool browse = false;
-            RoundButton other = new RoundButton();
-            other.Text = "浏览其它程序…";
-            other.Accent = false;
-            other.Size = new Size(130, 32);
-            other.Location = new Point(20, f.Height - 52);
-            other.Click += delegate { browse = true; f.Close(); };
-            f.Controls.Add(other);
-
-            list.ItemCheck += delegate(object s, ItemCheckEventArgs e)
+            string category = currentCategory;
+            List<AppInfo> picked;
+            bool browse;
+            // 在「系统工具」分类里添加时，要找的多半就是系统自带工具：默认一并列出
+            using (SoftwarePickerDialog dialog = new SoftwarePickerDialog(category, PickableSoftware(allApps, category),
+                category == "系统工具"))
             {
-                f.BeginInvoke((Action)delegate
-                {
-                    ok.Text = "添加 (" + list.CheckedItems.Count + ")";
-                });
-            };
-
-            ok.Click += delegate
-            {
-                List<string> paths = new List<string>();
-                List<string> missing = new List<string>();
-                foreach (AppInfo a in list.CheckedItems)
-                {
-                    if (File.Exists(a.TargetPath)) paths.Add(a.TargetPath);
-                    else missing.Add(a.DisplayName());
-                }
-                if (missing.Count > 0)
-                    MessageBox.Show(f, "以下 " + missing.Count + " 项的程序文件已不存在，未添加：\n" + string.Join("\n", missing.Take(10).ToArray())
-                        + (missing.Count > 10 ? "\n……" : ""), "添加软件", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                if (paths.Count > 0)
-                    AddPaths(paths.ToArray(), currentCategory);
-                f.Close();
-            };
-            cancel.Click += delegate { f.Close(); };
-
-            ConfirmDialog.ShowModal(f);   // 模态 + 遮罩层
-            f.Dispose();
-            return !browse;   // 点了「浏览其它程序…」才回退文件浏览器；勾选添加或取消都算操作完毕
+                ConfirmDialog.ShowModal(dialog);   // 模态 + 遮罩层
+                browse = dialog.BrowseRequested;
+                picked = dialog.Picked;
+            }
+            if (browse) return false;   // 点了「浏览其它程序…」才回退文件浏览器；勾选添加或取消都算操作完毕
+            AddPickedSoftware(picked, category);
+            return true;
         }
 
-        /// <summary>“添加软件”候选：目标为 .exe、尚未登记的条目，同一目标只列一次，按名称排序。internal 供回归测试。</summary>
-        internal List<AppInfo> PickableSoftware(IEnumerable<AppInfo> apps)
+        /// <summary>
+        /// 把勾选的已安装软件加入分类：与拖到侧栏「加入分类」是同一操作，原分类不变，不重复登记程序文件。
+        /// 程序文件已不存在的条目不加入，并告知用户。
+        /// </summary>
+        private void AddPickedSoftware(List<AppInfo> picked, string category)
+        {
+            if (picked == null || picked.Count == 0) return;
+            List<AppInfo> usable = new List<AppInfo>();
+            List<string> missing = new List<string>();
+            foreach (AppInfo a in picked)
+            {
+                if (a == null) continue;
+                if (Scanner.IsAliveTarget(a.TargetPath, a.IsUwp)) usable.Add(a);
+                else missing.Add(a.DisplayName());
+            }
+            if (missing.Count > 0)
+                MessageBox.Show(this, "以下 " + missing.Count + " 项的程序文件已不存在，未添加：\n" + string.Join("\n", missing.Take(10).ToArray())
+                    + (missing.Count > 10 ? "\n……" : ""), "添加软件", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            AddItemsToCategory(usable, category);
+        }
+
+        /// <summary>
+        /// “添加软件”候选：扫描到的已安装软件（含 Office、应用商店应用）中尚未出现在该分类的条目，按名称排序。
+        /// 文件夹、文档、网址、资源文件、隐藏项和没有启动目标的条目不列。internal 供回归测试。
+        /// </summary>
+        internal List<AppInfo> PickableSoftware(IEnumerable<AppInfo> apps, string category)
         {
             List<AppInfo> candidates = new List<AppInfo>();
-            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);   // 与分类归属记录的键比较方式一致
             foreach (AppInfo a in apps)
             {
-                if (a == null || string.IsNullOrEmpty(a.TargetPath) || !IsSoftwareFile(a.TargetPath)) continue;
-                if (Scanner.IsUrl(a.TargetPath) || !seen.Add(a.TargetPath)) continue;
-                candidates.Add(a);
+                if (a == null || string.IsNullOrEmpty(a.Key) || string.IsNullOrEmpty(a.Name)) continue;
+                if (a.IsFolder || !Scanner.IsSoftwareTarget(a) || Scanner.IsUrl(a.TargetPath)) continue;
+                if (!a.IsUwp && string.IsNullOrEmpty(a.TargetPath)) continue;
+                if (!ShouldShow(a) || IsResourceEntry(a) || InCategory(a, category)) continue;
+                if (seen.Add(a.Key)) candidates.Add(a);
             }
-            Dictionary<string, List<AddedEntry>> registered = AddedIndexLookups(candidates.Select(a => a.TargetPath));
-            candidates.RemoveAll(a => { List<AddedEntry> known; return registered.TryGetValue(a.TargetPath, out known) && known != null && known.Count > 0; });
-            candidates.Sort((x, y) => string.Compare(x.Name, y.Name, StringComparison.OrdinalIgnoreCase));
+            // 旧版把程序按路径登记在分类里：这些程序已经显示在该分类，不再列出。只批量查候选路径，不遍历整张收录表。
+            Dictionary<string, List<AddedEntry>> registered = AddedIndexLookups(
+                candidates.Where(a => !Scanner.IsAppsFolderTarget(a.TargetPath)).Select(a => a.TargetPath));
+            candidates.RemoveAll(a =>
+            {
+                List<AddedEntry> known;
+                return !string.IsNullOrEmpty(a.TargetPath) && registered.TryGetValue(a.TargetPath, out known)
+                    && known != null && known.Any(e => e != null && e.Category == category);
+            });
+            candidates.Sort((x, y) => string.Compare(x.Name, y.Name, StringComparison.CurrentCultureIgnoreCase));
             return candidates;
         }
 

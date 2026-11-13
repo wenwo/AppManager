@@ -15,14 +15,38 @@ namespace AppManager
     internal sealed class LocalScanScopeDrive
     {
         internal string Path;
-        internal string Display;
+        internal string Title;
+        internal string Detail;
         internal bool Supported;
         internal string UnsupportedReason;
         internal bool Removable;
+    }
+
+    internal enum LocalScanScopeRowKind
+    {
+        Header,
+        Note,
+        Shortcut,
+        Drive,
+        Custom
+    }
+
+    /// <summary>范围清单中的一行。标题行和提示行不可勾选，Path 为空。</summary>
+    internal sealed class LocalScanScopeRow
+    {
+        internal LocalScanScopeRowKind Kind;
+        internal string Title;
+        internal string Detail;
+        internal string Path;
+        internal bool Enabled;
+        internal bool Checked;
+        internal bool Warning;
+        /// <summary>已被另一个勾选的上级范围包含时，为该上级路径；否则为空。</summary>
+        internal string CoveredBy;
 
         public override string ToString()
         {
-            return string.IsNullOrEmpty(Display) ? (Path ?? string.Empty) : Display;
+            return Title ?? string.Empty;
         }
     }
 
@@ -72,7 +96,7 @@ namespace AppManager
                         if (supported)
                         {
                             try { label = drive.VolumeLabel; } catch { }
-                            try { space = "，可用 " + FormatBytes(drive.AvailableFreeSpace) + " / " + FormatBytes(drive.TotalSize); } catch { }
+                            try { space = "  ·  可用 " + FormatBytes(drive.AvailableFreeSpace) + " / " + FormatBytes(drive.TotalSize); } catch { }
                         }
                         LocalScanScopeDrive item = new LocalScanScopeDrive
                         {
@@ -81,8 +105,8 @@ namespace AppManager
                             Removable = type == DriveType.Removable,
                             UnsupportedReason = supported ? null : UnsupportedDriveReason(type, ready)
                         };
-                        item.Display = name + (string.IsNullOrWhiteSpace(label) ? string.Empty : " " + label.Trim())
-                            + "（" + DriveTypeName(type, ready) + space + "）";
+                        item.Title = name + (string.IsNullOrWhiteSpace(label) ? string.Empty : "  " + label.Trim());
+                        item.Detail = supported ? DriveTypeName(type, ready) + space : item.UnsupportedReason;
                         result.Add(item);
                     }
                     catch (IOException) { }
@@ -273,6 +297,123 @@ namespace AppManager
                 result.Roots.Add(candidate);
             }
             return result;
+        }
+
+        /// <summary>
+        /// 生成范围清单的行：常用文件夹、磁盘、已添加的文件夹。drives 为 null 表示磁盘仍在读取。
+        /// knownRoots 是本次打开后出现过的全部范围；其中没有对应常用文件夹或可用磁盘的，列在「已添加的文件夹」。
+        /// 勾选状态只来自 selected；被另一个已勾选的上级范围包含的行会标出 CoveredBy。不做磁盘访问。
+        /// </summary>
+        internal static List<LocalScanScopeRow> BuildRows(IList<LocalScanScopeShortcut> shortcuts,
+            IList<LocalScanScopeDrive> drives, string driveError, IList<string> knownRoots, IList<string> selected)
+        {
+            List<LocalScanScopeRow> rows = new List<LocalScanScopeRow>();
+            HashSet<string> listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (shortcuts != null && shortcuts.Count > 0)
+            {
+                rows.Add(new LocalScanScopeRow { Kind = LocalScanScopeRowKind.Header, Title = "常用文件夹" });
+                foreach (LocalScanScopeShortcut shortcut in shortcuts)
+                {
+                    string path = NormalizePath(shortcut.Path);
+                    if (path == null || !listed.Add(path)) continue;
+                    rows.Add(new LocalScanScopeRow
+                    {
+                        Kind = LocalScanScopeRowKind.Shortcut, Title = shortcut.Label, Detail = path, Path = path, Enabled = true
+                    });
+                }
+            }
+
+            rows.Add(new LocalScanScopeRow { Kind = LocalScanScopeRowKind.Header, Title = "磁盘" });
+            if (drives == null)
+                rows.Add(new LocalScanScopeRow { Kind = LocalScanScopeRowKind.Note, Title = "正在读取磁盘…" });
+            else
+            {
+                if (!string.IsNullOrEmpty(driveError))
+                    rows.Add(new LocalScanScopeRow { Kind = LocalScanScopeRowKind.Note, Title = "读取磁盘失败：" + driveError, Warning = true });
+                int before = rows.Count;
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    // 可扫描的磁盘在前，不可用的磁盘排在后面并写明原因
+                    foreach (LocalScanScopeDrive drive in drives)
+                    {
+                        if (drive == null || drive.Supported != (pass == 0)) continue;
+                        string path = NormalizePath(drive.Path);
+                        if (path == null) continue;
+                        if (drive.Supported && !listed.Add(path)) continue;
+                        rows.Add(new LocalScanScopeRow
+                        {
+                            Kind = LocalScanScopeRowKind.Drive,
+                            Title = string.IsNullOrEmpty(drive.Title) ? path : drive.Title,
+                            Detail = drive.Supported ? drive.Detail : drive.UnsupportedReason,
+                            Path = path,
+                            Enabled = drive.Supported
+                        });
+                    }
+                }
+                if (rows.Count == before && string.IsNullOrEmpty(driveError))
+                    rows.Add(new LocalScanScopeRow { Kind = LocalScanScopeRowKind.Note, Title = "没有可扫描的磁盘。" });
+            }
+
+            List<LocalScanScopeRow> custom = new List<LocalScanScopeRow>();
+            if (knownRoots != null)
+            {
+                foreach (string root in knownRoots)
+                {
+                    string path = NormalizePath(root);
+                    if (path == null || listed.Contains(path)) continue;
+                    // 磁盘读完之前先不列盘符，避免它先出现在这里、随后又跳到「磁盘」分组
+                    if (drives == null && IsDriveRoot(path)) continue;
+                    listed.Add(path);
+                    string name = Path.GetFileName(path);
+                    custom.Add(new LocalScanScopeRow
+                    {
+                        Kind = LocalScanScopeRowKind.Custom, Title = string.IsNullOrEmpty(name) ? path : name,
+                        Detail = path, Path = path, Enabled = true
+                    });
+                }
+            }
+            if (custom.Count > 0)
+            {
+                rows.Add(new LocalScanScopeRow { Kind = LocalScanScopeRowKind.Header, Title = "已添加的文件夹" });
+                rows.AddRange(custom);
+            }
+
+            List<string> chosen = new List<string>();
+            if (selected != null)
+            {
+                foreach (string value in selected)
+                {
+                    string path = NormalizePath(value);
+                    if (path != null && !chosen.Contains(path, StringComparer.OrdinalIgnoreCase)) chosen.Add(path);
+                }
+            }
+            foreach (LocalScanScopeRow row in rows)
+            {
+                if (!row.Enabled || !chosen.Contains(row.Path, StringComparer.OrdinalIgnoreCase)) continue;
+                row.Checked = true;
+                foreach (string other in chosen)
+                {
+                    if (string.Equals(other, row.Path, StringComparison.OrdinalIgnoreCase) || !Within(other, row.Path)) continue;
+                    if (row.CoveredBy == null || other.Length < row.CoveredBy.Length) row.CoveredBy = other;
+                }
+            }
+            return rows;
+        }
+
+        /// <summary>范围清单下方的一句话汇总：扫描几个磁盘、几个文件夹，以及合并、整盘和不可用提示。</summary>
+        internal static string Summary(LocalScanScopeResolution resolution)
+        {
+            if (resolution.Roots.Count == 0)
+                return resolution.Invalid.Count == 0 ? "请至少勾选一个位置。" : "没有可用范围：" + resolution.Invalid[0];
+            int drives = resolution.DriveCount;
+            int folders = resolution.Roots.Count - drives;
+            string text = "将扫描 " + (drives > 0 ? drives + " 个磁盘" : string.Empty)
+                + (drives > 0 && folders > 0 ? "、" : string.Empty)
+                + (folders > 0 ? folders + " 个文件夹" : string.Empty) + "。";
+            if (resolution.Merged > 0) text += "已合并 " + resolution.Merged + " 个重复或重叠范围。";
+            if (drives > 0) text += "整盘扫描可能耗时较长。";
+            if (resolution.Invalid.Count > 0) text += "另有 " + resolution.Invalid.Count + " 个范围不可用。";
+            return text;
         }
 
         internal static bool IsDriveRoot(string path)
