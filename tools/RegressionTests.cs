@@ -5296,6 +5296,16 @@ namespace AppManager
                         Check(clear.Left >= 0 && clear.Top >= 0 && clear.Right <= search.Width && clear.Bottom <= search.Height,
                             "clear button escaped the search field at " + dpi + " DPI: " + clear.Bounds);
                     }
+                    // 最窄搜索框（200px）放不下完整占位文案时仍须单行垂直居中：原生 Label 会折成两行，首行被挤到上沿。
+                    search.Width = 200;
+                    search.Placeholder = "在「我的工具」中搜索…";
+                    Application.DoEvents();
+                    Check(TextRenderer.MeasureText(search.Placeholder, placeholder.Font).Width > placeholder.Width,
+                        "fixture placeholder fits the narrow field: " + placeholder.Bounds);
+                    CheckPlaceholderCentered(search, placeholder, "narrow field");
+                    search.Width = 320;
+                    Application.DoEvents();
+                    CheckPlaceholderCentered(search, placeholder, "wide field");
                     Check(other.Focused, "test host did not receive focus");
                     search.Text = "idea";
                     Check(clear.Visible, "clear button hidden with input");
@@ -5308,6 +5318,36 @@ namespace AppManager
                 {
                     host.Close();
                 }
+            }
+        }
+
+        /// <summary>截取搜索框，检查占位文案字迹的上下边界相对输入框垂直居中。</summary>
+        private static void CheckPlaceholderCentered(Control search, Control placeholder, string label)
+        {
+            Check(placeholder.Visible && placeholder.Top == 0 && placeholder.Height == search.Height,
+                "placeholder hidden or not spanning the field (" + label + "): " + placeholder.Bounds);
+            using (Bitmap shot = new Bitmap(placeholder.Width, placeholder.Height))
+            {
+                placeholder.DrawToBitmap(shot, new Rectangle(Point.Empty, shot.Size));
+                int top = -1, bottom = -1;
+                for (int y = 3; y < shot.Height - 3; y++)
+                {
+                    for (int x = 0; x < shot.Width; x++)
+                    {
+                        Color c = shot.GetPixel(x, y);
+                        if (c.R + c.G + c.B >= 600) continue;   // 背景与边框都更亮，只统计灰色字迹
+                        if (top < 0) top = y;
+                        bottom = y;
+                        break;
+                    }
+                }
+                Check(top >= 0, "placeholder text not rendered (" + label + ")");
+                // 折行时两行字迹合起来也近似居中，必须先确认只有一行
+                Check(bottom - top + 1 <= placeholder.Font.Height, "placeholder text wrapped (" + label + "): ink rows "
+                    + top + "-" + bottom + ", line height " + placeholder.Font.Height);
+                int offset = (top + bottom + 1) - shot.Height;   // 字迹中心与框中心之差的两倍
+                Check(Math.Abs(offset) <= 4, "placeholder text off-center (" + label + "): ink rows "
+                    + top + "-" + bottom + " in height " + shot.Height);
             }
         }
 

@@ -13,7 +13,7 @@ namespace AppManager.Controls
     public class SearchField : UserControl
     {
         private readonly TextBox box = new TextBox();
-        private readonly Label placeholderLabel = new Label();
+        private readonly Label placeholderLabel = new PlaceholderLabel();
         private readonly ClearButton clearButton = new ClearButton();
         private string placeholder = "搜索应用…";
 
@@ -42,7 +42,7 @@ namespace AppManager.Controls
             placeholderLabel.BackColor = Color.Transparent;
             placeholderLabel.ForeColor = Theme.TextTertiary;
             placeholderLabel.Font = box.Font;
-            // 关闭自动尺寸后 TextAlign 的垂直对齐才会生效，避免占位文案贴在输入框上沿。
+            // 显式关闭自动尺寸：占位文案须撑满输入框高度，才能在 PlaceholderLabel 中垂直居中。
             placeholderLabel.AutoSize = false;
             placeholderLabel.Text = placeholder;
             placeholderLabel.TextAlign = ContentAlignment.MiddleLeft;
@@ -121,6 +121,21 @@ namespace AppManager.Controls
             using (Pen p = new Pen(box.Focused ? Theme.Accent : Theme.ControlBorder, box.Focused ? 1.4F : 1F))
                 Draw.DrawRoundedRect(g, p, r, 6);
             Draw.DrawIcon(g, UiIconKind.Search, new Rectangle(6, (Height - 20) / 2, 20, 20), Theme.IconColor);
+        }
+
+        /// <summary>
+        /// 占位文案：固定单行绘制，放不下时尾部省略。
+        /// 原生 Label 总是按词折行，搜索框较窄时长文案会折成两行，第二行被隐藏、首行被挤到上沿。
+        /// </summary>
+        private sealed class PlaceholderLabel : Label
+        {
+            private const TextFormatFlags Flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter
+                | TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                TextRenderer.DrawText(e.Graphics, Text, Font, ClientRectangle, ForeColor, Flags);
+            }
         }
 
         private sealed class ClearButton : Control
