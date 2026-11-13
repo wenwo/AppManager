@@ -76,6 +76,7 @@ namespace AppManager
         private Rectangle formRestoreBounds;
         private SettingsPage settingsPage; // 设置页（独立页面，覆盖主内容区）
         private bool settingsOpen;         // 是否处于设置页
+        private bool settingsRescan;       // 设置页「重新扫描」发起的扫描尚未结束（结束时回传结果）
         private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
         private TextViewerControl textViewer;   // 文本查看器：双击文本资源后替换列表区域展示文本
         private ArchiveViewerControl archiveViewer;   // 压缩包查看器：双击压缩包资源后替换列表区域列出内容
@@ -1100,7 +1101,13 @@ namespace AppManager
                 settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                     config.CloseToTray, ResourceStoreSummary());
             };
-            settingsPage.RescanRequested += delegate { StartScan(); };
+            settingsPage.RescanRequested += delegate
+            {
+                // 「正在扫描」遮罩被设置页盖住，进度改由设置页的这一行显示
+                settingsRescan = true;
+                settingsPage.SetRescanState(SettingsPage.RescanState.Running);
+                StartScan();
+            };
             settingsPage.LayoutBackupRequested += delegate { ShowLayoutBackups(); };
             settingsPage.DatabaseRequested += delegate
             {
@@ -1775,6 +1782,12 @@ namespace AppManager
                         else
                         {
                             loadingLabel.Visible = false;
+                            if (settingsRescan)
+                            {
+                                settingsRescan = false;
+                                settingsPage.SetRescanState(result != null
+                                    ? SettingsPage.RescanState.Done : SettingsPage.RescanState.Failed);
+                            }
                         }
                     });
                 }
@@ -7299,6 +7312,10 @@ namespace AppManager
             HideArchiveViewer();
             HideVideoPlayer();
             StopMusicPlayer();
+            // 重新进入时清掉上次的扫描结果提示；扫描回调丢失时也不让「正在扫描」一直卡住
+            if (!scanRunning) settingsRescan = false;
+            settingsPage.SetRescanState(settingsRescan
+                ? SettingsPage.RescanState.Running : SettingsPage.RescanState.Idle);
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                 config.CloseToTray, ResourceStoreSummary());
             SetMainContentVisible(false);

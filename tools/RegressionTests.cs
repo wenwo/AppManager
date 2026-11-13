@@ -124,6 +124,8 @@ namespace AppManager
                 Run("OLE export payload count follows the actual distinct exportable paths", DragExportPayload);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
+                Run("settings rows click as a whole, gate dependent switches and keep child sizes across DPI", SettingsPageRows);
+                Run("settings rescan row reports running and failure, and never stays stuck", SettingsRescanFeedback);
                 Run("minimize keeps the laid-out controls and restore lays out at the real size", MinimizeKeepsLayout);
                 Run("tray hide keeps the music playlist and current track", TrayHideKeepsMusicPlaylist);
                 Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
@@ -2657,6 +2659,199 @@ namespace AppManager
                 Check(!settings.Visible, "settings page did not close");
                 Check(collection.Visible && collection.Width == expandedWidth, "collection sidebar did not return after closing settings");
                 Check(collection.Left == sidebar.Width && grid.Left == collection.Right, "grid and collection sidebar are misaligned after closing settings");
+            }
+        }
+
+        /// <summary>按标题读取设置页某一行的字段（行模型是私有嵌套类型，只能反射访问）。</summary>
+        private static object SettingsRowField(Controls.SettingsPage page, string title, string field)
+        {
+            IEnumerable rows = (IEnumerable)typeof(Controls.SettingsPage).GetField("rows", Private).GetValue(page);
+            foreach (object row in rows)
+            {
+                if ((string)row.GetType().GetField("Title").GetValue(row) == title)
+                    return row.GetType().GetField(field).GetValue(row);
+            }
+            throw new Exception("settings row not found: " + title);
+        }
+
+        /// <summary>在设置页某一行的文字区域按下并松开指定鼠标键（不落在开关上）。</summary>
+        private static void ClickSettingsRow(Controls.SettingsPage page, string title, MouseButtons button)
+        {
+            Rectangle r = (Rectangle)SettingsRowField(page, title, "Bounds");
+            MouseEventArgs args = new MouseEventArgs(button, 1, r.Left + 30, r.Top + r.Height / 2, 0);
+            typeof(Control).GetMethod("OnMouseDown", Private).Invoke(page, new object[] { args });
+            typeof(Control).GetMethod("OnMouseUp", Private).Invoke(page, new object[] { args });
+        }
+
+        private static void SettingsPageRows()
+        {
+            const string HiddenRow = "显示隐藏项", ScanRow = "自动扫描应用与桌面变化", OrganizeRow = "自动收纳桌面新快捷方式";
+            const string RescanRow = "重新扫描", StorageRow = "资源存储位置";
+            using (DpiAwareForm host = new DpiAwareForm())
+            using (Controls.SettingsPage page = new Controls.SettingsPage())
+            {
+                host.ShowInTaskbar = false;
+                host.FormBorderStyle = FormBorderStyle.None;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-32000, -32000);
+                host.ClientSize = new Size(1000, 560);
+                page.SetBounds(0, 0, 1000, 560);
+                host.Controls.Add(page);
+                int hiddenEvents = 0, scanEvents = 0, organizeEvents = 0, rescanEvents = 0, storageEvents = 0;
+                page.ShowHiddenChanged += delegate { hiddenEvents++; };
+                page.AutoScanChanged += delegate { scanEvents++; };
+                page.AutoOrganizeDesktopChanged += delegate { organizeEvents++; };
+                page.RescanRequested += delegate { rescanEvents++; };
+                page.StorageLocationRequested += delegate { storageEvents++; };
+                Control organizeToggle = (Control)typeof(Controls.SettingsPage).GetField("autoOrganizeDesktopToggle", Private).GetValue(page);
+                Control back = (Control)typeof(Controls.SettingsPage).GetField("backBtn", Private).GetValue(page);
+                host.Show();
+                try
+                {
+                    Application.DoEvents();
+                    page.Bind(false, true, false, true, "D:\\Store");
+                    Check(hiddenEvents + scanEvents + organizeEvents == 0, "binding raised change events");
+                    Check((string)SettingsRowField(page, StorageRow, "Subtitle") == "D:\\Store", "storage row does not show the bound path");
+
+                    // 子控件尺寸只由页面按当前 DPI 计算：切换 DPI 不叠加框架缩放，之后再改页面大小也不退回未缩放尺寸。
+                    foreach (int dpi in new int[] { 144, 120, 96 })
+                    {
+                        SetDpi(host, dpi, host.Bounds);
+                        Size toggleSize = new Size(DpiHelper.Scale(46, dpi), DpiHelper.Scale(28, dpi));
+                        Size backSize = new Size(DpiHelper.Scale(74, dpi), DpiHelper.Scale(30, dpi));
+                        for (int pass = 0; pass < 2; pass++)
+                        {
+                            Rectangle row = (Rectangle)SettingsRowField(page, OrganizeRow, "Bounds");
+                            Check(row.Height == DpiHelper.Scale(60, dpi), "row height not scaled at " + dpi + " DPI: " + row);
+                            Check(organizeToggle.Size == toggleSize, "toggle size wrong at " + dpi + " DPI (pass " + pass + "): " + organizeToggle.Size);
+                            Check(row.Contains(organizeToggle.Bounds), "toggle escaped its row at " + dpi + " DPI: " + organizeToggle.Bounds + " / " + row);
+                            Check(back.Size == backSize, "back button size wrong at " + dpi + " DPI (pass " + pass + "): " + back.Size);
+                            Check(page.ClientRectangle.Contains(back.Bounds) && page.ClientRectangle.Contains((Rectangle)SettingsRowField(page, RescanRow, "Bounds")),
+                                "settings content escaped the page at " + dpi + " DPI");
+                            page.Width += 20;   // 第二轮：普通改大小触发的重新布局
+                        }
+                    }
+
+                    // 整行点击切换开关：只认左键；按下后移到别的行再松开视为取消。
+                    ClickSettingsRow(page, HiddenRow, MouseButtons.Left);
+                    Check(page.ShowHidden && hiddenEvents == 1, "left click on a toggle row did not toggle once");
+                    ClickSettingsRow(page, HiddenRow, MouseButtons.Right);
+                    Check(page.ShowHidden && hiddenEvents == 1, "right click toggled the row");
+                    Rectangle hidden = (Rectangle)SettingsRowField(page, HiddenRow, "Bounds");
+                    Rectangle scan = (Rectangle)SettingsRowField(page, ScanRow, "Bounds");
+                    typeof(Control).GetMethod("OnMouseDown", Private).Invoke(page, new object[] {
+                        new MouseEventArgs(MouseButtons.Left, 1, hidden.Left + 30, hidden.Top + hidden.Height / 2, 0) });
+                    typeof(Control).GetMethod("OnMouseUp", Private).Invoke(page, new object[] {
+                        new MouseEventArgs(MouseButtons.Left, 1, scan.Left + 30, scan.Top + scan.Height / 2, 0) });
+                    Check(page.ShowHidden && page.AutoScan && hiddenEvents == 1 && scanEvents == 0, "releasing on another row still activated a row");
+
+                    // 悬停高亮画在行内并透到卡片左缘；置灰行不高亮。
+                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] {
+                        new MouseEventArgs(MouseButtons.None, 0, hidden.Left + 30, hidden.Top + hidden.Height / 2, 0) });
+                    using (Bitmap shot = new Bitmap(page.Width, page.Height))
+                    {
+                        page.DrawToBitmap(shot, new Rectangle(Point.Empty, shot.Size));
+                        Check(shot.GetPixel(hidden.Left + 6, hidden.Top + hidden.Height / 2).ToArgb() == Theme.CardHover.ToArgb(),
+                            "hovered row is not highlighted");
+                        Check(shot.GetPixel(scan.Left + 6, scan.Top + scan.Height / 2).ToArgb() == Theme.Card.ToArgb(),
+                            "a row that is not hovered is highlighted");
+                    }
+
+                    // 「自动收纳」依赖自动扫描：扫描关闭时置灰、点击无效、保留原值；重新开启后恢复。
+                    Check(organizeToggle.Enabled && (bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row disabled while auto scan is on");
+                    ClickSettingsRow(page, ScanRow, MouseButtons.Left);
+                    Check(!page.AutoScan && scanEvents == 1, "auto scan row did not switch off");
+                    Check(!organizeToggle.Enabled && !(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row stayed enabled without auto scan");
+                    string organizeHint = (string)SettingsRowField(page, OrganizeRow, "Subtitle");
+                    Check(organizeHint.Contains("自动扫描"), "disabled organize row does not explain the dependency: " + organizeHint);
+                    ClickSettingsRow(page, OrganizeRow, MouseButtons.Left);
+                    Check(!page.AutoOrganizeDesktop && organizeEvents == 0, "disabled organize row still toggled");
+                    Rectangle organize = (Rectangle)SettingsRowField(page, OrganizeRow, "Bounds");
+                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] {
+                        new MouseEventArgs(MouseButtons.None, 0, organize.Left + 30, organize.Top + organize.Height / 2, 0) });
+                    using (Bitmap shot = new Bitmap(page.Width, page.Height))
+                    {
+                        page.DrawToBitmap(shot, new Rectangle(Point.Empty, shot.Size));
+                        Check(shot.GetPixel(organize.Left + 6, organize.Top + organize.Height / 2).ToArgb() == Theme.Card.ToArgb(),
+                            "disabled row is highlighted on hover");
+                    }
+                    ClickSettingsRow(page, ScanRow, MouseButtons.Left);
+                    ClickSettingsRow(page, OrganizeRow, MouseButtons.Left);
+                    Check(page.AutoScan && page.AutoOrganizeDesktop && scanEvents == 2 && organizeEvents == 1, "organize row did not recover after enabling auto scan");
+                    page.Bind(true, false, true, true, "D:\\Store");
+                    Check(page.AutoOrganizeDesktop && !organizeToggle.Enabled, "binding with auto scan off lost the organize value or left it enabled");
+                    Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "rebinding raised change events");
+
+                    // 操作行：存储位置整行可点；重新扫描进行中不重复触发，结束后给出结果并可再次触发。
+                    ClickSettingsRow(page, StorageRow, MouseButtons.Left);
+                    Check(storageEvents == 1, "storage row click did not request the dialog");
+                    ClickSettingsRow(page, RescanRow, MouseButtons.Left);
+                    Check(rescanEvents == 1, "rescan row click did not request a scan");
+                    page.SetRescanState(Controls.SettingsPage.RescanState.Running);
+                    Check((string)SettingsRowField(page, RescanRow, "Trailing") == "正在扫描…", "running rescan row does not say so");
+                    ClickSettingsRow(page, RescanRow, MouseButtons.Left);
+                    Check(rescanEvents == 1, "rescan row fired again while running");
+                    page.SetRescanState(Controls.SettingsPage.RescanState.Failed);
+                    Check(((string)SettingsRowField(page, RescanRow, "Subtitle")).Contains("失败"), "failed rescan is not reported");
+                    page.SetRescanState(Controls.SettingsPage.RescanState.Done);
+                    Check(((string)SettingsRowField(page, RescanRow, "Subtitle")).Contains("完成"), "finished rescan is not reported");
+                    ClickSettingsRow(page, RescanRow, MouseButtons.Left);
+                    Check(rescanEvents == 2, "rescan row cannot be used again after finishing");
+                }
+                finally
+                {
+                    host.Close();
+                }
+            }
+        }
+
+        private static void SettingsRescanFeedback()
+        {
+            AppConfig config = RenameConfig("settings-rescan");
+            config.AutoScan = false;
+            using (MainForm form = new MainForm(config))
+            {
+                FieldInfo running = typeof(MainForm).GetField("scanRunning", Private);
+                FieldInfo scannerField = typeof(MainForm).GetField("scanner", Private);
+                FieldInfo state = typeof(Controls.SettingsPage).GetField("rescanState", Private);
+                running.SetValue(form, true);   // 避免 OnLoad 启动真实扫描
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1200, 720);
+                form.Show();
+                Application.DoEvents();
+                Controls.SettingsPage page = (Controls.SettingsPage)typeof(MainForm).GetField("settingsPage", Private).GetValue(form);
+                Invoke(form, "OpenSettings");
+                Application.DoEvents();
+                Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Idle, "rescan row not idle when settings open");
+
+                // 扫描器置空：后台扫描必然失败，走完真实的开始/结束回调而不枚举真实系统环境。
+                object scanner = scannerField.GetValue(form);
+                scannerField.SetValue(form, null);
+                running.SetValue(form, false);
+                try
+                {
+                    ClickSettingsRow(page, "重新扫描", MouseButtons.Left);
+                    Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Running, "rescan row did not show the running scan");
+                    PumpUntil(delegate { return (Controls.SettingsPage.RescanState)state.GetValue(page) != Controls.SettingsPage.RescanState.Running; });
+                }
+                finally { scannerField.SetValue(form, scanner); }
+                Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Failed, "failed scan was not reported on the rescan row");
+                Check(!(bool)running.GetValue(form), "scan flag stayed set after the failed scan");
+
+                // 扫描回调丢失（扫描标志已复位但没有结束通知）：重新进入设置页时不能还卡在「正在扫描」。
+                running.SetValue(form, true);
+                ClickSettingsRow(page, "重新扫描", MouseButtons.Left);
+                Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Running, "queued rescan is not shown as running");
+                Invoke(form, "CloseSettings");
+                Invoke(form, "OpenSettings");
+                Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Running, "reopening settings dropped a scan that is still running");
+                running.SetValue(form, false);
+                Invoke(form, "CloseSettings");
+                Invoke(form, "OpenSettings");
+                Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Idle, "rescan row stayed stuck after the scan flag cleared");
+                running.SetValue(form, true);   // 关闭窗体前不再启动补扫
             }
         }
 

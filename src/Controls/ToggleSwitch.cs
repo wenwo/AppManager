@@ -53,6 +53,9 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle r = new Rectangle(0, 2, Width - 1, Height - 4);
             Color track = _checked ? Theme.ToggleOn : Theme.SegmentBg;
+            // 禁用态：轨道向卡片底色淡化一半，提示当前不可操作（仍能看出开/关）
+            if (!Enabled)
+                track = Color.FromArgb((track.R + Theme.Card.R) / 2, (track.G + Theme.Card.G) / 2, (track.B + Theme.Card.B) / 2);
             using (SolidBrush b = new SolidBrush(track)) Draw.FillRoundedRect(g, b, r, r.Height);
             // 轨道内阴影（顶部 1px 深色，模拟凹陷）
             using (Pen ip = new Pen(Color.FromArgb(12, 0, 0, 0), 1))
