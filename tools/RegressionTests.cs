@@ -48,6 +48,7 @@ namespace AppManager
                 Run("junction loop: copy rejects and preserves files", Junction);
                 Run("failed restore preserves current config and files", RestoreFailure);
                 Run("listing preserves old rollback data; quota refuses new restore", Retention);
+                Run("manifest makes the process per-monitor DPI aware from startup", ManifestDpiAwareness);
                 Run("DPI messages: effective DPI / suggested rectangle / repeated scaling", DpiMessages);
                 Run("maximize stays in selected monitor work area and restores", MaximizeWithinScreenWorkArea);
                 Run("window resize hit zones, minimum size, and fullscreen threshold", ResizeBounds);
@@ -105,6 +106,8 @@ namespace AppManager
                 Run("newer desktop shortcut replaces launch target while keeping identity", NewerShortcutKeepsIdentity);
                 Run("membership checks recognise every added category, like the listing projection", MultiMembershipCategories);
                 Run("grid scroll range follows width changes so the last rows stay reachable", GridScrollFollowsWidth);
+                Run("wide windows spread grid cards and list columns evenly; narrow layout is unchanged", WideLayoutSpreads);
+                Run("toolbar reserves room for long counts and lets the mini player fill the gap", ToolbarCountAndPlayerWidth);
                 Run("grid measures only visible rows; column width grows while scrolling to wider rows", GridVisibleMeasurement);
                 Run("list header paints before rows for empty and populated lists with bounded measurement", GridHeaderFirstPaint);
                 Run("main grid paint failures render a fallback instead of throwing", GridPaintFailureFallback);
@@ -5816,6 +5819,134 @@ namespace AppManager
             }
         }
 
+        private static void WideLayoutSpreads()
+        {
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000), Size = new Size(1700, 700) })
+            using (Controls.AppGridControl grid = new Controls.AppGridControl { Location = Point.Empty, Size = new Size(1600, 600) })
+            using (Bitmap bitmap = new Bitmap(8, 8))
+            using (Graphics graphics = Graphics.FromImage(bitmap))
+            {
+                host.Controls.Add(grid);
+                host.Show();
+                int dpi = DpiHelper.ForControl(grid);
+
+                // 网格：任何宽度下卡片都铺满整行（左右边距与列间距相等），命中判定与绘制位置一致
+                grid.GridMode = true;
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int i = 0; i < 60; i++) apps.Add(new AppInfo { Key = "af:wide-" + i, Name = "Wide " + i });
+                grid.SetApps(apps);
+                MethodInfo rect = typeof(Controls.AppGridControl).GetMethod("GridRect", Private);
+                MethodInfo hit = typeof(Controls.AppGridControl).GetMethod("HitIndex", Private);
+                MethodInfo columnCount = typeof(Controls.AppGridControl).GetMethod("Columns", Private);
+                foreach (int width in new int[] { 1600, 1301, 777, 420 })
+                {
+                    grid.Size = new Size(width, 600);
+                    int columns = (int)columnCount.Invoke(grid, null);
+                    Rectangle first = (Rectangle)rect.Invoke(grid, new object[] { 0 });
+                    Rectangle last = (Rectangle)rect.Invoke(grid, new object[] { columns - 1 });
+                    int left = first.X, right = grid.ClientSize.Width - last.Right;
+                    Check(right >= left && right - left <= columns,
+                        "cards do not span the row at width " + width + ": left=" + left + " right=" + right);
+                    Check(right < first.Width, "row leaves room for another card at width " + width);
+                    for (int column = 0; column < columns; column++)
+                    {
+                        Rectangle card = (Rectangle)rect.Invoke(grid, new object[] { column });
+                        if (column > 0)
+                        {
+                            Rectangle previous = (Rectangle)rect.Invoke(grid, new object[] { column - 1 });
+                            Check(card.X - previous.Right == left, "uneven card gap at width " + width + " column " + column);
+                        }
+                        foreach (int x in new int[] { card.X, card.X + card.Width / 2, card.Right - 1 })
+                            Check((int)hit.Invoke(grid, new object[] { new Point(x, card.Y + card.Height / 2) }) == column,
+                                "hit test disagrees with card position at width " + width + " column " + column + " x=" + x);
+                    }
+                    Check((int)hit.Invoke(grid, new object[] { new Point(first.X - 1, first.Y + first.Height / 2) }) == -1,
+                        "left margin was hit as a card at width " + width);
+                }
+
+                // 列表：宽行各列间距相等且大于基础间距，名称列不再独占余量；窄行保持原有紧凑排法
+                grid.GridMode = false;
+                grid.ShowTimeColumn = true;
+                List<AppInfo> rows = new List<AppInfo>();
+                for (int i = 0; i < 20; i++)
+                    rows.Add(new AppInfo { Key = "add:wide-" + i, Name = "Row " + i, Category = "照片", IsFile = true, TargetPath = Path.Combine(root, "wide-" + i + ".jpg") });
+                grid.SetApps(rows);
+                MethodInfo listColumns = typeof(Controls.AppGridControl).GetMethod("ListColumns", Private);
+                int baseGap = DpiHelper.Scale(18, dpi);
+                foreach (int logicalWidth in new int[] { 1600, 700 })
+                {
+                    int width = DpiHelper.Scale(logicalWidth, dpi);   // 列宽常量随 DPI 放大，测试宽度同步放大
+                    grid.Size = new Size(width, 600);
+                    Rectangle row = new Rectangle(DpiHelper.Scale(14, dpi), 0, grid.ClientSize.Width - DpiHelper.Scale(28, dpi), DpiHelper.Scale(30, dpi));
+                    object[] args = { graphics, row, 0, null, null, null, null, null };
+                    listColumns.Invoke(grid, args);
+                    Rectangle name = (Rectangle)args[3], category = (Rectangle)args[4], size = (Rectangle)args[5],
+                        time = (Rectangle)args[6], location = (Rectangle)args[7];
+                    int[] gaps = { category.X - name.Right, size.X - category.Right, time.X - size.Right, location.X - time.Right };
+                    Check(gaps[1] == gaps[2] && gaps[2] == gaps[3],
+                        "list column gaps differ at width " + width + ": " + string.Join(",", Array.ConvertAll(gaps, delegate(int gap) { return gap.ToString(); })));
+                    // 名称文字始终可以写到分类列前：宽行里长名称不能在旁边留着空白时被截断
+                    Check(gaps[0] == baseGap, "name column stops short of the category column at width " + width + ": " + gaps[0]);
+                    Check(location.Right == row.Right - 12, "location column left the right edge at width " + width);
+                    Check(name.Width >= DpiHelper.Scale(76, dpi), "name column too narrow at width " + width);
+                    if (logicalWidth == 1600)
+                    {
+                        Check(gaps[1] > baseGap * 3, "wide row kept the compact gaps: " + gaps[1]);
+                        Check(name.Width >= (int)(row.Width * 0.36f), "wide row gives the name column less than its comfortable width: " + name.Width + " of " + row.Width);
+                    }
+                    else Check(gaps[1] == baseGap, "narrow row changed its column gaps: " + gaps[1]);
+                }
+                host.Hide();
+            }
+        }
+
+        private static void ToolbarCountAndPlayerWidth()
+        {
+            AppConfig config = RenameConfig("toolbar-count");
+            config.AutoScan = false;
+            using (MainForm form = new MainForm(config))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Show();
+                Application.DoEvents();
+                int dpi = form.LayoutDpi;
+                Label count = (Label)typeof(MainForm).GetField("countLabel", Private).GetValue(form);
+                Control mini = (Control)typeof(MainForm).GetField("miniMusic", Private).GetValue(form);
+                Control search = (Control)typeof(MainForm).GetField("search", Private).GetValue(form);
+                int miniMin = DpiHelper.Scale(190, dpi), miniMax = DpiHelper.Scale(960, dpi);
+                Invoke(form, "UpdateCount", 3, 9);
+                bool fitsWithShortCount = mini.Visible;
+                foreach (int[] numbers in new int[][] { new int[] { 200, 216 }, new int[] { 123456, 1234567 }, new int[] { 0, 0 } })
+                {
+                    Invoke(form, "UpdateCount", numbers[0], numbers[1]);
+                    int needed = TextRenderer.MeasureText(count.Text, count.Font).Width;
+                    // 计数优先完整显示；唯一例外是播放器已让到最小宽度（再让就会被隐藏并暂停音乐）
+                    Check(count.Width >= needed || (mini.Visible && mini.Width == miniMin),
+                        "count '" + count.Text + "' does not fit on one line: width=" + count.Width + " text=" + needed + " mini=" + mini.Width);
+                    Check(!fitsWithShortCount || mini.Visible, "a longer count hid the mini player: '" + count.Text + "'");
+                    Check(!mini.Visible || mini.Right <= count.Left, "mini player overlaps the count '" + count.Text + "'");
+                    Check(search.Right <= mini.Left, "search box overlaps the mini player");
+                }
+                // 宽窗口：播放器要么到达上限，要么一直排到计数文字跟前，不在中间留空档
+                form.Size = new Size(Math.Min(2400, Screen.PrimaryScreen.WorkingArea.Width), form.Height);
+                Application.DoEvents();
+                Check(mini.Visible, "mini player hidden in a wide window");
+                Check(mini.Width <= miniMax, "mini player exceeds its maximum width");
+                foreach (string text in new string[] { "200 / 216", "扫描失败，已保留当前列表", "0 / 0" })
+                {
+                    count.Text = text;   // 直接赋值（扫描失败提示走这条路径）也必须重排
+                    int needed = TextRenderer.MeasureText(count.Text, count.Font).Width;
+                    Check(count.Width >= needed, "'" + text + "' does not fit in a wide toolbar: width=" + count.Width + " text=" + needed);
+                    int gap = count.Right - needed - mini.Right;
+                    Check(mini.Width == miniMax || gap <= DpiHelper.Scale(68, dpi),
+                        "wide toolbar leaves a gap of " + gap + " before '" + text + "': mini=" + mini.Bounds + " count=" + count.Bounds);
+                }
+            }
+        }
+
         private static void GridHeaderFirstPaint()
         {
             foreach (int count in new int[] { 0, 1, 49, 50, 51, 10000 })
@@ -7029,6 +7160,25 @@ namespace AppManager
                 typeof(DpiAwareForm).GetMethod("WndProc", Private).Invoke(form, new object[] { message });
             }
             finally { Marshal.FreeHGlobal(rect); }
+        }
+
+        [DllImport("shcore.dll")]
+        private static extern int GetProcessDpiAwareness(IntPtr process, out int awareness);
+
+        /// <summary>
+        /// 清单里的 DPI 设置一旦被系统忽略（例如命名空间写错），进程会以「不感知 DPI」启动，
+        /// 之后 WPF 图片组件加载时再被改成「系统级感知」：排版停在 96 DPI、文字按屏幕 DPI 绘制，界面字大框小。
+        /// 本测试程序与正式程序内嵌同一份清单，直接断言进程的感知级别。
+        /// </summary>
+        private static void ManifestDpiAwareness()
+        {
+            const int PerMonitorAware = 2;
+            // 本方法引用了 WPF 图片组件（WicImageDecoder 的依赖），程序集在执行到这里之前就已加载，
+            // 其模块初始化会尝试把进程改成系统级感知：清单生效时这一步无效，失效时查询结果是 1 而不是 2。
+            GC.KeepAlive(typeof(System.Windows.Media.Imaging.BitmapDecoder).Assembly);
+            int awareness;
+            Check(GetProcessDpiAwareness(IntPtr.Zero, out awareness) == 0, "process DPI awareness query failed");
+            Check(awareness == PerMonitorAware, "app.manifest DPI settings are ignored: process awareness is " + awareness + " instead of per-monitor");
         }
 
         private static void DpiMessages()

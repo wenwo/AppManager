@@ -36,6 +36,18 @@ namespace AppManager
             AddButton("恢复数据库", Restore);
             AddButton("关闭", delegate { Close(); }); Controls.Add(actions);
             FormClosing += delegate(object sender, FormClosingEventArgs e) { if (running) e.Cancel = true; };
+            // 列宽和窗口大小按 96 DPI 写死，文字却按屏幕 DPI 绘制：125% 起「时间」列放不下完整的日期时间。
+            // 窗口句柄建好后按实际 DPI 把列宽和窗口放大一次（本窗体不随 DPI 变化重排，只需一次），不超出屏幕工作区。
+            Load += delegate
+            {
+                float scale;
+                using (Graphics g = history.CreateGraphics()) scale = g.DpiX / 96F;
+                if (scale <= 1F) return;
+                foreach (ColumnHeader column in history.Columns) column.Width = (int)Math.Round(column.Width * scale);
+                Rectangle work = Screen.FromControl(this).WorkingArea;
+                Size = new Size(Math.Min(work.Width, (int)Math.Round(Width * scale)), Math.Min(work.Height, (int)Math.Round(Height * scale)));
+                if (Owner != null) CenterToParent();
+            };
             Shown += delegate { Reload(); };
         }
         private void AddButton(string text, Action action)

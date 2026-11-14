@@ -1016,6 +1016,11 @@ namespace AppManager
             countLabel.Font = Theme.ButtonFont;
             countLabel.ForeColor = Theme.TextPrimary;
             countLabel.TextAlign = ContentAlignment.MiddleRight;
+            // 计数位数变化或换成「扫描失败」提示都会改变它需要的宽度：重排工具行，让播放器让位
+            countLabel.TextChanged += delegate
+            {
+                if (_ready && !DpiChangeInProgress && CountReserveWidth() != countReserve) LayoutControls();
+            };
             Controls.Add(countLabel);
 
             viewToggle = new ToggleSwitch();
@@ -1221,11 +1226,18 @@ namespace AppManager
             search.Size = new Size(Math.Min(searchWidth, searchAvailable), Dpi(34));
             int miniLeft = search.Right + Dpi(12);
             int countRight = viewToggle.Left - Dpi(12);
+            int miniMin = Dpi(190);
             int miniAvailable = Math.Max(0, countRight - miniLeft - Dpi(68));
-            int miniWidth = Math.Min(Dpi(640), Math.Min((int)(contentWidth * 0.40), miniAvailable));
+            // 计数文字变长时从播放器让出宽度，但不把放得下的播放器挤到最小宽度以下：
+            // 播放器被隐藏会连带暂停音乐，不能因为计数位数变化而发生
+            countReserve = CountReserveWidth();
+            if (miniAvailable >= miniMin)
+                miniAvailable -= Math.Min(countReserve - Dpi(68), miniAvailable - miniMin);
+            // 迷你播放器占满搜索框与计数之间的余量（上限 960），宽窗口下工具行不再中间空出一段
+            int miniWidth = Math.Min(Dpi(960), miniAvailable);
             miniMusic.Location = new Point(miniLeft, row1 + (row2 - Dpi(34)) / 2);
             miniMusic.Size = new Size(miniWidth, Dpi(34));
-            bool miniFits = miniWidth >= Dpi(190);
+            bool miniFits = miniWidth >= miniMin;
             if (!miniFits) PauseMusicIfUnreachable();
             miniMusic.Visible = !settingsOpen && miniFits;
             int countLeft = miniMusic.Visible ? miniMusic.Right + Dpi(8) : miniLeft;
@@ -1296,6 +1308,19 @@ namespace AppManager
                 videoPlayer.Size = ClientSize;
             }
             InvalidateContentFooter();   // 窗口宽度/侧栏显隐变化后重绘底部留白与集合文案
+        }
+
+        private int countReserve;   // 上次排版为计数文字预留的宽度
+
+        /// <summary>
+        /// 计数文字（如「200 / 216」或「扫描失败，已保留当前列表」）需要的宽度：不低于 68、不超过 200。
+        /// 固定只留 68 时，三位数以上的计数会在工具行里折成两行。
+        /// </summary>
+        private int CountReserveWidth()
+        {
+            int text = string.IsNullOrEmpty(countLabel.Text) ? 0
+                : TextRenderer.MeasureText(countLabel.Text, countLabel.Font).Width + Dpi(8);
+            return Math.Max(Dpi(68), Math.Min(Dpi(200), text));
         }
 
         private void UpdateToggleLabel()
@@ -7564,11 +7589,15 @@ namespace AppManager
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
+            // 背景只有轴对齐的矩形和 1px 直线，不需要抗锯齿：开启时整屏填充要慢数倍，
+            // 而透明子控件（侧栏/标签/迷你播放器）每次重绘都会走到这里
+            g.SmoothingMode = SmoothingMode.None;
             // 整体背景
             using (SolidBrush b = new SolidBrush(Theme.Background))
                 g.FillRectangle(b, ClientRectangle);
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+            // 设置页铺满标题行以下的整个窗口：标题行与页面同底色，不再露出侧栏色块和分隔线
+            if (settingsOpen) return;
 
             // 侧栏使用低一层的中性灰，内容顶栏保持白色，形成稳定的三段式明暗层次
             int sidebarWidth = Dpi(sidebar.CurrentWidth);

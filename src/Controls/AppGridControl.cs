@@ -518,9 +518,11 @@ namespace AppManager.Controls
         {
             int dpi = DpiHelper.ForControl(this);
             bool dpiChanged = dpi != lastDpi;
+            int oldGapX = gridGapX;
             if (dpiChanged)
             {
                 lastDpi = dpi;
+                gridGapWidth = -1;
                 if (gridItemPath != null) { gridItemPath.Dispose(); gridItemPath = null; }
                 locTextMaxW = -1;
                 catTextMaxW = -1;
@@ -531,6 +533,16 @@ namespace AppManager.Controls
                 UpdateScroll();
                 Invalidate();
             }
+            else if (grid && GridGapX() != oldGapX) Invalidate();   // 列数没变但横向间距随宽度变了，卡片位置已变
+        }
+
+        /// <summary>
+        /// 名称列的舒适宽度：行宽的 36%（不低于 320）。行更宽时超出部分不再全部留在名称列后面，
+        /// 而是均分到各数据列间距，避免最大化后名称与右侧数据列之间隔着一大片空白。
+        /// </summary>
+        private int NameColComfortW(int rowWidth)
+        {
+            return Math.Max(Dpi(320), (int)(rowWidth * 0.36f));
         }
 
         private void UpdateScroll()
@@ -690,12 +702,32 @@ namespace AppManager.Controls
             return (apps.Count + cols - 1) / cols;
         }
 
+        /// <summary>
+        /// 网格横向间距：一行排不满的余量均分到各列间距与左右边距，卡片始终铺满整行；
+        /// 否则宽窗口（最大化）下卡片全部挤在左侧，右边留出一条空白。纵向间距不变。
+        /// </summary>
+        private int GridGapX()
+        {
+            // 逐条目调用（命中、重绘、可见项收集）：按客户区宽度缓存，DPI 变化时由 RefreshLayoutCaches 作废
+            int width = ClientSize.Width;
+            if (width == gridGapWidth) return gridGapX;
+            int cols = Columns();
+            int spare = width - GridItemGap - cols * (GridItemWidth + GridItemGap);
+            gridGapWidth = width;
+            gridGapX = GridItemGap + Math.Max(0, spare) / (cols + 1);
+            return gridGapX;
+        }
+
+        private int gridGapWidth = -1;   // gridGapX 对应的客户区宽度；-1 = 需重算
+        private int gridGapX;
+
         private Rectangle GridRect(int index)
         {
             int cols = Columns();
             int col = index % cols;
             int row = index / cols;
-            int x = GridItemGap + col * (GridItemWidth + GridItemGap);
+            int gapX = GridGapX();
+            int x = gapX + col * (GridItemWidth + gapX);
             int y = GridItemGap + row * (GridItemHeight + GridItemGap);
             return new Rectangle(x, y, GridItemWidth, GridItemHeight);
         }
@@ -709,7 +741,8 @@ namespace AppManager.Controls
             if (grid)
             {
                 int cols = Columns();
-                int col = (p.X - GridItemGap) / (GridItemWidth + GridItemGap);
+                int gapX = GridGapX();
+                int col = (p.X - gapX) / (GridItemWidth + gapX);
                 int row = (p.Y - GridItemGap) / (GridItemHeight + GridItemGap);
                 if (col >= 0 && row >= 0 && col < cols)
                 {
@@ -936,17 +969,26 @@ namespace AppManager.Controls
             catRect = Rectangle.Empty;
             locRect = Rectangle.Empty;
 
+            // 宽行：按「名称列取舒适宽度」算出余量，均分到名称右侧各数据列之前的间距（列数 = 间距数），
+            // 各列均匀铺开；名称文字仍可一直写到分类列前（长名称不会在旁边留着空白时被截断）。
+            // 行宽不足时 spare ≤ 0，间距保持 ColGap，与原排法完全一致
+            int gap = ColGap;
+            int dataColumns = ShowTimeColumn ? 4 : 3;
+            int spare = rightEnd - textLeft - NameColComfortW(row.Width) - catW - locW - SizeColW
+                - (ShowTimeColumn ? TimeColW : 0) - dataColumns * ColGap;
+            if (spare > 0) gap += spare / dataColumns;
+
             for (int attempt = 0; attempt < 2; attempt++)
             {
                 locRect = new Rectangle(rightEnd - locW, row.Y, locW, row.Height);
-                int x = locRect.X - ColGap;
+                int x = locRect.X - gap;
                 if (ShowTimeColumn)
                 {
                     timeRect = new Rectangle(x - TimeColW, row.Y, TimeColW, row.Height);
-                    x = timeRect.X - ColGap;
+                    x = timeRect.X - gap;
                 }
                 sizeRect = new Rectangle(x - SizeColW, row.Y, SizeColW, row.Height);
-                catRect = new Rectangle(sizeRect.X - ColGap - catW, row.Y, catW, row.Height);
+                catRect = new Rectangle(sizeRect.X - gap - catW, row.Y, catW, row.Height);
 
                 int nameW = catRect.X - ColGap - textLeft;
                 if (nameW < 0) nameW = 0;
@@ -1852,9 +1894,10 @@ namespace AppManager.Controls
             if (grid)
             {
                 int cols = Columns();
-                int cw = GridItemWidth + GridItemGap;
+                int gapX = GridGapX();
+                int cw = GridItemWidth + gapX;
                 int rh = GridItemHeight + GridItemGap;
-                int gcol = (p.X - GridItemGap) / cw;
+                int gcol = (p.X - gapX) / cw;
                 int grow = (p.Y - GridItemGap) / rh;
                 if (gcol < 0) gcol = 0;
                 if (gcol >= cols) gcol = cols - 1;
@@ -1910,8 +1953,10 @@ namespace AppManager.Controls
                 int gap = dragGap > count ? count : dragGap;
                 Rectangle refRect;
                 int x;
-                if (gap < count) { refRect = GridRect(gap); x = refRect.X - 4; }
-                else { refRect = GridRect(count - 1); x = refRect.Right + 4; }
+                // 指示线画在两张卡片的缝隙中间：横向间距随窗口宽度变化，固定偏移会贴到一侧卡片上
+                int offset = Math.Max(4, GridGapX() / 2);
+                if (gap < count) { refRect = GridRect(gap); x = refRect.X - offset; }
+                else { refRect = GridRect(count - 1); x = refRect.Right + offset; }
                 g.DrawLine(accentPen, x, refRect.Y, x, refRect.Bottom);
                 g.FillEllipse(favoriteBrush, x - 3, refRect.Y - 3, 6, 6);
                 g.FillEllipse(favoriteBrush, x - 3, refRect.Bottom - 3, 6, 6);
