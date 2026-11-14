@@ -124,8 +124,8 @@ namespace AppManager
                 Run("OLE export payload count follows the actual distinct exportable paths", DragExportPayload);
                 Run("sidebar scrolls with high-resolution wheel deltas; header strip matches grid client width", ShellWheelAndHeader);
                 Run("collection sidebar keeps its width and alignment across tray hide/restore", CollectionSidebarTrayRestore);
-                Run("settings rows click as a whole, gate dependent switches and keep child sizes across DPI", SettingsPageRows);
-                Run("settings rescan row reports running and failure, and never stays stuck", SettingsRescanFeedback);
+                Run("settings page rows, dependent switches, inline storage actions, scrolling and DPI layout", SettingsPageRows);
+                Run("settings in the main window: rescan feedback, storage edits with save rollback, wheel routing", SettingsRescanFeedback);
                 Run("minimize keeps the laid-out controls and restore lays out at the real size", MinimizeKeepsLayout);
                 Run("tray hide keeps the music playlist and current track", TrayHideKeepsMusicPlaylist);
                 Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
@@ -1430,7 +1430,6 @@ namespace AppManager
             Check(ResourceStore.KnownRoots(pool, fallback).SequenceEqual(new[] { first, second, third }, StringComparer.OrdinalIgnoreCase),
                 "disabled locations were lost from the known roots");
             Check(SameText(ResourceStore.PrimaryRoot(pool, fallback), first), "primary root was not the first enabled location");
-            Check(ResourceStore.Summary(pool, fallback).Contains("共 2 个位置"), "active location count was not summarized");
 
             string poolXml = Path.Combine(dir, "pool.xml");
             Check(pool.SaveTo(poolXml), "multi-location config save failed");
@@ -1446,7 +1445,6 @@ namespace AppManager
             pool.ResourceStoreLocations[2].Enabled = false;
             Check(ResourceStore.ActiveRoots(pool, fallback).Count == 0, "all-disabled pool still accepted new files");
             Check(ResourceStore.KnownRoots(pool, fallback).Count == 3, "all-disabled pool forgot its known roots");
-            Check(ResourceStore.Summary(pool, fallback).Contains("均已停用"), "all-disabled pool was not reported clearly");
             string disabledXml = Path.Combine(dir, "disabled.xml");
             Check(pool.SaveTo(disabledXml), "all-disabled config save failed");
             AppConfig disabledLoaded = AppConfig.LoadFrom(disabledXml);
@@ -2669,31 +2667,82 @@ namespace AppManager
             }
         }
 
-        /// <summary>按标题读取设置页某一行的字段（行模型是私有嵌套类型，只能反射访问）。</summary>
-        private static object SettingsRowField(Controls.SettingsPage page, string title, string field)
+        /// <summary>按标题找设置页的一行（行模型是私有嵌套类型，只能反射访问）；找不到返回 -1。</summary>
+        private static int SettingsRowIndex(Controls.SettingsPage page, string title)
         {
-            IEnumerable rows = (IEnumerable)typeof(Controls.SettingsPage).GetField("rows", Private).GetValue(page);
-            foreach (object row in rows)
-            {
-                if ((string)row.GetType().GetField("Title").GetValue(row) == title)
-                    return row.GetType().GetField(field).GetValue(row);
-            }
-            throw new Exception("settings row not found: " + title);
+            IList rows = (IList)typeof(Controls.SettingsPage).GetField("rows", Private).GetValue(page);
+            for (int i = 0; i < rows.Count; i++)
+                if ((string)rows[i].GetType().GetField("Title").GetValue(rows[i]) == title) return i;
+            return -1;
         }
 
-        /// <summary>在设置页某一行的文字区域按下并松开指定鼠标键（不落在开关上）。</summary>
-        private static void ClickSettingsRow(Controls.SettingsPage page, string title, MouseButtons button)
+        private static object SettingsRowField(Controls.SettingsPage page, string title, string field)
+        {
+            int index = SettingsRowIndex(page, title);
+            if (index < 0) throw new Exception("settings row not found: " + title);
+            object row = ((IList)typeof(Controls.SettingsPage).GetField("rows", Private).GetValue(page))[index];
+            return row.GetType().GetField(field).GetValue(row);
+        }
+
+        /// <summary>设置页内容坐标换算为客户区坐标（内容可滚动）。</summary>
+        private static Point SettingsClient(Controls.SettingsPage page, Point content)
+        {
+            return (Point)typeof(Controls.SettingsPage).GetMethod("ToClient", Private).Invoke(page, new object[] { content });
+        }
+
+        /// <summary>在设置页的两个内容坐标处依次按下、松开指定鼠标键。</summary>
+        private static void SettingsPress(Controls.SettingsPage page, MouseButtons button, Point down, Point up)
+        {
+            Point a = SettingsClient(page, down), b = SettingsClient(page, up);
+            typeof(Control).GetMethod("OnMouseDown", Private).Invoke(page, new object[] { new MouseEventArgs(button, 1, a.X, a.Y, 0) });
+            typeof(Control).GetMethod("OnMouseUp", Private).Invoke(page, new object[] { new MouseEventArgs(button, 1, b.X, b.Y, 0) });
+        }
+
+        /// <summary>行的文字区域中点（内容坐标），避开右侧的开关和按钮。</summary>
+        private static Point SettingsRowPoint(Controls.SettingsPage page, string title)
         {
             Rectangle r = (Rectangle)SettingsRowField(page, title, "Bounds");
-            MouseEventArgs args = new MouseEventArgs(button, 1, r.Left + 30, r.Top + r.Height / 2, 0);
-            typeof(Control).GetMethod("OnMouseDown", Private).Invoke(page, new object[] { args });
-            typeof(Control).GetMethod("OnMouseUp", Private).Invoke(page, new object[] { args });
+            return new Point(r.Left + 90, r.Top + r.Height / 2);
+        }
+
+        private static void ClickSettingsRow(Controls.SettingsPage page, string title, MouseButtons button)
+        {
+            Point p = SettingsRowPoint(page, title);
+            SettingsPress(page, button, p, p);
+        }
+
+        /// <summary>点击某一行里的小点击区（StoreToggle / MoveUp / MoveDown）；该行没有这个点击区时返回 false。</summary>
+        private static bool ClickSettingsZone(Controls.SettingsPage page, string title, string kind)
+        {
+            int row = SettingsRowIndex(page, title);
+            foreach (object zone in (IEnumerable)typeof(Controls.SettingsPage).GetField("zones", Private).GetValue(page))
+            {
+                if ((int)zone.GetType().GetField("Row").GetValue(zone) != row
+                    || zone.GetType().GetField("Kind").GetValue(zone).ToString() != kind) continue;
+                Rectangle b = (Rectangle)zone.GetType().GetField("Bounds").GetValue(zone);
+                Point p = new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
+                SettingsPress(page, MouseButtons.Left, p, p);
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>截取设置页，返回内容坐标 content 处的像素颜色。</summary>
+        private static int SettingsPixel(Controls.SettingsPage page, Point content)
+        {
+            Point p = SettingsClient(page, content);
+            using (Bitmap shot = new Bitmap(page.Width, page.Height))
+            {
+                page.DrawToBitmap(shot, new Rectangle(Point.Empty, shot.Size));
+                return shot.GetPixel(p.X, p.Y).ToArgb();
+            }
         }
 
         private static void SettingsPageRows()
         {
             const string HiddenRow = "显示隐藏项", ScanRow = "自动扫描应用与桌面变化", OrganizeRow = "自动收纳桌面新快捷方式";
-            const string RescanRow = "重新扫描", StorageRow = "资源存储位置";
+            const string RescanRow = "重新扫描", TestRow = "运行自测", AddRow = "添加存储位置…";
+            const string StoreA = "D:\\Store\\A", StoreB = "E:\\Store\\B", StoreC = "F:\\Store\\C", DefaultStore = "C:\\Default\\Resources";
             using (DpiAwareForm host = new DpiAwareForm())
             using (Controls.SettingsPage page = new Controls.SettingsPage())
             {
@@ -2702,108 +2751,202 @@ namespace AppManager
                 host.StartPosition = FormStartPosition.Manual;
                 host.Location = new Point(-32000, -32000);
                 host.ClientSize = new Size(1000, 560);
-                page.SetBounds(0, 0, 1000, 560);
+                page.SetBounds(0, 0, 1000, 1400);   // 足够高：先在不滚动的状态下验证点击
                 host.Controls.Add(page);
-                int hiddenEvents = 0, scanEvents = 0, organizeEvents = 0, rescanEvents = 0, storageEvents = 0;
+                int hiddenEvents = 0, scanEvents = 0, organizeEvents = 0, rescanEvents = 0, testEvents = 0, addEvents = 0;
+                List<string> storeEvents = new List<string>();
                 page.ShowHiddenChanged += delegate { hiddenEvents++; };
                 page.AutoScanChanged += delegate { scanEvents++; };
                 page.AutoOrganizeDesktopChanged += delegate { organizeEvents++; };
                 page.RescanRequested += delegate { rescanEvents++; };
-                page.StorageLocationRequested += delegate { storageEvents++; };
-                Control organizeToggle = (Control)typeof(Controls.SettingsPage).GetField("autoOrganizeDesktopToggle", Private).GetValue(page);
+                page.SelfTestRequested += delegate { testEvents++; };
+                page.StorageAddRequested += delegate { addEvents++; };
+                page.StorageEnabledRequested += delegate(int index, bool enabled) { storeEvents.Add("enable " + index + " " + enabled); };
+                page.StorageMoveRequested += delegate(int index, int delta) { storeEvents.Add("move " + index + " " + delta); };
                 Control back = (Control)typeof(Controls.SettingsPage).GetField("backBtn", Private).GetValue(page);
+                FieldInfo scroll = typeof(Controls.SettingsPage).GetField("scrollOffset", Private);
+                List<ResourceStoreLocation> three = new List<ResourceStoreLocation> {
+                    new ResourceStoreLocation(StoreA, true), new ResourceStoreLocation(StoreB, false), new ResourceStoreLocation(StoreC, true) };
                 host.Show();
                 try
                 {
                     Application.DoEvents();
-                    page.Bind(false, true, false, true, "D:\\Store");
-                    Check(hiddenEvents + scanEvents + organizeEvents == 0, "binding raised change events");
-                    Check((string)SettingsRowField(page, StorageRow, "Subtitle") == "D:\\Store", "storage row does not show the bound path");
+                    page.Bind(false, true, false, true, three, DefaultStore);
+                    Check(hiddenEvents + scanEvents + organizeEvents + storeEvents.Count == 0, "binding raised change events");
+                    three[0].Enabled = false;
+                    Check((bool)SettingsRowField(page, StoreA, "Checked"), "page shares the caller's location objects instead of copying them");
+                    three[0].Enabled = true;
 
-                    // 子控件尺寸只由页面按当前 DPI 计算：切换 DPI 不叠加框架缩放，之后再改页面大小也不退回未缩放尺寸。
+                    // 尺寸只由页面按当前 DPI 计算：切换 DPI 不叠加框架缩放，之后再改页面大小也不退回未缩放尺寸。
                     foreach (int dpi in new int[] { 144, 120, 96 })
                     {
                         SetDpi(host, dpi, host.Bounds);
-                        Size toggleSize = new Size(DpiHelper.Scale(46, dpi), DpiHelper.Scale(28, dpi));
-                        Size backSize = new Size(DpiHelper.Scale(74, dpi), DpiHelper.Scale(30, dpi));
                         for (int pass = 0; pass < 2; pass++)
                         {
                             Rectangle row = (Rectangle)SettingsRowField(page, OrganizeRow, "Bounds");
-                            Check(row.Height == DpiHelper.Scale(60, dpi), "row height not scaled at " + dpi + " DPI: " + row);
-                            Check(organizeToggle.Size == toggleSize, "toggle size wrong at " + dpi + " DPI (pass " + pass + "): " + organizeToggle.Size);
-                            Check(row.Contains(organizeToggle.Bounds), "toggle escaped its row at " + dpi + " DPI: " + organizeToggle.Bounds + " / " + row);
-                            Check(back.Size == backSize, "back button size wrong at " + dpi + " DPI (pass " + pass + "): " + back.Size);
-                            Check(page.ClientRectangle.Contains(back.Bounds) && page.ClientRectangle.Contains((Rectangle)SettingsRowField(page, RescanRow, "Bounds")),
-                                "settings content escaped the page at " + dpi + " DPI");
+                            Check(row.Height == DpiHelper.Scale(64, dpi), "row height not scaled at " + dpi + " DPI: " + row);
+                            Check(back.Size == new Size(DpiHelper.Scale(74, dpi), DpiHelper.Scale(30, dpi)),
+                                "back button size wrong at " + dpi + " DPI (pass " + pass + "): " + back.Size);
+                            Check(row.Left >= 0 && row.Right <= page.Width && back.Left == row.Left,
+                                "settings content is not aligned inside the page at " + dpi + " DPI: " + row + " / " + back.Bounds);
                             page.Width += 20;   // 第二轮：普通改大小触发的重新布局
                         }
                     }
 
                     // 整行点击切换开关：只认左键；按下后移到别的行再松开视为取消。
                     ClickSettingsRow(page, HiddenRow, MouseButtons.Left);
-                    Check(page.ShowHidden && hiddenEvents == 1, "left click on a toggle row did not toggle once");
+                    Check(page.ShowHidden && hiddenEvents == 1 && (bool)SettingsRowField(page, HiddenRow, "Checked"),
+                        "left click on a toggle row did not toggle once");
                     ClickSettingsRow(page, HiddenRow, MouseButtons.Right);
                     Check(page.ShowHidden && hiddenEvents == 1, "right click toggled the row");
-                    Rectangle hidden = (Rectangle)SettingsRowField(page, HiddenRow, "Bounds");
-                    Rectangle scan = (Rectangle)SettingsRowField(page, ScanRow, "Bounds");
-                    typeof(Control).GetMethod("OnMouseDown", Private).Invoke(page, new object[] {
-                        new MouseEventArgs(MouseButtons.Left, 1, hidden.Left + 30, hidden.Top + hidden.Height / 2, 0) });
-                    typeof(Control).GetMethod("OnMouseUp", Private).Invoke(page, new object[] {
-                        new MouseEventArgs(MouseButtons.Left, 1, scan.Left + 30, scan.Top + scan.Height / 2, 0) });
+                    SettingsPress(page, MouseButtons.Left, SettingsRowPoint(page, HiddenRow), SettingsRowPoint(page, ScanRow));
                     Check(page.ShowHidden && page.AutoScan && hiddenEvents == 1 && scanEvents == 0, "releasing on another row still activated a row");
 
-                    // 悬停高亮画在行内并透到卡片左缘；置灰行不高亮。
-                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] {
-                        new MouseEventArgs(MouseButtons.None, 0, hidden.Left + 30, hidden.Top + hidden.Height / 2, 0) });
-                    using (Bitmap shot = new Bitmap(page.Width, page.Height))
-                    {
-                        page.DrawToBitmap(shot, new Rectangle(Point.Empty, shot.Size));
-                        Check(shot.GetPixel(hidden.Left + 6, hidden.Top + hidden.Height / 2).ToArgb() == Theme.CardHover.ToArgb(),
-                            "hovered row is not highlighted");
-                        Check(shot.GetPixel(scan.Left + 6, scan.Top + scan.Height / 2).ToArgb() == Theme.Card.ToArgb(),
-                            "a row that is not hovered is highlighted");
-                    }
+                    // 悬停高亮画到卡片左缘；没有悬停的行保持卡片底色。
+                    Rectangle hidden = (Rectangle)SettingsRowField(page, HiddenRow, "Bounds");
+                    Rectangle scan = (Rectangle)SettingsRowField(page, ScanRow, "Bounds");
+                    Point hover = SettingsClient(page, SettingsRowPoint(page, HiddenRow));
+                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
+                    Check(SettingsPixel(page, new Point(hidden.Left + 6, hidden.Top + hidden.Height / 2)) == Theme.CardHover.ToArgb(), "hovered row is not highlighted");
+                    Check(SettingsPixel(page, new Point(scan.Left + 6, scan.Top + scan.Height / 2)) == Theme.Card.ToArgb(), "a row that is not hovered is highlighted");
 
                     // 「自动收纳」依赖自动扫描：扫描关闭时置灰、点击无效、保留原值；重新开启后恢复。
-                    Check(organizeToggle.Enabled && (bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row disabled while auto scan is on");
+                    Check((bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row disabled while auto scan is on");
                     ClickSettingsRow(page, ScanRow, MouseButtons.Left);
                     Check(!page.AutoScan && scanEvents == 1, "auto scan row did not switch off");
-                    Check(!organizeToggle.Enabled && !(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row stayed enabled without auto scan");
-                    string organizeHint = (string)SettingsRowField(page, OrganizeRow, "Subtitle");
-                    Check(organizeHint.Contains("自动扫描"), "disabled organize row does not explain the dependency: " + organizeHint);
+                    Check(!(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row stayed enabled without auto scan");
+                    Check(((string)SettingsRowField(page, OrganizeRow, "Subtitle")).Contains("自动扫描"), "disabled organize row does not explain the dependency");
                     ClickSettingsRow(page, OrganizeRow, MouseButtons.Left);
                     Check(!page.AutoOrganizeDesktop && organizeEvents == 0, "disabled organize row still toggled");
                     Rectangle organize = (Rectangle)SettingsRowField(page, OrganizeRow, "Bounds");
-                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] {
-                        new MouseEventArgs(MouseButtons.None, 0, organize.Left + 30, organize.Top + organize.Height / 2, 0) });
-                    using (Bitmap shot = new Bitmap(page.Width, page.Height))
-                    {
-                        page.DrawToBitmap(shot, new Rectangle(Point.Empty, shot.Size));
-                        Check(shot.GetPixel(organize.Left + 6, organize.Top + organize.Height / 2).ToArgb() == Theme.Card.ToArgb(),
-                            "disabled row is highlighted on hover");
-                    }
+                    hover = SettingsClient(page, SettingsRowPoint(page, OrganizeRow));
+                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
+                    Check(SettingsPixel(page, new Point(organize.Left + 6, organize.Top + organize.Height / 2)) == Theme.Card.ToArgb(), "disabled row is highlighted on hover");
                     ClickSettingsRow(page, ScanRow, MouseButtons.Left);
                     ClickSettingsRow(page, OrganizeRow, MouseButtons.Left);
                     Check(page.AutoScan && page.AutoOrganizeDesktop && scanEvents == 2 && organizeEvents == 1, "organize row did not recover after enabling auto scan");
-                    page.Bind(true, false, true, true, "D:\\Store");
-                    Check(page.AutoOrganizeDesktop && !organizeToggle.Enabled, "binding with auto scan off lost the organize value or left it enabled");
-                    Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "rebinding raised change events");
 
-                    // 操作行：存储位置整行可点；重新扫描进行中不重复触发，结束后给出结果并可再次触发。
-                    ClickSettingsRow(page, StorageRow, MouseButtons.Left);
-                    Check(storageEvents == 1, "storage row click did not request the dialog");
+                    // 立即执行的行：进行中不重复触发，结束后给出结果并可再次触发。
                     ClickSettingsRow(page, RescanRow, MouseButtons.Left);
                     Check(rescanEvents == 1, "rescan row click did not request a scan");
                     page.SetRescanState(Controls.SettingsPage.RescanState.Running);
-                    Check((string)SettingsRowField(page, RescanRow, "Trailing") == "正在扫描…", "running rescan row does not say so");
+                    Check((string)SettingsRowField(page, RescanRow, "ButtonText") == "扫描中…", "running rescan row does not say so");
                     ClickSettingsRow(page, RescanRow, MouseButtons.Left);
                     Check(rescanEvents == 1, "rescan row fired again while running");
                     page.SetRescanState(Controls.SettingsPage.RescanState.Failed);
-                    Check(((string)SettingsRowField(page, RescanRow, "Subtitle")).Contains("失败"), "failed rescan is not reported");
+                    Check(((string)SettingsRowField(page, RescanRow, "Subtitle")).Contains("失败") && (bool)SettingsRowField(page, RescanRow, "Warning"),
+                        "failed rescan is not reported");
                     page.SetRescanState(Controls.SettingsPage.RescanState.Done);
                     Check(((string)SettingsRowField(page, RescanRow, "Subtitle")).Contains("完成"), "finished rescan is not reported");
                     ClickSettingsRow(page, RescanRow, MouseButtons.Left);
                     Check(rescanEvents == 2, "rescan row cannot be used again after finishing");
+                    page.SetSelfTestRunning(true);
+                    ClickSettingsRow(page, TestRow, MouseButtons.Left);
+                    Check(testEvents == 0, "self test row fired while a self test is running");
+                    page.SetSelfTestRunning(false);
+                    ClickSettingsRow(page, TestRow, MouseButtons.Left);
+                    Check(testEvents == 1, "self test row did not request a run");
+
+                    // 存储位置：整行不可点，只有开关和排序按钮响应；首尾位置的越界方向不可用。
+                    Check(((string)SettingsRowField(page, StoreA, "Subtitle")).Contains("优先"), "first enabled location is not marked as preferred");
+                    Check(((string)SettingsRowField(page, StoreB, "Subtitle")).Contains("已停用") && !(bool)SettingsRowField(page, StoreB, "Checked"),
+                        "disabled location is not shown as disabled");
+                    Check(!((string)SettingsRowField(page, StoreC, "Subtitle")).Contains("优先"), "a later location is marked as preferred");
+                    ClickSettingsRow(page, StoreA, MouseButtons.Left);
+                    Check(storeEvents.Count == 0, "clicking a location's text changed it");
+                    // 路径过长时界面会省略中间：悬停存储位置行给出完整路径，移到别的行后清除。
+                    ToolTip tip = (ToolTip)typeof(Controls.SettingsPage).GetField("pathTip", Private).GetValue(page);
+                    hover = SettingsClient(page, SettingsRowPoint(page, StoreB));
+                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
+                    Check(tip.GetToolTip(page) == StoreB, "hovering a location does not offer its full path: " + tip.GetToolTip(page));
+                    hover = SettingsClient(page, SettingsRowPoint(page, HiddenRow));
+                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
+                    Check(string.IsNullOrEmpty(tip.GetToolTip(page)), "path tooltip stayed on a row that is not a location");
+                    Check(ClickSettingsZone(page, StoreB, "StoreToggle") && storeEvents.Count == 1 && storeEvents[0] == "enable 1 True",
+                        "location switch did not request enabling: " + string.Join(",", storeEvents.ToArray()));
+                    Check(ClickSettingsZone(page, StoreA, "StoreToggle") && storeEvents.Count == 2 && storeEvents[1] == "enable 0 False",
+                        "location switch did not request disabling");
+                    Check(ClickSettingsZone(page, StoreA, "MoveDown") && storeEvents.Count == 3 && storeEvents[2] == "move 0 1", "move down was not requested");
+                    Check(ClickSettingsZone(page, StoreC, "MoveUp") && storeEvents.Count == 4 && storeEvents[3] == "move 2 -1", "move up was not requested");
+                    Check(ClickSettingsZone(page, StoreA, "MoveUp") && ClickSettingsZone(page, StoreC, "MoveDown") && storeEvents.Count == 4,
+                        "moving past the ends of the list was requested");
+                    ClickSettingsRow(page, AddRow, MouseButtons.Left);
+                    Check(addEvents == 1, "add location row did not request a folder");
+                    Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "location actions raised unrelated events");
+
+                    // 只有一个位置：没有排序按钮。全部停用：分组说明改为警示。没有显式位置：显示默认位置，仍可添加。
+                    page.Bind(true, false, true, true, new List<ResourceStoreLocation> { new ResourceStoreLocation(StoreA, false) }, DefaultStore);
+                    Check(page.AutoOrganizeDesktop && !(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "binding with auto scan off lost the organize value or left it enabled");
+                    Check(!ClickSettingsZone(page, StoreA, "MoveUp") && !ClickSettingsZone(page, StoreA, "MoveDown"), "a single location offers reordering");
+                    object storeSection = null;
+                    foreach (object section in (IEnumerable)typeof(Controls.SettingsPage).GetField("sections", Private).GetValue(page))
+                        if ((string)section.GetType().GetField("Title").GetValue(section) == "资源存储位置") storeSection = section;
+                    Check(storeSection != null && (bool)storeSection.GetType().GetField("NoteWarning").GetValue(storeSection),
+                        "all-disabled locations are not flagged");
+                    page.Bind(true, false, true, true, null, DefaultStore);
+                    Check(SettingsRowIndex(page, DefaultStore) >= 0 && SettingsRowIndex(page, AddRow) >= 0, "empty location list does not show the default location");
+                    ClickSettingsRow(page, DefaultStore, MouseButtons.Left);
+                    Check(storeEvents.Count == 4 && addEvents == 1, "the default location row is clickable");
+                    Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "rebinding raised change events");
+
+                    // 滚动：页面变矮后内容可滚动；高分辨率滚轮的小增量累计后与一次整格等效；滚出视口的行不响应点击。
+                    page.Bind(false, true, false, true, three, DefaultStore);
+                    Check((int)scroll.GetValue(page) == 0, "tall page scrolled without need");
+                    page.Height = DpiHelper.Scale(420, 96);
+                    page.ScrollByWheel(-120);
+                    int oneNotch = (int)scroll.GetValue(page);
+                    Check(oneNotch > 0, "short page did not scroll with the wheel");
+                    page.ScrollToTop();
+                    for (int i = 0; i < 4; i++) page.ScrollByWheel(-30);
+                    Check((int)scroll.GetValue(page) == oneNotch, "high-resolution wheel deltas did not add up: " + scroll.GetValue(page) + " / " + oneNotch);
+                    page.ScrollByWheel(-120 * 200);
+                    int bottom = (int)scroll.GetValue(page);
+                    Rectangle last = (Rectangle)SettingsRowField(page, TestRow, "Bounds");
+                    Check(SettingsClient(page, new Point(0, last.Bottom)).Y <= page.Height, "scrolling to the end does not reveal the last row");
+                    ClickSettingsRow(page, TestRow, MouseButtons.Left);
+                    Check(testEvents == 2, "a row scrolled into view is not clickable");
+                    Check(SettingsClient(page, SettingsRowPoint(page, HiddenRow)).Y < back.Bottom, "fixture did not scroll the first row under the header");
+                    ClickSettingsRow(page, HiddenRow, MouseButtons.Left);
+                    Check(!page.ShowHidden && hiddenEvents == 1, "a row scrolled under the fixed header still reacted");
+                    Check(back.Top == DpiHelper.Scale(22, 96), "the back button scrolled with the content");
+
+                    // 滚动条：拖动滑块滚动；捕获丢失或页面隐藏时结束拖动（否则下次移动鼠标页面会跟着滚）；点轨道空白处跳转。
+                    Action<string, MouseButtons, Point> fire = delegate(string handler, MouseButtons button, Point at)
+                    {
+                        typeof(Control).GetMethod(handler, Private).Invoke(page, new object[] { new MouseEventArgs(button, 1, at.X, at.Y, 0) });
+                    };
+                    MethodInfo thumbRect = typeof(Controls.SettingsPage).GetMethod("ScrollThumbRect", Private);
+                    FieldInfo dragging = typeof(Controls.SettingsPage).GetField("scrollDragging", Private);
+                    page.ScrollToTop();
+                    Rectangle thumb = (Rectangle)thumbRect.Invoke(page, null);
+                    Check(thumb.Height > 0, "scrollable page has no scroll thumb");
+                    Point grab = new Point(thumb.Left + thumb.Width / 2, thumb.Top + 5);
+                    fire("OnMouseDown", MouseButtons.Left, grab);
+                    Check((bool)dragging.GetValue(page), "pressing the scroll thumb did not start a drag");
+                    fire("OnMouseMove", MouseButtons.Left, new Point(grab.X, grab.Y + 40));
+                    int draggedTo = (int)scroll.GetValue(page);
+                    Check(draggedTo > 0 && draggedTo < bottom, "dragging the scroll thumb did not scroll: " + draggedTo);
+                    typeof(Control).GetMethod("OnMouseCaptureChanged", Private).Invoke(page, new object[] { EventArgs.Empty });
+                    Check(!(bool)dragging.GetValue(page), "losing mouse capture did not end the scroll drag");
+                    fire("OnMouseMove", MouseButtons.None, new Point(grab.X, grab.Y + 90));
+                    Check((int)scroll.GetValue(page) == draggedTo, "the page kept scrolling after the drag was cancelled");
+                    fire("OnMouseDown", MouseButtons.Left, (Point)SettingsClient(page, SettingsRowPoint(page, AddRow)));
+                    typeof(Control).GetMethod("OnMouseCaptureChanged", Private).Invoke(page, new object[] { EventArgs.Empty });
+                    fire("OnMouseUp", MouseButtons.Left, (Point)SettingsClient(page, SettingsRowPoint(page, AddRow)));
+                    Check(addEvents == 1, "a press that lost mouse capture still activated the row");
+                    thumb = (Rectangle)thumbRect.Invoke(page, null);
+                    fire("OnMouseDown", MouseButtons.Left, new Point(thumb.Left + thumb.Width / 2, thumb.Top + 5));
+                    page.Visible = false;
+                    Check(!(bool)dragging.GetValue(page), "hiding the page did not end the scroll drag");
+                    page.Visible = true;
+                    Rectangle track = (Rectangle)typeof(Controls.SettingsPage).GetMethod("ScrollTrackRect", Private).Invoke(page, null);
+                    page.ScrollToTop();
+                    fire("OnMouseDown", MouseButtons.Left, new Point(track.Left + track.Width / 2, track.Bottom - 2));
+                    Check((int)scroll.GetValue(page) == bottom, "clicking the end of the scroll track did not jump there: " + scroll.GetValue(page) + " / " + bottom);
+                    fire("OnMouseUp", MouseButtons.Left, new Point(track.Left + track.Width / 2, track.Bottom - 2));
+                    Check(!(bool)dragging.GetValue(page), "releasing the mouse did not end the scroll drag");
+                    page.Height = 1400;
+                    Check(bottom > 0 && (int)scroll.GetValue(page) == 0, "scroll offset was not clamped after the page grew");
                 }
                 finally
                 {
@@ -2816,6 +2959,10 @@ namespace AppManager
         {
             AppConfig config = RenameConfig("settings-rescan");
             config.AutoScan = false;
+            string first = Path.Combine(root, "settings-rescan", "res"), second = Path.Combine(root, "settings-rescan", "res2");
+            config.ResourceStoreLocations.Add(new ResourceStoreLocation(first, true));
+            config.ResourceStoreLocations.Add(new ResourceStoreLocation(second, true));
+            Check(config.Save(), "settings fixture save failed");
             using (MainForm form = new MainForm(config))
             {
                 FieldInfo running = typeof(MainForm).GetField("scanRunning", Private);
@@ -2825,7 +2972,7 @@ namespace AppManager
                 form.ShowInTaskbar = false;
                 form.StartPosition = FormStartPosition.Manual;
                 form.Location = new Point(-3000, -3000);
-                form.ClientSize = new Size(1200, 720);
+                form.ClientSize = new Size(1200, 1100);   // 足够高：设置页各行无需滚动即可点击
                 form.Show();
                 Application.DoEvents();
                 Controls.SettingsPage page = (Controls.SettingsPage)typeof(MainForm).GetField("settingsPage", Private).GetValue(form);
@@ -2859,6 +3006,99 @@ namespace AppManager
                 Invoke(form, "OpenSettings");
                 Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Idle, "rescan row stayed stuck after the scan flag cleared");
                 running.SetValue(form, true);   // 关闭窗体前不再启动补扫
+
+                // 存储位置就地修改：停用、排序立即写入配置并落库，页面按生效后的配置刷新。
+                Check(ClickSettingsZone(page, first, "StoreToggle"), "first location has no switch");
+                Check(!config.ResourceStoreLocations[0].Enabled && config.ResourceStoreLocations[1].Enabled
+                    && SameText(config.ResourceStorePath, second), "disabling a location did not move the legacy path to the next enabled one");
+                Check(!(bool)SettingsRowField(page, first, "Checked") && ((string)SettingsRowField(page, second, "Subtitle")).Contains("优先"),
+                    "settings page did not refresh after disabling a location");
+                Check(ClickSettingsZone(page, first, "MoveDown"), "first location has no move-down button");
+                Check(SameText(config.ResourceStoreLocations[0].Path, second) && SameText(config.ResourceStoreLocations[1].Path, first)
+                    && !config.ResourceStoreLocations[1].Enabled, "moving a location did not swap the order or lost its enabled flag");
+                AppConfig loaded = AppConfig.Load();
+                Check(loaded.ResourceStoreLocations.Count == 2 && SameText(loaded.ResourceStoreLocations[0].Path, second)
+                    && !loaded.ResourceStoreLocations[1].Enabled, "location edits were not persisted");
+
+                // 保存失败：配置还原为数据库里的值，页面仍显示原状态，之后可以重试。
+                // 提示由 AppConfig.SaveFailed 统一给出一次；这里摘掉它（否则模态提示会阻塞用例），同时确认存储位置自己不再另弹一个。
+                FieldInfo saveFailed = typeof(AppConfig).GetField("SaveFailed", BindingFlags.Instance | BindingFlags.NonPublic);
+                Check(saveFailed != null, "save failure event was not found");
+                saveFailed.SetValue(config, null);
+                bool unexpectedDialog;
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                {
+                    db.Execute("BEGIN IMMEDIATE");
+                    try
+                    {
+                        bool extraPrompt = AnswerNativeMessageBox("资源存储位置", 2,
+                            delegate { ClickSettingsZone(page, second, "StoreToggle"); }, out unexpectedDialog);
+                        Check(!extraPrompt && !unexpectedDialog, "failed location save raised its own prompt on top of the shared one");
+                    }
+                    finally { db.Execute("ROLLBACK"); }
+                }
+                Check(config.ResourceStoreLocations.Count == 2 && config.ResourceStoreLocations[0].Enabled
+                    && SameText(config.ResourceStorePath, second), "failed location save left the edit in memory");
+                Check((bool)SettingsRowField(page, second, "Checked"), "settings page shows an edit that was not saved");
+                Check(ClickSettingsZone(page, second, "StoreToggle") && !config.ResourceStoreLocations[0].Enabled,
+                    "location edit could not be retried after a failed save");
+                Check(AppConfig.Load().ResourceStoreLocations.All(l => !l.Enabled), "retried location edit was not persisted");
+
+                // 添加位置：已在列表里的重新启用；新位置加到末尾；与已有位置互相包含时提示并保持原样。
+                string third = Path.Combine(root, "settings-rescan", "res3");
+                Invoke(form, "AddStoreLocation", first);
+                Check(config.ResourceStoreLocations.Count == 2 && config.ResourceStoreLocations[1].Enabled
+                    && SameText(config.ResourceStorePath, first), "re-adding a disabled location did not enable it in place");
+                Invoke(form, "AddStoreLocation", third);
+                Check(config.ResourceStoreLocations.Count == 3 && SameText(config.ResourceStoreLocations[2].Path, third)
+                    && config.ResourceStoreLocations[2].Enabled && SettingsRowIndex(page, third) >= 0, "a new location was not appended and shown");
+                bool rejected = AnswerNativeMessageBox("资源存储位置", 2,
+                    delegate { Invoke(form, "AddStoreLocation", Path.Combine(third, "inner")); });
+                Check(rejected && config.ResourceStoreLocations.Count == 3, "a nested location was accepted or rejected silently");
+                Check(AppConfig.Load().ResourceStoreLocations.Count == 3, "added location was not persisted");
+
+                // 一直在用默认位置时添加第一个位置：默认位置作为第一项保留，已有资源仍被识别为库内文件。
+                config.ResourceStoreLocations.Clear();
+                config.ResourceStorePath = string.Empty;
+                Check(config.Save(), "default-location fixture save failed");
+                string fallback = ResourceStore.Normalize((string)Invoke(form, "DefaultResourceStoreRoot"));
+                Invoke(form, "BindSettingsPage");
+                Check(SettingsRowIndex(page, fallback) >= 0 && !ClickSettingsZone(page, fallback, "StoreToggle"),
+                    "default location is not shown as a plain row");
+                Invoke(form, "AddStoreLocation", third);
+                Check(config.ResourceStoreLocations.Count == 2 && SameText(config.ResourceStoreLocations[0].Path, fallback)
+                    && config.ResourceStoreLocations[0].Enabled && SameText(config.ResourceStoreLocations[1].Path, third),
+                    "adding the first location dropped the default location");
+                Check(ResourceStore.KnownRoots(config, fallback).Count == 2 && ClickSettingsZone(page, fallback, "StoreToggle")
+                    && !config.ResourceStoreLocations[0].Enabled && ResourceStore.KnownRoots(config, fallback).Count == 2,
+                    "the kept default location cannot be disabled while staying known");
+
+                // 滚轮路由：光标在设置页上时滚动设置页并吞掉消息；设置页关闭后不再拦截。
+                form.ClientSize = new Size(1200, 600);
+                Application.DoEvents();
+                FieldInfo scroll = typeof(Controls.SettingsPage).GetField("scrollOffset", Private);
+                Point screen = page.PointToScreen(new Point(page.Width / 2, page.Height / 2));
+                IntPtr position = new IntPtr(((screen.Y & 0xFFFF) << 16) | (screen.X & 0xFFFF));
+                Message wheel = Message.Create(form.Handle, 0x020A, new IntPtr(-120 << 16), position);
+                Check((int)scroll.GetValue(page) == 0, "settings page was scrolled before any wheel input");
+                Check(form.PreFilterMessage(ref wheel) && (int)scroll.GetValue(page) > 0, "wheel over the settings page did not scroll it");
+                Invoke(form, "CloseSettings");
+                wheel = Message.Create(form.Handle, 0x020A, new IntPtr(-120 << 16), position);
+                Check(!form.PreFilterMessage(ref wheel), "closed settings page still swallowed the wheel");
+                Invoke(form, "OpenSettings");
+                Check((int)scroll.GetValue(page) == 0, "reopening settings did not return to the top");
+
+                // 滚动条滑块必须避开主窗体的边缘缩放区，否则按住滑块会变成拖动窗口边框。
+                MethodInfo thumbRect = typeof(Controls.SettingsPage).GetMethod("ScrollThumbRect", Private);
+                foreach (int wheelDelta in new int[] { 0, -120 * 200 })
+                {
+                    page.ScrollByWheel(wheelDelta);
+                    Rectangle thumb = (Rectangle)thumbRect.Invoke(page, null);
+                    Check(thumb.Height > 0, "fixture settings page is not scrollable");
+                    foreach (Point corner in new Point[] { new Point(thumb.Right - 1, thumb.Top), new Point(thumb.Right - 1, thumb.Bottom - 1) })
+                        Check((int)Invoke(form, "ResizeHitTest", new Point(page.Left + corner.X, page.Top + corner.Y)) == 0,
+                            "scroll thumb overlaps the window resize zone at " + corner);
+                }
             }
         }
 

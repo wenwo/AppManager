@@ -613,6 +613,13 @@ namespace AppManager
             long lp = m.LParam.ToInt64();
             Point screen = new Point((short)(lp & 0xFFFF), (short)((lp >> 16) & 0xFFFF));
             int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+            // 设置页打开时主内容区已隐藏：光标在设置页上则滚动设置页
+            if (settingsOpen && settingsPage != null
+                && settingsPage.RectangleToScreen(settingsPage.ClientRectangle).Contains(screen))
+            {
+                settingsPage.ScrollByWheel(delta);
+                return true;
+            }
             bool sidebarVisible = sidebar != null && sidebar.Visible;
             bool colVisible = collectionSidebar != null && collectionSidebar.Visible;
             if (!sidebarVisible && !colVisible) return false;
@@ -1094,12 +1101,23 @@ namespace AppManager
                 config.Save();
             };
             settingsPage.CloseToTrayChanged += delegate { SetCloseToTray(settingsPage.CloseToTray); };
-            settingsPage.StorageLocationRequested += delegate
+            settingsPage.StorageAddRequested += delegate { AddStoreLocationFromSettings(); };
+            settingsPage.StorageEnabledRequested += delegate(int index, bool enabled)
             {
-                ShowStorageLocationDialog();
-                // 对话框可能改了存储目录，回到页面后刷新展示的路径
-                settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                    config.CloseToTray, ResourceStoreSummary());
+                List<ResourceStoreLocation> edited = ResourceStore.EditableLocations(config);
+                if (index < 0 || index >= edited.Count) return;
+                edited[index].Enabled = enabled;
+                CommitStoreLocations(edited);
+            };
+            settingsPage.StorageMoveRequested += delegate(int index, int delta)
+            {
+                List<ResourceStoreLocation> edited = ResourceStore.EditableLocations(config);
+                int other = index + delta;
+                if (index < 0 || index >= edited.Count || other < 0 || other >= edited.Count) return;
+                ResourceStoreLocation moved = edited[index];
+                edited[index] = edited[other];
+                edited[other] = moved;
+                CommitStoreLocations(edited);
             };
             settingsPage.RescanRequested += delegate
             {
@@ -6192,11 +6210,6 @@ namespace AppManager
             return ResourceStore.PrimaryRoot(config, DefaultResourceStoreRoot());
         }
 
-        private string ResourceStoreSummary()
-        {
-            return ResourceStore.Summary(config, DefaultResourceStoreRoot());
-        }
-
         private List<string> ActiveResourceStoreRoots()
         {
             return ResourceStore.ActiveRoots(config, DefaultResourceStoreRoot());
@@ -6998,8 +7011,7 @@ namespace AppManager
             organizer = new DesktopOrganizer(config);
             grid.GridMode = GetCategoryGridMode(currentCategory);
             SyncHeaderStrip();
-            settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                config.CloseToTray, ResourceStoreSummary());
+            BindSettingsPage();
             StartAutoScan();
             SeparateCrossModeCategories();   // 布局备份等旧快照可能带回同名分类
             MigrateSoftwareFiles();          // 旧快照也可能带回软件页面里的文件条目
@@ -7197,6 +7209,7 @@ namespace AppManager
         {
             if (selfTestRunning) return;
             selfTestRunning = true;
+            settingsPage.SetSelfTestRunning(true);
             ShowStatusBar("正在运行自测…", 0, 0);
             string log = Path.Combine(Paths.DataDir, "selftest.log");
             DateTime startedAt = DateTime.UtcNow;
@@ -7243,6 +7256,7 @@ namespace AppManager
                 RunOnUi((Action)delegate
                 {
                     selfTestRunning = false;
+                    settingsPage.SetSelfTestRunning(false);
                     HideStatusBar();
                     if (pass < 0)
                         MessageBox.Show("自测运行异常或超时，详见 error.log。", "自测",
@@ -7272,8 +7286,8 @@ namespace AppManager
             if (!scanRunning) settingsRescan = false;
             settingsPage.SetRescanState(settingsRescan
                 ? SettingsPage.RescanState.Running : SettingsPage.RescanState.Idle);
-            settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                config.CloseToTray, ResourceStoreSummary());
+            BindSettingsPage();
+            settingsPage.ScrollToTop();
             SetMainContentVisible(false);
             settingsBtn.Visible = false;
             settingsPage.Visible = true;
@@ -7318,188 +7332,71 @@ namespace AppManager
             SyncHeaderStrip();
         }
 
-        /// <summary>存储位置设置：设定资源导入的存储根目录（iOS 风格对话框）。</summary>
-        private void ShowStorageLocationDialog()
+        /// <summary>把当前配置回填到设置页（开关 + 有序存储位置列表）。</summary>
+        private void BindSettingsPage()
         {
-            List<ResourceStoreLocation> edited = ResourceStore.EditableLocations(config);
-            using (Form f = new BufferedDialogForm())
+            settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
+                config.CloseToTray, ResourceStore.EditableLocations(config), ResourceStore.Normalize(DefaultResourceStoreRoot()));
+        }
+
+        /// <summary>设置页「添加存储位置」：弹出选择文件夹，确认后加入列表。</summary>
+        private void AddStoreLocationFromSettings()
+        {
+            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
             {
-                f.FormBorderStyle = FormBorderStyle.None;
-                f.StartPosition = FormStartPosition.CenterParent;
-                f.ClientSize = new Size(640, 476);
-                f.BackColor = Theme.Background;
-                f.ShowInTaskbar = false;
-                ApplyRoundedCorners(f);
-
-                Label title = new Label();
-                title.Text = "存储位置设置";
-                title.Font = Theme.DialogTitleFont;
-                title.ForeColor = Theme.TextPrimary;
-                title.BackColor = Color.Transparent;
-                title.Location = new Point(24, 20);
-                title.AutoSize = true;
-                f.Controls.Add(title);
-
-                Label desc = new Label();
-                desc.Text = "资源导入按分类存放在「资源存储位置」。";
-                desc.Font = Theme.CaptionFont;
-                desc.ForeColor = Theme.TextSecondary;
-                desc.BackColor = Color.Transparent;
-                desc.Location = new Point(24, 48);
-                desc.AutoSize = true;
-                f.Controls.Add(desc);
-
-                Label hint = new Label();
-                hint.Text = "按列表顺序使用；全部停用时不导入。同盘移动不复制，文件夹不会被拆开。默认：" + DefaultResourceStoreRoot();
-                hint.Font = Theme.CaptionFont;
-                hint.ForeColor = Theme.TextSecondary;
-                hint.BackColor = Color.Transparent;
-                hint.Location = new Point(24, 74);
-                hint.AutoSize = true;
-                f.Controls.Add(hint);
-
-                ListBox list = new ListBox();
-                list.Font = Theme.BodyFont;
-                list.Location = new Point(24, 102);
-                list.Size = new Size(592, 216);
-                list.HorizontalScrollbar = true;
-                list.SelectionMode = SelectionMode.One;
-                list.IntegralHeight = false;
-                f.Controls.Add(list);
-
-                Action updateButtons = null;
-                RoundButton add = new RoundButton();
-                add.Text = "添加位置…";
-                add.Accent = false;
-                add.Size = new Size(112, 34);
-                add.Location = new Point(24, 330);
-                f.Controls.Add(add);
-
-                RoundButton up = new RoundButton();
-                up.Text = "上移";
-                up.Accent = false;
-                up.Size = new Size(72, 34);
-                up.Location = new Point(144, 330);
-                f.Controls.Add(up);
-
-                RoundButton down = new RoundButton();
-                down.Text = "下移";
-                down.Accent = false;
-                down.Size = new Size(72, 34);
-                down.Location = new Point(224, 330);
-                f.Controls.Add(down);
-
-                RoundButton toggle = new RoundButton();
-                toggle.Text = "停用";
-                toggle.Accent = false;
-                toggle.Size = new Size(96, 34);
-                toggle.Location = new Point(304, 330);
-                f.Controls.Add(toggle);
-
-                Action refresh = delegate
-                {
-                    int selected = list.SelectedIndex;
-                    list.BeginUpdate();
-                    list.Items.Clear();
-                    foreach (ResourceStoreLocation location in edited)
-                        list.Items.Add(location.Enabled ? location.Path : "已停用 · " + location.Path);
-                    list.EndUpdate();
-                    if (edited.Count > 0) list.SelectedIndex = Math.Max(0, Math.Min(selected, edited.Count - 1));
-                    if (updateButtons != null) updateButtons();
-                };
-
-                updateButtons = delegate
-                {
-                    int index = list.SelectedIndex;
-                    bool has = index >= 0 && index < edited.Count;
-                    up.Enabled = has && index > 0;
-                    down.Enabled = has && index < edited.Count - 1;
-                    toggle.Enabled = has;
-                    if (has) toggle.Text = edited[index].Enabled ? "停用" : "启用";
-                };
-                list.SelectedIndexChanged += delegate { updateButtons(); };
-
-                add.Click += delegate
-                {
-                    using (FolderBrowserDialog dlg = new FolderBrowserDialog())
-                    {
-                        dlg.Description = "选择资源存储位置";
-                        dlg.ShowNewFolderButton = true;
-                        if (dlg.ShowDialog(f) != DialogResult.OK) return;
-                        string path = NormalizeStoreInput(dlg.SelectedPath);
-                        for (int i = 0; i < edited.Count; i++)
-                        {
-                            if (!string.Equals(edited[i].Path, path, StringComparison.OrdinalIgnoreCase)) continue;
-                            edited[i].Enabled = true;
-                            refresh();
-                            list.SelectedIndex = i;
-                            return;
-                        }
-                        edited.Add(new ResourceStoreLocation(path, true));
-                        refresh();
-                        list.SelectedIndex = edited.Count - 1;
-                    }
-                };
-
-                Action<int> move = delegate(int delta)
-                {
-                    int index = list.SelectedIndex;
-                    int other = index + delta;
-                    if (index < 0 || other < 0 || other >= edited.Count) return;
-                    ResourceStoreLocation value = edited[index];
-                    edited[index] = edited[other];
-                    edited[other] = value;
-                    refresh();
-                    list.SelectedIndex = other;
-                };
-                up.Click += delegate { move(-1); };
-                down.Click += delegate { move(1); };
-
-                toggle.Click += delegate
-                {
-                    int index = list.SelectedIndex;
-                    if (index < 0 || index >= edited.Count) return;
-                    edited[index].Enabled = !edited[index].Enabled;
-                    refresh();
-                    list.SelectedIndex = index;
-                };
-
-                RoundButton ok = new RoundButton();
-                ok.Text = "保存";
-                ok.Accent = true;
-                ok.Size = new Size(96, 34);
-                ok.Location = new Point(f.ClientSize.Width - 216, f.ClientSize.Height - 54);
-                ok.Click += delegate
-                {
-                    string error;
-                    bool changed = ApplyStoreEdits(config, edited, out error);
-                    if (error != null)
-                    {
-                        MessageBox.Show(this, error, "存储位置设置", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        return;
-                    }
-                    if (!changed) { f.Close(); return; }   // 没有改动：不写配置、不产生事务
-                    if (!config.Save())
-                    {
-                        MessageBox.Show(this, "存储位置未能保存，已保留原设置。\n" + config.DatabaseError,
-                            "存储位置设置", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-                    f.Close();
-                };
-                f.Controls.Add(ok);
-
-                RoundButton cancel = new RoundButton();
-                cancel.Text = "取消";
-                cancel.Accent = false;
-                cancel.Size = new Size(96, 34);
-                cancel.Location = new Point(f.ClientSize.Width - 112, f.ClientSize.Height - 54);
-                cancel.Click += delegate { f.Close(); };
-                f.Controls.Add(cancel);
-
-                refresh();
-                ConfirmDialog.ShowModal(f);   // 模态 + 遮罩层
+                dlg.Description = "选择资源存储位置";
+                dlg.ShowNewFolderButton = true;
+                if (dlg.ShowDialog(this) == DialogResult.OK) AddStoreLocation(dlg.SelectedPath);
             }
+        }
+
+        /// <summary>
+        /// 把一个文件夹加入存储位置列表并保存：已在列表里则重新启用，否则加到末尾。
+        /// 此前没有显式位置（一直在用默认位置）时，先把默认位置作为第一项保留下来：
+        /// 否则它会从已知位置里消失，里面已有的资源会被当成库外文件再次扫描收录。
+        /// </summary>
+        private void AddStoreLocation(string selectedPath)
+        {
+            string path = NormalizeStoreInput(selectedPath);
+            if (path.Length == 0) return;
+            List<ResourceStoreLocation> edited = ResourceStore.EditableLocations(config);
+            if (edited.Count == 0)
+                edited.Add(new ResourceStoreLocation(ResourceStore.Normalize(DefaultResourceStoreRoot()), true));
+            bool known = false;
+            foreach (ResourceStoreLocation location in edited)
+            {
+                if (!string.Equals(location.Path, path, StringComparison.OrdinalIgnoreCase)) continue;
+                location.Enabled = true;
+                known = true;
+            }
+            if (!known) edited.Add(new ResourceStoreLocation(path, true));
+            CommitStoreLocations(edited);
+        }
+
+        /// <summary>
+        /// 设置页就地修改存储位置：校验通过后立即保存，最后按实际生效的配置刷新设置页。
+        /// 校验失败不改配置并提示原因。保存失败由 AppConfig.Save 统一处理（配置还原为数据库里的值，
+        /// 并经 BindDatabaseErrors 提示一次），这里不再重复提示。
+        /// </summary>
+        private void CommitStoreLocations(List<ResourceStoreLocation> edited)
+        {
+            List<ResourceStoreLocation> previousLocations = config.ResourceStoreLocations;
+            string previousPath = config.ResourceStorePath;
+            string error;
+            bool changed = ApplyStoreEdits(config, edited, out error);
+            if (error != null)
+                MessageBox.Show(this, error, "资源存储位置", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else if (changed)
+            {
+                List<ResourceStoreLocation> applied = config.ResourceStoreLocations;
+                // 没有数据库会话时保存失败不会自动还原：未落盘的改动仍在内存里，这里手动还原
+                if (!config.Save() && ReferenceEquals(config.ResourceStoreLocations, applied))
+                {
+                    config.ResourceStoreLocations = previousLocations;
+                    config.ResourceStorePath = previousPath;
+                }
+            }
+            BindSettingsPage();
         }
 
         /// <summary>空值表示沿用默认位置；非空必须是完整绝对路径。</summary>

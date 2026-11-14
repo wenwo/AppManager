@@ -49,12 +49,17 @@ namespace AppManager.Controls
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            Graphics g = e.Graphics;
+            PaintSwitch(e.Graphics, ClientRectangle, _checked, Enabled);
+        }
+
+        /// <summary>在 bounds 内画一个开关；自绘页面（如设置页）不建子控件时复用同一外观。</summary>
+        internal static void PaintSwitch(Graphics g, Rectangle bounds, bool on, bool enabled)
+        {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            Rectangle r = new Rectangle(0, 2, Width - 1, Height - 4);
-            Color track = _checked ? Theme.ToggleOn : Theme.SegmentBg;
+            Rectangle r = new Rectangle(bounds.X, bounds.Y + 2, bounds.Width - 1, bounds.Height - 4);
+            Color track = on ? Theme.ToggleOn : Theme.SegmentBg;
             // 禁用态：轨道向卡片底色淡化一半，提示当前不可操作（仍能看出开/关）
-            if (!Enabled)
+            if (!enabled)
                 track = Color.FromArgb((track.R + Theme.Card.R) / 2, (track.G + Theme.Card.G) / 2, (track.B + Theme.Card.B) / 2);
             using (SolidBrush b = new SolidBrush(track)) Draw.FillRoundedRect(g, b, r, r.Height);
             // 轨道内阴影（顶部 1px 深色，模拟凹陷）
@@ -62,7 +67,7 @@ namespace AppManager.Controls
                 g.DrawLine(ip, r.X + 3, r.Y + 1, r.Right - 3, r.Y + 1);
             // 白色拨钮 + 柔和投影（iOS 细腻质感）
             int knob = r.Height - 4;
-            int kx = _checked ? r.Right - knob - 2 : r.X + 2;
+            int kx = on ? r.Right - knob - 2 : r.X + 2;
             int ky = r.Y + 2;
             Rectangle kr = new Rectangle(kx, ky, knob, knob);
             using (GraphicsPath p = Draw.RoundedPath(kr, knob / 2))

@@ -95,18 +95,6 @@ namespace AppManager
             return Normalize(defaultRoot);
         }
 
-        internal static string Summary(AppConfig config, string defaultRoot)
-        {
-            List<string> active = ActiveRoots(config, defaultRoot);
-            if (active.Count == 0)
-            {
-                int count = EditableLocations(config).Count;
-                return count == 0 ? "未配置" : count + " 个位置均已停用";
-            }
-            if (active.Count == 1) return active[0];
-            return active[0] + "（共 " + active.Count + " 个位置）";
-        }
-
         internal static bool IsUnderAny(IEnumerable<string> roots, string path)
         {
             if (string.IsNullOrWhiteSpace(path)) return false;

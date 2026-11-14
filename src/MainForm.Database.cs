@@ -60,9 +60,7 @@ namespace AppManager
             if (currentCollection != null && FindCollectionByKey(currentCollection) == null) currentCollection = null;
             grid.GridMode = GetCategoryGridMode(currentCategory);
             SyncHeaderStrip();
-            if (settingsPage != null)
-                settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
-                    config.CloseToTray, ResourceStoreSummary());
+            if (settingsPage != null) BindSettingsPage();
             StartAutoScan();
             RebuildSidebar();
             StartScan();

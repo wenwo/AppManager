@@ -70,6 +70,79 @@ namespace AppManager
             }
         }
 
+        private static readonly object glyphLock = new object();
+        private static readonly Dictionary<string, GraphicsPath> glyphPaths = new Dictionary<string, GraphicsPath>(StringComparer.Ordinal);
+        private static FontFamily glyphFamily;
+
+        /// <summary>
+        /// 在 box 内居中绘制系统图标字体（Segoe Fluent Icons / MDL2）里的一个字形：墨迹等比缩放到 box 的短边，
+        /// 不受字体行盒留白影响。字形路径按单位尺寸缓存；系统没有图标字体或字形为空时不绘制。
+        /// </summary>
+        public static void DrawGlyph(Graphics g, string glyph, RectangleF box, Color color)
+        {
+            GraphicsPath unit = GlyphPath(glyph);
+            float size = Math.Min(box.Width, box.Height);
+            if (unit == null || size <= 0F) return;
+            GraphicsState state = g.Save();
+            try
+            {
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                g.TranslateTransform(box.X + box.Width / 2F, box.Y + box.Height / 2F);
+                g.ScaleTransform(size, size);
+                using (SolidBrush brush = new SolidBrush(color)) g.FillPath(brush, unit);
+            }
+            finally { g.Restore(state); }
+        }
+
+        /// <summary>取字形的单位路径（墨迹中心在原点、长边为 1）；缓存有界，取不到时返回 null。</summary>
+        private static GraphicsPath GlyphPath(string glyph)
+        {
+            if (string.IsNullOrEmpty(glyph)) return null;
+            lock (glyphLock)
+            {
+                GraphicsPath path;
+                if (glyphPaths.TryGetValue(glyph, out path)) return path;
+                if (glyphFamily == null)
+                {
+                    foreach (string candidate in new string[] { "Segoe Fluent Icons", "Segoe MDL2 Assets" })
+                    {
+                        if (!Theme.InstalledFamilies.Contains(candidate)) continue;
+                        glyphFamily = new FontFamily(candidate);
+                        break;
+                    }
+                }
+                if (glyphFamily != null)
+                {
+                    path = new GraphicsPath();
+                    using (StringFormat format = new StringFormat(StringFormat.GenericTypographic))
+                        path.AddString(glyph, glyphFamily, (int)FontStyle.Regular, 100F, PointF.Empty, format);
+                    RectangleF ink = path.GetBounds();
+                    float extent = Math.Max(ink.Width, ink.Height);
+                    if (extent > 0F)
+                    {
+                        using (Matrix normalize = new Matrix())
+                        {
+                            normalize.Scale(1F / extent, 1F / extent);
+                            normalize.Translate(-(ink.X + ink.Width / 2F), -(ink.Y + ink.Height / 2F));
+                            path.Transform(normalize);
+                        }
+                    }
+                    else
+                    {
+                        path.Dispose();
+                        path = null;
+                    }
+                }
+                if (glyphPaths.Count > 64)
+                {
+                    foreach (GraphicsPath cached in glyphPaths.Values) if (cached != null) cached.Dispose();
+                    glyphPaths.Clear();
+                }
+                glyphPaths[glyph] = path;
+                return path;
+            }
+        }
+
         // 共享 StringFormat（绘制参数固定，仅用于绘制调用；避免每行每帧重复创建/泄漏）
         private static readonly StringFormat FmtCenter = MakeFormat(StringAlignment.Center);
         private static readonly StringFormat FmtLeft = MakeFormat(StringAlignment.Near);
