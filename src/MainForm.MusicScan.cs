@@ -312,11 +312,11 @@ namespace AppManager
                     bool canImport = result.Files.Count > 0 || result.UnconfirmedCount > 0;
                     LocalScanResultDecision importDecision = LocalScanResultDialog.Show("扫描本机音乐",
                         MusicScanHeadline(result), MusicScanStats(result), BuildMusicScanSummary(result),
-                        "继续", canImport, canImport);
+                        "继续", canImport, canImport, MusicUnconfirmedOption(result), result.Files.Count == 0);
                     if (importDecision.Action == LocalScanResultAction.ChangeScope) { roots = null; continue; }
                     if (importDecision.Action == LocalScanResultAction.Retry) continue;
                     if (importDecision.Action != LocalScanResultAction.Import || !canImport) return;
-                    FinishLocalMusicScan(result, importDecision.Operation);
+                    FinishLocalMusicScan(result, importDecision.Operation, importDecision.OptionChecked);
                     return;
                 }
             }
@@ -360,7 +360,16 @@ namespace AppManager
             paths.Add(path);
         }
 
-        private void FinishLocalMusicScan(LocalMusicScanResult result, ImportOperation operation)
+        /// <summary>结果窗口里「同时导入无法确认的文件」勾选项的文字；没有这类文件时返回 null（不显示勾选项）。</summary>
+        internal static string MusicUnconfirmedOption(LocalMusicScanResult result)
+        {
+            if (result.UnconfirmedCount == 0) return null;
+            string samples = MusicSamples(result, MusicFilterReason.Unconfirmed, 2);
+            return "同时导入 " + result.UnconfirmedCount + " 个无法确认是否为歌曲的文件"
+                + (string.IsNullOrEmpty(samples) ? string.Empty : "（如 " + samples + "）");
+        }
+
+        private void FinishLocalMusicScan(LocalMusicScanResult result, ImportOperation operation, bool includeUnconfirmed)
         {
             if (ActiveResourceStoreRoots().Count == 0)
             {
@@ -370,16 +379,7 @@ namespace AppManager
             }
             List<string> import = new List<string>();
             if (result.Files.Count > 0) import.AddRange(result.Files);
-            if (result.UnconfirmedCount > 0)
-            {
-                string samples = MusicSamples(result, MusicFilterReason.Unconfirmed, 3);
-                string message = "有 " + result.UnconfirmedCount + " 个文件无法确认是否为歌曲。"
-                    + (string.IsNullOrEmpty(samples) ? "" : "\n例如：" + samples)
-                    + "\n\n是否将无法确认的文件也一并导入？选择「否」会忽略这些文件。";
-                if (MessageBox.Show(this, message, "无法确认的文件",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) == DialogResult.Yes)
-                    import.AddRange(result.UnconfirmedFiles);
-            }
+            if (includeUnconfirmed) import.AddRange(result.UnconfirmedFiles);
             if (import.Count == 0)
             {
                 ShowNotice("未导入任何内容。");

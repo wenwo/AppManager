@@ -20,6 +20,8 @@ namespace AppManager
     {
         internal LocalScanResultAction Action = LocalScanResultAction.Cancel;
         internal ImportOperation Operation = ImportOperation.Copy;
+        /// <summary>结果窗口带附加勾选项时，用户是否勾选了它。</summary>
+        internal bool OptionChecked;
     }
 
     /// <summary>扫描结果顶部的一个关键数字，例如「新增 128 张」。Warn 用于失败类数字，大于零时标红。</summary>
@@ -171,13 +173,19 @@ namespace AppManager
         }
     }
 
-    /// <summary>扫描结果确认窗口：一句话结论、关键数字、可滚动明细，以及导入方式、修改范围、重新扫描。</summary>
+    /// <summary>
+    /// 扫描结果确认窗口：一句话结论、关键数字、可滚动明细，以及导入方式、修改范围、重新扫描。
+    /// optionText 不为空时在导入方式上方多一个勾选项（默认不勾选），需要用户表态的问题放在这里而不是另弹窗口；
+    /// optionRequired 表示不勾选就没有可导入的内容，此时主按钮不可用。
+    /// </summary>
     internal static class LocalScanResultDialog
     {
         internal static LocalScanResultDecision Show(string title, string headline, IList<LocalScanStat> stats,
-            string details, string importText, bool canImport, bool hasNewItems = true)
+            string details, string importText, bool canImport, bool hasNewItems = true,
+            string optionText = null, bool optionRequired = false)
         {
-            using (ResultForm form = new ResultForm(title, headline, stats, details, importText, canImport, hasNewItems))
+            using (ResultForm form = new ResultForm(title, headline, stats, details, importText, canImport, hasNewItems,
+                optionText, optionRequired))
             {
                 ConfirmDialog.ShowModal(form);   // 模态 + 遮罩层
                 return form.Decision;
@@ -192,6 +200,8 @@ namespace AppManager
             private readonly TextBox details;
             private readonly Rectangle detailsFrame;   // 明细外框（96 DPI 设计坐标）
             private readonly RadioButton move;
+            private readonly CheckBox option;
+            private readonly bool optionRequired;
             private readonly Label warning;
             private readonly RoundButton importButton = new RoundButton();
             private readonly RoundButton cancelButton = new RoundButton();
@@ -201,11 +211,12 @@ namespace AppManager
             internal readonly LocalScanResultDecision Decision = new LocalScanResultDecision();
 
             internal ResultForm(string title, string headline, IList<LocalScanStat> stats, string detailText,
-                string importText, bool canImport, bool hasNewItems)
+                string importText, bool canImport, bool hasNewItems, string optionText, bool optionRequired)
             {
                 this.importText = importText;
                 this.canImport = canImport;
                 this.hasNewItems = hasNewItems;
+                this.optionRequired = optionRequired;
                 bool allowMove = canImport && hasNewItems;
 
                 FormBorderStyle = FormBorderStyle.None;
@@ -260,6 +271,21 @@ namespace AppManager
                     details.SetBounds(detailsFrame.X + 12, detailsFrame.Y + 10, detailsFrame.Width - 16, detailsFrame.Height - 20);
                     Controls.Add(details);
                     y += detailsFrame.Height + 14;
+                }
+
+                if (canImport && !string.IsNullOrEmpty(optionText))
+                {
+                    option = new CheckBox();
+                    option.Text = optionText;
+                    option.Font = Theme.BodyFont;
+                    option.ForeColor = Theme.TextPrimary;
+                    option.AutoSize = false;
+                    option.AutoEllipsis = true;
+                    option.UseMnemonic = false;
+                    option.SetBounds(24, y, 552, 24);
+                    option.CheckedChanged += delegate { UpdateButtons(); };
+                    Controls.Add(option);
+                    y += 32;
                 }
 
                 if (allowMove)
@@ -342,13 +368,21 @@ namespace AppManager
                 importButton.Text = destructive ? "开始移动并清理原件…"
                     : (canImport && !hasNewItems ? "更新已收录归属" : (string.IsNullOrEmpty(importText) ? "继续" : importText));
                 if (warning != null) warning.Visible = destructive;
+                // 不勾选附加项就没有可导入的内容时，主按钮不可用
+                bool ready = !optionRequired || (option != null && option.Checked);
+                importButton.Enabled = ready;
+                importButton.Accent = ready;
             }
 
             private void Finish(LocalScanResultAction action)
             {
+                if (action == LocalScanResultAction.Import && !importButton.Enabled) return;
                 Decision.Action = action;
                 if (action == LocalScanResultAction.Import)
+                {
                     Decision.Operation = Destructive ? ImportOperation.Move : ImportOperation.Copy;
+                    Decision.OptionChecked = option != null && option.Checked;
+                }
                 DialogResult = action == LocalScanResultAction.Cancel ? DialogResult.Cancel : DialogResult.OK;
                 Close();
             }

@@ -28,7 +28,8 @@ namespace AppManager
         Note,
         Shortcut,
         Drive,
-        Custom
+        Custom,
+        Folder
     }
 
     /// <summary>范围清单中的一行。标题行和提示行不可勾选，Path 为空。</summary>
@@ -41,13 +42,34 @@ namespace AppManager
         internal bool Enabled;
         internal bool Checked;
         internal bool Warning;
+        /// <summary>缩进层级：分组下的行是 0，展开出来的子文件夹逐级加 1。</summary>
+        internal int Depth;
+        internal bool Expandable;
+        internal bool Expanded;
         /// <summary>已被另一个勾选的上级范围包含时，为该上级路径；否则为空。</summary>
         internal string CoveredBy;
+
+        /// <summary>自己没勾选，但上级已勾选：会随上级一并扫描。</summary>
+        internal bool Implied
+        {
+            get { return !Checked && CoveredBy != null; }
+        }
 
         public override string ToString()
         {
             return Title ?? string.Empty;
         }
+    }
+
+    /// <summary>某个文件夹的下一级子文件夹（已规范化、已排序）。Loading 表示后台仍在读取。</summary>
+    internal sealed class LocalScanScopeChildren
+    {
+        internal readonly List<string> Paths = new List<string>();
+        internal bool Loading;
+        internal string Error;
+        /// <summary>超出显示上限而没有列出的数量；OmittedMore 表示枚举提前停止，实际更多。</summary>
+        internal int Omitted;
+        internal bool OmittedMore;
     }
 
     internal sealed class LocalScanScopeShortcut
@@ -302,10 +324,13 @@ namespace AppManager
         /// <summary>
         /// 生成范围清单的行：常用文件夹、磁盘、已添加的文件夹。drives 为 null 表示磁盘仍在读取。
         /// knownRoots 是本次打开后出现过的全部范围；其中没有对应常用文件夹或可用磁盘的，列在「已添加的文件夹」。
+        /// 可勾选的行都能展开：expanded 里的路径会在原地列出 children 中记录的下一级子文件夹（逐级缩进），
+        /// 还没读到或正在读取时显示提示行。已在清单里可见的范围不再重复列入「已添加的文件夹」。
         /// 勾选状态只来自 selected；被另一个已勾选的上级范围包含的行会标出 CoveredBy。不做磁盘访问。
         /// </summary>
         internal static List<LocalScanScopeRow> BuildRows(IList<LocalScanScopeShortcut> shortcuts,
-            IList<LocalScanScopeDrive> drives, string driveError, IList<string> knownRoots, IList<string> selected)
+            IList<LocalScanScopeDrive> drives, string driveError, IList<string> knownRoots, IList<string> selected,
+            ICollection<string> expanded = null, IDictionary<string, LocalScanScopeChildren> children = null)
         {
             List<LocalScanScopeRow> rows = new List<LocalScanScopeRow>();
             HashSet<string> listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -315,11 +340,11 @@ namespace AppManager
                 foreach (LocalScanScopeShortcut shortcut in shortcuts)
                 {
                     string path = NormalizePath(shortcut.Path);
-                    if (path == null || !listed.Add(path)) continue;
-                    rows.Add(new LocalScanScopeRow
+                    if (path == null || listed.Contains(path)) continue;
+                    AddScopeRow(rows, new LocalScanScopeRow
                     {
                         Kind = LocalScanScopeRowKind.Shortcut, Title = shortcut.Label, Detail = path, Path = path, Enabled = true
-                    });
+                    }, expanded, children, listed);
                 }
             }
 
@@ -339,15 +364,17 @@ namespace AppManager
                         if (drive == null || drive.Supported != (pass == 0)) continue;
                         string path = NormalizePath(drive.Path);
                         if (path == null) continue;
-                        if (drive.Supported && !listed.Add(path)) continue;
-                        rows.Add(new LocalScanScopeRow
+                        if (drive.Supported && listed.Contains(path)) continue;
+                        LocalScanScopeRow row = new LocalScanScopeRow
                         {
                             Kind = LocalScanScopeRowKind.Drive,
                             Title = string.IsNullOrEmpty(drive.Title) ? path : drive.Title,
                             Detail = drive.Supported ? drive.Detail : drive.UnsupportedReason,
                             Path = path,
                             Enabled = drive.Supported
-                        });
+                        };
+                        if (drive.Supported) AddScopeRow(rows, row, expanded, children, listed);
+                        else rows.Add(row);
                     }
                 }
                 if (rows.Count == before && string.IsNullOrEmpty(driveError))
@@ -363,13 +390,12 @@ namespace AppManager
                     if (path == null || listed.Contains(path)) continue;
                     // 磁盘读完之前先不列盘符，避免它先出现在这里、随后又跳到「磁盘」分组
                     if (drives == null && IsDriveRoot(path)) continue;
-                    listed.Add(path);
                     string name = Path.GetFileName(path);
-                    custom.Add(new LocalScanScopeRow
+                    AddScopeRow(custom, new LocalScanScopeRow
                     {
                         Kind = LocalScanScopeRowKind.Custom, Title = string.IsNullOrEmpty(name) ? path : name,
                         Detail = path, Path = path, Enabled = true
-                    });
+                    }, expanded, children, listed);
                 }
             }
             if (custom.Count > 0)
@@ -389,15 +415,134 @@ namespace AppManager
             }
             foreach (LocalScanScopeRow row in rows)
             {
-                if (!row.Enabled || !chosen.Contains(row.Path, StringComparer.OrdinalIgnoreCase)) continue;
-                row.Checked = true;
+                if (!row.Enabled) continue;
                 foreach (string other in chosen)
                 {
-                    if (string.Equals(other, row.Path, StringComparison.OrdinalIgnoreCase) || !Within(other, row.Path)) continue;
-                    if (row.CoveredBy == null || other.Length < row.CoveredBy.Length) row.CoveredBy = other;
+                    if (string.Equals(other, row.Path, StringComparison.OrdinalIgnoreCase)) row.Checked = true;
+                    else if (IsUnder(other, row.Path) && (row.CoveredBy == null || other.Length < row.CoveredBy.Length))
+                        row.CoveredBy = other;
                 }
             }
             return rows;
+        }
+
+        /// <summary>加入一个可勾选的行；已展开时紧跟着列出它的子文件夹（递归），或一条说明当前状态的提示行。</summary>
+        private static void AddScopeRow(List<LocalScanScopeRow> rows, LocalScanScopeRow row, ICollection<string> expanded,
+            IDictionary<string, LocalScanScopeChildren> children, HashSet<string> listed)
+        {
+            rows.Add(row);
+            listed.Add(row.Path);
+            row.Expandable = true;
+            row.Expanded = expanded != null && expanded.Contains(row.Path);
+            if (!row.Expanded) return;
+            int depth = row.Depth + 1;
+            LocalScanScopeChildren state = null;
+            if (children != null) children.TryGetValue(row.Path, out state);
+            string note = state == null || state.Loading ? "正在读取子文件夹…"
+                : state.Error != null ? "无法读取：" + state.Error
+                : state.Paths.Count == 0 ? "没有可扫描的子文件夹。" : null;
+            if (note != null)
+            {
+                rows.Add(new LocalScanScopeRow
+                {
+                    Kind = LocalScanScopeRowKind.Note, Title = note, Depth = depth,
+                    Warning = state != null && !state.Loading && state.Error != null
+                });
+                return;
+            }
+            foreach (string child in state.Paths)
+            {
+                string name = Path.GetFileName(child);
+                AddScopeRow(rows, new LocalScanScopeRow
+                {
+                    Kind = LocalScanScopeRowKind.Folder, Title = string.IsNullOrEmpty(name) ? child : name,
+                    Path = child, Enabled = true, Depth = depth
+                }, expanded, children, listed);
+            }
+            if (state.Omitted > 0)
+                rows.Add(new LocalScanScopeRow
+                {
+                    Kind = LocalScanScopeRowKind.Note, Depth = depth,
+                    Title = "另有" + (state.OmittedMore ? "至少 " : " ") + state.Omitted + " 个子文件夹未列出，可在下方输入路径添加。"
+                });
+        }
+
+        /// <summary>child 是否在 parent 之下（不含相等）。两者都必须是 NormalizePath 的结果，只做字符串比较。</summary>
+        private static bool IsUnder(string parent, string child)
+        {
+            if (child.Length <= parent.Length || !child.StartsWith(parent, StringComparison.OrdinalIgnoreCase)) return false;
+            return parent[parent.Length - 1] == Path.DirectorySeparatorChar || child[parent.Length] == Path.DirectorySeparatorChar;
+        }
+
+        internal const int MaxListedSubfolders = 300;
+        private const int MaxEnumeratedSubfolders = 5000;
+
+        /// <summary>
+        /// 读取一个文件夹的下一级子文件夹，供清单展开使用；会访问磁盘，只在后台线程调用。
+        /// 隐藏文件夹、链接/联接点和排除范围内的文件夹不列出（它们不能作为扫描范围）；
+        /// 按资源管理器的名称顺序排序，最多列出 MaxListedSubfolders 个，其余只计数。读取失败时返回 Error，不抛异常。
+        /// </summary>
+        internal static LocalScanScopeChildren ListSubfolders(string path, IEnumerable<string> excludedRoots)
+        {
+            LocalScanScopeChildren result = new LocalScanScopeChildren();
+            List<string> exclusions = new List<string>();
+            if (excludedRoots != null)
+            {
+                foreach (string excluded in excludedRoots)
+                {
+                    string full = NormalizePath(excluded);
+                    if (!string.IsNullOrEmpty(full)) exclusions.Add(full);
+                }
+            }
+            List<string> found = new List<string>();
+            try
+            {
+                foreach (DirectoryInfo directory in new DirectoryInfo(path).EnumerateDirectories())
+                {
+                    FileAttributes attributes = directory.Attributes;
+                    if ((attributes & FileAttributes.Hidden) != 0) continue;
+                    if (FileImport.IsNameSurrogateReparsePoint(directory.FullName, attributes)) continue;
+                    string full = NormalizePath(directory.FullName);
+                    if (full == null || exclusions.Any(excluded => Within(excluded, full))) continue;
+                    if (found.Count >= MaxEnumeratedSubfolders) { result.OmittedMore = true; break; }
+                    found.Add(full);
+                }
+            }
+            catch (IOException ex) { result.Error = ex.Message; return result; }
+            catch (UnauthorizedAccessException ex) { result.Error = ex.Message; return result; }
+            catch (System.Security.SecurityException ex) { result.Error = ex.Message; return result; }
+            catch (ArgumentException ex) { result.Error = ex.Message; return result; }
+
+            try { found.Sort(delegate(string a, string b) { return StrCmpLogicalW(Path.GetFileName(a), Path.GetFileName(b)); }); }
+            catch (InvalidOperationException)
+            {
+                // StrCmpLogicalW 对个别字符不满足传递性，排序可能报比较结果不一致：退回序号比较
+                found.Sort(StringComparer.OrdinalIgnoreCase);
+            }
+            int shown = Math.Min(found.Count, MaxListedSubfolders);
+            result.Paths.AddRange(found.GetRange(0, shown));
+            result.Omitted = found.Count - shown;
+            return result;
+        }
+
+        [System.Runtime.InteropServices.DllImport("shlwapi.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        private static extern int StrCmpLogicalW(string a, string b);
+
+        /// <summary>
+        /// 整理手动输入、粘贴或拖入的路径：去掉首尾空白和引号（资源管理器「复制为路径」带引号），展开环境变量。
+        /// 只接受带盘符的完整路径或网络路径；空内容返回 null，相对路径等返回 null 并给出 reason。
+        /// </summary>
+        internal static string CleanTypedPath(string text, out string reason)
+        {
+            reason = null;
+            string value = (text ?? string.Empty).Trim().Trim('"').Trim();
+            if (value.Length == 0) return null;
+            value = Environment.ExpandEnvironmentVariables(value);
+            bool drive = value.Length >= 3 && char.IsLetter(value[0]) && value[1] == ':'
+                && (value[2] == Path.DirectorySeparatorChar || value[2] == Path.AltDirectorySeparatorChar);
+            if (drive || value.StartsWith(@"\\", StringComparison.Ordinal)) return value;
+            reason = "请输入完整路径，例如 D:\\照片。";
+            return null;
         }
 
         /// <summary>范围清单下方的一句话汇总：扫描几个磁盘、几个文件夹，以及合并、整盘和不可用提示。</summary>

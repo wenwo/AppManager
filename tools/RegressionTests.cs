@@ -153,6 +153,9 @@ namespace AppManager
                 Run("add-software picker joins the category and skips missing programs", SoftwarePickerAdds);
                 Run("local scan scope lists folders, drives and added folders in one checklist", LocalScanScopeRows);
                 Run("local scan scope dialog toggles, removes and returns merged roots", LocalScanScopeDialogSelection);
+                Run("local scan scope expands subfolders in place", LocalScanScopeTree);
+                Run("local scan scope dialog reports problems inline instead of popping up", LocalScanScopeDialogInline);
+                Run("local scan result folds the unconfirmed question into a checkbox", LocalScanResultOption);
                 Run("local scan progress keeps the window until the worker stops", LocalScanProgressLifetime);
                 Run("local scan result enter never starts a destructive move", LocalScanResultKeyboard);
                 Run("local scan result headline and key numbers", LocalScanResultSummaries);
@@ -5138,6 +5141,185 @@ namespace AppManager
                 Check(dialog.DialogResult == DialogResult.OK && dialog.ResultRoots.Count == 1
                     && string.Equals(dialog.ResultRoots[0], extra, StringComparison.OrdinalIgnoreCase), "confirmed roots wrong");
             }
+        }
+
+        // 展开：子文件夹按资源管理器的名称顺序列出，隐藏和排除范围内的不列；清单在原地逐级缩进，
+        // 上级已勾选的子文件夹标为“随上级扫描”；看不到对应行的已勾选范围列在「已添加的文件夹」。
+        private static void LocalScanScopeTree()
+        {
+            string folder = Path.Combine(root, "scan-scope-tree");
+            string a = Path.Combine(folder, "a"), store = Path.Combine(a, "store"), empty = Path.Combine(folder, "empty");
+            string a1 = Path.Combine(a, "a1"), a2 = Path.Combine(a, "a2"), a10 = Path.Combine(a, "a10"), hidden = Path.Combine(a, "hidden");
+            foreach (string dir in new string[] { a1, a2, a10, hidden, Path.Combine(store, "x"), empty }) Directory.CreateDirectory(dir);
+            File.SetAttributes(hidden, File.GetAttributes(hidden) | FileAttributes.Hidden);
+            File.WriteAllText(Path.Combine(a, "file.txt"), "x");
+
+            LocalScanScopeChildren listed = LocalScanScope.ListSubfolders(a, new[] { store });
+            Check(listed.Error == null && listed.Omitted == 0 && !listed.Loading
+                && string.Join("|", listed.Paths.ConvertAll(delegate(string path) { return Path.GetFileName(path); }).ToArray()) == "a1|a2|a10",
+                "subfolders wrong: " + string.Join("|", listed.Paths.ToArray()) + " / " + listed.Error);
+            Check(LocalScanScope.ListSubfolders(empty, null).Paths.Count == 0 && LocalScanScope.ListSubfolders(empty, null).Error == null,
+                "empty folder not listed as empty");
+            LocalScanScopeChildren missing = LocalScanScope.ListSubfolders(Path.Combine(folder, "missing"), null);
+            Check(missing.Paths.Count == 0 && !string.IsNullOrEmpty(missing.Error), "unreadable folder did not report an error");
+
+            List<LocalScanScopeShortcut> shortcuts = new List<LocalScanScopeShortcut> { new LocalScanScopeShortcut { Label = "图片", Path = a } };
+            List<LocalScanScopeDrive> drives = new List<LocalScanScopeDrive>();
+            Dictionary<string, LocalScanScopeChildren> children = new Dictionary<string, LocalScanScopeChildren>(StringComparer.OrdinalIgnoreCase);
+            children[a] = listed;
+            HashSet<string> expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { a.ToUpperInvariant(), a1 };
+            Func<List<LocalScanScopeRow>, string> shape = delegate(List<LocalScanScopeRow> rows)
+            {
+                return string.Join("|", rows.ConvertAll(delegate(LocalScanScopeRow row)
+                {
+                    return row.Depth + row.Kind.ToString().Substring(0, 1) + ":" + row.Title + (row.Checked ? "*" : "") + (row.Implied ? "~" : "")
+                        + (row.Expanded ? ">" : "") + (row.Warning ? "!" : "");
+                }).ToArray());
+            };
+            List<LocalScanScopeRow> open = LocalScanScope.BuildRows(shortcuts, drives, null, new List<string> { a2 }, new List<string> { a },
+                expanded, children);
+            Check(shape(open) == "0H:常用文件夹|0S:图片*>|1F:a1~>|2N:正在读取子文件夹…|1F:a2~|1F:a10~|0H:磁盘|0N:没有可扫描的磁盘。",
+                "expanded rows wrong: " + shape(open));
+            Check(open[1].Expandable && open[2].Expandable && !open[0].Expandable && !open[3].Expandable
+                && string.Equals(open[4].CoveredBy, a, StringComparison.OrdinalIgnoreCase), "expand marks or coverage wrong");
+
+            List<LocalScanScopeRow> picked = LocalScanScope.BuildRows(shortcuts, drives, null, new List<string> { a2 }, new List<string> { a2 },
+                expanded, children);
+            Check(shape(picked) == "0H:常用文件夹|0S:图片>|1F:a1>|2N:正在读取子文件夹…|1F:a2*|1F:a10|0H:磁盘|0N:没有可扫描的磁盘。",
+                "checked subfolder wrong: " + shape(picked));
+            List<LocalScanScopeRow> closed = LocalScanScope.BuildRows(shortcuts, drives, null, new List<string> { a2 }, new List<string> { a2 },
+                new HashSet<string>(), children);
+            Check(shape(closed) == "0H:常用文件夹|0S:图片|0H:磁盘|0N:没有可扫描的磁盘。|0H:已添加的文件夹|0C:a2*",
+                "a checked subfolder disappeared when its parent was collapsed: " + shape(closed));
+
+            children[a] = new LocalScanScopeChildren { Error = "拒绝访问" };
+            Check(shape(LocalScanScope.BuildRows(shortcuts, drives, null, null, null, expanded, children))
+                == "0H:常用文件夹|0S:图片>|1N:无法读取：拒绝访问!|0H:磁盘|0N:没有可扫描的磁盘。", "read failure is not shown under the folder");
+            LocalScanScopeChildren many = new LocalScanScopeChildren { Omitted = 5, OmittedMore = true };
+            many.Paths.Add(a1);
+            children[a] = many;
+            children[a1] = new LocalScanScopeChildren();
+            Check(shape(LocalScanScope.BuildRows(shortcuts, drives, null, null, null, expanded, children))
+                == "0H:常用文件夹|0S:图片>|1F:a1>|2N:没有可扫描的子文件夹。|1N:另有至少 5 个子文件夹未列出，可在下方输入路径添加。|0H:磁盘|0N:没有可扫描的磁盘。",
+                "empty or truncated subfolder list is not explained");
+
+            string reason;
+            Check(LocalScanScope.CleanTypedPath("  \"C:\\Photos\\2024\" ", out reason) == "C:\\Photos\\2024" && reason == null, "quoted path was not cleaned");
+            Check(LocalScanScope.CleanTypedPath("   ", out reason) == null && reason == null, "blank input reported an error");
+            Check(LocalScanScope.CleanTypedPath("photos\\2024", out reason) == null && !string.IsNullOrEmpty(reason)
+                && LocalScanScope.CleanTypedPath("C:photos", out reason) == null, "relative path was accepted");
+            Check(LocalScanScope.CleanTypedPath("%WINDIR%", out reason) == Environment.GetEnvironmentVariable("WINDIR")
+                && LocalScanScope.CleanTypedPath("\\\\server\\share", out reason) == "\\\\server\\share", "environment variable or UNC path was not passed on");
+        }
+
+        // 范围窗口不再弹出消息框或文件夹浏览框：路径无效、已被上级包含、开始前发现范围失效，都只在提示行里说明。
+        private static void LocalScanScopeDialogInline()
+        {
+            string folder = Path.Combine(root, "scan-scope-inline");
+            string extra = Path.Combine(folder, "extra"), inner = Path.Combine(extra, "inner"), other = Path.Combine(folder, "other");
+            string store = Path.Combine(folder, "store"), missing = Path.Combine(folder, "missing");
+            foreach (string dir in new string[] { inner, other, store }) Directory.CreateDirectory(dir);
+            using (LocalScanScopeDialog dialog = new LocalScanScopeDialog("回归", LocalScanScopeKind.Photos, new[] { extra }, new[] { store }))
+            {
+                ListBox list = (ListBox)typeof(LocalScanScopeDialog).GetField("list", Private).GetValue(dialog);
+                Label summary = (Label)typeof(LocalScanScopeDialog).GetField("summaryLabel", Private).GetValue(dialog);
+                Func<string, object[], object> invoke = delegate(string name, object[] args)
+                {
+                    return typeof(LocalScanScopeDialog).GetMethod(name, Private).Invoke(dialog, args);
+                };
+                Func<string> rows = delegate
+                {
+                    List<string> names = new List<string>();
+                    foreach (LocalScanScopeRow row in list.Items)
+                        if (row.Kind == LocalScanScopeRowKind.Custom || row.Kind == LocalScanScopeRowKind.Folder)
+                            names.Add(row.Depth + ":" + row.Title + (row.Checked ? "*" : "") + (row.Implied ? "~" : "") + (row.Expanded ? ">" : ""));
+                    return string.Join("|", names.ToArray());
+                };
+                Func<string, int> indexOf = delegate(string title)
+                {
+                    for (int i = 0; i < list.Items.Count; i++)
+                        if (((LocalScanScopeRow)list.Items[i]).Title == title) return i;
+                    return -1;
+                };
+
+                bool allAdded = (bool)invoke("AddPaths", new object[] { new string[] { "\"" + other + "\"", missing, "relative\\path", store, "  " } });
+                Check(!allAdded && rows() == "0:extra*|0:other*", "typed paths were not added one by one: " + rows());
+                Check(summary.Text.StartsWith("有 3 项没有添加，例如 " + missing) && summary.ForeColor == Theme.DeleteRed,
+                    "rejected paths were not explained inline: " + summary.Text);
+                Check((bool)invoke("AddPaths", new object[] { new string[] { inner } }) && rows() == "0:extra*|0:other*|0:inner*",
+                    "a valid path was rejected: " + rows());
+                Check(summary.Text == "将扫描 2 个文件夹。已合并 1 个重复或重叠范围。" && summary.ForeColor != Theme.DeleteRed,
+                    "the notice was not replaced by the summary after a clean action: " + summary.Text);
+
+                invoke("Toggle", new object[] { indexOf("inner") });
+                Check(rows() == "0:extra*|0:other*|0:inner~", "unchecking a covered folder went wrong: " + rows());
+                invoke("Toggle", new object[] { indexOf("inner") });
+                Check(rows() == "0:extra*|0:other*|0:inner~" && summary.Text.Contains("已包含在 " + extra) && summary.ForeColor != Theme.DeleteRed,
+                    "clicking a folder that its parent already covers was not explained: " + summary.Text);
+
+                // 展开要等后台读完子文件夹：建出窗口句柄（不显示窗口）并泵消息
+                IntPtr handle = dialog.Handle;
+                invoke("ToggleExpand", new object[] { indexOf("extra") });
+                PumpUntil(delegate { return rows().Contains("1:inner"); });
+                Check(rows() == "0:extra*>|1:inner~|0:other*", "expanding did not list the subfolder in place: " + rows());
+                invoke("Toggle", new object[] { indexOf("extra") });
+                invoke("Toggle", new object[] { indexOf("inner") });
+                Check(rows() == "0:extra>|1:inner*|0:other*", "a subfolder could not be checked on its own: " + rows());
+                invoke("ToggleExpand", new object[] { indexOf("extra") });
+                Check(rows() == "0:extra|0:other*|0:inner*", "collapsing hid a checked subfolder: " + rows());
+
+                Directory.Delete(other);
+                invoke("StartScan", new object[0]);
+                Check(dialog.DialogResult != DialogResult.OK && rows() == "0:extra|0:other|0:inner*"
+                    && summary.Text.StartsWith("已取消勾选当前不可用的范围：" + other) && summary.Text.EndsWith("确认其余范围后再点「开始扫描」。")
+                    && summary.ForeColor == Theme.DeleteRed, "a vanished range was not unchecked and explained: " + summary.Text + " / " + rows());
+                invoke("StartScan", new object[0]);
+                Check(dialog.DialogResult == DialogResult.OK && dialog.ResultRoots.Count == 1
+                    && string.Equals(dialog.ResultRoots[0], inner, StringComparison.OrdinalIgnoreCase), "confirmed roots wrong after the fix-up");
+            }
+        }
+
+        // 音乐的「无法确认的文件」不再单独弹问：结果窗口多一个默认不勾的勾选项；不勾就没内容可导入时主按钮不可用。
+        private static void LocalScanResultOption()
+        {
+            LocalMusicScanResult music = new LocalMusicScanResult();
+            Check(MainForm.MusicUnconfirmedOption(music) == null, "option offered without unconfirmed files");
+            music.UnconfirmedFiles.AddRange(new string[] { "D:\\m\\a.mp3", "D:\\m\\b.mp3", "D:\\m\\c.mp3" });
+            string optionText = MainForm.MusicUnconfirmedOption(music);
+            Check(optionText == "同时导入 3 个无法确认是否为歌曲的文件（如 a.mp3、b.mp3）", "option text wrong: " + optionText);
+
+            bool probed = false, stayedOpen = false;
+            string shownText = null;
+            LocalScanResultDecision decision;
+            using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                probe.Tick += delegate
+                {
+                    Form dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(open => open.Modal);
+                    if (dialog == null) return;
+                    probe.Stop();
+                    dialog.Opacity = 0;
+                    probed = true;
+                    MethodInfo key = dialog.GetType().GetMethod("ProcessCmdKey", Private);
+                    key.Invoke(dialog, new object[] { new Message(), Keys.Enter });
+                    stayedOpen = !dialog.IsDisposed && dialog.Visible;
+                    CheckBox option = dialog.Controls.OfType<CheckBox>().FirstOrDefault();
+                    if (option != null)
+                    {
+                        shownText = option.Text;
+                        stayedOpen = stayedOpen && !option.Checked;
+                        option.Checked = true;
+                    }
+                    if (stayedOpen) key.Invoke(dialog, new object[] { new Message(), Keys.Enter });
+                    if (!dialog.IsDisposed && dialog.Visible) dialog.Close();
+                };
+                probe.Start();
+                decision = LocalScanResultDialog.Show("回归", "没有确认是歌曲的文件", null, "明细", "继续", true, false, optionText, true);
+            }
+            Check(probed && shownText == optionText, "option checkbox missing: " + shownText);
+            Check(stayedOpen, "import was possible with nothing to import");
+            Check(decision.Action == LocalScanResultAction.Import && decision.OptionChecked && decision.Operation == ImportOperation.Copy,
+                "checking the option did not enable the import");
         }
 
         // 进度窗口：扫描结束前关窗口只发出取消，窗口等后台线程退出才关闭；取消后迟到的进度不覆盖「正在取消」。
