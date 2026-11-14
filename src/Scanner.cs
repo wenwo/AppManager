@@ -267,12 +267,24 @@ namespace AppManager
                 string dir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
                 return string.IsNullOrEmpty(dir) ? string.Empty : dir.TrimEnd('\\') + "\\";
             }
-            catch (Exception) { return string.Empty; }
+            catch (Exception ex)
+            {
+                // 取不到 Windows 目录时只按 shell 虚拟项和系统应用包识别系统工具
+                Debug.WriteLine("读取 Windows 目录失败: " + ex.Message);
+                return string.Empty;
+            }
         }
 
         /// <summary>
+        /// MSI 安装缓存目录：「播发」快捷方式解析出的目标是这里的图标占位程序（Windows\Installer\{产品码}\xxx.exe），
+        /// 对应的是用户安装的软件，不是系统工具。
+        /// </summary>
+        private static readonly string InstallerCachePrefix =
+            WindowsDirPrefix.Length == 0 ? string.Empty : WindowsDirPrefix + "Installer\\";
+
+        /// <summary>
         /// 是否为 Windows 自带的系统工具或组件（命令提示符、注册表编辑器、控制面板、设置等），区别于用户安装的软件。
-        /// 按实际启动目标判断，不靠名称表：程序位于 Windows 目录、目标是 shell 虚拟项（::{CLSID}），或属于系统应用包。
+        /// 按实际启动目标判断，不靠名称表：程序位于 Windows 目录（MSI 安装缓存除外）、目标是 shell 虚拟项（::{CLSID}），或属于系统应用包。
         /// 目标未知的条目（应用商店应用、解析不出目标的快捷方式）不算系统组件。internal 供回归测试。
         /// </summary>
         internal static bool IsSystemComponent(AppInfo app)
@@ -294,7 +306,8 @@ namespace AppManager
             path = path.Trim();
             if (path.Length == 0) return false;
             if (path.StartsWith("::", StringComparison.Ordinal)) return true;
-            return WindowsDirPrefix.Length > 0 && path.StartsWith(WindowsDirPrefix, StringComparison.OrdinalIgnoreCase);
+            if (WindowsDirPrefix.Length == 0 || !path.StartsWith(WindowsDirPrefix, StringComparison.OrdinalIgnoreCase)) return false;
+            return !path.StartsWith(InstallerCachePrefix, StringComparison.OrdinalIgnoreCase);
         }
 
         [DllImport("shell32.dll")]

@@ -4954,10 +4954,13 @@ namespace AppManager
             AppInfo storeShortcut = new AppInfo { Key = "lnk:picker-store", Name = "商店应用快捷方式", IsUwp = true, TargetPath = windows + "\\explorer.exe" };
             AppInfo shellShortcut = new AppInfo { Key = "lnk:picker-shell", Name = "此电脑", IsUwp = true };
             AppInfo lookalike = new AppInfo { Key = "lnk:picker-lookalike", Name = "Lookalike", TargetPath = windows + "Apps\\tool.exe" };
+            // MSI「播发」快捷方式的目标是安装缓存里的图标占位程序：是用户安装的软件
+            AppInfo advertised = new AppInfo { Key = "lnk:picker-advertised", Name = "Advertised",
+                TargetPath = windows.ToUpperInvariant() + "\\Installer\\{90140000-0011-0000-0000-0000000FF1CE}\\wordicon.exe" };
 
             foreach (AppInfo app in new AppInfo[] { cmd, taskmgr, control, settings })
                 Check(Scanner.IsSystemComponent(app), "system tool not recognised: " + app.Name);
-            foreach (AppInfo app in new AppInfo[] { installed, excel, calc, storeShortcut, shellShortcut, lookalike, new AppInfo(), null })
+            foreach (AppInfo app in new AppInfo[] { installed, excel, calc, storeShortcut, shellShortcut, lookalike, advertised, new AppInfo(), null })
                 Check(!Scanner.IsSystemComponent(app), "installed software treated as a system tool: " + (app == null ? "null" : app.Name));
 
             List<AppInfo> all = new List<AppInfo> { installed, cmd, taskmgr, excel, control, settings, calc, null };
@@ -4975,6 +4978,16 @@ namespace AppManager
             Check(SoftwarePickerDialog.Describe(excel).EndsWith("EXCEL.EXE") && SoftwarePickerDialog.Describe(calc) == "应用商店应用"
                 && SoftwarePickerDialog.Describe(settings) == "系统组件" && SoftwarePickerDialog.Describe(control) == "系统组件"
                 && SoftwarePickerDialog.Describe(null) == "", "packaged description wrong");
+
+            // 关掉「显示系统工具」时已勾选的系统工具一并取消，不会把看不见的条目加进分类；被搜索筛掉的勾选保留
+            using (SoftwarePickerDialog dialog = new SoftwarePickerDialog("开发工具", new List<AppInfo> { installed, cmd, excel }, true))
+            {
+                typeof(SoftwarePickerDialog).GetMethod("ToggleAllVisible", Private).Invoke(dialog, null);
+                ((Controls.ToggleSwitch)typeof(SoftwarePickerDialog).GetField("systemToggle", Private).GetValue(dialog)).Checked = false;
+                ((Controls.SearchField)typeof(SoftwarePickerDialog).GetField("search", Private).GetValue(dialog)).Text = "Excel";
+                typeof(SoftwarePickerDialog).GetMethod("Confirm", Private).Invoke(dialog, null);
+                Check(names(dialog.Picked) == "Apifox|Excel", "hidden system tool was added or a searched-out selection was dropped: " + names(dialog.Picked));
+            }
 
             string path = Path.Combine(Paths.DataDir, "scan.cache.xml");
             try

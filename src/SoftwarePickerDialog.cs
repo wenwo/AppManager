@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Threading;
@@ -20,7 +21,6 @@ namespace AppManager
 
         private readonly List<AppInfo> candidates;
         private readonly HashSet<AppInfo> chosen = new HashSet<AppInfo>();
-        private readonly int systemCount;
 
         private readonly SearchField search = new SearchField();
         private readonly PickerList list = new PickerList();
@@ -49,8 +49,6 @@ namespace AppManager
         {
             this.candidates = candidates ?? new List<AppInfo>();
             Picked = new List<AppInfo>();
-            foreach (AppInfo a in this.candidates)
-                if (Scanner.IsSystemComponent(a)) systemCount++;
 
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
@@ -103,7 +101,12 @@ namespace AppManager
             systemToggle.SetBounds(412, 124, 40, 24);
             systemToggle.Checked = showSystem;
             systemToggle.AccessibleName = "显示系统工具";
-            systemToggle.CheckedChanged += delegate { RefreshList(); };
+            systemToggle.CheckedChanged += delegate
+            {
+                // 关掉开关表示不要系统工具：已勾选的系统工具一并取消，避免把列表里看不见的条目加进分类
+                if (!systemToggle.Checked) chosen.RemoveWhere(Scanner.IsSystemComponent);
+                RefreshList();
+            };
             Controls.Add(systemToggle);
 
             selectAll.Text = "全选";
@@ -416,7 +419,12 @@ namespace AppManager
                     lock (iconLock) { if (closed) return; }
                     Bitmap bmp;
                     try { bmp = Icons.Extract(app, size); }
-                    catch (Exception) { bmp = null; }   // 取不到图标时这一行保留占位块，不影响勾选添加
+                    catch (Exception ex)
+                    {
+                        // 取不到图标时这一行保留占位块，不影响勾选添加
+                        Debug.WriteLine("提取软件图标失败 " + app.Name + ": " + ex.Message);
+                        bmp = null;
+                    }
                     if (bmp == null) continue;
                     lock (iconLock)
                     {
@@ -480,6 +488,7 @@ namespace AppManager
         private sealed class PickerList : ListBox
         {
             private const int WM_ERASEBKGND = 0x0014;
+            private const int WM_MOUSEWHEEL = 0x020A;
 
             internal int HoverIndex = -1;
             internal bool KeyboardActive;   // 最近一次操作来自键盘：此时才高亮键盘选中的行
@@ -541,12 +550,6 @@ namespace AppManager
                 base.OnMouseLeave(e);
             }
 
-            protected override void OnMouseWheel(MouseEventArgs e)
-            {
-                base.OnMouseWheel(e);
-                SetHover(HitRow(PointToClient(MousePosition)));   // 滚动后鼠标下换了一行
-            }
-
             protected override void OnKeyDown(KeyEventArgs e)
             {
                 if (!KeyboardActive)
@@ -575,6 +578,8 @@ namespace AppManager
                 if (m.Msg != WM_ERASEBKGND || m.WParam == IntPtr.Zero)
                 {
                     base.WndProc(ref m);
+                    // 滚轮的实际滚动由默认窗口过程完成，晚于 OnMouseWheel：滚完再按鼠标位置更新悬停行
+                    if (m.Msg == WM_MOUSEWHEEL && IsHandleCreated) SetHover(HitRow(PointToClient(MousePosition)));
                     return;
                 }
                 // 只擦最后一行以下的空白：行区域交给 DrawItem，避免先擦后画造成闪烁
