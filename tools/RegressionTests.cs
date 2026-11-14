@@ -54,7 +54,9 @@ namespace AppManager
                 Run("window resize hit zones, minimum size, and fullscreen threshold", ResizeBounds);
                 Run("non-client grid scrollbar keeps the right resize edge active", ResizeOverGridScrollbar);
                 Run("menu hit regions and rendering at 100/125/150/175 percent", MenuDpi);
-                Run("backup list row height at 100/125/150/175 percent", BackupDpi);
+                Run("backup cards: size, grouping and inline buttons at 100/125/150/175 percent", BackupDpi);
+                Run("backup cards: texts, keyboard and mouse actions, busy state, selection and scrolling", BackupCards);
+                Run("backup cards: one wheel notch scrolls the list once from the list, a button or the window", BackupWheel);
                 Run("background status: queued update, disposal race, no handle", StatusRace);
                 Run("rounded path and progress bar: one-pixel fill renders without invalid arcs", RoundedPathNarrow);
                 Run("auto scan: existing shortcut rewrite, periodic fallback and disposal", AutoScanChanges);
@@ -7719,12 +7721,238 @@ namespace AppManager
             using (BackupForm form = new BackupForm())
             {
                 Initialize(form);
-                ListBox list = (ListBox)typeof(BackupForm).GetField("list", Private).GetValue(form);
+                Controls.BackupListControl list = (Controls.BackupListControl)typeof(BackupForm).GetField("list", Private).GetValue(form);
+                // Same order as LayoutBackup.List: rollback folders sort before the user's own backups.
+                List<LayoutBackupInfo> items = new List<LayoutBackupInfo>();
+                items.Add(new LayoutBackupInfo { Id = "_prerestore_20260102-030405-aaaa", Name = "broken", IsPreRestore = true, Incomplete = true });
+                items.Add(new LayoutBackupInfo { Id = "_prerestore_20260101-030405-bbbb", Name = "rollback", IsPreRestore = true });
+                items.Add(new LayoutBackupInfo { Id = "20260103-000000", Name = "new", Created = "2026-01-03 00:00:00" });
+                items.Add(new LayoutBackupInfo { Id = "20260101-000000", Name = "old", Created = "2026-01-01 00:00:00" });
+                list.SetItems(items, "20260101-000000");
+                Check(list.CardCount == 4 && list.Selected != null && list.Selected.Name == "old", "requested backup not selected");
                 foreach (int dpi in new int[] { 96, 120, 144, 168 })
                 {
-                    SetDpi(form, dpi, new Rectangle(10, 10, DpiHelper.Scale(620, dpi), DpiHelper.Scale(486, dpi)));
-                    Check(list.ItemHeight == DpiHelper.Scale(54, dpi), "list row height incorrect");
+                    SetDpi(form, dpi, new Rectangle(10, 10, DpiHelper.Scale(640, dpi), DpiHelper.Scale(560, dpi)));
+                    Rectangle first = list.CardRect(0), second = list.CardRect(1), broken = list.CardRect(2);
+                    Check(first.Height == DpiHelper.Scale(90, dpi), "card height incorrect");
+                    Check(first.Left >= 0 && first.Right <= list.Width, "card wider than the list");
+                    Check(second.Top == first.Bottom + DpiHelper.Scale(10, dpi), "card gap incorrect");
+                    Check(broken.Top >= second.Bottom + DpiHelper.Scale(28, dpi), "rollback group has no heading of its own");
+                    Rectangle restore = list.ActionRect(0, Controls.BackupListControl.CardAction.Restore);
+                    Rectangle more = list.ActionRect(0, Controls.BackupListControl.CardAction.More);
+                    Check(first.Contains(restore) && first.Contains(more) && restore.Right < more.Left, "inline buttons outside the card or overlapping");
+                    Check(list.ActionRect(0, Controls.BackupListControl.CardAction.Delete).IsEmpty, "own backup shows delete outside the menu");
+                    Check(list.ActionRect(2, Controls.BackupListControl.CardAction.Restore).IsEmpty
+                        && !list.ActionRect(2, Controls.BackupListControl.CardAction.Delete).IsEmpty, "incomplete rollback offers restore");
+                    Check(!list.ActionRect(3, Controls.BackupListControl.CardAction.Restore).IsEmpty
+                        && list.ActionRect(3, Controls.BackupListControl.CardAction.More).IsEmpty, "rollback buttons incorrect");
+                    using (Bitmap bitmap = new Bitmap(form.Width, form.Height)) form.DrawToBitmap(bitmap, form.ClientRectangle);
                 }
+            }
+        }
+
+        private static void BackupCards()
+        {
+            DateTime now = new DateTime(2026, 11, 14, 12, 0, 0);
+            Func<DateTime, string> relative = delegate(DateTime then) { return Controls.BackupListControl.RelativeTime(then, now); };
+            Check(relative(now.AddSeconds(-20)) == "刚刚" && relative(now.AddMinutes(-5)) == "5 分钟前"
+                && relative(now.AddHours(-3)) == "3 小时前", "recent relative time wrong");
+            Check(relative(new DateTime(2026, 11, 13, 23, 59, 0)) == "昨天"
+                && relative(new DateTime(2026, 10, 29, 14, 18, 40)) == "16 天前", "day relative time wrong");
+            Check(relative(now.AddDays(-70)) == "2 个月前" && relative(now.AddDays(-800)) == "2 年前"
+                && relative(now.AddHours(2)) == string.Empty, "far or future relative time wrong");
+
+            LayoutBackupInfo own = new LayoutBackupInfo
+            {
+                Id = "20261029-141840", Name = "布局备份 10-29 14:18", Created = "2026-10-29 14:18:40",
+                StashCount = 33, CustomCount = 121, CategoryCount = 3, SizeBytes = 81 * 1024
+            };
+            LayoutBackupInfo rollback = new LayoutBackupInfo
+            {
+                Id = "_prerestore_20261102-201500-0123456789abcdef", Name = "恢复前留底 20261102-201500-0123456789abcdef",
+                Created = "bad", IsPreRestore = true, StashCount = 2, SizeBytes = -1
+            };
+            LayoutBackupInfo broken = new LayoutBackupInfo { Id = "_prerestore_x", Name = "恢复前留底 x", IsPreRestore = true, Incomplete = true };
+            Check(Controls.BackupListControl.TimeText(own, now) == "16 天前 · 2026-10-29 14:18", "time line wrong");
+            Check(Controls.BackupListControl.TimeText(rollback, now) == "bad"
+                && Controls.BackupListControl.TimeText(broken, now) == "时间未知", "unparsable time not shown as is");
+            Check(Controls.BackupListControl.DisplayName(own) == own.Name
+                && Controls.BackupListControl.DisplayName(rollback) == "恢复前留底 11-02 20:15"
+                && Controls.BackupListControl.DisplayName(broken) == "恢复前留底 x", "card title wrong");
+            Check(string.Join("|", Controls.BackupListControl.Facts(own)) == "收纳 33|自定义 121|分类 3|81 KB"
+                && string.Join("|", Controls.BackupListControl.Facts(rollback)) == "收纳 2|大小未统计", "fact chips wrong");
+
+            using (Controls.BackupListControl list = new Controls.BackupListControl())
+            {
+                list.Size = new Size(608, 460);
+                IntPtr handle = list.Handle;
+                int restores = 0, renames = 0, deletes = 0, menus = 0;
+                bool menuFromButton = false;
+                list.RestoreRequested += delegate { restores++; };
+                list.RenameRequested += delegate { renames++; };
+                list.DeleteRequested += delegate { deletes++; };
+                list.MenuRequested += delegate(LayoutBackupInfo info, Rectangle anchor, bool fromButton) { menus++; menuFromButton = fromButton; };
+                MethodInfo keyDown = typeof(Controls.BackupListControl).GetMethod("OnKeyDown", Private);
+                MethodInfo mouseDown = typeof(Controls.BackupListControl).GetMethod("OnMouseDown", Private);
+                MethodInfo mouseUp = typeof(Controls.BackupListControl).GetMethod("OnMouseUp", Private);
+                MethodInfo keyUp = typeof(Controls.BackupListControl).GetMethod("OnKeyUp", Private);
+                Action<Keys> press = delegate(Keys key)
+                {
+                    keyDown.Invoke(list, new object[] { new KeyEventArgs(key) });
+                    keyUp.Invoke(list, new object[] { new KeyEventArgs(key) });
+                };
+                Func<Rectangle, Point> center = delegate(Rectangle r) { return new Point(r.Left + r.Width / 2, r.Top + r.Height / 2); };
+                Action<Point, Point, MouseButtons> drag = delegate(Point from, Point to, MouseButtons button)
+                {
+                    mouseDown.Invoke(list, new object[] { new MouseEventArgs(button, 1, from.X, from.Y, 0) });
+                    mouseUp.Invoke(list, new object[] { new MouseEventArgs(button, 1, to.X, to.Y, 0) });
+                };
+                Action<Point, MouseButtons> click = delegate(Point p, MouseButtons button) { drag(p, p, button); };
+                Func<int, Controls.BackupListControl.CardAction, Point> buttonAt = delegate(int card, Controls.BackupListControl.CardAction action)
+                {
+                    Rectangle r = list.ActionRect(card, action);
+                    Check(!r.IsEmpty, "button missing: card " + card + " " + action);
+                    return center(r);
+                };
+                Func<int, Point> cardBody = delegate(int card) { Rectangle r = list.CardRect(card); return new Point(r.Left + 100, r.Top + r.Height / 2); };
+
+                // Empty list: nothing to act on, empty state renders.
+                list.SetItems(new List<LayoutBackupInfo>(), null);
+                press(Keys.Down); press(Keys.Enter); press(Keys.Delete);
+                Check(list.CardCount == 0 && list.Selected == null && restores + deletes == 0, "empty list reacts to keys");
+                using (Bitmap bitmap = new Bitmap(list.Width, list.Height)) list.DrawToBitmap(bitmap, list.ClientRectangle);
+
+                // Own backups first, rollbacks after; nothing selected until the user interacts.
+                list.SetItems(new List<LayoutBackupInfo> { broken, rollback, own }, null);
+                Check(list.CardCount == 3 && list.Selected == null, "selection appears before any interaction");
+                press(Keys.Enter); press(Keys.Delete);
+                Check(restores + deletes == 0, "keys act without a selected backup");
+                press(Keys.Down);
+                Check(list.Selected == own, "own backup is not listed first");
+                press(Keys.Enter); press(Keys.F2);
+                Check(restores == 1 && renames == 1, "own backup: Enter/F2 ignored");
+                press(Keys.Down);
+                Check(list.Selected == broken, "incomplete rollback not second");
+                press(Keys.Enter); press(Keys.F2);
+                Check(restores == 1 && renames == 1, "incomplete rollback can be restored or renamed");
+                press(Keys.Delete);
+                Check(deletes == 1, "incomplete rollback cannot be deleted");
+                press(Keys.End);
+                Check(list.Selected == rollback, "End does not select the last card");
+                press(Keys.Enter); press(Keys.F2);
+                Check(restores == 2 && renames == 1, "rollback: restore missing or rename allowed");
+
+                click(buttonAt(0, Controls.BackupListControl.CardAction.Restore), MouseButtons.Left);
+                Check(restores == 3 && list.Selected == own, "inline restore button ignored");
+                click(buttonAt(0, Controls.BackupListControl.CardAction.More), MouseButtons.Left);
+                Check(menus == 1 && menuFromButton, "more button does not open the menu");
+                click(cardBody(2), MouseButtons.Right);
+                Check(menus == 2 && !menuFromButton && list.Selected == rollback, "right click does not open the menu for that card");
+                click(buttonAt(1, Controls.BackupListControl.CardAction.Delete), MouseButtons.Left);
+                Check(deletes == 2 && list.Selected == broken, "inline delete button ignored");
+                drag(buttonAt(0, Controls.BackupListControl.CardAction.Restore), cardBody(0), MouseButtons.Left);
+                Check(restores == 3, "releasing outside the button still triggers it");
+
+                // Busy: every entry point is blocked, the busy card still renders.
+                Point restoreOwn = buttonAt(0, Controls.BackupListControl.CardAction.Restore);
+                list.SetBusy(own.Id, "正在恢复…");
+                click(restoreOwn, MouseButtons.Left);
+                click(cardBody(0), MouseButtons.Right);
+                press(Keys.Enter); press(Keys.Delete); press(Keys.F2); press(Keys.Apps);
+                Check(restores == 3 && deletes == 2 && renames == 1 && menus == 2, "actions run while an operation is in progress");
+                using (Bitmap bitmap = new Bitmap(list.Width, list.Height)) list.DrawToBitmap(bitmap, list.ClientRectangle);
+                list.ClearBusy();
+                click(restoreOwn, MouseButtons.Left);
+                Check(restores == 4, "buttons stay disabled after the operation ends");
+
+                // Reload keeps the selection by id; a deleted backup clears it; an explicit id wins.
+                list.SetItems(new List<LayoutBackupInfo> { rollback, own }, null);
+                Check(list.Selected == own, "reload loses the selection");
+                list.SetItems(new List<LayoutBackupInfo> { rollback }, null);
+                Check(list.Selected == null, "selection points at a removed backup");
+                list.SetItems(new List<LayoutBackupInfo> { rollback, own }, rollback.Id);
+                Check(list.Selected == rollback, "explicit selection ignored");
+
+                // Scrolling: keyboard navigation and a requested selection bring the card fully into view.
+                List<LayoutBackupInfo> many = new List<LayoutBackupInfo>();
+                for (int i = 0; i < 12; i++)
+                    many.Add(new LayoutBackupInfo { Id = "20260101-0000" + i.ToString("00"), Name = "backup " + i, Created = "2026-01-01 00:00:00" });
+                list.SetItems(many, null);
+                Func<int, bool> visible = delegate(int card) { Rectangle r = list.CardRect(card); return r.Top >= 0 && r.Bottom <= list.Height; };
+                Check(visible(0) && !visible(11), "long list does not need scrolling");
+                press(Keys.End);
+                Check(list.Selected == many[11] && visible(11) && !visible(0), "End does not scroll to the last card");
+                click(buttonAt(11, Controls.BackupListControl.CardAction.Restore), MouseButtons.Left);
+                Check(restores == 5 && list.Selected == many[11], "button hit testing ignores the scroll position");
+                press(Keys.Home);
+                Check(list.Selected == many[0] && visible(0), "Home does not scroll back to the top");
+                list.SetItems(many, many[8].Id);
+                Check(list.Selected == many[8] && visible(8), "newly selected backup is not scrolled into view");
+                using (Bitmap bitmap = new Bitmap(list.Width, list.Height)) list.DrawToBitmap(bitmap, list.ClientRectangle);
+
+                // Enter restores on release, once, and only for a press that started on this list:
+                // a held key must not open the confirmation and then confirm it by auto-repeat.
+                Action enterDown = delegate { keyDown.Invoke(list, new object[] { new KeyEventArgs(Keys.Enter) }); };
+                Action enterUp = delegate { keyUp.Invoke(list, new object[] { new KeyEventArgs(Keys.Enter) }); };
+                int baseline = restores;
+                enterUp();
+                Check(restores == baseline, "Enter release without a press on the list restores");
+                enterDown(); enterDown();
+                Check(restores == baseline, "Enter restores before the key is released");
+                enterUp(); enterUp();
+                Check(restores == baseline + 1, "Enter press and release does not restore exactly once");
+                MethodInfo commandKey = typeof(Controls.BackupListControl).GetMethod("ProcessCmdKey", Private);
+                Action<int> enterMessage = delegate(int flags)
+                {
+                    commandKey.Invoke(list, new object[] { Message.Create(list.Handle, 0x0100, (IntPtr)(int)Keys.Enter, (IntPtr)flags), Keys.Enter });
+                };
+                enterMessage(0x40000001); enterDown(); enterUp();
+                Check(restores == baseline + 1, "auto-repeated Enter (key held since another dialog) restores");
+                enterMessage(1); enterDown(); enterUp();
+                Check(restores == baseline + 2, "fresh Enter press ignored after a repeated one");
+                enterDown(); list.SetBusy(many[8].Id, "…"); enterUp(); list.ClearBusy(); enterUp();
+                Check(restores == baseline + 2, "Enter pressed before an operation started restores afterwards");
+                enterDown(); list.SetItems(many, null); enterUp();
+                Check(restores == baseline + 2, "Enter pressed before the list reloaded restores afterwards");
+
+                // Hover tip: only for a name that does not fit, and not while pointing at a button.
+                LayoutBackupInfo longName = new LayoutBackupInfo { Id = "20260201-000000", Name = new string('长', 80), Created = "2026-02-01 00:00:00" };
+                list.SetItems(new List<LayoutBackupInfo> { longName, own }, null);
+                Check(list.TruncatedNameAt(cardBody(0)) == longName.Name, "truncated name has no hover tip");
+                Check(list.TruncatedNameAt(cardBody(1)) == null, "short name shows a hover tip");
+                Check(list.TruncatedNameAt(buttonAt(0, Controls.BackupListControl.CardAction.Restore)) == null, "hover tip shown over a button");
+                Check(list.TruncatedNameAt(new Point(list.Width / 2, list.Height - 2)) == null, "hover tip shown outside the cards");
+            }
+        }
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private static void BackupWheel()
+        {
+            using (BackupForm form = new BackupForm())
+            {
+                Initialize(form);
+                Controls.BackupListControl list = (Controls.BackupListControl)typeof(BackupForm).GetField("list", Private).GetValue(form);
+                Control create = (Control)typeof(BackupForm).GetField("btnCreate", Private).GetValue(form);
+                List<LayoutBackupInfo> many = new List<LayoutBackupInfo>();
+                for (int i = 0; i < 200; i++)
+                    many.Add(new LayoutBackupInfo { Id = "20260101-" + i.ToString("000000"), Name = "backup " + i, Created = "2026-01-01 00:00:00" });
+                list.SetItems(many, null);
+                int lines = SystemInformation.MouseWheelScrollLines;
+                if (lines <= 0) lines = 3;
+                int step = DpiHelper.Scale(32, form.LayoutDpi) * lines;
+                IntPtr oneNotchDown = new IntPtr(-120 << 16);
+                int top = list.CardRect(0).Top;
+                SendMessage(list.Handle, 0x020A, oneNotchDown, IntPtr.Zero);
+                Check(list.CardRect(0).Top == top - step, "wheel over the list does not scroll exactly one step: "
+                    + (top - list.CardRect(0).Top) + " instead of " + step);
+                SendMessage(create.Handle, 0x020A, oneNotchDown, IntPtr.Zero);
+                Check(list.CardRect(0).Top == top - 2 * step, "wheel on a button does not scroll the list exactly one step");
+                SendMessage(form.Handle, 0x020A, oneNotchDown, IntPtr.Zero);
+                Check(list.CardRect(0).Top == top - 3 * step, "wheel on the window does not scroll the list exactly one step");
+                SendMessage(list.Handle, 0x020A, new IntPtr(120 << 16), IntPtr.Zero);
+                Check(list.CardRect(0).Top == top - 2 * step, "wheel up does not scroll back one step");
             }
         }
 
