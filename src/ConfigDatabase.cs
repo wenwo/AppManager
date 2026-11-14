@@ -981,7 +981,7 @@ namespace AppManager
                 db.Execute("BEGIN IMMEDIATE");
                 try
                 {
-                    if (Number(db.Scalar("SELECT max(id) FROM operations WHERE action NOT IN('catalog.discover','catalog.rebuild')")) != operation) throw new IOException("只允许撤销最新业务事务；请先检查操作记录。");
+                    if (Number(db.Scalar(LatestBusinessSql)) != operation) throw new IOException("只允许撤销最新业务事务；请先检查操作记录。");
                     string action = db.Scalar("SELECT action FROM operations WHERE id=?", operation);
                     // 迁移类事务（XML 迁入、大小写条目合并、同名分类拆分、软件侧文件转资源）带有不受审计的完成标记或会在启动时重做，
                     // 逐项撤销会让数据与标记不一致或来回反复，只能用完整备份恢复。

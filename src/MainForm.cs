@@ -1137,7 +1137,7 @@ namespace AppManager
                 if (config.Database == null) return;
                 using (DatabaseForm dialog = new DatabaseForm(config.Database))
                 {
-                    dialog.ShowDialog(this);
+                    ConfirmDialog.ShowModal(dialog);
                     if (dialog.Changed) ReloadAfterRestore();
                 }
             };

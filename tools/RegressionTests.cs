@@ -170,6 +170,8 @@ namespace AppManager
                 Run("import history sorts problems first and names each record's state", ImportHistoryRules);
                 Run("import history dialog loads the journal and hands back the batch to clean up", ImportHistoryDialogFlow);
                 Run("import history cleanup deletes sources through the import queue; closing deletes nothing", ImportHistoryCleanupEndToEnd);
+                Run("operation history names actions and explains each change in plain words", OperationHistoryRules);
+                Run("database window lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
             }
             finally
             {
@@ -5567,6 +5569,258 @@ namespace AppManager
                 ConfirmDialog.ShowModal(dialog);
                 PumpUntil(delegate { return false; }, 300);
                 Check(((ListBox)field(dialog, "batchList")).Items.Count == 0 && dialog.RetryBatch == null, "closed dialog still received the journal");
+            }
+        }
+
+        // 操作记录的文字规则：内部名称换成中文、摘要换成一句话、改动语句按不可信输入解析并说明改了什么。
+        private static void OperationHistoryRules()
+        {
+            Check(OperationHistory.Title("physical.files.import") == "导入文件" && OperationHistory.Title("CreateCollectionUnder") == "新建集合"
+                && OperationHistory.Title("migration.future.step") == "数据升级" && OperationHistory.IsKnown("migration.future.step"), "known action names wrong");
+            Check(OperationHistory.Title("SomeFutureMethod") == "修改数据" && !OperationHistory.IsKnown("SomeFutureMethod")
+                && OperationHistory.Title(null) == "修改数据" && !OperationHistory.IsKnown(""), "unknown action must fall back without throwing");
+            Check(OperationHistory.IsSystem("catalog.discover") && !OperationHistory.IsSystem("catalogue") && !OperationHistory.IsSystem(null), "system records misjudged");
+            Check(OperationHistory.UndoBlock("physical.files.move").Contains("布局备份") && OperationHistory.UndoBlock("migration.xml").Contains("从备份恢复")
+                && OperationHistory.UndoBlock("restore.snapshot") != null && OperationHistory.UndoBlock("OnAddCategory") == null, "undo rules differ from the database");
+
+            Check(OperationHistory.ChangeCount("+1 ~0 -0; rows=3") == 3 && OperationHistory.ChangeCount("undo 4; rows=12") == 12
+                && OperationHistory.ChangeCount("rows=x") == -1 && OperationHistory.ChangeCount("") == -1 && OperationHistory.ChangeCount(null) == -1, "change count wrong");
+            Check(OperationHistory.SummaryText("OnAddCategory", "+1 ~0 -0; rows=2", 0, null) == "改动 2 处"
+                && OperationHistory.SummaryText("catalog.discover", "new identities=7", 0, null) == "登记 7 个新项目"
+                && OperationHistory.SummaryText("restore.snapshot", "safety=a.db", 0, null) == "恢复前的数据已留底"
+                && OperationHistory.SummaryText("rollback", "undo 4; rows=1", 4, null) == "撤销了之前的一次操作"
+                && OperationHistory.SummaryText("rollback", "undo 4; rows=1", 4, delegate(long id) { return id == 4 ? "新建分类" : null; }) == "撤销了「新建分类」"
+                && OperationHistory.SummaryText("x", null, 0, null) == "", "summary text wrong");
+
+            bool ok;
+            Check(OperationHistory.CheckText("integrity=ok; foreign_key_errors=0; schema=9; records=12; items=3; memberships=5; journal=wal", out ok)
+                == "检查通过，数据库没有损坏（3 个项目，12 条配置记录）。" && ok, "healthy check text wrong");
+            Check(OperationHistory.CheckText("integrity=row 3 missing; foreign_key_errors=0", out ok).StartsWith("数据库文件有损坏") && !ok, "corruption not reported");
+            Check(OperationHistory.CheckText("integrity=ok; foreign_key_errors=2", out ok).StartsWith("发现 2 处") && !ok, "foreign key errors not reported");
+            Check(OperationHistory.CheckText(null, out ok) == "没有得到检查结果，请稍后再试。" && !ok, "empty check result treated as healthy");
+
+            // 语句解析：文本里的逗号、括号、单引号、换行都不能打断解析；不符合格式的一律返回 null
+            Dictionary<string, string> values = OperationHistory.ParseValues(
+                "INSERT INTO groups(id,key,name,parent_id) VALUES(7,'col:照片/it''s, (a)\nb','it''s, (a)',NULL)");
+            Check(values != null && values["id"] == "7" && values["key"] == "col:照片/it's, (a)\nb" && values["name"] == "it's, (a)" && values["parent_id"] == null,
+                "insert statement parsed wrong");
+            values = OperationHistory.ParseValues("UPDATE records SET record_key='k',ordinal=-3,payload='<a b=''1''>x, y WHERE id=9</a>',slot=X'00ff' WHERE id=12");
+            Check(values != null && values["ordinal"] == "-3" && values["payload"] == "<a b='1'>x, y WHERE id=9</a>" && values["slot"] == "（二进制数据）" && values["id"] == "12",
+                "update statement parsed wrong");
+            foreach (string bad in new string[] { null, "", "DELETE FROM groups WHERE id=7", "DROP TABLE groups", "INSERT INTO groups(id,key) VALUES(7,'abc",
+                "INSERT INTO groups(id,key) VALUES(7)", "INSERT INTO groups(id) VALUES(1); DROP TABLE groups", "INSERT INTO groups(id", "UPDATE groups SET name='a'",
+                "UPDATE groups SET name= WHERE id=1", "UPDATE groups SET name='a' WHERE id=1 OR 1=1" })
+                Check(OperationHistory.ParseValues(bad) == null, "malformed statement accepted: " + bad);
+
+            Dictionary<long, string> groups = new Dictionary<long, string>(), entries = new Dictionary<long, string>();
+            groups[5] = "照片"; groups[6] = "col:照片/旅行"; entries[9] = "add:C:\\p\\a.jpg"; entries[10] = "af:记事本";
+            entries[11] = "lnk:C:\\s\\画图.LNK";
+            // 项目键的四种写法：按路径登记的取文件名（快捷方式不带扩展名），按名称登记的去前缀，没有前缀的（含盘符）原样显示
+            Check(OperationHistory.EntryName("add:C:\\p\\a.jpg") == "a.jpg" && OperationHistory.EntryName("lnk:C:\\s\\画图.LNK") == "画图"
+                && OperationHistory.EntryName("af:记事本") == "记事本" && OperationHistory.EntryName("reg:7-Zip") == "7-Zip"
+                && OperationHistory.EntryName("C:\\x\\y.txt") == "C:\\x\\y.txt" && OperationHistory.EntryName("add:") == "add:"
+                && OperationHistory.EntryName("lnk:.lnk") == ".lnk" && OperationHistory.EntryName(null) == "（未命名）", "entry display name wrong");
+            Check(OperationHistory.EntryPath("lnk:C:\\s\\画图.LNK") == "C:\\s\\画图.LNK" && OperationHistory.EntryPath("af:记事本") == ""
+                && OperationHistory.EntryPath("add:") == "" && OperationHistory.EntryPath(null) == "", "entry path wrong");
+            // 旧版本用过的内部名称也要有中文名
+            Check(OperationHistory.Title("CommitImport") == "导入文件" && OperationHistory.Title("OnCreateCollection") == "新建集合"
+                && OperationHistory.Title("DeleteEntriesDisk") == "删除文件" && OperationHistory.Title("RenameAddedEntry") == "修改显示名称"
+                && OperationHistory.Title("MakeSetCat") == "修改所属分类", "legacy action names not translated");
+            Func<string, string, string, string> text = delegate(string entity, string undoSql, string redoSql)
+            {
+                ChangeRow row = OperationHistory.Parse(1, entity, undoSql, redoSql);
+                OperationHistory.Describe(row, groups, entries);
+                return OperationHistory.RowText(row);
+            };
+            Func<string, string, string, string, string, string> record = delegate(string section, string item, string group, string ordinal, string payload)
+            {
+                return "INSERT INTO records(id,record_key,section,item_id,group_id,ordinal,slot,payload) VALUES(1,'k','" + section + "'," + item + "," + group
+                    + "," + ordinal + ",''," + payload + ")";
+            };
+            string delete = "DELETE FROM records WHERE id=1";
+            Check(text("records", delete, record("ItemCategories", "9", "6", "0", "'<Item />'")) == "新增 归属：a.jpg\r\n加入 照片 / 旅行", "membership text wrong");
+            Check(text("records", record("ItemCategories", "9", "6", "0", "'<Item />'"), delete) == "删除 归属：a.jpg\r\n移出 照片 / 旅行", "removed membership text wrong");
+            Check(text("records", delete, record("Favorites", "10", "NULL", "0", "'<Item />'")) == "新增 收藏：记事本", "favorite text wrong");
+            Check(text("records", delete, record("Favorites", "77", "NULL", "0", "'<Item />'")) == "新增 收藏：已不存在的项目", "missing entry not explained");
+            Check(text("records", delete, record("Hidden", "11", "NULL", "0", "'<Item />'")) == "新增 隐藏：画图\r\nC:\\s\\画图.LNK", "shortcut entry text wrong");
+            Check(text("records", "UPDATE records SET section='CustomCategories',group_id=5,ordinal=0,payload='<Item />' WHERE id=1",
+                "UPDATE records SET section='CustomCategories',group_id=5,ordinal=2,payload='<Item />' WHERE id=1") == "修改 自定义分类：照片\r\n第 1 位 → 第 3 位"
+                && text("records", "UPDATE records SET section='CategoryViewModes',group_id=5,ordinal=0,payload='<Item grid=\"1\" />' WHERE id=1",
+                    "UPDATE records SET section='CategoryViewModes',group_id=5,ordinal=0,payload='<Item grid=\"0\" />' WHERE id=1") == "修改 显示方式：照片\r\n内容有调整",
+                "a modified record must say what changed");
+            Check(text("entries", "UPDATE entries SET key='add:C:\\p\\old.jpg' WHERE id=9", "UPDATE entries SET key='add:C:\\p\\a.jpg' WHERE id=9")
+                == "修改 项目登记：a.jpg\r\n原为：C:\\p\\old.jpg → C:\\p\\a.jpg"
+                && text("entries", "UPDATE entries SET key='af:旧名' WHERE id=10", "UPDATE entries SET key='af:记事本' WHERE id=10") == "修改 项目登记：记事本\r\n原为：旧名",
+                "renamed entry must show the old name");
+            Check(text("records", "UPDATE records SET section='CategoryOverrides',item_id=9,group_id=5,ordinal=0 WHERE id=1",
+                "UPDATE records SET section='CategoryOverrides',item_id=9,group_id=99,ordinal=0 WHERE id=1") == "修改 所属分类：a.jpg\r\n照片 → 已删除的分类或集合",
+                "category change text wrong");
+            Check(text("records", "UPDATE records SET section='ItemOrders',item_id=9,group_id=5,ordinal=0 WHERE id=1",
+                "UPDATE records SET section='ItemOrders',item_id=9,group_id=5,ordinal=4 WHERE id=1") == "修改 排序：a.jpg\r\n照片 中第 1 位 → 第 5 位", "order text wrong");
+            Check(text("records", "UPDATE records SET section='Settings',slot='CloseToTray',payload='<CloseToTray>true</CloseToTray>' WHERE id=1",
+                "UPDATE records SET section='Settings',slot='CloseToTray',payload='<CloseToTray>false</CloseToTray>' WHERE id=1")
+                == "修改 设置：关闭时最小化到托盘\r\n开 → 关", "setting text wrong");
+            Check(text("records", "INSERT INTO records(id,section,slot,payload) VALUES(1,'Settings','Favorites','<Favorites />')", delete)
+                == "删除 内部标记：「收藏」为空的占位记录\r\n程序自用，不代表内容有增减", "empty-list placeholder shown as a setting");
+            Check(text("groups", "DELETE FROM groups WHERE id=6", "INSERT INTO groups(id,key,name,parent_id) VALUES(6,'col:照片/旅行','旅行',5)") == "新增 集合：照片 / 旅行"
+                && text("groups", "UPDATE groups SET key='工具',name='工具',parent_id=NULL WHERE id=3", "UPDATE groups SET key='软件',name='软件',parent_id=NULL WHERE id=3")
+                    == "修改 分类：软件\r\n原名：工具", "group text wrong");
+            Check(text("added_items", "DELETE FROM added_items WHERE id=1",
+                "INSERT INTO added_items(id,item_id,group_id,path,path_key,name,folder,resource,origin,origin_key) VALUES(1,9,5,'C:\\p\\a.jpg','c:\\p\\a.jpg','a',0,1,NULL,NULL)")
+                == "新增 文件：a\r\nC:\\p\\a.jpg  ·  所在：照片", "added file text wrong");
+            Check(text("added_items", "UPDATE added_items SET group_id=5,path='C:\\p\\a.jpg',name='a',folder=0,resource=1 WHERE id=1",
+                "UPDATE added_items SET group_id=5,path='C:\\p\\a.jpg',name='b',folder=0,resource=1 WHERE id=1") == "修改 文件：b\r\n名称：a → b", "rename text wrong");
+            Check(text("entries", "DELETE FROM entries WHERE id=9", "INSERT INTO entries(id,key) VALUES(9,'add:C:\\p\\a.jpg')") == "新增 项目登记：a.jpg\r\nC:\\p\\a.jpg",
+                "entry text wrong");
+            Check(text("records", "garbage", "garbage").StartsWith("其它 其它：无法解读的改动") && text("unknown_table", "DELETE FROM unknown_table WHERE id=1",
+                "INSERT INTO unknown_table(id) VALUES(1)") == "新增 其它：unknown_table", "unreadable change must be labelled, not thrown");
+            Check(OperationHistory.SettingValue("<A><B>1</B></A>") == "（多项内容）" && OperationHistory.SettingValue("<A>") == "（无法读取）"
+                && OperationHistory.SettingValue("<!DOCTYPE a [<!ENTITY e \"x\">]><a>&e;</a>") == "（无法读取）" && OperationHistory.SettingValue("") == "（空）",
+                "setting value must not expand entities or throw");
+            ChangeRow lengthy = OperationHistory.Parse(1, "entries", "DELETE FROM entries WHERE id=1",
+                "INSERT INTO entries(id,key) VALUES(1,'add:C:\\" + new string('长', 900) + "\nx')");
+            OperationHistory.Describe(lengthy, groups, entries);
+            Check(lengthy.Title.Length <= 201 && lengthy.Detail.Length <= 401 && lengthy.Title.IndexOf('\n') < 0, "long text not clipped to one line");
+
+            // 列表规则：撤销与再撤销交替标记；只有最新的业务操作可撤销；格式不对的行跳过
+            List<string[]> rows = new List<string[]>();
+            rows.Add(new string[] { "5", "2026-11-14T05:00:00.0000000Z", "rollback", "undo 4; rows=1", "4" });
+            rows.Add(new string[] { "4", "2026-11-14T04:00:00.0000000Z", "rollback", "undo 3; rows=1", "3" });
+            rows.Add(new string[] { "3", "2026-11-14T03:00:00.0000000Z", "OnAddCategory", "+1 ~0 -0; rows=2", null });
+            rows.Add(new string[] { "2", "not a time", "physical.files.import", "+1 ~0 -0; rows=3", null });
+            rows.Add(new string[] { "x", "2026-11-14T03:00:00.0000000Z", "OnAddCategory", "", null });
+            rows.Add(new string[] { "1", "2026-11-14T01:00:00.0000000Z", "catalog.discover", "new identities=2", null });
+            List<DatabaseForm.Op> ops = DatabaseForm.ReadOps(rows);
+            DatabaseForm.Annotate(ops);
+            Check(ops.Count == 5 && ops[0].TimeKnown && ops[0].Time == new DateTime(2026, 11, 14, 5, 0, 0, DateTimeKind.Utc).ToLocalTime() && !ops[3].TimeKnown,
+                "operation rows read wrong");
+            Check(!ops[0].Reverted && ops[1].Reverted && !ops[2].Reverted, "undo of an undo must make the original effective again");
+            Check(ops[0].ToString() == "撤销操作，撤销了「撤销操作」" && ops[2].ToString() == "新建分类，改动 2 处" && ops[4].ToString() == "扫描登记新项目，登记 2 个新项目",
+                "list line wrong: " + ops[0] + " / " + ops[2] + " / " + ops[4]);
+            Check(DatabaseForm.CanUndo(ops[0], 5) && DatabaseForm.NoticeText(ops[0], 5).StartsWith("这是一次撤销") && DatabaseForm.StatusText(ops[0], 5) == "可撤销",
+                "latest undo record must be undoable");
+            Check(!DatabaseForm.CanUndo(ops[2], 5) && DatabaseForm.NoticeText(ops[2], 5).StartsWith("只能撤销最新的一次操作")
+                && DatabaseForm.NoticeText(ops[1], 5) == "这次操作已经被撤销。" && DatabaseForm.StatusText(ops[1], 5) == "已撤销", "older records offered for undo");
+            Check(!DatabaseForm.CanUndo(ops[3], 2) && DatabaseForm.NoticeText(ops[3], 2).Contains("布局备份") && DatabaseForm.StatusText(ops[3], 2) == "不可撤销",
+                "operation that touched files offered for undo");
+            Check(!DatabaseForm.CanUndo(ops[4], 1) && DatabaseForm.StatusText(ops[4], 1) == "系统记录" && !DatabaseForm.CanUndo(null, 0), "system record offered for undo");
+        }
+
+        // 窗口的完整链路：默认不列系统记录；最新的业务操作可撤销；明细和更早的记录分页读取；撤销后数据库确实退回。
+        private static void DatabaseFormFlow()
+        {
+            string path = Path.Combine(root, "database-form", "config.xml");
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            AppConfig c = new AppConfig();
+            c.CustomCategories.Add("工具");
+            c.ResourceCategories.Add("音乐");
+            Check(c.SaveTo(path), "fixture export");
+            c = ConfigDatabase.Load(path);
+            Check(!c.LoadFailed, c.DatabaseError);
+            for (int i = 0; i < DatabaseForm.PageRows; i++)
+                c.AddedItems.Add(new AddedEntry { Path = "D:\\lib\\track" + i + ".mp3", Name = "track" + i, Category = "音乐", IsResource = true });
+            Check(c.Save("phone.music.import"), c.DatabaseError);
+            c.CustomCategories.Add("游戏");
+            Check(c.Save("OnAddCategory"), c.DatabaseError);
+            long newest = Convert.ToInt64(c.Database.History(1)[0][0]);
+            int business = c.Database.HistoryPage(0, 1000, false).Count;
+            // 扫描登记比业务操作更新，数量超过一页：既不能挡住撤销，也不能默认列出来
+            using (Sqlite db = new Sqlite(c.Database.FilePath, false))
+                for (int i = 0; i < DatabaseForm.PageOps + 5; i++)
+                    db.Execute("INSERT INTO operations(utc,action,summary,actor,session,pid) VALUES(?,?,?,?,?,?)",
+                        DateTime.UtcNow.ToString("o"), "catalog.discover", "new identities=1", "test", "test", 1);
+            Check(c.Database.LatestBusinessOperation() == newest && c.Database.HistoryPage(0, 1000, false).Count == business
+                && c.Database.HistoryPage(newest, 1000, false).Count == business - 1, "history paging or the undo candidate is wrong");
+
+            Func<DatabaseForm, string, object> field = delegate(DatabaseForm dialog, string name)
+            {
+                return typeof(DatabaseForm).GetField(name, Private).GetValue(dialog);
+            };
+            Action<DatabaseForm> loaded = delegate(DatabaseForm dialog)
+            {
+                PumpUntil(delegate
+                {
+                    return (string)field(dialog, "placeholder") != "正在读取操作记录…" && (string)field(dialog, "detailText") != "正在读取明细…";
+                }, 15000);
+            };
+
+            using (DatabaseForm dialog = new DatabaseForm(c.Database))
+            {
+                dialog.Opacity = 0;
+                dialog.Show();
+                loaded(dialog);
+                ListBox ops = (ListBox)field(dialog, "opList"), rows = (ListBox)field(dialog, "changeList");
+                Control undo = (Control)field(dialog, "undo"), notice = (Control)field(dialog, "notice");
+                Check(ops.Items.Count == business && ops.Items[0].ToString() == "新建分类，改动 2 处" && (string)field(dialog, "headerSummary") == "共 " + business + " 次操作",
+                    "business operations not listed newest first: " + ops.Items.Count + " / " + ops.Items[0]);
+                Check(undo.Visible && notice.Text.StartsWith("可以撤销") && rows.Items.Count == 2 && rows.Items[0].ToString() == "新增 分类：游戏",
+                    "latest operation not offered for undo: " + notice.Text + " / " + rows.Items.Count);
+
+                // 改动很多的操作：先列一页，点「显示更多」接着列，选中新列出的第一行
+                ops.SelectedIndex = 1;
+                loaded(dialog);
+                Check(ops.Items[1].ToString().StartsWith("导入手机音乐") && !undo.Visible && notice.Text.StartsWith("只能撤销最新的一次操作"),
+                    "older operation offered for undo: " + ops.Items[1] + " / " + notice.Text);
+                Check(rows.Items.Count == DatabaseForm.PageRows + 1 && rows.Items[rows.Items.Count - 1].ToString() == "显示更多"
+                    && (int)field(dialog, "added") >= DatabaseForm.PageRows * 2, "long operation not paged: " + rows.Items.Count);
+                MethodInfo more = typeof(DatabaseForm).GetMethod("LoadDetails", Private);
+                more.Invoke(dialog, new object[] { true });
+                PumpUntil(delegate { return rows.Items.Count != DatabaseForm.PageRows + 1; }, 15000);
+                Check(rows.Items.Count >= DatabaseForm.PageRows * 2 && rows.SelectedIndex == DatabaseForm.PageRows && rows.Items[DatabaseForm.PageRows] is ChangeRow,
+                    "show-more did not append the next page: " + rows.Items.Count + " / " + rows.SelectedIndex);
+                HashSet<long> seen = new HashSet<long>();
+                foreach (object item in rows.Items) if (item is ChangeRow) Check(seen.Add(((ChangeRow)item).Id), "a change is listed twice after paging");
+
+                // 显示系统记录：一页 PageOps 条，末尾可继续往更早读；业务操作仍是唯一可撤销的那条
+                typeof(Control).GetMethod("OnClick", Private).Invoke((Control)field(dialog, "filter"), new object[] { EventArgs.Empty });
+                PumpUntil(delegate { return ops.Items.Count == DatabaseForm.PageOps + 1; }, 15000);
+                loaded(dialog);
+                Check(ops.Items.Count == DatabaseForm.PageOps + 1 && ops.Items[0].ToString() == "扫描登记新项目，登记 1 个新项目"
+                    && ops.Items[DatabaseForm.PageOps].ToString() == "显示更早的记录" && ((Control)field(dialog, "filter")).Text == "隐藏系统自动记录",
+                    "system records not paged: " + ops.Items.Count);
+                Check(!undo.Visible && notice.Text.StartsWith("扫描时自动产生的记录"), "system record offered for undo");
+                typeof(DatabaseForm).GetMethod("LoadHistory", Private).Invoke(dialog, new object[] { true });
+                PumpUntil(delegate { return ops.Items.Count == DatabaseForm.PageOps + 5 + business; }, 15000);
+                loaded(dialog);
+                Check(ops.Items.Count == DatabaseForm.PageOps + 5 + business && ops.Items[ops.Items.Count - 1] is DatabaseForm.Op,
+                    "earlier records not appended: " + ops.Items.Count);
+                ops.SelectedIndex = DatabaseForm.PageOps + 5;
+                loaded(dialog);
+                Check(ops.SelectedItem.ToString() == "新建分类，改动 2 处" && undo.Visible, "scan records must not block undoing the latest business operation");
+
+                typeof(DatabaseForm).GetMethod("StartUndo", Private).Invoke(dialog, new object[] { newest });
+                Check(!((Control)field(dialog, "close")).Enabled, "window stays usable while the undo is running");
+                dialog.Close();
+                Check(dialog.Visible, "window closed while the undo was still running");
+                PumpUntil(delegate { return !dialog.Visible; }, 15000);
+                Check(dialog.Changed && !dialog.Visible, "successful undo must close the window and report the change");
+            }
+            AppConfig after = ConfigDatabase.Load(path);
+            Check(!after.LoadFailed && !after.CustomCategories.Contains("游戏") && after.CustomCategories.Contains("工具")
+                && after.AddedItems.Count == DatabaseForm.PageRows, "undo did not roll back exactly the latest operation");
+
+            // 撤销本身是最新的一条：可以再撤销；被撤销的那条标为已撤销
+            using (DatabaseForm dialog = new DatabaseForm(after.Database))
+            {
+                dialog.Opacity = 0;
+                dialog.Show();
+                loaded(dialog);
+                ListBox ops = (ListBox)field(dialog, "opList");
+                Check(ops.Items[0].ToString() == "撤销操作，撤销了「新建分类」" && ((Control)field(dialog, "undo")).Visible
+                    && ((Control)field(dialog, "notice")).Text.StartsWith("这是一次撤销"), "undo record wrong: " + ops.Items[0]);
+                Check(((DatabaseForm.Op)ops.Items[1]).Reverted && DatabaseForm.StatusText((DatabaseForm.Op)ops.Items[1], (long)field(dialog, "latestBusiness")) == "已撤销",
+                    "undone operation not marked");
+                dialog.Close();
+            }
+
+            // 读取还没结束就关闭：后台线程不得再回调已关闭的窗口
+            using (DatabaseForm dialog = new DatabaseForm(after.Database))
+            {
+                dialog.Opacity = 0;
+                dialog.Shown += delegate { dialog.Close(); };
+                dialog.Show();
+                PumpUntil(delegate { return false; }, 300);
+                Check(((ListBox)field(dialog, "opList")).Items.Count == 0 && !dialog.Changed, "closed window still received the history");
             }
         }
 
