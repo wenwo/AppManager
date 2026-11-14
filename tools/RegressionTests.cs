@@ -165,6 +165,9 @@ namespace AppManager
                 Run("backup list ignores update leftovers", BackupListSkipsOld);
                 Run("backup create removes stale temporary snapshots", BackupCleansStaleTemp);
                 Run("music player caches the scaled cover per size", MusicPlayerCoverCache);
+                Run("import history sorts problems first and names each record's state", ImportHistoryRules);
+                Run("import history dialog loads the journal and hands back the batch to clean up", ImportHistoryDialogFlow);
+                Run("import history cleanup deletes sources through the import queue; closing deletes nothing", ImportHistoryCleanupEndToEnd);
             }
             finally
             {
@@ -5339,6 +5342,340 @@ namespace AppManager
         }
 
         // 进度窗口：扫描结束前关窗口只发出取消，窗口等后台线程退出才关闭；取消后迟到的进度不覆盖「正在取消」。
+        // 导入记录窗口的整理规则：整体状态、明细排序与上限、文件名、提示文字。
+        private static void ImportHistoryRules()
+        {
+            Func<string, string, string, ImportItem> item = delegate(string state, string source, string error)
+            {
+                return new ImportItem { State = state, Source = source, Target = "D:\\lib\\" + ImportHistoryDialog.DisplayName(source), Error = error };
+            };
+            Func<List<ImportHistoryDialog.Row>, string> labels = delegate(List<ImportHistoryDialog.Row> rows)
+            {
+                return string.Join("|", rows.ConvertAll(delegate(ImportHistoryDialog.Row row) { return row.Label; }).ToArray());
+            };
+
+            ImportBatch done = new ImportBatch { Category = "文档", Operation = ImportOperation.Move, Committed = true, Finished = true };
+            done.Items.Add(item(FileImport.Moved, "C:\\a\\1.txt", null));
+            done.Items.Add(item(FileImport.Skipped, "C:\\a\\2.txt", null));
+            Check(ImportHistoryDialog.Classify(done) == ImportBatchStatus.Done, "moved + skipped batch is not done");
+            Check(ImportHistoryDialog.NoticeText(done) == "", "clean batch has a notice");
+
+            ImportBatch copy = new ImportBatch { Category = "文档", Collection = "合同", Operation = ImportOperation.Copy, Committed = true, Finished = true };
+            copy.Items.Add(item(FileImport.Copied, "C:\\a\\1.txt", null));
+            ImportHistoryDialog.Row copied = new ImportHistoryDialog.Row(copy, copy.Items[0]);
+            Check(ImportHistoryDialog.Classify(copy) == ImportBatchStatus.Done && !MainForm.CanRetryDelete(copy), "copy batch treated as awaiting cleanup");
+            Check(copied.Label == FileImport.Copied && copied.Tone == ImportTone.Good && copied.ErrorLines == 0, "copied item of a copy batch shown as a problem");
+            Check(ImportHistoryDialog.Title(copy) == "文档 › 合同" && ImportHistoryDialog.Title(new ImportBatch()) == "未指定分类", "record title wrong");
+
+            // 移入但部分失败：原件全部保留，等用户确认清理；引用项没有原件可删
+            ImportBatch cleanup = new ImportBatch { Category = "照片", Operation = ImportOperation.Move, Committed = true, Finished = true,
+                Error = "部分失败，全部源文件保留。" };
+            cleanup.Items.Add(item(FileImport.Copied, "C:\\p\\a.jpg", null));
+            cleanup.Items.Add(item(FileImport.Failed, "C:\\p\\b.jpg", "磁盘空间不足。"));
+            cleanup.Items.Add(item(FileImport.DeleteFailed, "C:\\p\\c.jpg", "拒绝访问。"));
+            cleanup.Items.Add(item(FileImport.Linked, "C:\\p\\d.jpg", null));
+            ImportItem reference = item(FileImport.Copied, "C:\\p\\e.jpg", null);
+            reference.Reference = true;
+            cleanup.Items.Add(reference);
+            ImportHistoryDialog.Record record = new ImportHistoryDialog.Record(cleanup, new DateTime(2026, 11, 9, 22, 4, 0));
+            Check(record.Status == ImportBatchStatus.Cleanup && MainForm.CanRetryDelete(cleanup), "partially failed move is not awaiting cleanup");
+            Check(record.Stored == 3 && record.Existing == 1 && record.Failed == 1 && record.Cleanup == 2 && !record.HasRolledBack,
+                "record numbers wrong: " + record.Stored + "/" + record.Existing + "/" + record.Failed + "/" + record.Cleanup);
+            Check(labels(record.Rows) == "失败|源文件删除失败|原件待清理|已收录|已复制", "problem rows not listed first: " + labels(record.Rows));
+            Check(record.Rows[0].Tone == ImportTone.Bad && record.Rows[1].Tone == ImportTone.Warn && record.Rows[2].Tone == ImportTone.Warn
+                && record.Rows[3].Tone == ImportTone.Neutral && record.Rows[4].Tone == ImportTone.Good, "row tones wrong");
+            Check(!MainForm.AwaitsSourceDelete(cleanup, reference), "reference item treated as having a source to delete");
+            Check(ImportHistoryDialog.NoticeText(cleanup) == "部分失败，全部源文件保留。\r\n可重试删除已入库项的源文件；复制失败项需重新扫描或重新导入。",
+                "notice wrong: " + ImportHistoryDialog.NoticeText(cleanup));
+            Check(ImportHistoryDialog.RowText(record.Rows[1]) == "源文件删除失败：C:\\p\\c.jpg\r\n目标：D:\\lib\\c.jpg\r\n拒绝访问。", "row text wrong");
+
+            // 入库没保存成功：副本已撤回，不提供清理原件
+            ImportBatch notSaved = new ImportBatch { Category = "视频", Operation = ImportOperation.Move, Committed = false, Finished = true, Error = "入库记录保存失败" };
+            notSaved.Items.Add(item(FileImport.RolledBack, "C:\\v\\a.mp4", null));
+            notSaved.Items.Add(item(FileImport.Copied, "C:\\v\\b.mp4", null));
+            ImportHistoryDialog.Record rolled = new ImportHistoryDialog.Record(notSaved, DateTime.Now);
+            Check(rolled.Status == ImportBatchStatus.NotSaved && !MainForm.CanRetryDelete(notSaved) && rolled.Cleanup == 0, "uncommitted batch offers cleanup");
+            Check(rolled.HasRolledBack && rolled.Failed == 1 && rolled.Rows[0].Tone == ImportTone.Bad && rolled.Rows[1].Tone == ImportTone.Neutral
+                && rolled.Rows[1].Label == FileImport.Copied, "rolled back batch shown wrong");
+
+            ImportBatch unfinished = new ImportBatch { Category = "文档", Operation = ImportOperation.Move, Committed = true };
+            unfinished.Items.Add(item(FileImport.Waiting, "C:\\a\\1.txt", null));
+            unfinished.Items.Add(item(null, null, null));
+            Check(ImportHistoryDialog.Classify(unfinished) == ImportBatchStatus.Unfinished, "interrupted batch not marked unfinished");
+            List<ImportHistoryDialog.Row> odd = ImportHistoryDialog.BuildRows(unfinished);
+            Check(odd[1].Label == "未知" && odd[1].Name == "（未知来源）" && odd[1].Tone == ImportTone.Neutral, "item without state or source not tolerated");
+
+            ImportBatch partial = new ImportBatch { Category = "文档", Operation = ImportOperation.Copy, Committed = true, Finished = true };
+            partial.Items.Add(item(FileImport.Copied, "C:\\a\\1.txt", null));
+            partial.Items.Add(item(FileImport.Failed, "C:\\a\\2.txt", "文件正被另一个程序使用。"));
+            Check(ImportHistoryDialog.Classify(partial) == ImportBatchStatus.Partial, "copy batch with a failure is not partial");
+            Check(ImportHistoryDialog.NoticeText(partial) == "复制失败项需重新扫描或重新导入；本记录不能重试复制。", "failure hint missing");
+            done.Error = "磁盘空间不足，已停止后续操作。";
+            Check(ImportHistoryDialog.Classify(done) == ImportBatchStatus.Partial, "batch error alone does not mark the record");
+            done.Error = null;
+
+            // 状态正常但恢复时留下了说明：排在正常项前面；文件再多也是问题项在最前，后面的正常项保持原顺序
+            ImportBatch large = new ImportBatch { Category = "照片", Operation = ImportOperation.Move, Committed = true, Finished = true };
+            for (int i = 0; i < ImportHistoryDialog.PageRows + 500; i++) large.Items.Add(item(FileImport.Moved, "E:\\DCIM\\" + i + ".jpg", null));
+            ImportItem noted = item(FileImport.Moved, "E:\\DCIM\\noted.jpg", "临时副本需核对：D:\\lib\\noted.jpg.import-1");
+            ImportItem broken = item(FileImport.Failed, "E:\\DCIM\\broken.jpg", "第一行\n第二行");
+            large.Items.Add(noted);
+            large.Items.Add(broken);
+            ImportHistoryDialog.Record capped = new ImportHistoryDialog.Record(large, DateTime.Now);
+            Check(capped.Rows.Count == large.Items.Count && capped.Rows[0].Item == broken && capped.Rows[1].Item == noted
+                && capped.Rows[2].Item == large.Items[0]
+                && capped.Rows[capped.Rows.Count - 1].Item == large.Items[ImportHistoryDialog.PageRows + 499],
+                "problem rows not first or normal rows reordered");
+            Check(capped.Rows[0].ErrorLines == 2 && capped.Rows[1].ErrorLines == 1 && capped.Rows[1].Tone == ImportTone.Good, "error lines wrong");
+            Check(capped.Stored == ImportHistoryDialog.PageRows + 501 && capped.Failed == 1, "numbers must cover every row, not only the first page");
+
+            Check(ImportHistoryDialog.DisplayName("C:\\a\\b.txt") == "b.txt" && ImportHistoryDialog.DisplayName("C:\\a\\dir\\") == "dir"
+                && ImportHistoryDialog.DisplayName("C:/a/b") == "b" && ImportHistoryDialog.DisplayName("C:\\") == "C:", "display name wrong");
+            Check(ImportHistoryDialog.DisplayName(null) == "（未知来源）" && ImportHistoryDialog.DisplayName("") == "（未知来源）"
+                && ImportHistoryDialog.DisplayName("\\\\") == "\\\\" && ImportHistoryDialog.DisplayName("C:\\a\\x<>|?*\"\n.txt") == "x<>|?*\"\n.txt",
+                "display name does not tolerate empty or invalid paths");
+
+            DateTime now = new DateTime(2026, 11, 14, 9, 30, 0);
+            Check(ImportHistoryDialog.ListTime(new DateTime(2026, 11, 14, 0, 5, 0), now) == "今天 00:05"
+                && ImportHistoryDialog.ListTime(new DateTime(2026, 11, 13, 23, 59, 0), now) == "11-13 23:59"
+                && ImportHistoryDialog.ListTime(new DateTime(2025, 12, 31, 23, 59, 0), now) == "2025-12-31", "list time wrong");
+            HashSet<string> names = new HashSet<string>();
+            foreach (ImportBatchStatus status in Enum.GetValues(typeof(ImportBatchStatus)))
+                Check(names.Add(ImportHistoryDialog.StatusText(status)), "two states share one label: " + status);
+        }
+
+        // 导入记录窗口：后台读取日志（坏文件只计数不中断）、按时间倒序列出；可清理的批次点按钮后交回调用方，
+        // 导入进行中或批次不需要清理时不提供按钮；文件很多的记录先列一页，点「显示更多」接着列；读取完成前关闭窗口不出错。
+        private static void ImportHistoryDialogFlow()
+        {
+            string journal = Path.Combine(root, "import-history", "Imports");
+            ImportBatch pending = new ImportBatch { Category = "照片", Operation = ImportOperation.Move, Committed = true, Finished = true,
+                DeleteAuthorized = true, JournalDirectory = journal };
+            pending.Items.Add(new ImportItem { State = FileImport.DeleteFailed, Source = "C:\\src\\a&b.jpg", Target = "D:\\lib\\a&b.jpg", Error = "拒绝访问。" });
+            pending.Items.Add(new ImportItem { State = FileImport.Moved, Source = "C:\\src\\c.jpg", Target = "D:\\lib\\c.jpg" });
+            FileImport.Save(pending);
+            ImportBatch clean = new ImportBatch { Category = "文档", Operation = ImportOperation.Copy, Committed = true, Finished = true, JournalDirectory = journal };
+            clean.Items.Add(new ImportItem { State = FileImport.Copied, Source = "C:\\src\\d.txt", Target = "D:\\lib\\d.txt" });
+            FileImport.Save(clean);
+            File.SetLastWriteTime(Path.Combine(journal, clean.Id + ".xml"), DateTime.Now.AddDays(-3));
+            string damaged = Path.Combine(journal, Guid.NewGuid().ToString("N") + ".xml");
+            File.WriteAllText(damaged, "<ImportBatch><Id>");
+            File.SetLastWriteTime(damaged, DateTime.Now.AddDays(-5));
+            ImportBatch many = new ImportBatch { Category = "音乐", Operation = ImportOperation.Copy, Committed = true, Finished = true, JournalDirectory = journal };
+            for (int i = 0; i < ImportHistoryDialog.PageRows + 5; i++)
+                many.Items.Add(new ImportItem { State = FileImport.Copied, Source = "E:\\m\\" + i + ".mp3", Target = "D:\\lib\\" + i + ".mp3" });
+            FileImport.Save(many);
+            File.SetLastWriteTime(Path.Combine(journal, many.Id + ".xml"), DateTime.Now.AddDays(-4));
+
+            Func<ImportHistoryDialog, string, object> field = delegate(ImportHistoryDialog dialog, string name)
+            {
+                return typeof(ImportHistoryDialog).GetField(name, Private).GetValue(dialog);
+            };
+            // 显示窗口并等读取结束（左侧出现记录，或占位文字不再是“正在读取”），再在界面线程里执行检查
+            Action<ImportHistoryDialog, Action> whenLoaded = delegate(ImportHistoryDialog dialog, Action inspect)
+            {
+                Stopwatch waited = Stopwatch.StartNew();
+                using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+                {
+                    probe.Tick += delegate
+                    {
+                        bool loaded = ((ListBox)field(dialog, "batchList")).Items.Count > 0
+                            || (string)field(dialog, "placeholder") != "正在读取导入记录…";
+                        if (!dialog.Visible || (!loaded && waited.ElapsedMilliseconds < 15000)) return;
+                        probe.Stop();
+                        dialog.Opacity = 0;
+                        try { if (loaded) inspect(); }
+                        finally { if (dialog.Visible) dialog.Close(); }
+                    };
+                    probe.Start();
+                    ConfirmDialog.ShowModal(dialog);
+                }
+            };
+
+            int records = -1, rows = -1;
+            bool retryShown = false;
+            string summary = null, first = null, hint = null;
+            ImportBatch handed = null;
+            using (ImportHistoryDialog dialog = new ImportHistoryDialog(journal, delegate { return false; }))
+            {
+                whenLoaded(dialog, delegate
+                {
+                    ListBox batches = (ListBox)field(dialog, "batchList");
+                    records = batches.Items.Count;
+                    first = batches.Items.Count > 0 ? batches.Items[0].ToString() : null;
+                    rows = ((ListBox)field(dialog, "itemList")).Items.Count;
+                    retryShown = ((Control)field(dialog, "retry")).Visible;
+                    hint = ((Control)field(dialog, "footer")).Text;
+                    summary = (string)field(dialog, "headerSummary");
+                    typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(dialog, null);
+                });
+                handed = dialog.RetryBatch;
+            }
+            Check(records == 3 && first != null && first.StartsWith("照片，原件待清理"), "journal not listed newest first: " + records + " / " + first);
+            Check(summary == "共 3 次导入 · 1 次需留意 · 1 条记录无法读取", "header summary wrong: " + summary);
+            Check(rows == 2 && retryShown && hint.Contains("不进入回收站"), "pending batch does not offer cleanup");
+            Check(handed != null && handed.Id == pending.Id && handed.DeleteAuthorized, "cleanup request not handed back to the caller");
+
+            // 导入进行中：不提供清理按钮并说明原因；不需要清理的记录同样没有按钮；直接关闭不交回批次
+            bool busyHidden = false, cleanHidden = false;
+            string busyHint = null;
+            int cleanRows = -1, firstPage = -1, allRows = -1, selectedAfterMore = -1, afterExtraClick = -1;
+            string lastOfFirstPage = null;
+            using (ImportHistoryDialog dialog = new ImportHistoryDialog(journal, delegate { return true; }))
+            {
+                whenLoaded(dialog, delegate
+                {
+                    Control retry = (Control)field(dialog, "retry");
+                    busyHidden = !retry.Visible;
+                    busyHint = ((Control)field(dialog, "footer")).Text;
+                    typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(dialog, null);
+                    ((ListBox)field(dialog, "batchList")).SelectedIndex = 1;
+                    cleanHidden = !retry.Visible && ((Control)field(dialog, "footer")).Text == "";
+                    ListBox items = (ListBox)field(dialog, "itemList");
+                    cleanRows = items.Items.Count;
+                    ((ListBox)field(dialog, "batchList")).SelectedIndex = 2;
+                    firstPage = items.Items.Count;
+                    lastOfFirstPage = items.Items[items.Items.Count - 1].ToString();
+                    MethodInfo more = typeof(ImportHistoryDialog).GetMethod("ShowMoreRows", Private);
+                    more.Invoke(dialog, null);
+                    allRows = items.Items.Count;
+                    selectedAfterMore = items.SelectedIndex;
+                    more.Invoke(dialog, null);
+                    afterExtraClick = items.Items.Count;
+                });
+                Check(dialog.RetryBatch == null, "closing the dialog still returned a batch");
+            }
+            Check(busyHidden && busyHint.StartsWith("正在导入"), "cleanup offered while an import is running: " + busyHint);
+            Check(cleanHidden && cleanRows == 1, "record without leftovers offers cleanup");
+            Check(firstPage == ImportHistoryDialog.PageRows + 1 && lastOfFirstPage == "显示更多", "long record not paged: " + firstPage + " / " + lastOfFirstPage);
+            Check(allRows == ImportHistoryDialog.PageRows + 5 && selectedAfterMore == ImportHistoryDialog.PageRows && afterExtraClick == allRows,
+                "show-more did not append the remaining rows: " + allRows + " / " + selectedAfterMore + " / " + afterExtraClick);
+
+            // 没有日志目录：显示空状态
+            string emptyText = null;
+            using (ImportHistoryDialog dialog = new ImportHistoryDialog(Path.Combine(root, "import-history", "missing"), delegate { return false; }))
+                whenLoaded(dialog, delegate { emptyText = (string)field(dialog, "placeholder"); });
+            Check(emptyText == "暂无导入记录", "empty journal state wrong: " + emptyText);
+
+            // 读取还没结束就关闭：后台线程不得再回调已关闭的窗口
+            using (ImportHistoryDialog dialog = new ImportHistoryDialog(journal, delegate { return false; }))
+            {
+                dialog.Opacity = 0;
+                dialog.Shown += delegate { dialog.Close(); };
+                ConfirmDialog.ShowModal(dialog);
+                PumpUntil(delegate { return false; }, 300);
+                Check(((ListBox)field(dialog, "batchList")).Items.Count == 0 && dialog.RetryBatch == null, "closed dialog still received the journal");
+            }
+        }
+
+        // 主窗口入口的完整链路：打开导入记录后直接关闭，不删任何东西；点「删除已入库项的源文件」后，
+        // 由导入队列校验并删掉原件、入库副本保留、日志改为已移动。
+        private static void ImportHistoryCleanupEndToEnd()
+        {
+            string dir = Path.Combine(root, "import-history-cleanup");
+            Directory.CreateDirectory(dir);
+            string source = Path.Combine(dir, "report.txt");
+            File.WriteAllText(source, "history cleanup content");
+            AppConfig config = new AppConfig
+            {
+                ManageRootPath = Path.Combine(dir, "manage"),
+                ResourceStorePath = Path.Combine(dir, "store")
+            };
+            using (MainForm form = new MainForm(config))
+            {
+                Invoke(form, "BuildControls");
+                IntPtr handle = form.Handle;
+                typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
+                typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "文档");
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                MethodInfo queue = typeof(MainForm).GetMethod("QueueImport", Private, null, new[]
+                {
+                    typeof(string[]), typeof(ImportOperation), typeof(string), typeof(string), typeof(bool), typeof(uint),
+                    typeof(Action<ImportBatch>), typeof(int), typeof(bool), typeof(bool), typeof(ImportDuplicateDecision), typeof(bool)
+                }, null);
+                queue.Invoke(form, new object[] { new[] { source }, ImportOperation.Copy, "文档", null, true, (uint)0,
+                    null, 0, false, false, null, false });
+                FieldInfo running = typeof(MainForm).GetField("importRunning", Private);
+                PumpUntil(() => !(bool)running.GetValue(form));
+                Check(config.AddedItems.Count == 1 && File.Exists(source), "fixture import failed");
+
+                // 把这条记录改成“移入、已授权、原件还没删”：相当于上次删源没有完成
+                string journal = Path.Combine(Paths.DataDir, "Imports"), xml = null;
+                ImportBatch saved = null;
+                foreach (string path in Directory.GetFiles(journal, "*.xml"))
+                {
+                    ImportBatch candidate;
+                    try { candidate = FileImport.Load(path); }
+                    catch (Exception) { continue; }   // 其它用例留下的损坏日志
+                    if (candidate.Items.Count == 1 && string.Equals(candidate.Items[0].Source, source, StringComparison.OrdinalIgnoreCase))
+                    {
+                        saved = candidate;
+                        xml = path;
+                    }
+                }
+                Check(saved != null && saved.Committed && saved.Items[0].State == FileImport.Copied, "fixture journal not found");
+                string target = saved.Items[0].Target;
+                saved.Operation = ImportOperation.Move;
+                saved.DeleteAuthorized = true;
+                FileImport.Save(saved);
+                File.Delete(Path.ChangeExtension(xml, ".complete"));
+
+                // 打开导入记录、选中这条记录，再按 clean 决定点清理还是直接关闭；检查结果先记下来，出了窗口再断言
+                bool found = false, offered = false;
+                Action<bool> open = delegate(bool clean)
+                {
+                    found = false;
+                    offered = false;
+                    Stopwatch waited = Stopwatch.StartNew();
+                    using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+                    {
+                        probe.Tick += delegate
+                        {
+                            ImportHistoryDialog dialog = null;
+                            foreach (Form opened in Application.OpenForms)
+                                if (opened is ImportHistoryDialog) dialog = (ImportHistoryDialog)opened;
+                            if (dialog == null || !dialog.Visible) return;
+                            ListBox batches = (ListBox)typeof(ImportHistoryDialog).GetField("batchList", Private).GetValue(dialog);
+                            if (batches.Items.Count == 0 && waited.ElapsedMilliseconds < 15000) return;
+                            probe.Stop();
+                            dialog.Opacity = 0;
+                            try
+                            {
+                                for (int i = 0; i < batches.Items.Count; i++)
+                                    if (((ImportHistoryDialog.Record)batches.Items[i]).Batch.Id == saved.Id)
+                                    {
+                                        batches.SelectedIndex = i;
+                                        found = true;
+                                    }
+                                offered = found && ((Control)typeof(ImportHistoryDialog).GetField("retry", Private).GetValue(dialog)).Visible;
+                                if (clean && offered) typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(dialog, null);
+                            }
+                            finally { if (dialog.Visible) dialog.Close(); }
+                        };
+                        probe.Start();
+                        Invoke(form, "ShowImportHistory");
+                    }
+                    PumpUntil(() => !(bool)running.GetValue(form));
+                };
+
+                open(false);
+                Check(found && offered, "pending record not listed with a cleanup button");
+                Check(File.Exists(source) && File.Exists(target) && FileImport.Load(xml).Items[0].State == FileImport.Copied,
+                    "closing the history window touched the source or the journal");
+
+                open(true);
+                Check(found && offered, "pending record not offered for cleanup");
+                ImportBatch after = FileImport.Load(xml);
+                Check(!File.Exists(source) && File.Exists(target), "cleanup did not delete the source or lost the library copy");
+                Check(after.Items[0].State == FileImport.Moved && string.IsNullOrEmpty(after.Items[0].Error) && after.Finished,
+                    "journal not updated after cleanup: " + after.Items[0].State + " / " + after.Items[0].Error);
+                Check(File.ReadAllText(target) == "history cleanup content" && config.AddedItems.Count == 1, "library copy or its record changed");
+
+                open(false);
+                Check(found && !offered, "finished record still offers cleanup");
+            }
+        }
+
         private static void LocalScanProgressLifetime()
         {
             bool reportedShown = false, closeBlocked = false, workerSawCancel = false, probed = false;

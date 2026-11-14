@@ -935,94 +935,39 @@ namespace AppManager
             statusLabel.Cursor = statusDetail.Cursor = Cursors.Default;
         }
 
-        private static bool CanRetryDelete(ImportBatch batch)
+        /// <summary>该项已入库、但按「移入」本应删除的原件还在（删除失败，或整批因部分失败而保留了原件）。</summary>
+        internal static bool AwaitsSourceDelete(ImportBatch batch, ImportItem item)
         {
             return batch.Committed && batch.Operation == ImportOperation.Move
-                && batch.Items.Any(i => !i.Reference && (i.State == FileImport.DeleteFailed || i.State == FileImport.Copied));
+                && !item.Reference && (item.State == FileImport.DeleteFailed || item.State == FileImport.Copied);
+        }
+
+        internal static bool CanRetryDelete(ImportBatch batch)
+        {
+            return batch.Items.Any(i => AwaitsSourceDelete(batch, i));
         }
 
         private void ShowImportHistory()
         {
-            using (Form dialog = new Form { Text = "导入记录", StartPosition = FormStartPosition.CenterParent, Size = new Size(860, 560) })
+            ImportBatch batch;
+            using (ImportHistoryDialog dialog = new ImportHistoryDialog(ImportJournal, delegate { return importRunning; }))
             {
-                ListBox list = new ListBox { Dock = DockStyle.Top, Height = 120, Enabled = false };
-                TextBox details = new TextBox { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false };
-                Button retry = new Button { Dock = DockStyle.Bottom, Height = 38, Text = "删除已入库项的源文件", Enabled = false };
-                List<ImportBatch> batches = new List<ImportBatch>();
-                string journal = ImportJournal;
-                list.Items.Add("正在读取导入记录…");
-                // 日志可能很大，后台读取，避免打开记录时卡住界面。
-                dialog.Shown += delegate
-                {
-                    ThreadPool.QueueUserWorkItem(delegate
-                    {
-                        List<ImportBatch> loaded = new List<ImportBatch>();
-                        try
-                        {
-                            if (Directory.Exists(journal))
-                                foreach (FileInfo file in new DirectoryInfo(journal).GetFiles("*.xml").OrderByDescending(f => f.LastWriteTimeUtc)
-                                    .Where((f, index) => index < 100 || !File.Exists(Path.ChangeExtension(f.FullName, ".complete"))))
-                                {
-                                    try { loaded.Add(FileImport.Load(file.FullName)); }
-                                    catch (Exception ex) { Paths.LogError(ex); }
-                                }
-                        }
-                        catch (Exception ex) { Paths.LogError(ex); }
-                        try
-                        {
-                            dialog.BeginInvoke((Action)delegate
-                            {
-                                list.Items.Clear();
-                                batches.AddRange(loaded);
-                                foreach (ImportBatch batch in loaded) list.Items.Add(batch.Category + " · " + FileImport.Summary(batch));
-                                if (batches.Count == 0) { list.Items.Add("暂无导入记录"); return; }
-                                list.Enabled = true;
-                                list.SelectedIndex = 0;
-                            });
-                        }
-                        catch (InvalidOperationException) { }   // 对话框已关闭
-                    });
-                };
-                list.SelectedIndexChanged += delegate
-                {
-                    if (list.SelectedIndex < 0 || list.SelectedIndex >= batches.Count) { retry.Enabled = false; return; }
-                    ImportBatch batch = batches[list.SelectedIndex];
-                    string retryHint = batch.Items.Any(i => i.State == FileImport.DeleteFailed)
-                        ? "可重试删除已入库项的源文件；复制失败项需重新扫描或重新导入。"
-                        : batch.Items.Any(i => i.State == FileImport.Failed)
-                            ? "复制失败项需重新扫描或重新导入；本记录不能重试复制。" : "";
-                    details.Text = (batch.Error ?? "") + "\r\n" + string.Join("\r\n\r\n", batch.Items.Select(i => i.State + "：" + i.Source + "\r\n目标：" + i.Target + (string.IsNullOrEmpty(i.Error) ? "" : "\r\n" + i.Error)))
-                        + (string.IsNullOrEmpty(retryHint) ? "" : "\r\n\r\n" + retryHint);
-                    retry.Enabled = !importRunning && CanRetryDelete(batch);
-                };
-                retry.Click += delegate
-                {
-                    if (list.SelectedIndex < 0 || list.SelectedIndex >= batches.Count) return;
-                    ImportBatch batch = batches[list.SelectedIndex];
-                    if (!batch.DeleteAuthorized)
-                    {
-                        // 部分失败的批次当时保留了全部源文件；需用户明确确认后才删除已入库项的源文件。
-                        if (MessageBox.Show(dialog, "该批次当时有失败项，因此保留了全部源文件。\n确定删除已成功入库项目的源文件吗？删除前会再次校验内容。",
-                            "导入记录", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                        batch.DeleteAuthorized = true;
-                    }
-                    CancellationToken cancel = importCancel.Token;
-                    EnqueueImport(delegate
-                    {
-                        // 数据库已被恢复/条目已删除时，不按过期日志删源。
-                        bool registered = (bool)Invoke(new Func<bool>(delegate
-                        {
-                            return batch.Items.Where(i => !i.Reference && (i.State == FileImport.Copied || i.State == FileImport.DeleteFailed))
-                                .All(i => IsBatchTargetRegistered(batch, i.Target));
-                        }));
-                        if (!registered) throw new IOException("入库记录已变化，保留源文件。");
-                        FileImport.DeleteSources(batch, cancel); FileImport.Finish(batch); RunOnUi(delegate { FinishImport(batch); });
-                    });
-                    dialog.Close();
-                };
-                dialog.Controls.Add(details); dialog.Controls.Add(list); dialog.Controls.Add(retry);
-                dialog.ShowDialog(this);
+                ConfirmDialog.ShowModal(dialog);   // 模态 + 遮罩层
+                batch = dialog.RetryBatch;
             }
+            if (batch == null) return;
+            CancellationToken cancel = importCancel.Token;
+            EnqueueImport(delegate
+            {
+                // 数据库已被恢复/条目已删除时，不按过期日志删源。
+                bool registered = (bool)Invoke(new Func<bool>(delegate
+                {
+                    return batch.Items.Where(i => !i.Reference && (i.State == FileImport.Copied || i.State == FileImport.DeleteFailed))
+                        .All(i => IsBatchTargetRegistered(batch, i.Target));
+                }));
+                if (!registered) throw new IOException("入库记录已变化，保留源文件。");
+                FileImport.DeleteSources(batch, cancel); FileImport.Finish(batch); RunOnUi(delegate { FinishImport(batch); });
+            });
         }
 
         /// <summary>
