@@ -611,13 +611,16 @@ namespace AppManager
     }
 
     /// <summary>
-    /// 布局备份管理对话框：卡片列表 + 右上角「新建备份」。恢复、覆盖、重命名、删除都在卡片上发起，
-    /// 会改动数据的操作先确认；恢复成功后窗口自动关闭，由主窗口重新加载。
+    /// 布局备份面板：嵌在设置页右侧（不再另开窗口）。上方一行是结果提示和「新建备份」，下面是卡片列表；
+    /// 恢复、覆盖、重命名、删除都在卡片上发起，会改动数据的操作先确认。结果直接写在面板的提示行里，不另弹提示框。
+    /// 恢复成功后触发 Restored，由主窗口重新加载；操作进行中 Busy 为真，设置页据此挡住返回和切换。
     /// </summary>
-    internal class BackupForm : BufferedDialogForm
+    internal sealed class LayoutBackupPanel : Control, ISettingsPanel
     {
         private const string CreateText = "新建备份";
         private const int MenuWidth = 176;
+        private const int ToolbarH = 34;
+        private const int Shadow = 8;   // 与设置页约定：左右各多留 8px 放卡片阴影，按钮和文字向内缩进同样距离
 
         private readonly BackupListControl list;
         private readonly RoundButton btnCreate;
@@ -628,73 +631,111 @@ namespace AppManager
         private string pendingSelection;
         /// <summary>操作成功后保持忙碌，直到重新读出的列表换上，避免在已删除或已改名的旧卡片上继续操作。</summary>
         private bool busyUntilReload;
+        private string status = string.Empty;   // 上一次操作的结果
+        private List<LayoutBackupInfo> shownItems = new List<LayoutBackupInfo>();   // 列表上当前显示的备份（新建时避开重名）
+        private bool statusWarning;
+        private volatile bool disposed;
 
-        /// <summary>是否执行过恢复（主窗口据此重载配置与重扫）。</summary>
-        public bool Restored;
+        /// <summary>恢复成功：布局已换成备份里的样子，主窗口需要重新加载配置与列表。</summary>
+        public event EventHandler Restored;
+        public event EventHandler BusyChanged;
 
-        public BackupForm()
+        public LayoutBackupPanel()
         {
-            Text = "布局备份";
-            FormBorderStyle = FormBorderStyle.None;
-            StartPosition = FormStartPosition.CenterParent;
-            ShowInTaskbar = false;
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
             BackColor = Theme.Background;
-            ClientSize = new Size(640, 560);
-            try { using (GraphicsPath path = Draw.RoundedPath(ClientRectangle, Theme.CornerRadius)) Region = new Region(path); } catch { }
-
-            IconButton btnClose = new IconButton();
-            btnClose.Kind = IconKind.Close;
-            btnClose.Bounds = new Rectangle(ClientSize.Width - 14 - 34, 18, 34, 30);
-            btnClose.Click += delegate { Close(); };
-            Controls.Add(btnClose);
 
             btnCreate = new RoundButton();
             btnCreate.Text = CreateText;
             btnCreate.Icon = UiIconKind.Add;
             btnCreate.Accent = true;
-            btnCreate.Bounds = new Rectangle(btnClose.Left - 8 - 116, 16, 116, 34);
             btnCreate.Click += delegate { CreateBackup(); };
             Controls.Add(btnCreate);
 
-            // 列表比标题左右各宽 8px：卡片自带 8px 留白放阴影，卡片边缘正好与标题对齐
             list = new BackupListControl();
-            list.Bounds = new Rectangle(16, 84, ClientSize.Width - 32, ClientSize.Height - 84 - 16);
             list.RestoreRequested += RestoreBackup;
             list.RenameRequested += RenameBackup;
             list.DeleteRequested += DeleteBackup;
             list.MenuRequested += ShowCardMenu;
             Controls.Add(list);
-            ActiveControl = list;
         }
 
-        protected override void OnShown(EventArgs e)
+        public bool Busy { get { return operationRunning || busyUntilReload; } }
+
+        private int Dpi(int value)
         {
-            base.OnShown(e);
-            ReloadList();
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
+
+        /// <summary>子控件位置由 OnResize 按当前 DPI 计算，不叠加框架缩放。</summary>
+        protected override bool ScaleChildren { get { return false; } }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            int w = Dpi(116);
+            btnCreate.Bounds = new Rectangle(Math.Max(0, Width - Dpi(Shadow) - w), 0, w, Dpi(ToolbarH));
+            int top = Dpi(ToolbarH) + Dpi(10);
+            list.Bounds = new Rectangle(0, top, Width, Math.Max(0, Height - top));
+            Invalidate();
+        }
+
+        /// <summary>每次显示时重新读取列表：备份目录可能在别处被改动过。</summary>
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (Visible && IsHandleCreated && !operationRunning) ReloadList(list.Selected == null ? null : list.Selected.Id);
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (Visible) ReloadList();
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            Graphics g = e.Graphics;
-            using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "布局备份", Theme.DialogTitleFont, tb, new Rectangle(Dpi(24), Dpi(18), Dpi(300), Dpi(30)));
-            using (SolidBrush db = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringLeft(g, "把分类、顺序、常用、隐藏与桌面收纳整体存一份，之后可以随时恢复。", Theme.CaptionFont, db,
-                    new Rectangle(Dpi(24), Dpi(52), ClientSize.Width - Dpi(48), Dpi(20)));
+            if (string.IsNullOrEmpty(status)) return;
+            Rectangle rect = new Rectangle(Dpi(Shadow), 0, Math.Max(0, btnCreate.Left - Dpi(Shadow) - Dpi(12)), Dpi(ToolbarH));
+            using (SolidBrush brush = new SolidBrush(statusWarning ? Theme.WarningText : Theme.SuccessText))
+                Draw.DrawStringLeft(e.Graphics, status, Theme.CaptionFont, brush, rect);
         }
 
-        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        private void SetStatus(string text, bool warning)
         {
-            if (keyData == Keys.Escape) { Close(); return true; }
-            return base.ProcessCmdKey(ref msg, keyData);
+            status = text ?? string.Empty;
+            statusWarning = warning;
+            Invalidate();
         }
 
-        /// <summary>焦点不在列表上（例如停在按钮上）时，滚轮同样滚动列表。</summary>
+        public bool ScrollByWheel(int delta)
+        {
+            list.ScrollByWheel(delta);
+            return true;
+        }
+
+        /// <summary>指针停在按钮或提示行上时，滚轮同样滚动列表。</summary>
         protected override void OnMouseWheel(MouseEventArgs e)
         {
             base.OnMouseWheel(e);
             list.ScrollByWheel(e.Delta);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            disposed = true;
+            base.Dispose(disposing);
+        }
+
+        /// <summary>后台线程把结果交回界面线程；面板已释放或句柄未建时丢弃。</summary>
+        private void Post(Action action)
+        {
+            if (disposed || !IsHandleCreated) return;
+            try { BeginInvoke((Action)delegate { if (!disposed && !IsDisposed) action(); }); }
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }
         }
 
         private void ReloadList()
@@ -714,35 +755,27 @@ namespace AppManager
             int generation = ++reloadGeneration;
             ThreadPool.QueueUserWorkItem(delegate
             {
-                List<LayoutBackupInfo> loaded = LayoutBackup.List();
-                try
+                List<LayoutBackupInfo> loaded;
+                try { loaded = LayoutBackup.List(); }
+                catch (Exception ex) { Paths.LogError(ex); loaded = new List<LayoutBackupInfo>(); }
+                Post(delegate
                 {
-                    BeginInvoke((Action)delegate
+                    if (generation != reloadGeneration) return;
+                    reloadRunning = false;
+                    list.SetItems(loaded, selectId);
+                    shownItems = loaded;
+                    if (reloadPending)
                     {
-                        if (IsDisposed || Disposing || generation != reloadGeneration) return;
-                        reloadRunning = false;
-                        list.SetItems(loaded, selectId);
-                        if (reloadPending)
-                        {
-                            reloadPending = false;
-                            ReloadList(pendingSelection);
-                        }
-                        else if (busyUntilReload)
-                        {
-                            busyUntilReload = false;
-                            ShowBusy(false, null, null);
-                        }
-                    });
-                }
-                catch (ObjectDisposedException) { }
-                catch (InvalidOperationException) { }
+                        reloadPending = false;
+                        ReloadList(pendingSelection);
+                    }
+                    else if (busyUntilReload)
+                    {
+                        busyUntilReload = false;
+                        ShowBusy(false, null, null);
+                    }
+                });
             });
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            if (operationRunning) e.Cancel = true;
-            base.OnFormClosing(e);
         }
 
         // ---------- 菜单 ----------
@@ -753,7 +786,7 @@ namespace AppManager
         /// </summary>
         private void ShowCardMenu(LayoutBackupInfo info, Rectangle anchor, bool fromButton)
         {
-            if (operationRunning) return;
+            if (Busy) return;
             List<MenuWindow.MenuItem> entries = new List<MenuWindow.MenuItem>();
             if (!fromButton && !info.Incomplete) entries.Add(MenuEntry("恢复到这份备份", RestoreBackup, info));
             if (!info.IsPreRestore)
@@ -772,23 +805,19 @@ namespace AppManager
             Rectangle work = Screen.GetWorkingArea(point);
             menu.Location = new Point(Math.Max(work.Left, Math.Min(point.X, work.Right - width)),
                 Math.Max(work.Top, Math.Min(point.Y, work.Bottom - menu.Height)));
-            menu.Show(this);
+            menu.Show(FindForm());
         }
 
-        /// <summary>菜单项的动作延后到菜单窗口关闭之后执行：那时本窗口已重新成为活动窗口，确认框才会以它为宿主居中。</summary>
+        /// <summary>菜单项的动作延后到菜单窗口关闭之后执行：那时主窗口已重新成为活动窗口，确认框才会以它为宿主居中。</summary>
         private MenuWindow.MenuItem MenuEntry(string text, Action<LayoutBackupInfo> action, LayoutBackupInfo info)
         {
             MenuWindow.MenuItem entry = new MenuWindow.MenuItem();
             entry.Text = text;
-            entry.Action = delegate
-            {
-                if (IsDisposed || !IsHandleCreated) return;
-                BeginInvoke((Action)delegate { if (!IsDisposed && !Disposing) action(info); });
-            };
+            entry.Action = delegate { Post(delegate { action(info); }); };
             return entry;
         }
 
-        /// <summary>确认框里引用的备份名：过长时截断，保证一行放得下。</summary>
+        /// <summary>确认框和提示里引用的备份名：过长时截断，保证一行放得下。</summary>
         private static string Quote(LayoutBackupInfo info)
         {
             string name = BackupListControl.DisplayName(info);
@@ -798,13 +827,11 @@ namespace AppManager
 
         // ---------- 操作 ----------
 
+        /// <summary>直接按时间命名新建（不再弹出命名框）；需要改名时在卡片菜单里重命名。</summary>
         private void CreateBackup()
         {
-            if (operationRunning) return;
-            string name = InputDialog.Show("新建备份", "给这份布局起个名字（留空则按时间命名）。", LayoutBackup.DefaultName());
-            if (name == null) return;   // 取消
-            name = name.Trim();         // 只输入了空格等同留空，按时间命名
-
+            if (Busy) return;
+            string name = UniqueName(LayoutBackup.DefaultName(), shownItems);
             string id = null;
             RunBackupOperation(null, "正在备份…", "新建备份失败：", delegate
             {
@@ -812,13 +839,32 @@ namespace AppManager
                 return LayoutBackup.Create(name, out id, out error) ? null : error;
             }, delegate
             {
+                SetStatus("已新建备份「" + name + "」。需要改名可以在卡片的「更多」菜单里重命名。", false);
                 ReloadList(id);
             });
         }
 
+        /// <summary>
+        /// 默认名按分钟取时间，同一分钟内连续新建会重名：与列表里已有的名字相同时依次加「(2)」「(3)」…，
+        /// 卡片上能分清是哪一份。只比较用户自己的备份，恢复前留底另有名称。
+        /// </summary>
+        internal static string UniqueName(string name, IList<LayoutBackupInfo> existing)
+        {
+            HashSet<string> taken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (existing != null)
+                foreach (LayoutBackupInfo info in existing)
+                    if (info != null && !info.IsPreRestore && !string.IsNullOrEmpty(info.Name)) taken.Add(info.Name.Trim());
+            if (!taken.Contains(name)) return name;
+            for (int n = 2; ; n++)
+            {
+                string candidate = name + " (" + n + ")";
+                if (!taken.Contains(candidate)) return candidate;
+            }
+        }
+
         private void UpdateBackup(LayoutBackupInfo info)
         {
-            if (operationRunning || info == null || info.IsPreRestore) return;
+            if (Busy || info == null || info.IsPreRestore) return;
             if (!ConfirmDialog.Show("覆盖备份", "用当前布局覆盖" + Quote(info) + "？\r\n" +
                 "备份里原来的内容会被替换，名称和创建时间不变。", "覆盖", "取消")) return;
 
@@ -826,16 +872,19 @@ namespace AppManager
             {
                 string error;
                 return LayoutBackup.Update(info.Id, out error) ? null : error;
-            }, ReloadList);
+            }, delegate
+            {
+                SetStatus("已用当前布局覆盖" + Quote(info) + "。", false);
+                ReloadList(info.Id);
+            });
         }
 
         private void RestoreBackup(LayoutBackupInfo info)
         {
-            if (operationRunning || info == null) return;
+            if (Busy || info == null) return;
             if (info.Incomplete)
             {
-                MessageDialog.Show(this, "这份恢复前残留可能不完整，只能删除，不能恢复。", "布局备份",
-                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                SetStatus("这份恢复前残留可能不完整，只能删除，不能恢复。", true);
                 return;
             }
             if (!ConfirmDialog.Show("恢复备份", "恢复到" + Quote(info) + "？\r\n" +
@@ -847,19 +896,16 @@ namespace AppManager
                 return LayoutBackup.Restore(info.Id, out error) ? null : error;
             }, delegate
             {
-                Restored = true;
-                // 恢复后直接关窗、不刷新列表：先解除忙碌，提示框背后的卡片不停在「正在恢复…」
-                busyUntilReload = false;
-                ShowBusy(false, null, null);
-                MessageDialog.Show(this, "已恢复到" + Quote(info) + "。\r\n恢复前的布局已自动留底，需要时可以回到这里再恢复回去。",
-                    "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                Close();   // 主窗口在本窗口关闭后重新加载，不必再手动关一次
+                SetStatus("已恢复到" + Quote(info) + "。恢复前的布局已自动留底，在下面的列表里可以再恢复回去。", false);
+                ReloadList(info.Id);   // 列出新生成的恢复前留底
+                EventHandler handler = Restored;
+                if (handler != null) handler(this, EventArgs.Empty);
             });
         }
 
         private void RenameBackup(LayoutBackupInfo info)
         {
-            if (operationRunning || info == null || info.IsPreRestore) return;
+            if (Busy || info == null || info.IsPreRestore) return;
             string name = InputDialog.Show("重命名备份", "输入新的备份名称。", info.Name, -1, delegate(string value)
             {
                 return (value == null || value.Trim().Length == 0) ? "名称不能为空。" : null;
@@ -870,12 +916,16 @@ namespace AppManager
             {
                 string error;
                 return LayoutBackup.Rename(info.Id, name, out error) ? null : error;
-            }, ReloadList);
+            }, delegate
+            {
+                SetStatus("已重命名为「" + name.Trim() + "」。", false);
+                ReloadList(info.Id);
+            });
         }
 
         private void DeleteBackup(LayoutBackupInfo info)
         {
-            if (operationRunning || info == null) return;
+            if (Busy || info == null) return;
             string consequence = info.IsPreRestore
                 ? "这是那次恢复前自动保存的布局，删除后无法找回。"
                 : "备份文件会被永久删除，当前布局不受影响。";
@@ -885,7 +935,11 @@ namespace AppManager
             {
                 string error;
                 return LayoutBackup.Delete(info.Id, out error) ? null : error;
-            }, ReloadList);
+            }, delegate
+            {
+                SetStatus("已删除" + Quote(info) + "。", false);
+                ReloadList();
+            });
         }
 
         /// <summary>操作进行中：停用所有入口；busyId 对应的卡片显示进度文字，为空表示正在新建（文字显示在「新建备份」按钮上）。</summary>
@@ -901,49 +955,43 @@ namespace AppManager
             else
             {
                 list.ClearBusy();
-                ActiveControl = list;   // 焦点回到列表：新选中的卡片可以直接用键盘操作
+                if (Visible && list.CanFocus) list.Focus();   // 焦点回到列表：新选中的卡片可以直接用键盘操作
             }
+            EventHandler handler = BusyChanged;
+            if (handler != null) handler(this, EventArgs.Empty);
         }
 
         private void RunBackupOperation(string busyId, string busyText, string failPrefix, Func<string> operation, Action onSuccess)
         {
-            if (operationRunning) return;
+            if (Busy) return;
             operationRunning = true;
+            SetStatus(string.Empty, false);
             ShowBusy(true, busyId, busyText);
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string error = null;
                 try { error = operation(); }
                 catch (Exception ex) { error = ex.Message; Paths.LogError(ex); }
-                if (IsDisposed) return;
-                try
+                Post(delegate
                 {
-                    BeginInvoke((Action)delegate
+                    operationRunning = false;
+                    if (error != null)
                     {
-                        if (IsDisposed || Disposing) return;
-                        operationRunning = false;
-                        if (error != null)
-                        {
-                            ShowBusy(false, null, null);
-                            // 失败也可能改动了磁盘（恢复中断会留下不完整的留底、删除可能只删了一半）：先按实际情况刷新列表
-                            ReloadList();
-                            MessageDialog.Show(this, failPrefix + error, "布局备份",
-                                MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            return;
-                        }
-                        // 成功后的刷新在后台统计目录大小，可能要几秒：期间保持停用，新列表换上后再解除
-                        busyUntilReload = true;
-                        onSuccess();
-                        if (IsDisposed || Disposing) return;
-                        if (!reloadRunning && busyUntilReload)
-                        {
-                            busyUntilReload = false;
-                            ShowBusy(false, null, null);
-                        }
-                    });
-                }
-                catch (ObjectDisposedException) { }
-                catch (InvalidOperationException) { }
+                        ShowBusy(false, null, null);
+                        // 失败也可能改动了磁盘（恢复中断会留下不完整的留底、删除可能只删了一半）：先按实际情况刷新列表
+                        SetStatus(failPrefix + error, true);
+                        ReloadList();
+                        return;
+                    }
+                    // 成功后的刷新在后台统计目录大小，可能要几秒：期间保持停用，新列表换上后再解除
+                    busyUntilReload = true;
+                    onSuccess();
+                    if (!reloadRunning && busyUntilReload)
+                    {
+                        busyUntilReload = false;
+                        ShowBusy(false, null, null);
+                    }
+                });
             });
         }
     }

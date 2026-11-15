@@ -75,6 +75,8 @@ namespace AppManager
         private bool resizingWindow;
         private Rectangle formRestoreBounds;
         private SettingsPage settingsPage; // 设置页（独立页面，覆盖主内容区）
+        private LayoutBackupPanel layoutBackupPanel;   // 设置页右侧「布局备份」
+        private DatabasePanel databasePanel;           // 设置页右侧「操作记录与数据」
         private bool settingsOpen;         // 是否处于设置页
         private bool settingsRescan;       // 设置页「重新扫描」发起的扫描尚未结束（结束时回传结果）
         private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
@@ -488,6 +490,12 @@ namespace AppManager
                 HideToTray();   // 导入在后台继续
                 return;
             }
+            if (e.CloseReason == CloseReason.UserClosing && SettingsWorkRunning())
+            {
+                e.Cancel = true;
+                exiting = false;
+                return;
+            }
             // 用户关闭时桌面整理/还原仍在搬文件：拦下，等完成后再退出（关机无法等待，逐项保存已限制影响范围）。
             if (e.CloseReason == CloseReason.UserClosing && DesktopWorkRunning())
             {
@@ -616,10 +624,7 @@ namespace AppManager
             // 设置页打开时主内容区已隐藏：光标在设置页上则滚动设置页
             if (settingsOpen && settingsPage != null
                 && settingsPage.RectangleToScreen(settingsPage.ClientRectangle).Contains(screen))
-            {
-                settingsPage.ScrollByWheel(delta);
-                return true;
-            }
+                return settingsPage.HandleWheel(delta);
             bool sidebarVisible = sidebar != null && sidebar.Visible;
             bool colVisible = collectionSidebar != null && collectionSidebar.Visible;
             if (!sidebarVisible && !colVisible) return false;
@@ -797,6 +802,7 @@ namespace AppManager
                 RequestImportExit();
                 return;
             }
+            if (SettingsWorkRunning()) return;
             if (DesktopWorkRunning())
             {
                 MessageDialog.Show(this, "桌面整理或还原正在进行，完成后再退出，避免文件已移动却没有登记。", "退出",
@@ -807,6 +813,15 @@ namespace AppManager
             exiting = true;
             if (tray != null) tray.Visible = false;
             Close();
+        }
+
+        /// <summary>设置页里的布局备份、恢复或撤销还在进行：提示并返回 true，调用方不退出。</summary>
+        private bool SettingsWorkRunning()
+        {
+            if (settingsPage == null || !settingsPage.Busy) return false;
+            MessageDialog.Show(this, "设置页里的备份、恢复或撤销正在进行，完成后再退出。", "退出",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return true;
         }
 
         /// <summary>设置关闭主窗口行为并落盘。</summary>
@@ -1131,17 +1146,14 @@ namespace AppManager
                 settingsPage.SetRescanState(SettingsPage.RescanState.Running);
                 StartScan();
             };
-            settingsPage.LayoutBackupRequested += delegate { ShowLayoutBackups(); };
-            settingsPage.DatabaseRequested += delegate
-            {
-                if (config.Database == null) return;
-                using (DatabaseForm dialog = new DatabaseForm(config.Database))
-                {
-                    ConfirmDialog.ShowModal(dialog);
-                    if (dialog.Changed) ReloadAfterRestore();
-                }
-            };
             settingsPage.SelfTestRequested += delegate { RunSelfTestFromUi(); };
+            // 布局备份、操作记录直接嵌在设置页右侧：恢复或撤销成功后重载配置，设置页保持打开
+            layoutBackupPanel = new LayoutBackupPanel();
+            layoutBackupPanel.Restored += delegate { ReloadAfterRestore(); };
+            settingsPage.HostPanel(SettingsPage.SettingsSection.Backup, layoutBackupPanel);
+            databasePanel = new DatabasePanel(config.Database);
+            databasePanel.DataChanged += delegate { ReloadAfterRestore(); };
+            settingsPage.HostPanel(SettingsPage.SettingsSection.Data, databasePanel);
             Controls.Add(settingsPage);
             settingsPage.Visible = false;   // 默认隐藏，仅点「设置」后显示
 
@@ -7017,16 +7029,6 @@ namespace AppManager
             }
         }
 
-        /// <summary>打开「布局备份」管理窗口；恢复后重载配置与列表。</summary>
-        private void ShowLayoutBackups()
-        {
-            using (BackupForm f = new BackupForm())
-            {
-                ConfirmDialog.ShowModal(f);
-                if (f.Restored) ReloadAfterRestore();
-            }
-        }
-
         /// <summary>布局恢复后：重载配置、重建扫描器与列表，并把设置页状态同步到恢复后的值。</summary>
         private void ReloadAfterRestore()
         {
@@ -7282,17 +7284,16 @@ namespace AppManager
                 RunOnUi((Action)delegate
                 {
                     selfTestRunning = false;
+                    // 结果写在设置页「运行自测」一行的说明里，不再弹出提示框
+                    string result = pass < 0 ? "自测运行异常或超时，详见 error.log。"
+                        : total == 0 ? "自测进程已结束，但未读到通过数，详见 selftest.log。"
+                        : "上次结果：通过 " + pass + "/" + total + "，详见 selftest.log。";
+                    settingsPage.SetSelfTestResult(result, pass < 0 || total == 0 || pass != total);
                     settingsPage.SetSelfTestRunning(false);
                     HideStatusBar();
-                    if (pass < 0)
-                        MessageDialog.Show("自测运行异常或超时，详见 error.log。", "自测",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    else if (total == 0)
-                        MessageDialog.Show("自测进程已结束，但未读到通过数，详见 selftest.log。", "自测",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    else
-                        MessageDialog.Show("自测完成：通过 " + pass + "/" + total + "，详见 selftest.log。", "自测",
-                            MessageBoxButtons.OK, pass == total ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+                    // 已经退出设置页时看不到那一行：在底部状态条再提示一次（几秒后自动消失）；设置页打开时状态条被盖住，不提示
+                    if (!settingsOpen)
+                        ShowNotice("自测" + (result.StartsWith("上次结果：") ? "完成，" + result.Substring(5) : "：" + result));
                 });
             });
         }
@@ -7326,6 +7327,7 @@ namespace AppManager
         private void CloseSettings()
         {
             if (!settingsOpen) return;
+            if (settingsPage.Busy) return;   // 备份、恢复或撤销还在进行：完成前不离开设置页
             settingsOpen = false;
             settingsPage.Visible = false;
             settingsBtn.Visible = true;
@@ -7363,29 +7365,40 @@ namespace AppManager
         {
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                 config.CloseToTray, ResourceStore.EditableLocations(config), ResourceStore.Normalize(DefaultResourceStoreRoot()));
-        }
-
-        /// <summary>设置页「添加存储位置」：弹出选择文件夹，确认后加入列表。</summary>
-        private void AddStoreLocationFromSettings()
-        {
-            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
-            {
-                dlg.Description = "选择资源存储位置";
-                dlg.ShowNewFolderButton = true;
-                if (dlg.ShowDialog(this) == DialogResult.OK) AddStoreLocation(dlg.SelectedPath);
-            }
+            if (databasePanel != null) databasePanel.SetDatabase(config.Database);   // 配置整体重载后换成新的数据库对象
         }
 
         /// <summary>
-        /// 把一个文件夹加入存储位置列表并保存：已在列表里则重新启用，否则加到末尾。
-        /// 此前没有显式位置（一直在用默认位置）时，先把默认位置作为第一项保留下来：
-        /// 否则它会从已知位置里消失，里面已有的资源会被当成库外文件再次扫描收录。
+        /// 设置页「添加存储位置」：在路径选择窗口里选文件夹（可以填一个新路径并新建），
+        /// 与已有位置重复或互相包含时直接在窗口里提示，选好后加入列表。
         /// </summary>
-        private void AddStoreLocation(string selectedPath)
+        private void AddStoreLocationFromSettings()
+        {
+            string path = PathPickerDialog.Pick(new PathPickerOptions
+            {
+                Title = "添加存储位置",
+                Hint = "选一个文件夹存放导入的资源；也可以在下面输入一个新路径，确认后会新建。",
+                Mode = PathPickerMode.Folder,
+                ConfirmText = "添加",
+                AllowCreateFolder = true,
+                Validate = StoreLocationError
+            });
+            if (path != null) AddStoreLocation(path);
+        }
+
+        /// <summary>把 selectedPath 加入存储位置列表后能否通过校验：不能时返回原因，不改动配置。</summary>
+        private string StoreLocationError(string selectedPath)
+        {
+            List<ResourceStoreLocation> normalized;
+            return ValidateStoreLocations(StoreLocationsWith(selectedPath), out normalized);
+        }
+
+        /// <summary>加入 selectedPath 之后的存储位置列表（已在列表里则重新启用）；不改动配置。</summary>
+        private List<ResourceStoreLocation> StoreLocationsWith(string selectedPath)
         {
             string path = NormalizeStoreInput(selectedPath);
-            if (path.Length == 0) return;
             List<ResourceStoreLocation> edited = ResourceStore.EditableLocations(config);
+            if (path.Length == 0) return edited;
             if (edited.Count == 0)
                 edited.Add(new ResourceStoreLocation(ResourceStore.Normalize(DefaultResourceStoreRoot()), true));
             bool known = false;
@@ -7396,7 +7409,18 @@ namespace AppManager
                 known = true;
             }
             if (!known) edited.Add(new ResourceStoreLocation(path, true));
-            CommitStoreLocations(edited);
+            return edited;
+        }
+
+        /// <summary>
+        /// 把一个文件夹加入存储位置列表并保存：已在列表里则重新启用，否则加到末尾。
+        /// 此前没有显式位置（一直在用默认位置）时，先把默认位置作为第一项保留下来：
+        /// 否则它会从已知位置里消失，里面已有的资源会被当成库外文件再次扫描收录。
+        /// </summary>
+        private void AddStoreLocation(string selectedPath)
+        {
+            if (NormalizeStoreInput(selectedPath).Length == 0) return;
+            CommitStoreLocations(StoreLocationsWith(selectedPath));
         }
 
         /// <summary>
@@ -7423,6 +7447,39 @@ namespace AppManager
                 }
             }
             BindSettingsPage();
+        }
+
+        /// <summary>
+        /// 校验有序存储位置列表：每项必须是完整路径，不能重复，也不能互相包含。
+        /// 通过时返回 null 并给出规范化后的列表（跳过空项）；不通过时返回原因。
+        /// </summary>
+        private static string ValidateStoreLocations(List<ResourceStoreLocation> locations, out List<ResourceStoreLocation> normalized)
+        {
+            normalized = new List<ResourceStoreLocation>();
+            foreach (ResourceStoreLocation location in locations)
+            {
+                if (location == null || string.IsNullOrWhiteSpace(location.Path)) continue;
+                string path = NormalizeStoreInput(location.Path);
+                string error = ValidateStorePath(path, "存储位置");
+                if (error != null) return error;
+                foreach (ResourceStoreLocation existing in normalized)
+                {
+                    if (string.Equals(existing.Path, path, StringComparison.OrdinalIgnoreCase))
+                        return "存储位置重复：" + path;
+                    try
+                    {
+                        if (FileImport.Within(existing.Path, path) || FileImport.Within(path, existing.Path))
+                            return "存储位置不能互相包含：" + existing.Path + " / " + path;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (!(ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)) throw;
+                        return "存储位置格式无效：" + ex.Message;
+                    }
+                }
+                normalized.Add(new ResourceStoreLocation(path, location.Enabled));
+            }
+            return null;
         }
 
         /// <summary>空值表示沿用默认位置；非空必须是完整绝对路径。</summary>
@@ -7468,38 +7525,9 @@ namespace AppManager
         /// <summary>校验并保存有序存储位置列表；停用项保留，旧版本字段写入第一个启用位置。</summary>
         private static bool ApplyStoreEdits(AppConfig cfg, List<ResourceStoreLocation> locations, out string error)
         {
-            error = null;
-            List<ResourceStoreLocation> normalized = new List<ResourceStoreLocation>();
-            foreach (ResourceStoreLocation location in locations)
-            {
-                if (location == null || string.IsNullOrWhiteSpace(location.Path)) continue;
-                string path = NormalizeStoreInput(location.Path);
-                error = ValidateStorePath(path, "存储位置");
-                if (error != null) return false;
-                foreach (ResourceStoreLocation existing in normalized)
-                {
-                    if (string.Equals(existing.Path, path, StringComparison.OrdinalIgnoreCase))
-                    {
-                        error = "存储位置重复：" + path;
-                        return false;
-                    }
-                    try
-                    {
-                        if (FileImport.Within(existing.Path, path) || FileImport.Within(path, existing.Path))
-                        {
-                            error = "存储位置不能互相包含：" + existing.Path + " / " + path;
-                            return false;
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        if (!(ex is ArgumentException || ex is NotSupportedException || ex is PathTooLongException)) throw;
-                        error = "存储位置格式无效：" + ex.Message;
-                        return false;
-                    }
-                }
-                normalized.Add(new ResourceStoreLocation(path, location.Enabled));
-            }
+            List<ResourceStoreLocation> normalized;
+            error = ValidateStoreLocations(locations, out normalized);
+            if (error != null) return false;
 
             string legacy = string.Empty;
             foreach (ResourceStoreLocation location in normalized)
@@ -7597,8 +7625,17 @@ namespace AppManager
             using (SolidBrush b = new SolidBrush(Theme.Background))
                 g.FillRectangle(b, ClientRectangle);
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-            // 设置页铺满标题行以下的整个窗口：标题行与页面同底色，不再露出侧栏色块和分隔线
-            if (settingsOpen) return;
+            // 设置页铺满标题行以下的整个窗口：标题行与右侧同底色，只把设置页左侧目录的底色和分隔线向上延伸到窗口顶边
+            if (settingsOpen)
+            {
+                int navWidth = settingsPage.NavWidth;
+                int titleRow = Dpi(Theme.TitleRowHeight);
+                using (SolidBrush nb = new SolidBrush(Theme.SidebarBg))
+                    g.FillRectangle(nb, new Rectangle(0, 0, navWidth, titleRow));
+                using (Pen ps = new Pen(Theme.Separator, 1))
+                    g.DrawLine(ps, navWidth - 1, 0, navWidth - 1, titleRow);
+                return;
+            }
 
             // 侧栏使用低一层的中性灰，内容顶栏保持白色，形成稳定的三段式明暗层次
             int sidebarWidth = Dpi(sidebar.CurrentWidth);

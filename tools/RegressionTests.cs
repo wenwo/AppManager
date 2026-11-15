@@ -180,7 +180,8 @@ namespace AppManager
                 Run("themed tooltip sizes bound and directly shown text, skips empty text", ThemedToolTipMeasure);
                 Run("review fixes: long text boxes open safely, keyboard restore, left-click only, radio tab stop, MTA fallback", ReviewFollowUps);
                 Run("operation history names actions and explains each change in plain words", OperationHistoryRules);
-                Run("database window lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
+                Run("database panel lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
+                Run("path picker checks paths, asks before creating or replacing and keeps failed validation in the window", PathPickerFlow);
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
                 Run("exporting change details writes a temp file first: a failure keeps the old file and leaves no partial file", ExportChangesAtomic);
@@ -2768,9 +2769,39 @@ namespace AppManager
             }
         }
 
+        /// <summary>点击设置页左侧目录的某一项（目录不滚动，按客户区坐标按下、松开）。</summary>
+        private static void ClickSettingsNav(Controls.SettingsPage page, string title)
+        {
+            foreach (object item in (IEnumerable)typeof(Controls.SettingsPage).GetField("navItems", Private).GetValue(page))
+            {
+                if ((string)item.GetType().GetField("Title").GetValue(item) != title) continue;
+                Rectangle b = (Rectangle)item.GetType().GetField("Bounds").GetValue(item);
+                Point p = new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
+                typeof(Control).GetMethod("OnMouseDown", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.Left, 1, p.X, p.Y, 0) });
+                typeof(Control).GetMethod("OnMouseUp", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.Left, 1, p.X, p.Y, 0) });
+                return;
+            }
+            throw new Exception("settings nav item not found: " + title);
+        }
+
+        /// <summary>嵌入设置页右侧的假面板：可以手动设置忙碌状态，记录收到的滚轮。</summary>
+        private sealed class FakeSettingsPanel : Control, Controls.ISettingsPanel
+        {
+            private bool busy;
+            public int Wheel;
+            public bool Busy { get { return busy; } }
+            public event EventHandler BusyChanged;
+            public void SetBusy(bool value)
+            {
+                busy = value;
+                if (BusyChanged != null) BusyChanged(this, EventArgs.Empty);
+            }
+            public bool ScrollByWheel(int delta) { Wheel += delta; return true; }
+        }
+
         private static void SettingsPageRows()
         {
-            const string HiddenRow = "显示隐藏项", ScanRow = "自动扫描应用与桌面变化", OrganizeRow = "自动收纳桌面新快捷方式";
+            const string HiddenRow = "显示隐藏项", TrayRow = "关闭时隐藏到托盘", ScanRow = "自动扫描应用与桌面变化", OrganizeRow = "自动收纳桌面新快捷方式";
             const string RescanRow = "重新扫描", TestRow = "运行自测", AddRow = "添加存储位置…";
             const string StoreA = "D:\\Store\\A", StoreB = "E:\\Store\\B", StoreC = "F:\\Store\\C", DefaultStore = "C:\\Default\\Resources";
             using (DpiAwareForm host = new DpiAwareForm())
@@ -2783,31 +2814,61 @@ namespace AppManager
                 host.ClientSize = new Size(1000, 560);
                 page.SetBounds(0, 0, 1000, 1400);   // 足够高：先在不滚动的状态下验证点击
                 host.Controls.Add(page);
-                int hiddenEvents = 0, scanEvents = 0, organizeEvents = 0, rescanEvents = 0, testEvents = 0, addEvents = 0;
+                int hiddenEvents = 0, trayEvents = 0, scanEvents = 0, organizeEvents = 0, rescanEvents = 0, testEvents = 0, addEvents = 0, backEvents = 0;
                 List<string> storeEvents = new List<string>();
                 page.ShowHiddenChanged += delegate { hiddenEvents++; };
+                page.CloseToTrayChanged += delegate { trayEvents++; };
                 page.AutoScanChanged += delegate { scanEvents++; };
                 page.AutoOrganizeDesktopChanged += delegate { organizeEvents++; };
                 page.RescanRequested += delegate { rescanEvents++; };
                 page.SelfTestRequested += delegate { testEvents++; };
                 page.StorageAddRequested += delegate { addEvents++; };
+                page.BackRequested += delegate { backEvents++; };
                 page.StorageEnabledRequested += delegate(int index, bool enabled) { storeEvents.Add("enable " + index + " " + enabled); };
                 page.StorageMoveRequested += delegate(int index, int delta) { storeEvents.Add("move " + index + " " + delta); };
-                Control back = (Control)typeof(Controls.SettingsPage).GetField("backBtn", Private).GetValue(page);
+                Controls.RoundButton back = (Controls.RoundButton)typeof(Controls.SettingsPage).GetField("backBtn", Private).GetValue(page);
                 FieldInfo scroll = typeof(Controls.SettingsPage).GetField("scrollOffset", Private);
                 List<ResourceStoreLocation> three = new List<ResourceStoreLocation> {
                     new ResourceStoreLocation(StoreA, true), new ResourceStoreLocation(StoreB, false), new ResourceStoreLocation(StoreC, true) };
+                FakeSettingsPanel backupPanel = new FakeSettingsPanel();
+                page.HostPanel(Controls.SettingsPage.SettingsSection.Backup, backupPanel);
                 host.Show();
                 try
                 {
                     Application.DoEvents();
                     page.Bind(false, true, false, true, three, DefaultStore);
                     Check(hiddenEvents + scanEvents + organizeEvents + storeEvents.Count == 0, "binding raised change events");
-                    three[0].Enabled = false;
-                    Check((bool)SettingsRowField(page, StoreA, "Checked"), "page shares the caller's location objects instead of copying them");
-                    three[0].Enabled = true;
+
+                    // 默认显示「常规」；目录切换只显示所选目录的行，嵌入面板只在自己的目录下可见。
+                    Check(page.Section == Controls.SettingsPage.SettingsSection.General && SettingsRowIndex(page, HiddenRow) >= 0
+                        && SettingsRowIndex(page, ScanRow) < 0 && SettingsRowIndex(page, StoreA) < 0, "general section does not show only its own rows");
+                    Check(!backupPanel.Visible, "a hosted panel is visible outside its section");
+                    ClickSettingsNav(page, "布局备份");
+                    Check(page.Section == Controls.SettingsPage.SettingsSection.Backup && backupPanel.Visible
+                        && ((IList)typeof(Controls.SettingsPage).GetField("rows", Private).GetValue(page)).Count == 0,
+                        "selecting the backup section did not show its hosted panel");
+                    Check(backupPanel.Left >= page.NavWidth && backupPanel.Right <= page.Width && backupPanel.Top >= back.Bottom,
+                        "hosted panel is not placed in the right pane: " + backupPanel.Bounds);
+                    Check(page.HandleWheel(-120) && backupPanel.Wheel == -120, "wheel on a hosted section was not handed to the panel");
+
+                    // 面板忙碌：「返回」和目录都不能用，停在当前目录；结束后恢复。
+                    backupPanel.SetBusy(true);
+                    Check(page.Busy && !back.Enabled, "busy panel did not disable the back button");
+                    ClickSettingsNav(page, "常规");
+                    Check(page.Section == Controls.SettingsPage.SettingsSection.Backup && backupPanel.Visible, "section changed while the panel was busy");
+                    Check(!page.SelectSection(Controls.SettingsPage.SettingsSection.General), "SelectSection succeeded while busy");
+                    typeof(Control).GetMethod("OnClick", Private).Invoke(back, new object[] { EventArgs.Empty });
+                    Check(backEvents == 0, "back was requested while the panel was busy");
+                    backupPanel.SetBusy(false);
+                    Check(!page.Busy && back.Enabled, "back button stayed disabled after the panel finished");
+                    ClickSettingsNav(page, "常规");
+                    Check(page.Section == Controls.SettingsPage.SettingsSection.General && !backupPanel.Visible, "nav did not return to the general section");
+                    typeof(Control).GetMethod("OnClick", Private).Invoke(back, new object[] { EventArgs.Empty });
+                    Check(backEvents == 1, "back button did not request leaving");
+                    Check(page.HandleWheel(0), "a row section did not claim the wheel");
 
                     // 尺寸只由页面按当前 DPI 计算：切换 DPI 不叠加框架缩放，之后再改页面大小也不退回未缩放尺寸。
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.Scan);
                     foreach (int dpi in new int[] { 144, 120, 96 })
                     {
                         SetDpi(host, dpi, host.Bounds);
@@ -2817,30 +2878,40 @@ namespace AppManager
                             Check(row.Height == DpiHelper.Scale(64, dpi), "row height not scaled at " + dpi + " DPI: " + row);
                             Check(back.Size == new Size(DpiHelper.Scale(74, dpi), DpiHelper.Scale(30, dpi)),
                                 "back button size wrong at " + dpi + " DPI (pass " + pass + "): " + back.Size);
-                            Check(row.Left >= 0 && row.Right <= page.Width && back.Left == row.Left,
-                                "settings content is not aligned inside the page at " + dpi + " DPI: " + row + " / " + back.Bounds);
+                            Check(page.NavWidth == DpiHelper.Scale(220, dpi) && back.Right <= page.NavWidth
+                                && row.Left >= page.NavWidth && row.Right <= page.Width,
+                                "settings layout is not split into nav and content at " + dpi + " DPI: " + row + " / " + back.Bounds);
                             page.Width += 20;   // 第二轮：普通改大小触发的重新布局
                         }
                     }
 
                     // 整行点击切换开关：只认左键；按下后移到别的行再松开视为取消。
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.General);
                     ClickSettingsRow(page, HiddenRow, MouseButtons.Left);
                     Check(page.ShowHidden && hiddenEvents == 1 && (bool)SettingsRowField(page, HiddenRow, "Checked"),
                         "left click on a toggle row did not toggle once");
                     ClickSettingsRow(page, HiddenRow, MouseButtons.Right);
                     Check(page.ShowHidden && hiddenEvents == 1, "right click toggled the row");
-                    SettingsPress(page, MouseButtons.Left, SettingsRowPoint(page, HiddenRow), SettingsRowPoint(page, ScanRow));
-                    Check(page.ShowHidden && page.AutoScan && hiddenEvents == 1 && scanEvents == 0, "releasing on another row still activated a row");
+                    SettingsPress(page, MouseButtons.Left, SettingsRowPoint(page, HiddenRow), SettingsRowPoint(page, TrayRow));
+                    Check(page.ShowHidden && page.CloseToTray && hiddenEvents == 1 && trayEvents == 0, "releasing on another row still activated a row");
 
                     // 悬停高亮画到卡片左缘；没有悬停的行保持卡片底色。
                     Rectangle hidden = (Rectangle)SettingsRowField(page, HiddenRow, "Bounds");
-                    Rectangle scan = (Rectangle)SettingsRowField(page, ScanRow, "Bounds");
+                    Rectangle tray = (Rectangle)SettingsRowField(page, TrayRow, "Bounds");
                     Point hover = SettingsClient(page, SettingsRowPoint(page, HiddenRow));
                     typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
                     Check(SettingsPixel(page, new Point(hidden.Left + 6, hidden.Top + hidden.Height / 2)) == Theme.CardHover.ToArgb(), "hovered row is not highlighted");
-                    Check(SettingsPixel(page, new Point(scan.Left + 6, scan.Top + scan.Height / 2)) == Theme.Card.ToArgb(), "a row that is not hovered is highlighted");
+                    Check(SettingsPixel(page, new Point(tray.Left + 6, tray.Top + tray.Height / 2)) == Theme.Card.ToArgb(), "a row that is not hovered is highlighted");
+                    // 目录底色从页面顶边起就是侧栏色：不能有抗锯齿混出来的浅线
+                    using (Bitmap shot = new Bitmap(page.Width, page.Height))
+                    {
+                        page.DrawToBitmap(shot, new Rectangle(Point.Empty, shot.Size));
+                        Check(shot.GetPixel(4, 0).ToArgb() == Theme.SidebarBg.ToArgb() && shot.GetPixel(4, page.Height - 1).ToArgb() == Theme.SidebarBg.ToArgb(),
+                            "nav column is not filled edge to edge: " + shot.GetPixel(4, 0));
+                    }
 
                     // 「自动收纳」依赖自动扫描：扫描关闭时置灰、点击无效、保留原值；重新开启后恢复。
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.Scan);
                     Check((bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row disabled while auto scan is on");
                     ClickSettingsRow(page, ScanRow, MouseButtons.Left);
                     Check(!page.AutoScan && scanEvents == 1, "auto scan row did not switch off");
@@ -2870,14 +2941,24 @@ namespace AppManager
                     Check(((string)SettingsRowField(page, RescanRow, "Subtitle")).Contains("完成"), "finished rescan is not reported");
                     ClickSettingsRow(page, RescanRow, MouseButtons.Left);
                     Check(rescanEvents == 2, "rescan row cannot be used again after finishing");
+
+                    // 自测：运行中不重复触发；结果写在这一行的说明里，未全部通过时用警示色。
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.Diagnostics);
                     page.SetSelfTestRunning(true);
                     ClickSettingsRow(page, TestRow, MouseButtons.Left);
                     Check(testEvents == 0, "self test row fired while a self test is running");
+                    page.SetSelfTestResult("上次结果：通过 9/10，详见 selftest.log。", true);
                     page.SetSelfTestRunning(false);
+                    Check(((string)SettingsRowField(page, TestRow, "Subtitle")).Contains("9/10") && (bool)SettingsRowField(page, TestRow, "Warning"),
+                        "self test result is not shown on the row");
                     ClickSettingsRow(page, TestRow, MouseButtons.Left);
                     Check(testEvents == 1, "self test row did not request a run");
 
                     // 存储位置：整行不可点，只有开关和排序按钮响应；首尾位置的越界方向不可用。
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.Storage);
+                    three[0].Enabled = false;
+                    Check((bool)SettingsRowField(page, StoreA, "Checked"), "page shares the caller's location objects instead of copying them");
+                    three[0].Enabled = true;
                     Check(((string)SettingsRowField(page, StoreA, "Subtitle")).Contains("优先"), "first enabled location is not marked as preferred");
                     Check(((string)SettingsRowField(page, StoreB, "Subtitle")).Contains("已停用") && !(bool)SettingsRowField(page, StoreB, "Checked"),
                         "disabled location is not shown as disabled");
@@ -2889,7 +2970,7 @@ namespace AppManager
                     hover = SettingsClient(page, SettingsRowPoint(page, StoreB));
                     typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
                     Check(tip.GetToolTip(page) == StoreB, "hovering a location does not offer its full path: " + tip.GetToolTip(page));
-                    hover = SettingsClient(page, SettingsRowPoint(page, HiddenRow));
+                    hover = SettingsClient(page, SettingsRowPoint(page, AddRow));
                     typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
                     Check(string.IsNullOrEmpty(tip.GetToolTip(page)), "path tooltip stayed on a row that is not a location");
                     Check(ClickSettingsZone(page, StoreB, "StoreToggle") && storeEvents.Count == 1 && storeEvents[0] == "enable 1 True",
@@ -2904,41 +2985,47 @@ namespace AppManager
                     Check(addEvents == 1, "add location row did not request a folder");
                     Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "location actions raised unrelated events");
 
-                    // 只有一个位置：没有排序按钮。全部停用：分组说明改为警示。没有显式位置：显示默认位置，仍可添加。
+                    // 只有一个位置：没有排序按钮。全部停用：页说明改为警示。没有显式位置：显示默认位置，仍可添加。
+                    FieldInfo noteWarning = typeof(Controls.SettingsPage).GetField("paneNoteWarning", Private);
+                    Check(!(bool)noteWarning.GetValue(page), "storage note is a warning while locations are enabled");
                     page.Bind(true, false, true, true, new List<ResourceStoreLocation> { new ResourceStoreLocation(StoreA, false) }, DefaultStore);
-                    Check(page.AutoOrganizeDesktop && !(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "binding with auto scan off lost the organize value or left it enabled");
+                    Check(page.Section == Controls.SettingsPage.SettingsSection.Storage, "rebinding changed the selected section");
                     Check(!ClickSettingsZone(page, StoreA, "MoveUp") && !ClickSettingsZone(page, StoreA, "MoveDown"), "a single location offers reordering");
-                    object storeSection = null;
-                    foreach (object section in (IEnumerable)typeof(Controls.SettingsPage).GetField("sections", Private).GetValue(page))
-                        if ((string)section.GetType().GetField("Title").GetValue(section) == "资源存储位置") storeSection = section;
-                    Check(storeSection != null && (bool)storeSection.GetType().GetField("NoteWarning").GetValue(storeSection),
-                        "all-disabled locations are not flagged");
+                    Check((bool)noteWarning.GetValue(page), "all-disabled locations are not flagged");
                     page.Bind(true, false, true, true, null, DefaultStore);
                     Check(SettingsRowIndex(page, DefaultStore) >= 0 && SettingsRowIndex(page, AddRow) >= 0, "empty location list does not show the default location");
                     ClickSettingsRow(page, DefaultStore, MouseButtons.Left);
                     Check(storeEvents.Count == 4 && addEvents == 1, "the default location row is clickable");
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.Scan);
+                    Check(page.AutoOrganizeDesktop && !(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "binding with auto scan off lost the organize value or left it enabled");
                     Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "rebinding raised change events");
 
                     // 滚动：页面变矮后内容可滚动；高分辨率滚轮的小增量累计后与一次整格等效；滚出视口的行不响应点击。
                     page.Bind(false, true, false, true, three, DefaultStore);
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.Storage);
                     Check((int)scroll.GetValue(page) == 0, "tall page scrolled without need");
-                    page.Height = DpiHelper.Scale(420, 96);
+                    page.Height = DpiHelper.Scale(300, 96);
                     page.ScrollByWheel(-120);
                     int oneNotch = (int)scroll.GetValue(page);
                     Check(oneNotch > 0, "short page did not scroll with the wheel");
                     page.ScrollToTop();
                     for (int i = 0; i < 4; i++) page.ScrollByWheel(-30);
-                    Check((int)scroll.GetValue(page) == oneNotch, "high-resolution wheel deltas did not add up: " + scroll.GetValue(page) + " / " + oneNotch);
+                    Check((int)scroll.GetValue(page) == oneNotch,
+                        "high-resolution wheel deltas did not add up: " + scroll.GetValue(page) + " / " + oneNotch);
                     page.ScrollByWheel(-120 * 200);
                     int bottom = (int)scroll.GetValue(page);
-                    Rectangle last = (Rectangle)SettingsRowField(page, TestRow, "Bounds");
+                    Rectangle last = (Rectangle)SettingsRowField(page, AddRow, "Bounds");
                     Check(SettingsClient(page, new Point(0, last.Bottom)).Y <= page.Height, "scrolling to the end does not reveal the last row");
-                    ClickSettingsRow(page, TestRow, MouseButtons.Left);
-                    Check(testEvents == 2, "a row scrolled into view is not clickable");
-                    Check(SettingsClient(page, SettingsRowPoint(page, HiddenRow)).Y < back.Bottom, "fixture did not scroll the first row under the header");
-                    ClickSettingsRow(page, HiddenRow, MouseButtons.Left);
-                    Check(!page.ShowHidden && hiddenEvents == 1, "a row scrolled under the fixed header still reacted");
-                    Check(back.Top == DpiHelper.Scale(22, 96), "the back button scrolled with the content");
+                    ClickSettingsRow(page, AddRow, MouseButtons.Left);
+                    Check(addEvents == 2, "a row scrolled into view is not clickable");
+                    Check(SettingsClient(page, SettingsRowPoint(page, StoreA)).Y < DpiHelper.Scale(92, 96), "fixture did not scroll the first row under the header");
+                    ClickSettingsZone(page, StoreA, "StoreToggle");
+                    Check(storeEvents.Count == 4, "a row scrolled under the fixed header still reacted");
+                    Check(back.Top == DpiHelper.Scale(16, 96), "the back button scrolled with the content");
+                    ClickSettingsNav(page, "常规");
+                    Check(page.Section == Controls.SettingsPage.SettingsSection.General && (int)scroll.GetValue(page) == 0,
+                        "switching sections kept the previous section's scroll position");
+                    page.SelectSection(Controls.SettingsPage.SettingsSection.Storage);
 
                     // 滚动条：拖动滑块滚动；捕获丢失或页面隐藏时结束拖动（否则下次移动鼠标页面会跟着滚）；点轨道空白处跳转。
                     Action<string, MouseButtons, Point> fire = delegate(string handler, MouseButtons button, Point at)
@@ -2953,17 +3040,19 @@ namespace AppManager
                     Point grab = new Point(thumb.Left + thumb.Width / 2, thumb.Top + 5);
                     fire("OnMouseDown", MouseButtons.Left, grab);
                     Check((bool)dragging.GetValue(page), "pressing the scroll thumb did not start a drag");
-                    fire("OnMouseMove", MouseButtons.Left, new Point(grab.X, grab.Y + 40));
+                    fire("OnMouseMove", MouseButtons.Left, new Point(grab.X, grab.Y + 20));
                     int draggedTo = (int)scroll.GetValue(page);
-                    Check(draggedTo > 0 && draggedTo < bottom, "dragging the scroll thumb did not scroll: " + draggedTo);
+                    Check(draggedTo > 0 && draggedTo <= bottom, "dragging the scroll thumb did not scroll: " + draggedTo);
                     typeof(Control).GetMethod("OnMouseCaptureChanged", Private).Invoke(page, new object[] { EventArgs.Empty });
                     Check(!(bool)dragging.GetValue(page), "losing mouse capture did not end the scroll drag");
+                    page.ScrollToTop();
                     fire("OnMouseMove", MouseButtons.None, new Point(grab.X, grab.Y + 90));
-                    Check((int)scroll.GetValue(page) == draggedTo, "the page kept scrolling after the drag was cancelled");
+                    Check((int)scroll.GetValue(page) == 0, "the page kept scrolling after the drag was cancelled");
+                    page.ScrollByWheel(-120 * 200);
                     fire("OnMouseDown", MouseButtons.Left, (Point)SettingsClient(page, SettingsRowPoint(page, AddRow)));
                     typeof(Control).GetMethod("OnMouseCaptureChanged", Private).Invoke(page, new object[] { EventArgs.Empty });
                     fire("OnMouseUp", MouseButtons.Left, (Point)SettingsClient(page, SettingsRowPoint(page, AddRow)));
-                    Check(addEvents == 1, "a press that lost mouse capture still activated the row");
+                    Check(addEvents == 2, "a press that lost mouse capture still activated the row");
                     thumb = (Rectangle)thumbRect.Invoke(page, null);
                     fire("OnMouseDown", MouseButtons.Left, new Point(thumb.Left + thumb.Width / 2, thumb.Top + 5));
                     page.Visible = false;
@@ -3009,6 +3098,7 @@ namespace AppManager
                 Invoke(form, "OpenSettings");
                 Application.DoEvents();
                 Check((Controls.SettingsPage.RescanState)state.GetValue(page) == Controls.SettingsPage.RescanState.Idle, "rescan row not idle when settings open");
+                page.SelectSection(Controls.SettingsPage.SettingsSection.Scan);
 
                 // 扫描器置空：后台扫描必然失败，走完真实的开始/结束回调而不枚举真实系统环境。
                 object scanner = scannerField.GetValue(form);
@@ -3038,6 +3128,7 @@ namespace AppManager
                 running.SetValue(form, true);   // 关闭窗体前不再启动补扫
 
                 // 存储位置就地修改：停用、排序立即写入配置并落库，页面按生效后的配置刷新。
+                page.SelectSection(Controls.SettingsPage.SettingsSection.Storage);
                 Check(ClickSettingsZone(page, first, "StoreToggle"), "first location has no switch");
                 Check(!config.ResourceStoreLocations[0].Enabled && config.ResourceStoreLocations[1].Enabled
                     && SameText(config.ResourceStorePath, second), "disabling a location did not move the legacy path to the next enabled one");
@@ -3086,6 +3177,12 @@ namespace AppManager
                     delegate { Invoke(form, "AddStoreLocation", Path.Combine(third, "inner")); });
                 Check(rejected && config.ResourceStoreLocations.Count == 3, "a nested location was accepted or rejected silently");
                 Check(AppConfig.Load().ResourceStoreLocations.Count == 3, "added location was not persisted");
+                // 选择窗口里的校验：重复和互相包含当场给出原因，且不改动配置；新位置通过
+                int before = config.ResourceStoreLocations.Count;
+                Check(((string)Invoke(form, "StoreLocationError", Path.Combine(third, "inner"))).Contains("互相包含")
+                    && Invoke(form, "StoreLocationError", Path.Combine(root, "settings-rescan", "res4")) == null
+                    && Invoke(form, "StoreLocationError", first) == null && config.ResourceStoreLocations.Count == before,
+                    "store location check in the picker is wrong or changed the config");
 
                 // 一直在用默认位置时添加第一个位置：默认位置作为第一项保留，已有资源仍被识别为库内文件。
                 config.ResourceStoreLocations.Clear();
@@ -3104,12 +3201,20 @@ namespace AppManager
                     "the kept default location cannot be disabled while staying known");
 
                 // 滚轮路由：光标在设置页上时滚动设置页并吞掉消息；设置页关闭后不再拦截。
+                // 位置多到一屏放不下，存储位置页才能滚动。
+                for (int i = 0; i < 6; i++) Invoke(form, "AddStoreLocation", Path.Combine(root, "settings-rescan", "extra" + i));
                 form.ClientSize = new Size(1200, 600);
                 Application.DoEvents();
                 FieldInfo scroll = typeof(Controls.SettingsPage).GetField("scrollOffset", Private);
                 Point screen = page.PointToScreen(new Point(page.Width / 2, page.Height / 2));
                 IntPtr position = new IntPtr(((screen.Y & 0xFFFF) << 16) | (screen.X & 0xFFFF));
                 Message wheel = Message.Create(form.Handle, 0x020A, new IntPtr(-120 << 16), position);
+                // 操作记录页的列表是原生列表框：滚轮不拦截，由列表自己滚；布局备份页交给备份列表并吞掉消息
+                page.SelectSection(Controls.SettingsPage.SettingsSection.Data);
+                Check(!form.PreFilterMessage(ref wheel), "wheel over the operation history was swallowed instead of reaching the list");
+                page.SelectSection(Controls.SettingsPage.SettingsSection.Backup);
+                Check(form.PreFilterMessage(ref wheel), "wheel over the layout backups was not routed to the backup list");
+                page.SelectSection(Controls.SettingsPage.SettingsSection.Storage);
                 Check((int)scroll.GetValue(page) == 0, "settings page was scrolled before any wheel input");
                 Check(form.PreFilterMessage(ref wheel) && (int)scroll.GetValue(page) > 0, "wheel over the settings page did not scroll it");
                 Invoke(form, "CloseSettings");
@@ -3129,6 +3234,18 @@ namespace AppManager
                         Check((int)Invoke(form, "ResizeHitTest", new Point(page.Left + corner.X, page.Top + corner.Y)) == 0,
                             "scroll thumb overlaps the window resize zone at " + corner);
                 }
+
+                // 右侧面板忙碌（备份、恢复、撤销进行中）：Esc / 返回都不能离开设置页，结束后恢复。
+                FakeSettingsPanel busyPanel = new FakeSettingsPanel();
+                page.HostPanel(Controls.SettingsPage.SettingsSection.Diagnostics, busyPanel);
+                page.SelectSection(Controls.SettingsPage.SettingsSection.Diagnostics);
+                FieldInfo open = typeof(MainForm).GetField("settingsOpen", Private);
+                busyPanel.SetBusy(true);
+                Invoke(form, "CloseSettings");
+                Check((bool)open.GetValue(form) && page.Visible, "settings page closed while a panel was busy");
+                busyPanel.SetBusy(false);
+                Invoke(form, "CloseSettings");
+                Check(!(bool)open.GetValue(form) && !page.Visible, "settings page could not close after the panel finished");
             }
         }
 
@@ -5003,16 +5120,15 @@ namespace AppManager
             Check(c.Database.LatestBusinessOperation() == business && visible.Count > 1 && Convert.ToInt64(visible[0][0]) == business
                 && visible.All(row => !row[2].StartsWith("catalog.")), "a startup repair blocks undo or is listed by default");
 
-            // 1b. 操作记录窗口：切换记录后稍等再读明细；维护操作失败后重新读取记录，撤销资格不停在旧状态
-            using (DatabaseForm dialog = new DatabaseForm(c.Database))
+            // 1b. 操作记录面板：切换记录后稍等再读明细；维护操作失败后重新读取记录，撤销资格不停在旧状态
+            using (DatabasePanel dialog = new DatabasePanel(c.Database))
+            using (Form panelHost = HostSettingsPanel(dialog))
             {
-                Func<string, object> field = delegate(string name) { return typeof(DatabaseForm).GetField(name, Private).GetValue(dialog); };
+                Func<string, object> field = delegate(string name) { return typeof(DatabasePanel).GetField(name, Private).GetValue(dialog); };
                 Func<bool> loaded = delegate
                 {
                     return (string)field("placeholder") != "正在读取操作记录…" && (string)field("detailText") != "正在读取明细…";
                 };
-                dialog.Opacity = 0;
-                dialog.Show();
                 PumpUntil(loaded, 15000);
                 ListBox ops = (ListBox)field("opList");
                 Control undo = (Control)field("undo");
@@ -5025,15 +5141,14 @@ namespace AppManager
                 Check(!((System.Windows.Forms.Timer)field("detailDelay")).Enabled && (string)field("detailText") == null, "details never loaded after the selection settled");
 
                 int versionBefore = (int)field("historyVersion");
-                MethodInfo work = typeof(DatabaseForm).GetMethod("Work", Private);
-                Check(AnswerMessageDialog(dialog.Text, 2, delegate
-                {
-                    work.Invoke(dialog, new object[] { "正在测试…", (Func<string>)delegate { throw new IOException("模拟失败"); }, (Action<string>)delegate { } });
-                    PumpUntil(delegate { return !(bool)field("running") && (int)field("historyVersion") > versionBefore; }, 15000);
-                }), "the failure was not reported");
-                Check((int)field("historyVersion") > versionBefore, "a failed maintenance step did not reload the history");
+                MethodInfo work = typeof(DatabasePanel).GetMethod("Work", Private);
+                work.Invoke(dialog, new object[] { "正在测试…", (Func<string>)delegate { throw new IOException("模拟失败"); }, (Action<string>)delegate { } });
+                Check(dialog.Busy, "the panel is not busy while maintenance runs");
+                PumpUntil(delegate { return !(bool)field("running") && (int)field("historyVersion") > versionBefore; }, 15000);
+                Label failure = (Label)field("status");
+                Check(failure.Text.Contains("模拟失败") && failure.ForeColor == Theme.WarningText, "the failure was not reported in the status line: " + failure.Text);
+                Check((int)field("historyVersion") > versionBefore && !dialog.Busy, "a failed maintenance step did not reload the history");
                 PumpUntil(loaded, 15000);
-                dialog.Close();
             }
             c.Database.Undo(business);   // 修复和扫描记录更新也不挡：直接能撤销
 
@@ -5165,18 +5280,17 @@ namespace AppManager
                 finally { Monitor.Exit(listLock); }
                 Check(reader.Join(10000) && listed != null && listed.Any(i => i.Id == backupId), "listing gave up instead of waiting for the earlier read");
 
-                using (BackupForm form = new BackupForm())
+                using (LayoutBackupPanel form = new LayoutBackupPanel())
+                using (Form panelHost = HostSettingsPanel(form))
                 {
-                    form.Opacity = 0;
-                    form.Show();
-                    Controls.BackupListControl cards = (Controls.BackupListControl)typeof(BackupForm).GetField("list", Private).GetValue(form);
+                    Controls.BackupListControl cards = (Controls.BackupListControl)typeof(LayoutBackupPanel).GetField("list", Private).GetValue(form);
                     FieldInfo busy = typeof(Controls.BackupListControl).GetField("busy", Private);
-                    FieldInfo running = typeof(BackupForm).GetField("operationRunning", Private);
-                    FieldInfo reloading = typeof(BackupForm).GetField("reloadRunning", Private);
+                    FieldInfo running = typeof(LayoutBackupPanel).GetField("operationRunning", Private);
+                    FieldInfo reloading = typeof(LayoutBackupPanel).GetField("reloadRunning", Private);
                     FieldInfo loading = typeof(Controls.BackupListControl).GetField("loading", Private);
                     PumpUntil(delegate { return !(bool)loading.GetValue(cards) && !(bool)reloading.GetValue(form); }, 15000);
-                    MethodInfo operate = typeof(BackupForm).GetMethod("RunBackupOperation", Private);
-                    Action reload = (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(BackupForm).GetMethod("ReloadList", Private, null, Type.EmptyTypes, null));
+                    MethodInfo operate = typeof(LayoutBackupPanel).GetMethod("RunBackupOperation", Private);
+                    Action reload = (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(LayoutBackupPanel).GetMethod("ReloadList", Private, null, Type.EmptyTypes, null));
                     Monitor.Enter(listLock);
                     try
                     {
@@ -5186,8 +5300,7 @@ namespace AppManager
                     }
                     finally { Monitor.Exit(listLock); }
                     PumpUntil(delegate { return !(bool)busy.GetValue(cards); }, 15000);
-                    Check(!(bool)busy.GetValue(cards) && !(bool)reloading.GetValue(form), "cards stayed disabled after the list was refreshed");
-                    form.Close();
+                    Check(!(bool)busy.GetValue(cards) && !(bool)reloading.GetValue(form) && !form.Busy, "cards stayed disabled after the list was refreshed");
                 }
             }
             finally { Directory.Delete(backupDir, true); }
@@ -6403,23 +6516,158 @@ namespace AppManager
             rows.Add(new string[] { "2", "not a time", "physical.files.import", "+1 ~0 -0; rows=3", null });
             rows.Add(new string[] { "x", "2026-11-14T03:00:00.0000000Z", "OnAddCategory", "", null });
             rows.Add(new string[] { "1", "2026-11-14T01:00:00.0000000Z", "catalog.discover", "new identities=2", null });
-            List<DatabaseForm.Op> ops = DatabaseForm.ReadOps(rows);
-            DatabaseForm.Annotate(ops);
+            List<DatabasePanel.Op> ops = DatabasePanel.ReadOps(rows);
+            DatabasePanel.Annotate(ops);
             Check(ops.Count == 5 && ops[0].TimeKnown && ops[0].Time == new DateTime(2026, 11, 14, 5, 0, 0, DateTimeKind.Utc).ToLocalTime() && !ops[3].TimeKnown,
                 "operation rows read wrong");
             Check(!ops[0].Reverted && ops[1].Reverted && !ops[2].Reverted, "undo of an undo must make the original effective again");
             Check(ops[0].ToString() == "撤销操作，撤销了「撤销操作」" && ops[2].ToString() == "新建分类，改动 2 处" && ops[4].ToString() == "扫描登记新项目，登记 2 个新项目",
                 "list line wrong: " + ops[0] + " / " + ops[2] + " / " + ops[4]);
-            Check(DatabaseForm.CanUndo(ops[0], 5) && DatabaseForm.NoticeText(ops[0], 5).StartsWith("这是一次撤销") && DatabaseForm.StatusText(ops[0], 5) == "可撤销",
+            Check(DatabasePanel.CanUndo(ops[0], 5) && DatabasePanel.NoticeText(ops[0], 5).StartsWith("这是一次撤销") && DatabasePanel.StatusText(ops[0], 5) == "可撤销",
                 "latest undo record must be undoable");
-            Check(!DatabaseForm.CanUndo(ops[2], 5) && DatabaseForm.NoticeText(ops[2], 5).StartsWith("只能撤销最新的一次操作")
-                && DatabaseForm.NoticeText(ops[1], 5) == "这次操作已经被撤销。" && DatabaseForm.StatusText(ops[1], 5) == "已撤销", "older records offered for undo");
-            Check(!DatabaseForm.CanUndo(ops[3], 2) && DatabaseForm.NoticeText(ops[3], 2).Contains("布局备份") && DatabaseForm.StatusText(ops[3], 2) == "不可撤销",
+            Check(!DatabasePanel.CanUndo(ops[2], 5) && DatabasePanel.NoticeText(ops[2], 5).StartsWith("只能撤销最新的一次操作")
+                && DatabasePanel.NoticeText(ops[1], 5) == "这次操作已经被撤销。" && DatabasePanel.StatusText(ops[1], 5) == "已撤销", "older records offered for undo");
+            Check(!DatabasePanel.CanUndo(ops[3], 2) && DatabasePanel.NoticeText(ops[3], 2).Contains("布局备份") && DatabasePanel.StatusText(ops[3], 2) == "不可撤销",
                 "operation that touched files offered for undo");
-            Check(!DatabaseForm.CanUndo(ops[4], 1) && DatabaseForm.StatusText(ops[4], 1) == "系统记录" && !DatabaseForm.CanUndo(null, 0), "system record offered for undo");
+            Check(!DatabasePanel.CanUndo(ops[4], 1) && DatabasePanel.StatusText(ops[4], 1) == "系统记录" && !DatabasePanel.CanUndo(null, 0), "system record offered for undo");
         }
 
         // 窗口的完整链路：默认不列系统记录；最新的业务操作可撤销；明细和更早的记录分页读取；撤销后数据库确实退回。
+        /// <summary>路径选择窗口：后台路径检查的各种结果，以及窗口里「再点一次才新建/替换」、业务校验不通过时留在窗口里的流程。</summary>
+        private static void PathPickerFlow()
+        {
+            string dir = Path.Combine(root, "path-picker");
+            Directory.CreateDirectory(dir);
+            string existing = Path.Combine(dir, "已有.db"), other = Path.Combine(dir, "notes.txt"), locked = Path.Combine(dir, "只读.db");
+            File.WriteAllText(existing, "db");
+            File.WriteAllText(other, "text");
+            File.WriteAllText(locked, "db");
+            File.SetAttributes(locked, FileAttributes.ReadOnly);
+            string[] db = new string[] { ".db" };
+            try
+            {
+                // 选文件夹：已有的直接通过；文件、缺失的文件夹报错；允许新建时先提示，同一路径再确认才新建
+                PathPickerCheck check = PathPickerDialog.CheckPath(PathPickerMode.Folder, dir + "\\", null, false, null, null);
+                Check(check.Error == null && !check.AskCreate && check.Path == dir, "existing folder rejected: " + check.Error + " / " + check.Path);
+                check = PathPickerDialog.CheckPath(PathPickerMode.Folder, existing, null, true, null, null);
+                Check(check.Error != null && check.Error.Contains("文件"), "a file was accepted as a folder");
+                string fresh = Path.Combine(dir, "新建", "子目录");
+                check = PathPickerDialog.CheckPath(PathPickerMode.Folder, fresh, null, false, null, null);
+                Check(check.Error != null && !Directory.Exists(fresh), "a missing folder was accepted without permission to create it");
+                check = PathPickerDialog.CheckPath(PathPickerMode.Folder, fresh, null, true, null, null);
+                Check(check.AskCreate && check.Error == null && !Directory.Exists(fresh), "a missing folder was created without asking first");
+                check = PathPickerDialog.CheckPath(PathPickerMode.Folder, fresh, null, true, Path.Combine(dir, "别的"), null);
+                Check(check.AskCreate && !Directory.Exists(fresh), "confirming a different path created this folder");
+                check = PathPickerDialog.CheckPath(PathPickerMode.Folder, fresh, null, true, fresh, null);
+                Check(check.Error == null && !check.AskCreate && Directory.Exists(fresh), "a confirmed folder was not created: " + check.Error);
+                check = PathPickerDialog.CheckPath(PathPickerMode.Folder, "C:\\bad|name", null, true, null, null);
+                Check(check.Error != null, "an invalid path was accepted");
+
+                // 打开文件：只接受存在的、扩展名匹配的文件
+                check = PathPickerDialog.CheckPath(PathPickerMode.OpenFile, existing, db, false, null, null);
+                Check(check.Error == null && check.Path == existing, "an existing backup was rejected: " + check.Error);
+                Check(PathPickerDialog.CheckPath(PathPickerMode.OpenFile, other, db, false, null, null).Error != null, "a file of the wrong type was accepted");
+                Check(PathPickerDialog.CheckPath(PathPickerMode.OpenFile, Path.Combine(dir, "没有.db"), db, false, null, null).Error != null, "a missing file was accepted");
+                Check(PathPickerDialog.CheckPath(PathPickerMode.OpenFile, dir, db, false, null, null).Error != null, "a folder was accepted as a file");
+
+                // 保存：补扩展名；同名文件先提示、确认后才接受；只读同名文件、缺失的文件夹、只写了文件夹都报错
+                check = PathPickerDialog.CheckPath(PathPickerMode.SaveFile, Path.Combine(dir, "新备份"), db, false, null, null);
+                Check(check.Error == null && !check.AskOverwrite && check.Path == Path.Combine(dir, "新备份.db"), "missing extension was not added: " + check.Path);
+                check = PathPickerDialog.CheckPath(PathPickerMode.SaveFile, Path.Combine(dir, "已有"), db, false, null, null);
+                Check(check.AskOverwrite && check.Path == existing, "an existing file was replaced without asking");
+                check = PathPickerDialog.CheckPath(PathPickerMode.SaveFile, existing, db, false, null, existing);
+                Check(check.Error == null && !check.AskOverwrite, "a confirmed replacement was refused");
+                Check(PathPickerDialog.CheckPath(PathPickerMode.SaveFile, locked, db, false, null, locked).Error != null, "a read-only file was offered for replacement");
+                Check(PathPickerDialog.CheckPath(PathPickerMode.SaveFile, Path.Combine(dir, "没有", "a.db"), db, false, null, null).Error != null, "saving into a missing folder was accepted");
+                Check(PathPickerDialog.CheckPath(PathPickerMode.SaveFile, dir + "\\", db, false, null, null).Error != null, "a folder without a file name was accepted");
+
+                // 列文件：只列匹配的类型，不列隐藏文件，超过上限只计数
+                string many = Path.Combine(dir, "many");
+                Directory.CreateDirectory(many);
+                for (int i = 0; i < PathPickerDialog.MaxListedFiles + 3; i++) File.WriteAllText(Path.Combine(many, "b" + i + ".db"), "x");
+                File.WriteAllText(Path.Combine(many, "skip.txt"), "x");
+                string hidden = Path.Combine(many, "hidden.db");
+                File.WriteAllText(hidden, "x");
+                File.SetAttributes(hidden, FileAttributes.Hidden);
+                int omitted;
+                string error;
+                List<string> files = PathPickerDialog.ListFiles(many, db, out omitted, out error);
+                Check(error == null && files.Count == PathPickerDialog.MaxListedFiles && omitted == 3
+                    && files.All(f => f.EndsWith(".db") && !f.EndsWith("hidden.db")) && Path.GetFileName(files[1]) == "b1.db",
+                    "file listing did not filter, sort or cap: " + files.Count + " / " + omitted);
+                PathPickerDialog.ListFiles(Path.Combine(dir, "不存在"), db, out omitted, out error);
+                Check(error != null, "listing a missing folder reported no error");
+
+                // 窗口流程：业务校验不通过时留在窗口里提示；保存到同名文件要点两次；输入变化后需要重新确认
+                Func<PathPickerDialog, string, object> field = delegate(PathPickerDialog d, string name) { return typeof(PathPickerDialog).GetField(name, Private).GetValue(d); };
+                Action<PathPickerDialog> confirm = delegate(PathPickerDialog d)
+                {
+                    d.Confirm();
+                    PumpUntil(delegate { return !(bool)field(d, "checking"); }, 15000);
+                };
+                using (PathPickerDialog picker = new PathPickerDialog(new PathPickerOptions
+                {
+                    Title = "测试", Mode = PathPickerMode.Folder, ConfirmText = "添加", AllowCreateFolder = true, InitialFolder = dir,
+                    Validate = delegate(string path)
+                    {
+                        if (path == Path.Combine(dir, "会抛异常")) throw new InvalidOperationException("校验出错");
+                        return path == fresh || path == Path.Combine(dir, "被拒绝") ? "存储位置不能互相包含" : null;
+                    }
+                }))
+                {
+                    picker.Opacity = 0;
+                    picker.Show();
+                    Application.DoEvents();
+                    TextBox box = (TextBox)field(picker, "pathBox");
+                    Label notice = (Label)field(picker, "noticeLabel");
+                    Check(box.Text == dir && notice.Text.Contains(dir), "initial folder was not preselected: " + box.Text);
+                    box.Text = fresh;
+                    confirm(picker);
+                    Check(picker.Visible && picker.ResultPath == null && notice.Text.Contains("互相包含"), "a failed validation closed the picker: " + notice.Text);
+                    // 业务校验不通过的新路径：不提示新建，点几次都不会先建出空文件夹
+                    string rejected = Path.Combine(dir, "被拒绝");
+                    box.Text = rejected;
+                    confirm(picker);
+                    confirm(picker);
+                    Check(picker.Visible && !Directory.Exists(rejected) && notice.Text.Contains("互相包含") && field(picker, "confirmedCreate") == null,
+                        "a rejected new folder was offered for creation or created: " + notice.Text);
+                    // 校验本身出错：留在窗口里说明原因，可以换个路径重试
+                    box.Text = Path.Combine(dir, "会抛异常");
+                    confirm(picker);
+                    Check(picker.Visible && notice.Text.Contains("校验出错") && !Directory.Exists(Path.Combine(dir, "会抛异常")), "a validation exception escaped or closed the picker");
+                    string later = Path.Combine(dir, "稍后新建");
+                    box.Text = later;
+                    confirm(picker);
+                    Check(picker.Visible && !Directory.Exists(later) && notice.Text.Contains("新建"), "a missing folder was not announced before creating it");
+                    box.Text = later + "2";
+                    confirm(picker);
+                    Check(picker.Visible && !Directory.Exists(later + "2") && !Directory.Exists(later), "changing the path skipped the second confirmation");
+                    confirm(picker);
+                    Check(picker.DialogResult == DialogResult.OK && picker.ResultPath == later + "2" && Directory.Exists(later + "2"),
+                        "confirming twice did not create and return the folder: " + picker.ResultPath);
+                }
+                using (PathPickerDialog picker = new PathPickerDialog(new PathPickerOptions
+                {
+                    Title = "测试", Mode = PathPickerMode.SaveFile, ConfirmText = "备份", InitialFolder = dir, FileName = "已有.db", Extensions = db
+                }))
+                {
+                    picker.Opacity = 0;
+                    picker.Show();
+                    PumpUntil(delegate { return ((ListBox)field(picker, "list")).Items.Cast<object>().Any(r => r.ToString() == "已有.db"); }, 15000);
+                    Check(((ListBox)field(picker, "list")).Items.Cast<object>().Any(r => r.ToString() == "已有.db")
+                        && !((ListBox)field(picker, "list")).Items.Cast<object>().Any(r => r.ToString() == "notes.txt"),
+                        "the start folder was not expanded with matching files only");
+                    TextBox box = (TextBox)field(picker, "pathBox");
+                    Check(box.Text == existing, "default file name not placed in the start folder: " + box.Text);
+                    confirm(picker);
+                    Check(picker.Visible && picker.ResultPath == null && ((Label)field(picker, "noticeLabel")).Text.Contains("替换"), "an existing file was replaced on the first click");
+                    confirm(picker);
+                    Check(picker.DialogResult == DialogResult.OK && picker.ResultPath == existing, "confirming the replacement did not return the file");
+                }
+            }
+            finally { File.SetAttributes(locked, FileAttributes.Normal); }
+        }
+
         private static void DatabaseFormFlow()
         {
             string path = Path.Combine(root, "database-form", "config.xml");
@@ -6430,7 +6678,7 @@ namespace AppManager
             Check(c.SaveTo(path), "fixture export");
             c = ConfigDatabase.Load(path);
             Check(!c.LoadFailed, c.DatabaseError);
-            for (int i = 0; i < DatabaseForm.PageRows; i++)
+            for (int i = 0; i < DatabasePanel.PageRows; i++)
                 c.AddedItems.Add(new AddedEntry { Path = "D:\\lib\\track" + i + ".mp3", Name = "track" + i, Category = "音乐", IsResource = true });
             Check(c.Save("phone.music.import"), c.DatabaseError);
             c.CustomCategories.Add("游戏");
@@ -6439,17 +6687,17 @@ namespace AppManager
             int business = c.Database.HistoryPage(0, 1000, false).Count;
             // 扫描登记比业务操作更新，数量超过一页：既不能挡住撤销，也不能默认列出来
             using (Sqlite db = new Sqlite(c.Database.FilePath, false))
-                for (int i = 0; i < DatabaseForm.PageOps + 5; i++)
+                for (int i = 0; i < DatabasePanel.PageOps + 5; i++)
                     db.Execute("INSERT INTO operations(utc,action,summary,actor,session,pid) VALUES(?,?,?,?,?,?)",
                         DateTime.UtcNow.ToString("o"), "catalog.discover", "new identities=1", "test", "test", 1);
             Check(c.Database.LatestBusinessOperation() == newest && c.Database.HistoryPage(0, 1000, false).Count == business
                 && c.Database.HistoryPage(newest, 1000, false).Count == business - 1, "history paging or the undo candidate is wrong");
 
-            Func<DatabaseForm, string, object> field = delegate(DatabaseForm dialog, string name)
+            Func<DatabasePanel, string, object> field = delegate(DatabasePanel dialog, string name)
             {
-                return typeof(DatabaseForm).GetField(name, Private).GetValue(dialog);
+                return typeof(DatabasePanel).GetField(name, Private).GetValue(dialog);
             };
-            Action<DatabaseForm> loaded = delegate(DatabaseForm dialog)
+            Action<DatabasePanel> loaded = delegate(DatabasePanel dialog)
             {
                 PumpUntil(delegate
                 {
@@ -6457,10 +6705,11 @@ namespace AppManager
                 }, 15000);
             };
 
-            using (DatabaseForm dialog = new DatabaseForm(c.Database))
+            using (DatabasePanel dialog = new DatabasePanel(c.Database))
+            using (Form panelHost = HostSettingsPanel(dialog))
             {
-                dialog.Opacity = 0;
-                dialog.Show();
+                int changed = 0;
+                dialog.DataChanged += delegate { changed++; };
                 loaded(dialog);
                 ListBox ops = (ListBox)field(dialog, "opList"), rows = (ListBox)field(dialog, "changeList");
                 Control undo = (Control)field(dialog, "undo"), notice = (Control)field(dialog, "notice");
@@ -6474,67 +6723,100 @@ namespace AppManager
                 loaded(dialog);
                 Check(ops.Items[1].ToString().StartsWith("导入手机音乐") && !undo.Visible && notice.Text.StartsWith("只能撤销最新的一次操作"),
                     "older operation offered for undo: " + ops.Items[1] + " / " + notice.Text);
-                Check(rows.Items.Count == DatabaseForm.PageRows + 1 && rows.Items[rows.Items.Count - 1].ToString() == "显示更多"
-                    && (int)field(dialog, "added") >= DatabaseForm.PageRows * 2, "long operation not paged: " + rows.Items.Count);
-                MethodInfo more = typeof(DatabaseForm).GetMethod("LoadDetails", Private);
+                Check(rows.Items.Count == DatabasePanel.PageRows + 1 && rows.Items[rows.Items.Count - 1].ToString() == "显示更多"
+                    && (int)field(dialog, "added") >= DatabasePanel.PageRows * 2, "long operation not paged: " + rows.Items.Count);
+                MethodInfo more = typeof(DatabasePanel).GetMethod("LoadDetails", Private);
                 more.Invoke(dialog, new object[] { true });
-                PumpUntil(delegate { return rows.Items.Count != DatabaseForm.PageRows + 1; }, 15000);
-                Check(rows.Items.Count >= DatabaseForm.PageRows * 2 && rows.SelectedIndex == DatabaseForm.PageRows && rows.Items[DatabaseForm.PageRows] is ChangeRow,
+                PumpUntil(delegate { return rows.Items.Count != DatabasePanel.PageRows + 1; }, 15000);
+                Check(rows.Items.Count >= DatabasePanel.PageRows * 2 && rows.SelectedIndex == DatabasePanel.PageRows && rows.Items[DatabasePanel.PageRows] is ChangeRow,
                     "show-more did not append the next page: " + rows.Items.Count + " / " + rows.SelectedIndex);
                 HashSet<long> seen = new HashSet<long>();
                 foreach (object item in rows.Items) if (item is ChangeRow) Check(seen.Add(((ChangeRow)item).Id), "a change is listed twice after paging");
 
                 // 显示系统记录：一页 PageOps 条，末尾可继续往更早读；业务操作仍是唯一可撤销的那条
                 typeof(Control).GetMethod("OnClick", Private).Invoke((Control)field(dialog, "filter"), new object[] { EventArgs.Empty });
-                PumpUntil(delegate { return ops.Items.Count == DatabaseForm.PageOps + 1; }, 15000);
+                PumpUntil(delegate { return ops.Items.Count == DatabasePanel.PageOps + 1; }, 15000);
                 loaded(dialog);
-                Check(ops.Items.Count == DatabaseForm.PageOps + 1 && ops.Items[0].ToString() == "扫描登记新项目，登记 1 个新项目"
-                    && ops.Items[DatabaseForm.PageOps].ToString() == "显示更早的记录" && ((Control)field(dialog, "filter")).Text == "隐藏系统自动记录",
+                Check(ops.Items.Count == DatabasePanel.PageOps + 1 && ops.Items[0].ToString() == "扫描登记新项目，登记 1 个新项目"
+                    && ops.Items[DatabasePanel.PageOps].ToString() == "显示更早的记录" && ((Control)field(dialog, "filter")).Text == "隐藏系统自动记录",
                     "system records not paged: " + ops.Items.Count);
                 Check(!undo.Visible && notice.Text.StartsWith("扫描时自动产生的记录"), "system record offered for undo");
-                typeof(DatabaseForm).GetMethod("LoadHistory", Private).Invoke(dialog, new object[] { true });
-                PumpUntil(delegate { return ops.Items.Count == DatabaseForm.PageOps + 5 + business; }, 15000);
+                typeof(DatabasePanel).GetMethod("LoadHistory", Private).Invoke(dialog, new object[] { true });
+                PumpUntil(delegate { return ops.Items.Count == DatabasePanel.PageOps + 5 + business; }, 15000);
                 loaded(dialog);
-                Check(ops.Items.Count == DatabaseForm.PageOps + 5 + business && ops.Items[ops.Items.Count - 1] is DatabaseForm.Op,
+                Check(ops.Items.Count == DatabasePanel.PageOps + 5 + business && ops.Items[ops.Items.Count - 1] is DatabasePanel.Op,
                     "earlier records not appended: " + ops.Items.Count);
-                ops.SelectedIndex = DatabaseForm.PageOps + 5;
+                ops.SelectedIndex = DatabasePanel.PageOps + 5;
                 loaded(dialog);
                 Check(ops.SelectedItem.ToString() == "新建分类，改动 2 处" && undo.Visible, "scan records must not block undoing the latest business operation");
 
-                typeof(DatabaseForm).GetMethod("StartUndo", Private).Invoke(dialog, new object[] { newest });
-                Check(!((Control)field(dialog, "close")).Enabled, "window stays usable while the undo is running");
-                dialog.Close();
-                Check(dialog.Visible, "window closed while the undo was still running");
-                PumpUntil(delegate { return !dialog.Visible; }, 15000);
-                Check(dialog.Changed && !dialog.Visible, "successful undo must close the window and report the change");
+                typeof(DatabasePanel).GetMethod("StartUndo", Private).Invoke(dialog, new object[] { newest });
+                Check(dialog.Busy && !((Control)field(dialog, "maintain")).Enabled && !ops.Enabled, "panel stays usable while the undo is running");
+                PumpUntil(delegate { return !dialog.Busy; }, 15000);
+                Check(changed == 1 && ((Control)field(dialog, "status")).Text.StartsWith("已撤销"), "successful undo was not reported in place");
+                // 面板不关闭：撤销后按新内容重新读取，最新一条就是这次撤销
+                // 此时还显示着系统记录，被撤销的那条不在第一页里，摘要只写「之前的一次操作」
+                PumpUntil(delegate { return ops.Items.Count > 0 && ops.Items[0].ToString().StartsWith("撤销操作"); }, 15000);
+                Check(ops.Items.Count > 0 && ops.Items[0].ToString().StartsWith("撤销操作"), "history was not reloaded after the undo: " + (ops.Items.Count > 0 ? ops.Items[0] : null));
             }
             AppConfig after = ConfigDatabase.Load(path);
             Check(!after.LoadFailed && !after.CustomCategories.Contains("游戏") && after.CustomCategories.Contains("工具")
-                && after.AddedItems.Count == DatabaseForm.PageRows, "undo did not roll back exactly the latest operation");
+                && after.AddedItems.Count == DatabasePanel.PageRows, "undo did not roll back exactly the latest operation");
 
             // 撤销本身是最新的一条：可以再撤销；被撤销的那条标为已撤销
-            using (DatabaseForm dialog = new DatabaseForm(after.Database))
+            using (DatabasePanel dialog = new DatabasePanel(after.Database))
+            using (Form panelHost = HostSettingsPanel(dialog))
             {
-                dialog.Opacity = 0;
-                dialog.Show();
                 loaded(dialog);
                 ListBox ops = (ListBox)field(dialog, "opList");
                 Check(ops.Items[0].ToString() == "撤销操作，撤销了「新建分类」" && ((Control)field(dialog, "undo")).Visible
                     && ((Control)field(dialog, "notice")).Text.StartsWith("这是一次撤销"), "undo record wrong: " + ops.Items[0]);
-                Check(((DatabaseForm.Op)ops.Items[1]).Reverted && DatabaseForm.StatusText((DatabaseForm.Op)ops.Items[1], (long)field(dialog, "latestBusiness")) == "已撤销",
+                Check(((DatabasePanel.Op)ops.Items[1]).Reverted && DatabasePanel.StatusText((DatabasePanel.Op)ops.Items[1], (long)field(dialog, "latestBusiness")) == "已撤销",
                     "undone operation not marked");
-                dialog.Close();
             }
 
-            // 读取还没结束就关闭：后台线程不得再回调已关闭的窗口
-            using (DatabaseForm dialog = new DatabaseForm(after.Database))
+            // 读取还没结束就释放面板（主窗口关闭）：后台线程不得再回调已释放的面板
+            DatabasePanel early = new DatabasePanel(after.Database);
+            using (Form panelHost = HostSettingsPanel(early, false))
             {
-                dialog.Opacity = 0;
-                dialog.Shown += delegate { dialog.Close(); };
-                dialog.Show();
+                early.Dispose();
                 PumpUntil(delegate { return false; }, 300);
-                Check(((ListBox)field(dialog, "opList")).Items.Count == 0 && !dialog.Changed, "closed window still received the history");
+                Check(((IList)field(early, "ops")).Count == 0, "disposed panel still received the history");
             }
+
+            // 换成另一个数据库对象（主窗口整体重载配置后）：清掉旧记录并按新对象重新读取
+            using (DatabasePanel dialog = new DatabasePanel(null))
+            using (Form panelHost = HostSettingsPanel(dialog))
+            {
+                Check((string)field(dialog, "placeholder") == "数据库不可用，无法读取操作记录。", "missing database is not explained");
+                typeof(DatabasePanel).GetMethod("CheckDatabase", Private).Invoke(dialog, null);
+                Check(((Control)field(dialog, "status")).Text.Contains("数据库不可用") && !dialog.Busy, "maintenance without a database did nothing visible");
+                dialog.SetDatabase(after.Database);
+                loaded(dialog);
+                Check(((ListBox)field(dialog, "opList")).Items.Count > 0, "history was not read after the database was set");
+            }
+        }
+
+        /// <summary>把设置页面板放进一个屏幕外的宿主窗口并显示（面板显示后才开始读取）。</summary>
+        private static Form HostSettingsPanel(Control panel)
+        {
+            return HostSettingsPanel(panel, true);
+        }
+
+        /// <summary>pump 为 false 时显示后不处理消息：面板已发起读取，但结果还没交回界面线程。</summary>
+        private static Form HostSettingsPanel(Control panel, bool pump)
+        {
+            DpiAwareForm host = new DpiAwareForm();
+            host.ShowInTaskbar = false;
+            host.FormBorderStyle = FormBorderStyle.None;
+            host.StartPosition = FormStartPosition.Manual;
+            host.Location = new Point(-32000, -32000);
+            host.ClientSize = new Size(960, 600);
+            panel.Bounds = new Rectangle(0, 0, 960, 600);
+            host.Controls.Add(panel);
+            host.Show();
+            if (pump) Application.DoEvents();
+            return host;
         }
 
         // 主窗口入口的完整链路：打开导入记录后直接关闭，不删任何东西；点「删除已入库项的源文件」后，
@@ -8687,10 +8969,14 @@ namespace AppManager
 
         private static void BackupDpi()
         {
-            using (BackupForm form = new BackupForm())
+            using (DpiAwareForm form = new DpiAwareForm())
+            using (LayoutBackupPanel panel = new LayoutBackupPanel())
             {
+                form.ClientSize = new Size(640, 560);
+                panel.Bounds = new Rectangle(0, 0, 640, 560);
+                form.Controls.Add(panel);
                 Initialize(form);
-                Controls.BackupListControl list = (Controls.BackupListControl)typeof(BackupForm).GetField("list", Private).GetValue(form);
+                Controls.BackupListControl list = (Controls.BackupListControl)typeof(LayoutBackupPanel).GetField("list", Private).GetValue(panel);
                 // Same order as LayoutBackup.List: rollback folders sort before the user's own backups.
                 List<LayoutBackupInfo> items = new List<LayoutBackupInfo>();
                 items.Add(new LayoutBackupInfo { Id = "_prerestore_20260102-030405-aaaa", Name = "broken", IsPreRestore = true, Incomplete = true });
@@ -8722,6 +9008,16 @@ namespace AppManager
 
         private static void BackupCards()
         {
+            // 新建备份不再弹命名框：同一分钟内重名时依次加序号，恢复前留底的名字不占用
+            List<LayoutBackupInfo> named = new List<LayoutBackupInfo>
+            {
+                new LayoutBackupInfo { Name = "布局备份 11-15 23:48" }, new LayoutBackupInfo { Name = "布局备份 11-15 23:48 (2)" },
+                new LayoutBackupInfo { Name = "布局备份 11-16 08:00", IsPreRestore = true }
+            };
+            Check(LayoutBackupPanel.UniqueName("布局备份 11-15 23:48", named) == "布局备份 11-15 23:48 (3)"
+                && LayoutBackupPanel.UniqueName("布局备份 11-16 08:00", named) == "布局备份 11-16 08:00"
+                && LayoutBackupPanel.UniqueName("新的", null) == "新的", "duplicate default backup names were not numbered");
+
             DateTime now = new DateTime(2026, 11, 14, 12, 0, 0);
             Func<DateTime, string> relative = delegate(DateTime then) { return Controls.BackupListControl.RelativeTime(then, now); };
             Check(relative(now.AddSeconds(-20)) == "刚刚" && relative(now.AddMinutes(-5)) == "5 分钟前"
@@ -8899,11 +9195,16 @@ namespace AppManager
 
         private static void BackupWheel()
         {
-            using (BackupForm form = new BackupForm())
+            using (DpiAwareForm form = new DpiAwareForm())
+            using (LayoutBackupPanel panel = new LayoutBackupPanel())
             {
+                form.ClientSize = new Size(640, 560);
+                panel.Bounds = new Rectangle(0, 0, 640, 560);
+                form.Controls.Add(panel);
                 Initialize(form);
-                Controls.BackupListControl list = (Controls.BackupListControl)typeof(BackupForm).GetField("list", Private).GetValue(form);
-                Control create = (Control)typeof(BackupForm).GetField("btnCreate", Private).GetValue(form);
+                Controls.BackupListControl list = (Controls.BackupListControl)typeof(LayoutBackupPanel).GetField("list", Private).GetValue(panel);
+                Control create = (Control)typeof(LayoutBackupPanel).GetField("btnCreate", Private).GetValue(panel);
+                IntPtr panelHandle = panel.Handle;   // 宿主未显示：先建面板句柄，否则按钮会挂在停放窗口上，滚轮转不到面板
                 List<LayoutBackupInfo> many = new List<LayoutBackupInfo>();
                 for (int i = 0; i < 200; i++)
                     many.Add(new LayoutBackupInfo { Id = "20260101-" + i.ToString("000000"), Name = "backup " + i, Created = "2026-01-01 00:00:00" });
@@ -8918,8 +9219,10 @@ namespace AppManager
                     + (top - list.CardRect(0).Top) + " instead of " + step);
                 SendMessage(create.Handle, 0x020A, oneNotchDown, IntPtr.Zero);
                 Check(list.CardRect(0).Top == top - 2 * step, "wheel on a button does not scroll the list exactly one step");
-                SendMessage(form.Handle, 0x020A, oneNotchDown, IntPtr.Zero);
-                Check(list.CardRect(0).Top == top - 3 * step, "wheel on the window does not scroll the list exactly one step");
+                SendMessage(panel.Handle, 0x020A, oneNotchDown, IntPtr.Zero);
+                Check(list.CardRect(0).Top == top - 3 * step, "wheel on the panel does not scroll the list exactly one step");
+                Check(panel.ScrollByWheel(120) && list.CardRect(0).Top == top - 2 * step, "settings wheel routing does not scroll the backup list");
+                panel.ScrollByWheel(-120);
                 SendMessage(list.Handle, 0x020A, new IntPtr(120 << 16), IntPtr.Zero);
                 Check(list.CardRect(0).Top == top - 2 * step, "wheel up does not scroll back one step");
             }

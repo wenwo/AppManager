@@ -7,26 +7,44 @@ using AppManager;
 
 namespace AppManager.Controls
 {
+    /// <summary>设置页右侧可嵌入的整块面板（布局备份、操作记录）。</summary>
+    public interface ISettingsPanel
+    {
+        /// <summary>正在执行不能中断的操作（写备份、恢复、撤销）：期间不能离开设置页或切换目录。</summary>
+        bool Busy { get; }
+        event EventHandler BusyChanged;
+        /// <summary>处理滚轮；返回 false 时交给指针下的原生控件自己滚动。</summary>
+        bool ScrollByWheel(int delta);
+    }
+
     /// <summary>
     /// 设置页：作为独立页面覆盖在主内容区之上（标题行与窗口按钮保留），点击「返回」退出。
-    /// 单列分组卡片（Windows 11 设置风格）：固定页头 + 可滚动内容，每行左侧为彩色图标块，
-    /// 右侧为开关、箭头或按钮。除「返回」外全部自绘，行内可点击区域由 Zone 统一命中，
-    /// 因此滚动时不存在子控件错位或压住页头的问题。
-    /// 资源存储位置直接列在页面里，可就地添加、启停和调整顺序；改动由主窗体校验并保存后回填。
+    /// 左侧是目录（与主窗口侧栏同色同样式），右侧是所选目录的详情：
+    /// 开关、存储位置等以单列卡片行显示（自绘，行内可点击区域由 Zone 统一命中，可滚动）；
+    /// 布局备份、操作记录等整块功能由主窗体通过 HostPanel 嵌入右侧，不再另开弹窗。
     /// </summary>
     public class SettingsPage : Control
     {
         /// <summary>「重新扫描」行的状态，由主窗体在扫描开始和结束时回传。</summary>
         public enum RescanState { Idle, Running, Done, Failed }
 
+        /// <summary>左侧目录的各页。</summary>
+        public enum SettingsSection { General, Scan, Storage, Backup, Data, Diagnostics }
+
         // 尺寸均为 96 DPI 下的逻辑像素，使用处统一经 Dpi() 缩放
-        private const int ContentMaxW = 720;   // 内容列最大宽度
-        private const int HeaderH = 74;        // 固定页头高度（返回按钮 + 标题）
+        private const int NavW = 220;          // 左侧目录宽度
+        private const int NavTop = 66;         // 目录第一项的顶部（上方是「返回」与标题）
+        private const int NavItemH = 40;
+        private const int NavItemGap = 2;
+        private const int PanePad = 36;        // 右侧内容与目录、窗口右缘的留白
+        private const int ContentMaxW = 760;   // 右侧内容列最大宽度
+        private const int HeaderH = 92;        // 右侧页头高度（页标题 + 一行说明）
         private const int RowH = 64;           // 行高（图标 + 标题 + 说明）
-        private const int SectionGap = 22;     // 分组间距
+        private const int SectionGap = 22;     // 卡片间距
         private const int CardPad = 18;        // 卡片内左右留白
         private const int CardRadius = 10;
         private const int IconTile = 36;       // 图标块边长
+        private const int PanelShadow = 8;     // 嵌入面板左右多给的留白（放卡片阴影），卡片边缘与页标题对齐
         private const int ScrollBarW = 4;      // 滚动条可视宽度
         private const int ScrollHitW = 14;     // 滚动条命中宽度（比可视条宽，便于抓取）
         // 滚动条避开主窗体的边缘缩放命中区（MainForm.ResizeHitTest：右缘 7px、右下角 15px），否则点滑块会变成缩放窗口
@@ -34,14 +52,15 @@ namespace AppManager.Controls
         private const int ScrollCornerGap = 16;
 
         // 图标字形（Segoe Fluent Icons / MDL2 Assets 共有的码位）
-        private const string GlyphEye = "\uE890";
-        private const string GlyphTray = "\uE896";
-        private const string GlyphSync = "\uE895";
-        private const string GlyphRefresh = "\uE72C";
-        private const string GlyphDrive = "\uEDA2";
-        private const string GlyphHistory = "\uE81C";
-        private const string GlyphRepair = "\uE90F";
-        private const string GlyphTest = "\uE9D9";
+        private const string GlyphSettings = "";
+        private const string GlyphEye = "";
+        private const string GlyphTray = "";
+        private const string GlyphSync = "";
+        private const string GlyphRefresh = "";
+        private const string GlyphDrive = "";
+        private const string GlyphHistory = "";
+        private const string GlyphRepair = "";
+        private const string GlyphTest = "";
 
         // 图标块配色：每类设置一个色相，图标块底色为该色与卡片白的浅混色
         private static readonly Color TintBlue = Theme.Accent;
@@ -55,9 +74,9 @@ namespace AppManager.Controls
         // 路径文本过长时省略中间，保留盘符和末级目录
         private static readonly StringFormat PathFormat = MakePathFormat();
 
-        private enum RowKind { Toggle, Navigate, Button, Store, Add, Note }
+        private enum RowKind { Toggle, Button, Store, Add, Note }
         private enum ZoneKind { Row, StoreToggle, MoveUp, MoveDown }
-        private enum Arrow { Up, Down, Right }
+        private enum Arrow { Up, Down }
 
         /// <summary>一行内容。Bounds 为内容坐标（未减滚动偏移）。</summary>
         private sealed class Row
@@ -94,25 +113,26 @@ namespace AppManager.Controls
             public Action Action;
         }
 
-        /// <summary>一个分组：标题（可带一行说明）+ 白色圆角卡片。</summary>
-        private sealed class Section
+        /// <summary>左侧目录的一项。Bounds 为客户区坐标（目录不滚动）。</summary>
+        private sealed class NavItem
         {
-            public string Title = string.Empty;
-            public string Note;
-            public bool NoteWarning;
-            public Rectangle LabelRect;
-            public Rectangle NoteRect;
-            public Rectangle CardRect;
+            public SettingsSection Section;
+            public string Glyph;
+            public string Title;
+            public Rectangle Bounds;
         }
 
         private readonly RoundButton backBtn;
         private readonly ThemedToolTip pathTip = new ThemedToolTip();   // 悬停存储位置行时显示完整路径
         private string pathTipText = string.Empty;
-        private readonly List<Section> sections = new List<Section>();
+        private readonly List<NavItem> navItems = new List<NavItem>();
+        private readonly List<Rectangle> cards = new List<Rectangle>();
         private readonly List<Row> rows = new List<Row>();
         private readonly List<Zone> zones = new List<Zone>();
         private readonly List<ResourceStoreLocation> storeLocations = new List<ResourceStoreLocation>();
+        private readonly Dictionary<SettingsSection, Control> panels = new Dictionary<SettingsSection, Control>();
 
+        private SettingsSection section = SettingsSection.General;
         private bool showHidden;
         private bool autoScan;
         private bool autoOrganizeDesktop;
@@ -120,9 +140,16 @@ namespace AppManager.Controls
         private string defaultStoreRoot = string.Empty;
         private RescanState rescanState = RescanState.Idle;
         private bool selfTestRunning;
+        private string selfTestResult;      // 上一次自测的结果（显示在「运行自测」行的说明里）
+        private bool selfTestWarning;
 
-        private Rectangle titleRect;
-        private Rectangle contentSpan;      // 内容列的水平范围（页头分隔线用）
+        private Rectangle navTitleRect;
+        private Rectangle paneTitleRect;
+        private Rectangle paneNoteRect;
+        private string paneTitle = string.Empty;
+        private string paneNote = string.Empty;
+        private bool paneNoteWarning;       // 说明用警示色（如所有存储位置都已停用）
+        private Rectangle contentSpan;      // 右侧内容列的水平范围（页头分隔线用）
         private int contentHeight;
         private int scrollOffset;
         private int wheelRemainder;         // 不足一像素的滚轮累计量（单位：delta × 像素）
@@ -131,6 +158,8 @@ namespace AppManager.Controls
         private bool scrollbarHot;
         private int hoverZone = -1;
         private int pressedZone = -1;
+        private int hoverNav = -1;
+        private int pressedNav = -1;
 
         public event EventHandler BackRequested;
         public event EventHandler ShowHiddenChanged;
@@ -139,8 +168,6 @@ namespace AppManager.Controls
         public event EventHandler CloseToTrayChanged;
         public event EventHandler RescanRequested;
         public event EventHandler SelfTestRequested;
-        public event EventHandler LayoutBackupRequested;
-        public event EventHandler DatabaseRequested;
         /// <summary>请求添加一个存储位置（由主窗体弹出选择文件夹）。</summary>
         public event EventHandler StorageAddRequested;
         /// <summary>请求启用或停用存储位置：参数为位置下标、目标启用状态。</summary>
@@ -159,8 +186,24 @@ namespace AppManager.Controls
             backBtn.Text = "返回";
             backBtn.Icon = UiIconKind.Back;
             backBtn.Accent = false;
-            backBtn.Click += delegate { Raise(BackRequested); };
+            backBtn.Click += delegate { if (!Busy) Raise(BackRequested); };
             Controls.Add(backBtn);
+
+            AddNav(SettingsSection.General, GlyphSettings, "常规");
+            AddNav(SettingsSection.Scan, GlyphSync, "扫描与收纳");
+            AddNav(SettingsSection.Storage, GlyphDrive, "资源存储位置");
+            AddNav(SettingsSection.Backup, GlyphHistory, "布局备份");
+            AddNav(SettingsSection.Data, GlyphRepair, "操作记录与数据");
+            AddNav(SettingsSection.Diagnostics, GlyphTest, "诊断");
+        }
+
+        private void AddNav(SettingsSection target, string glyph, string title)
+        {
+            NavItem item = new NavItem();
+            item.Section = target;
+            item.Glyph = glyph;
+            item.Title = title;
+            navItems.Add(item);
         }
 
         protected override void Dispose(bool disposing)
@@ -184,7 +227,7 @@ namespace AppManager.Controls
             return DpiHelper.Scale(value, DpiHelper.ForControl(this));
         }
 
-        /// <summary>「返回」按钮的位置和尺寸由 Rebuild 按当前 DPI 计算，不再叠加框架缩放。</summary>
+        /// <summary>子控件（「返回」和嵌入面板）的位置和尺寸由 Rebuild 按当前 DPI 计算，不再叠加框架缩放。</summary>
         protected override bool ScaleChildren { get { return false; } }
 
         // ===== 对外状态 =====
@@ -193,9 +236,27 @@ namespace AppManager.Controls
         public bool AutoScan { get { return autoScan; } }
         public bool AutoOrganizeDesktop { get { return autoOrganizeDesktop; } }
         public bool CloseToTray { get { return closeToTray; } }
+        public SettingsSection Section { get { return section; } }
+
+        /// <summary>左侧目录的实际宽度（像素）：主窗体用它把目录底色延伸到标题行。</summary>
+        public int NavWidth { get { return Dpi(NavW); } }
+
+        /// <summary>嵌入的面板正在执行不能中断的操作：期间「返回」、目录切换和退出都被挡住。</summary>
+        public bool Busy
+        {
+            get
+            {
+                foreach (Control panel in panels.Values)
+                {
+                    ISettingsPanel sp = panel as ISettingsPanel;
+                    if (sp != null && sp.Busy) return true;
+                }
+                return false;
+            }
+        }
 
         /// <summary>
-        /// 回填页面状态（开关与存储位置列表）；不触发变更事件，也不改变滚动位置。
+        /// 回填页面状态（开关与存储位置列表）；不触发变更事件，也不改变所选目录和滚动位置。
         /// locations 为配置里的有序位置（含已停用），为空时页面显示 defaultStoreRoot 作为默认位置。
         /// </summary>
         public void Bind(bool showHidden, bool autoScan, bool autoOrganizeDesktop, bool closeToTray,
@@ -211,6 +272,43 @@ namespace AppManager.Controls
                     if (location != null) storeLocations.Add(location.Clone());
             this.defaultStoreRoot = defaultStoreRoot ?? string.Empty;
             Rebuild();
+        }
+
+        /// <summary>把一块整页功能嵌入右侧（同一目录重复调用时替换旧面板）；只在选中该目录时显示。</summary>
+        public void HostPanel(SettingsSection target, Control panel)
+        {
+            if (panel == null) throw new ArgumentNullException("panel");
+            Control old;
+            if (panels.TryGetValue(target, out old))
+            {
+                ISettingsPanel oldPanel = old as ISettingsPanel;
+                if (oldPanel != null) oldPanel.BusyChanged -= OnPanelBusyChanged;
+                Controls.Remove(old);
+            }
+            panels[target] = panel;
+            panel.Visible = false;
+            Controls.Add(panel);
+            ISettingsPanel sp = panel as ISettingsPanel;
+            if (sp != null) sp.BusyChanged += OnPanelBusyChanged;
+            Rebuild();
+        }
+
+        private void OnPanelBusyChanged(object sender, EventArgs e)
+        {
+            backBtn.Enabled = !Busy;
+            Invalidate();
+        }
+
+        /// <summary>切换右侧显示的目录；嵌入面板忙碌时不切换。返回是否已处于目标目录。</summary>
+        public bool SelectSection(SettingsSection target)
+        {
+            if (target == section) return true;
+            if (Busy) return false;
+            section = target;
+            wheelRemainder = 0;
+            scrollOffset = 0;
+            Rebuild();
+            return true;
         }
 
         /// <summary>更新「重新扫描」行：进行中置灰防止重复触发，结束后在说明里给出结果。</summary>
@@ -229,6 +327,14 @@ namespace AppManager.Controls
             Rebuild();
         }
 
+        /// <summary>自测结束后把结果写在「运行自测」行的说明里（不再弹出提示框）。</summary>
+        public void SetSelfTestResult(string text, bool warning)
+        {
+            selfTestResult = text;
+            selfTestWarning = warning;
+            Rebuild();
+        }
+
         /// <summary>回到页面顶部（每次进入设置页时调用）。</summary>
         public void ScrollToTop()
         {
@@ -236,7 +342,7 @@ namespace AppManager.Controls
             SetScroll(0);
         }
 
-        /// <summary>鼠标滚轮滚动页面（由窗体消息过滤器按光标位置路由到此）。delta 为 WM_MOUSEWHEEL 增量。</summary>
+        /// <summary>鼠标滚轮滚动右侧卡片内容。delta 为 WM_MOUSEWHEEL 增量。</summary>
         public void ScrollByWheel(int delta)
         {
             if (delta == 0 || MaxScroll <= 0) return;
@@ -247,6 +353,22 @@ namespace AppManager.Controls
             int pixels = wheelRemainder / 120;
             wheelRemainder -= pixels * 120;
             if (pixels != 0) SetScroll(scrollOffset - pixels);
+        }
+
+        /// <summary>
+        /// 由窗体消息过滤器按光标位置路由过来的滚轮：卡片页由本页滚动；嵌入面板页交给面板，
+        /// 面板返回 false 时（如原生列表）不吞掉消息，由指针下的控件自己滚动。
+        /// </summary>
+        public bool HandleWheel(int delta)
+        {
+            Control panel;
+            if (panels.TryGetValue(section, out panel))
+            {
+                ISettingsPanel sp = panel as ISettingsPanel;
+                return sp != null && sp.ScrollByWheel(delta);
+            }
+            ScrollByWheel(delta);
+            return true;
         }
 
         private void Raise(EventHandler handler)
@@ -262,10 +384,10 @@ namespace AppManager.Controls
             Rebuild();
         }
 
-        /// <summary>按当前状态和尺寸重建分组、行与点击区，夹紧滚动位置并重绘。</summary>
+        /// <summary>按当前目录、状态和尺寸重建目录、卡片行与点击区，摆放嵌入面板，夹紧滚动位置并重绘。</summary>
         private void Rebuild()
         {
-            sections.Clear();
+            cards.Clear();
             rows.Clear();
             zones.Clear();
             hoverZone = -1;
@@ -273,95 +395,104 @@ namespace AppManager.Controls
             contentHeight = 0;
             if (Width <= 0 || Height <= 0) return;
 
-            int width = Math.Min(Dpi(ContentMaxW), Math.Max(Dpi(360), Width - Dpi(96)));
-            int left = (Width - width) / 2;
+            // 左侧目录：「返回」与标题同一行，下面是各目录项
+            int navW = Dpi(NavW);
+            backBtn.Bounds = new Rectangle(Dpi(16), Dpi(16), Dpi(74), Dpi(30));
+            backBtn.Enabled = !Busy;
+            navTitleRect = new Rectangle(backBtn.Right + Dpi(12), Dpi(16), Math.Max(0, navW - backBtn.Right - Dpi(24)), Dpi(30));
+            int ny = Dpi(NavTop);
+            foreach (NavItem item in navItems)
+            {
+                item.Bounds = new Rectangle(Dpi(12), ny, navW - Dpi(24), Dpi(NavItemH));
+                ny += Dpi(NavItemH) + Dpi(NavItemGap);
+            }
+
+            // 右侧：页标题 + 说明，内容列靠左、限制最大宽度
+            int left = navW + Dpi(PanePad);
+            int width = Math.Max(Dpi(320), Math.Min(Dpi(ContentMaxW), Width - left - Dpi(PanePad)));
             contentSpan = new Rectangle(left, 0, width, 0);
-            backBtn.Bounds = new Rectangle(left, Dpi(22), Dpi(74), Dpi(30));
-            titleRect = new Rectangle(backBtn.Right + Dpi(14), Dpi(22), Math.Max(0, width - Dpi(88)), Dpi(30));
+            paneTitleRect = new Rectangle(left, Dpi(22), width, Dpi(34));
+            paneNoteRect = new Rectangle(left, Dpi(56), Math.Max(0, Width - left - Dpi(PanePad)), Dpi(22));
+            paneNoteWarning = false;
 
             int y = Dpi(4);
-            y = AddSection("常规", null, false, left, width, y, new Row[]
+            switch (section)
             {
-                ToggleRow(GlyphEye, TintPurple, "显示隐藏项", "在列表里显示已设为隐藏的软件和资源。", showHidden, delegate
-                {
-                    showHidden = !showHidden;
-                    Rebuild();
-                    Raise(ShowHiddenChanged);
-                }),
-                ToggleRow(GlyphTray, TintBlue, "关闭时隐藏到托盘", "开启后关闭窗口隐藏到托盘；关闭则直接退出。", closeToTray, delegate
-                {
-                    closeToTray = !closeToTray;
-                    Rebuild();
-                    Raise(CloseToTrayChanged);
-                })
-            });
-
-            // 「自动收纳」由自动扫描的监听触发：作为它的子项显示，扫描关闭时置灰并说明原因
-            Row organize = ToggleRow(null, TintGreen, "自动收纳桌面新快捷方式",
-                autoScan ? "桌面出现新快捷方式时自动收进「快捷中心」；关闭则只更新列表，不移动文件。"
-                         : "需要先开启上面的自动扫描。",
-                autoOrganizeDesktop, delegate
-                {
-                    autoOrganizeDesktop = !autoOrganizeDesktop;
-                    Rebuild();
-                    Raise(AutoOrganizeDesktopChanged);
-                });
-            organize.Child = true;
-            organize.Enabled = autoScan;
-            y = AddSection("扫描与收纳", null, false, left, width, y, new Row[]
-            {
-                ToggleRow(GlyphSync, TintGreen, "自动扫描应用与桌面变化", "新装软件或桌面有变化时自动更新列表。", autoScan, delegate
-                {
-                    autoScan = !autoScan;
-                    Rebuild();
-                    Raise(AutoScanChanged);
-                }),
-                organize,
-                RescanRow()
-            });
-
-            bool anyEnabled = storeLocations.Count == 0;
-            foreach (ResourceStoreLocation location in storeLocations) if (location.Enabled) anyEnabled = true;
-            y = AddSection("资源存储位置",
-                anyEnabled ? "导入的资源按分类存放在这里。有多个位置时从上到下依次使用。"
-                           : "所有位置都已停用，现在无法导入资源。",
-                !anyEnabled, left, width, y, StoreRows());
-
-            y = AddSection("备份与数据", null, false, left, width, y, new Row[]
-            {
-                NavRow(GlyphHistory, TintBlue, "布局备份与还原", "备份当前的分类和排列，或还原到之前的备份。",
-                    delegate { Raise(LayoutBackupRequested); }),
-                NavRow(GlyphRepair, TintPurple, "数据维护与操作记录", "查看操作记录、撤销最近一次操作，完整备份或恢复数据库。",
-                    delegate { Raise(DatabaseRequested); })
-            });
-
-            y = AddSection("诊断", null, false, left, width, y, new Row[]
-            {
-                ButtonRow(GlyphTest, TintGray, "运行自测", "在独立进程里检查核心功能，结果写入 selftest.log。",
-                    selfTestRunning ? "运行中…" : "运行", selfTestRunning, delegate { Raise(SelfTestRequested); })
-            });
-
-            contentHeight = y - Dpi(SectionGap) + Dpi(28);
+                case SettingsSection.General:
+                    SetPane("常规", "窗口和列表的基本行为。");
+                    y = AddCard(left, width, y, new Row[]
+                    {
+                        ToggleRow(GlyphEye, TintPurple, "显示隐藏项", "在列表里显示已设为隐藏的软件和资源。", showHidden, delegate
+                        {
+                            showHidden = !showHidden;
+                            Rebuild();
+                            Raise(ShowHiddenChanged);
+                        }),
+                        ToggleRow(GlyphTray, TintBlue, "关闭时隐藏到托盘", "开启后关闭窗口隐藏到托盘；关闭则直接退出。", closeToTray, delegate
+                        {
+                            closeToTray = !closeToTray;
+                            Rebuild();
+                            Raise(CloseToTrayChanged);
+                        })
+                    });
+                    break;
+                case SettingsSection.Scan:
+                    SetPane("扫描与收纳", "自动发现新装软件和桌面变化，也可以随时手动重新扫描。");
+                    y = AddCard(left, width, y, ScanRows());
+                    break;
+                case SettingsSection.Storage:
+                    bool anyEnabled = storeLocations.Count == 0;
+                    foreach (ResourceStoreLocation location in storeLocations) if (location.Enabled) anyEnabled = true;
+                    SetPane("资源存储位置", anyEnabled ? "导入的资源按分类存放在这里。有多个位置时从上到下依次使用。"
+                                                     : "所有位置都已停用，现在无法导入资源。");
+                    paneNoteWarning = !anyEnabled;
+                    y = AddCard(left, width, y, StoreRows());
+                    break;
+                case SettingsSection.Backup:
+                    SetPane("布局备份", "把分类、顺序、常用、隐藏与桌面收纳整体存一份，之后可以随时恢复。");
+                    break;
+                case SettingsSection.Data:
+                    SetPane("操作记录与数据", "程序对分类、集合和设置的每次改动都记在这里；最新的一次可以撤销。");
+                    break;
+                default:
+                    SetPane("诊断", "检查程序的核心功能是否正常。");
+                    y = AddCard(left, width, y, new Row[] { SelfTestRow() });
+                    break;
+            }
+            if (cards.Count > 0) contentHeight = y - Dpi(SectionGap) + Dpi(28);
             if (scrollOffset > MaxScroll) scrollOffset = MaxScroll;
+            LayoutPanels(left, width);
             hoverZone = ZoneUnderCursor();
             Invalidate();
         }
 
-        /// <summary>追加一个分组，返回下一个分组的起始 Y（内容坐标）。</summary>
-        private int AddSection(string title, string note, bool noteWarning, int x, int width, int y, IList<Row> list)
+        private void SetPane(string title, string note)
         {
-            Section s = new Section();
-            s.Title = title;
-            s.Note = note;
-            s.NoteWarning = noteWarning;
-            s.LabelRect = new Rectangle(x + Dpi(4), y, width - Dpi(8), Dpi(22));
-            int cardTop = s.LabelRect.Bottom + Dpi(6);
-            if (!string.IsNullOrEmpty(note))
+            paneTitle = title;
+            paneNote = note;
+        }
+
+        /// <summary>只显示当前目录的嵌入面板；面板占满页头以下的右侧区域（操作记录用满宽度，其余限制在内容列宽内）。</summary>
+        private void LayoutPanels(int left, int width)
+        {
+            Rectangle viewport = Viewport;
+            foreach (KeyValuePair<SettingsSection, Control> pair in panels)
             {
-                s.NoteRect = new Rectangle(x + Dpi(4), s.LabelRect.Bottom, width - Dpi(8), Dpi(20));
-                cardTop = s.NoteRect.Bottom + Dpi(8);
+                bool show = pair.Key == section;
+                if (show)
+                {
+                    int w = pair.Key == SettingsSection.Data ? Math.Max(width, Width - left - Dpi(PanePad)) : width;
+                    pair.Value.Bounds = new Rectangle(left - Dpi(PanelShadow), viewport.Top,
+                        w + Dpi(PanelShadow) * 2, Math.Max(0, viewport.Height - Dpi(24)));
+                }
+                if (pair.Value.Visible != show) pair.Value.Visible = show;
             }
-            int rowTop = cardTop;
+        }
+
+        /// <summary>追加一张卡片，返回下一张卡片的起始 Y（内容坐标）。</summary>
+        private int AddCard(int x, int width, int y, IList<Row> list)
+        {
+            int rowTop = y;
             for (int i = 0; i < list.Count; i++)
             {
                 Row r = list[i];
@@ -372,9 +503,9 @@ namespace AppManager.Controls
                 AddZones(r, rows.Count - 1);
                 rowTop += r.Bounds.Height;
             }
-            s.CardRect = new Rectangle(x, cardTop, width, rowTop - cardTop);
-            sections.Add(s);
-            return s.CardRect.Bottom + Dpi(SectionGap);
+            Rectangle card = new Rectangle(x, y, width, rowTop - y);
+            cards.Add(card);
+            return card.Bottom + Dpi(SectionGap);
         }
 
         /// <summary>登记一行的点击区：普通行整行可点；存储位置行只有开关和排序按钮可点。</summary>
@@ -417,19 +548,6 @@ namespace AppManager.Controls
             return r;
         }
 
-        /// <summary>打开下一级窗口的行（右侧箭头）。</summary>
-        private Row NavRow(string glyph, Color tint, string title, string subtitle, Action open)
-        {
-            Row r = new Row();
-            r.Kind = RowKind.Navigate;
-            r.Glyph = glyph;
-            r.Tint = tint;
-            r.Title = title;
-            r.Subtitle = subtitle;
-            r.Activate = open;
-            return r;
-        }
-
         /// <summary>立即执行的行（右侧按钮）；busy 时置灰，不重复触发。</summary>
         private Row ButtonRow(string glyph, Color tint, string title, string subtitle, string button, bool busy, Action run)
         {
@@ -443,6 +561,33 @@ namespace AppManager.Controls
             r.Enabled = !busy;
             r.Activate = run;
             return r;
+        }
+
+        private Row[] ScanRows()
+        {
+            // 「自动收纳」由自动扫描的监听触发：作为它的子项显示，扫描关闭时置灰并说明原因
+            Row organize = ToggleRow(null, TintGreen, "自动收纳桌面新快捷方式",
+                autoScan ? "桌面出现新快捷方式时自动收进「快捷中心」；关闭则只更新列表，不移动文件。"
+                         : "需要先开启上面的自动扫描。",
+                autoOrganizeDesktop, delegate
+                {
+                    autoOrganizeDesktop = !autoOrganizeDesktop;
+                    Rebuild();
+                    Raise(AutoOrganizeDesktopChanged);
+                });
+            organize.Child = true;
+            organize.Enabled = autoScan;
+            return new Row[]
+            {
+                ToggleRow(GlyphSync, TintGreen, "自动扫描应用与桌面变化", "新装软件或桌面有变化时自动更新列表。", autoScan, delegate
+                {
+                    autoScan = !autoScan;
+                    Rebuild();
+                    Raise(AutoScanChanged);
+                }),
+                organize,
+                RescanRow()
+            };
         }
 
         private Row RescanRow()
@@ -459,7 +604,20 @@ namespace AppManager.Controls
             return r;
         }
 
-        /// <summary>存储位置分组的行：每个位置一行（没有显式位置时显示默认位置），最后是「添加」。</summary>
+        private Row SelfTestRow()
+        {
+            Row r = ButtonRow(GlyphTest, TintGray, "运行自测", "在独立进程里检查核心功能，结果写入 selftest.log。",
+                selfTestRunning ? "运行中…" : "运行", selfTestRunning, delegate { Raise(SelfTestRequested); });
+            if (selfTestRunning) r.Subtitle = "正在独立进程里运行，通常需要几十秒…";
+            else if (!string.IsNullOrEmpty(selfTestResult))
+            {
+                r.Subtitle = selfTestResult;
+                r.Warning = selfTestWarning;
+            }
+            return r;
+        }
+
+        /// <summary>存储位置页的行：每个位置一行（没有显式位置时显示默认位置），最后是「添加」。</summary>
         private List<Row> StoreRows()
         {
             List<Row> list = new List<Row>();
@@ -538,13 +696,14 @@ namespace AppManager.Controls
 
         // ===== 滚动 =====
 
-        /// <summary>页头以下的可滚动视口（客户区坐标）。</summary>
+        /// <summary>右侧页头以下的可滚动视口（客户区坐标）。</summary>
         private Rectangle Viewport
         {
             get
             {
                 int top = Dpi(HeaderH);
-                return new Rectangle(0, top, Width, Math.Max(0, Height - top));
+                int left = Dpi(NavW);
+                return new Rectangle(left, top, Math.Max(0, Width - left), Math.Max(0, Height - top));
             }
         }
 
@@ -604,28 +763,33 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (SolidBrush bg = new SolidBrush(Theme.Background))
                 g.FillRectangle(bg, ClientRectangle);
-            if (contentHeight <= 0) return;
+            if (Width <= 0 || Height <= 0) return;
 
-            // 滚动内容：裁剪到视口内，页头区域始终干净
+            PaintNav(g);
+
+            // 右侧页头：页标题 + 说明；内容滚上来后在页头下缘画一条分隔线
             Rectangle viewport = Viewport;
-            GraphicsState state = g.Save();
-            try
-            {
-                g.SetClip(viewport);
-                g.TranslateTransform(0, viewport.Top - scrollOffset);
-                PaintSections(g);
-                for (int i = 0; i < rows.Count; i++) PaintRow(g, i);
-            }
-            finally { g.Restore(state); }
-
-            // 固定页头：标题；内容滚上来后在页头下缘画一条分隔线
             using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "设置", Theme.PageTitleFont, tb, titleRect);
+                Draw.DrawStringLeft(g, paneTitle, Theme.PageTitleFont, tb, paneTitleRect);
+            using (SolidBrush nb = new SolidBrush(paneNoteWarning ? WarningText : Theme.TextSecondary))
+                Draw.DrawStringLeft(g, paneNote, Theme.CaptionFont, nb, paneNoteRect);
+            if (contentHeight <= 0) return;
             if (scrollOffset > 0)
             {
                 using (Pen line = new Pen(Theme.Separator, 1))
                     g.DrawLine(line, contentSpan.Left, viewport.Top - 1, contentSpan.Right, viewport.Top - 1);
             }
+
+            // 滚动内容：裁剪到视口内，页头区域始终干净
+            GraphicsState state = g.Save();
+            try
+            {
+                g.SetClip(viewport);
+                g.TranslateTransform(0, viewport.Top - scrollOffset);
+                PaintCards(g);
+                for (int i = 0; i < rows.Count; i++) PaintRow(g, i);
+            }
+            finally { g.Restore(state); }
 
             // 滚动条（仅内容超出视口时显示，细条风格，与侧栏一致）
             if (MaxScroll > 0)
@@ -636,20 +800,50 @@ namespace AppManager.Controls
             }
         }
 
-        private void PaintSections(Graphics g)
+        /// <summary>左侧目录：侧栏底色 + 右缘分隔线；选中项浅蓝底、强调色文字，悬停项浅灰底（与主窗口侧栏一致）。</summary>
+        private void PaintNav(Graphics g)
         {
-            using (SolidBrush titleBrush = new SolidBrush(Theme.TextSecondary))
-            using (SolidBrush noteBrush = new SolidBrush(Theme.TextTertiary))
-            using (SolidBrush warnBrush = new SolidBrush(WarningText))
+            int navW = Dpi(NavW);
+            // 底色和分隔线按整像素画：开着抗锯齿时矩形上缘会和页面底色混成一条浅线
+            g.SmoothingMode = SmoothingMode.None;
+            using (SolidBrush sb = new SolidBrush(Theme.SidebarBg))
+                g.FillRectangle(sb, new Rectangle(0, 0, navW, Height));
+            using (Pen sep = new Pen(Theme.Separator, 1))
+                g.DrawLine(sep, navW - 1, 0, navW - 1, Height);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
+                Draw.DrawStringLeft(g, "设置", Theme.WindowTitleFont, tb, navTitleRect);
+
+            bool busy = Busy;
+            for (int i = 0; i < navItems.Count; i++)
+            {
+                NavItem item = navItems[i];
+                Rectangle b = item.Bounds;
+                bool active = item.Section == section;
+                bool hot = !active && !busy && i == hoverNav && (pressedNav < 0 || pressedNav == i);
+                if (active || hot)
+                {
+                    using (SolidBrush hb = new SolidBrush(active ? Theme.SelectionBg : (pressedNav == i ? Theme.SegmentBg : Theme.RowHover)))
+                        Draw.FillRoundedRect(g, hb, b, Dpi(6));
+                }
+                Color fore = active ? Theme.AccentText : (busy ? Theme.TextTertiary : Theme.TextPrimary);
+                Color icon = active ? Theme.AccentText : (busy ? Theme.TextTertiary : Theme.IconColor);
+                int glyph = Dpi(18);
+                Draw.DrawGlyph(g, item.Glyph, new Rectangle(b.X + Dpi(12), b.Y + (b.Height - glyph) / 2, glyph, glyph), icon);
+                using (SolidBrush fb = new SolidBrush(fore))
+                    Draw.DrawStringLeft(g, item.Title, Theme.NavigationFont, fb,
+                        new Rectangle(b.X + Dpi(42), b.Y, Math.Max(0, b.Width - Dpi(50)), b.Height));
+            }
+        }
+
+        private void PaintCards(Graphics g)
+        {
             using (SolidBrush cardBrush = new SolidBrush(Theme.Card))
             {
-                foreach (Section s in sections)
+                foreach (Rectangle card in cards)
                 {
-                    Draw.DrawStringLeft(g, s.Title, Theme.SectionTitleFont, titleBrush, s.LabelRect);
-                    if (!string.IsNullOrEmpty(s.Note))
-                        Draw.DrawStringLeft(g, s.Note, Theme.CaptionFont, s.NoteWarning ? warnBrush : noteBrush, s.NoteRect);
-                    Draw.DrawShadow(g, s.CardRect, Dpi(CardRadius), 0.18f);
-                    Draw.FillRoundedRect(g, cardBrush, s.CardRect, Dpi(CardRadius));
+                    Draw.DrawShadow(g, card, Dpi(CardRadius), 0.18f);
+                    Draw.FillRoundedRect(g, cardBrush, card, Dpi(CardRadius));
                 }
             }
         }
@@ -728,7 +922,7 @@ namespace AppManager.Controls
             g.DrawString(text, font, brush, rect, PathFormat);
         }
 
-        /// <summary>画行右侧的开关、箭头或按钮，返回文字可用的右边界。</summary>
+        /// <summary>画行右侧的开关或按钮，返回文字可用的右边界。</summary>
         private int PaintTrailing(Graphics g, Row r, int index)
         {
             Rectangle b = r.Bounds;
@@ -739,10 +933,6 @@ namespace AppManager.Controls
                     Rectangle toggle = ToggleRect(b);
                     ToggleSwitch.PaintSwitch(g, toggle, r.Checked, r.Enabled);
                     return toggle.Left - Dpi(16);
-                case RowKind.Navigate:
-                    DrawChevron(g, new Rectangle(right - Dpi(12), b.Top + (b.Height - Dpi(12)) / 2, Dpi(12), Dpi(12)),
-                        Arrow.Right, Theme.TextTertiary);
-                    return right - Dpi(28);
                 case RowKind.Button:
                     return PaintRowButton(g, r, right) - Dpi(16);
                 case RowKind.Store:
@@ -788,7 +978,7 @@ namespace AppManager.Controls
         }
 
         /// <summary>
-        /// 在 box 内画线条箭头。排序按钮和导航箭头是功能性图标，用线条绘制而不走图标字体：
+        /// 在 box 内画线条箭头。排序按钮是功能性图标，用线条绘制而不走图标字体：
         /// 系统缺少图标字体时它们仍然可见（图标块里的装饰图标缺失只会留空）。
         /// </summary>
         private void DrawChevron(Graphics g, Rectangle box, Arrow arrow, Color color)
@@ -797,14 +987,8 @@ namespace AppManager.Controls
             float cy = box.Y + box.Height / 2F;
             float half = box.Width / 2F;      // 开口方向上的半宽
             float depth = box.Width / 4F;     // 箭头尖到开口的一半距离
-            PointF[] points;
-            if (arrow == Arrow.Right)
-                points = new PointF[] { new PointF(cx - depth, cy - half), new PointF(cx + depth, cy), new PointF(cx - depth, cy + half) };
-            else
-            {
-                float tip = arrow == Arrow.Up ? -depth : depth;
-                points = new PointF[] { new PointF(cx - half, cy - tip), new PointF(cx, cy + tip), new PointF(cx + half, cy - tip) };
-            }
+            float tip = arrow == Arrow.Up ? -depth : depth;
+            PointF[] points = new PointF[] { new PointF(cx - half, cy - tip), new PointF(cx, cy + tip), new PointF(cx + half, cy - tip) };
             using (Pen pen = new Pen(color, Dpi(16) / 10F))
             {
                 pen.StartCap = LineCap.Round;
@@ -866,19 +1050,22 @@ namespace AppManager.Controls
             }
             bool hot = MaxScroll > 0 && ScrollHitRect().Contains(e.Location);
             int zone = hot ? -1 : ZoneAt(e.Location);
+            int nav = NavAt(e.Location);
             SetPathTip(hot ? null : PathAt(e.Location));
-            if (hot == scrollbarHot && zone == hoverZone) return;
+            if (hot == scrollbarHot && zone == hoverZone && nav == hoverNav) return;
             scrollbarHot = hot;
             hoverZone = zone;
+            hoverNav = nav;
             Invalidate();
         }
 
         protected override void OnMouseLeave(EventArgs e)
         {
             SetPathTip(null);
-            if (hoverZone >= 0 || scrollbarHot)
+            if (hoverZone >= 0 || scrollbarHot || hoverNav >= 0)
             {
                 hoverZone = -1;
+                hoverNav = -1;
                 scrollbarHot = false;
                 Invalidate();
             }
@@ -902,9 +1089,10 @@ namespace AppManager.Controls
         private void CancelPointerState()
         {
             SetPathTip(null);
-            if (!scrollDragging && pressedZone < 0) return;
+            if (!scrollDragging && pressedZone < 0 && pressedNav < 0) return;
             scrollDragging = false;
             pressedZone = -1;
+            pressedNav = -1;
             Invalidate();
         }
 
@@ -932,6 +1120,14 @@ namespace AppManager.Controls
         {
             base.OnMouseDown(e);
             if (e.Button != MouseButtons.Left) return;
+
+            int nav = NavAt(e.Location);
+            if (nav >= 0)
+            {
+                pressedNav = Busy ? -1 : nav;
+                Invalidate();
+                return;
+            }
 
             // 滚动条：命中滑块则抓取拖动；点在轨道空白处则滑块跳到点击处并进入拖动
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location))
@@ -965,12 +1161,28 @@ namespace AppManager.Controls
                 Invalidate();
                 return;
             }
+            if (pressedNav >= 0)
+            {
+                int pressed = pressedNav;
+                pressedNav = -1;
+                Invalidate();
+                if (NavAt(e.Location) == pressed) SelectSection(navItems[pressed].Section);   // 移出该项再松开：视为取消
+                return;
+            }
             int zone = pressedZone;
             pressedZone = -1;
             Invalidate();
             if (zone < 0 || zone != ZoneAt(e.Location)) return;   // 按下后移出该区域再松开：视为取消
             Action action = zones[zone].Action;
             if (action != null) action();
+        }
+
+        /// <summary>命中左侧目录项（客户区坐标）；未命中返回 -1。</summary>
+        private int NavAt(Point client)
+        {
+            for (int i = 0; i < navItems.Count; i++)
+                if (navItems[i].Bounds.Contains(client)) return i;
+            return -1;
         }
 
         /// <summary>命中可响应点击的区域（客户区坐标，未置灰）；未命中返回 -1。</summary>

@@ -10,16 +10,18 @@ using AppManager.Controls;
 namespace AppManager
 {
     /// <summary>
-    /// 「数据维护与操作记录」窗口：左边按时间列出程序对分类、集合和设置做过的每次改动，右边是选中那次的说明、数量和逐处明细。
-    /// 完整备份、从备份恢复、检查数据库收在右上角的「数据库维护」菜单里；只有最新的一次业务操作提供「撤销」。
-    /// 读取和维护都在后台线程执行；撤销或恢复成功后 Changed 为 true，由主窗口重新加载。
+    /// 「操作记录与数据」面板：嵌在设置页右侧（不再另开窗口）。左边按时间列出程序对分类、集合和设置做过的每次改动，
+    /// 右边是选中那次的说明、数量和逐处明细。完整备份、从备份恢复、检查数据库收在右上角的「数据库维护」菜单里；
+    /// 只有最新的一次业务操作提供「撤销」。结果写在底部的状态行里，不另弹提示框。
+    /// 读取和维护都在后台线程执行；撤销或恢复成功后触发 DataChanged，由主窗口重新加载，面板随后重新读取记录。
     /// </summary>
-    internal sealed class DatabaseForm : BufferedDialogForm
+    internal sealed class DatabasePanel : Control, ISettingsPanel
     {
         /// <summary>左侧每次列出的操作数、右侧每次列出的改动数；后面还有时在末尾放一行「显示更多」。</summary>
         internal const int PageOps = 200, PageRows = 300;
         private static readonly string MoreOps = "显示更早的记录", MoreRows = "显示更多";
         private const int OpRowHeight = 58, MenuWidth = 176;
+        private const int Shadow = 8;   // 与设置页约定：左右各多留 8px，内容向内缩进同样距离，边缘与页标题对齐
 
         private static readonly Color GoodText = Theme.SuccessText;
         private static readonly Color GoodBg = Theme.SuccessBg;
@@ -47,7 +49,7 @@ namespace AppManager
             public override string ToString() { return Title + "，" + Line; }
         }
 
-        private readonly ConfigDatabase database;
+        private ConfigDatabase database;
         private readonly SoftwarePickerDialog.PickerList opList = new SoftwarePickerDialog.PickerList();
         private readonly SoftwarePickerDialog.PickerList changeList = new SoftwarePickerDialog.PickerList();
         private readonly Label notice = new Label();
@@ -56,7 +58,6 @@ namespace AppManager
         private readonly RoundButton maintain = new RoundButton();
         private readonly RoundButton undo = new RoundButton();
         private readonly RoundButton export = new RoundButton();
-        private readonly RoundButton close = new RoundButton();
         private readonly ThemedToolTip tip = new ThemedToolTip();
         // 切换选中后稍等再读明细：按住方向键划过列表时不为每一行都发起一次整次操作的统计
         private readonly System.Windows.Forms.Timer detailDelay = new System.Windows.Forms.Timer { Interval = 120 };
@@ -75,20 +76,19 @@ namespace AppManager
         private int historyVersion, detailVersion;   // 每发起一次读取加一：过期的后台结果直接丢弃
         private int tipIndex = -1;
         private bool running, layingOut, readFailed;
-        private volatile bool closed;
+        private int layoutDpi;            // 上次排版时的 DPI：变化后列表行高要重新计算
+        private volatile bool closed;     // 面板已释放：后台结果直接丢弃
 
         /// <summary>撤销或恢复成功：数据库内容已变，主窗口需要重新加载。</summary>
-        internal bool Changed;
+        public event EventHandler DataChanged;
+        public event EventHandler BusyChanged;
 
-        internal DatabaseForm(ConfigDatabase store)
+        internal DatabasePanel(ConfigDatabase store)
         {
             database = store;
-            FormBorderStyle = FormBorderStyle.None;
-            StartPosition = FormStartPosition.CenterParent;
-            ClientSize = new Size(960, 640);
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
+                | ControlStyles.ResizeRedraw | ControlStyles.UserPaint, true);
             BackColor = Theme.Background;
-            ShowInTaskbar = false;
-            Text = "数据维护与操作记录";
 
             opList.ItemHeight = OpRowHeight;
             opList.AccessibleName = "操作记录";
@@ -163,14 +163,41 @@ namespace AppManager
             export.Click += delegate { Export(); };
             Controls.Add(export);
 
-            close.Text = "关闭";
-            close.Click += delegate { Close(); };
-            Controls.Add(close);
-
             tip.AutoPopDelay = 20000;
             ApplyVisibility();
             LayoutContent();
-            ActiveControl = close;
+        }
+
+        public bool Busy { get { return running; } }
+
+        /// <summary>操作列表是原生列表框，滚轮交给它自己处理。</summary>
+        public bool ScrollByWheel(int delta) { return false; }
+
+        private int Dpi(int value)
+        {
+            return DpiHelper.Scale(value, DpiHelper.ForControl(this));
+        }
+
+        /// <summary>子控件位置由 LayoutContent 按当前 DPI 计算，不叠加框架缩放。</summary>
+        protected override bool ScaleChildren { get { return false; } }
+
+        /// <summary>
+        /// 换成另一个数据库对象（主窗口整体重载配置后调用）：清掉旧记录，正在显示时立即重新读取。
+        /// 还没回来的旧读取按版本号作废。
+        /// </summary>
+        internal void SetDatabase(ConfigDatabase store)
+        {
+            if (store == database) return;
+            database = store;
+            historyVersion++;
+            detailVersion++;
+            ops.Clear();
+            opList.Items.Clear();
+            ShowOp(null);
+            placeholder = "正在读取操作记录…";
+            ApplyVisibility();
+            Invalidate();
+            if (Visible && IsHandleCreated && !running) LoadHistory(false);
         }
 
         // ===== 记录的整理（纯逻辑，internal 供回归测试） =====
@@ -253,24 +280,40 @@ namespace AppManager
 
         // ===== 读取 =====
 
-        protected override void OnShown(EventArgs e)
+        /// <summary>每次显示时从最新开始重新读取：别处的操作可能已经写入了新记录。</summary>
+        protected override void OnVisibleChanged(EventArgs e)
         {
-            base.OnShown(e);
-            if (!closed) LoadHistory(false);
+            base.OnVisibleChanged(e);
+            if (Visible && IsHandleCreated && !closed && !running) LoadHistory(false);
         }
 
-        /// <summary>后台线程把结果交回界面线程；窗口已关闭时丢弃。</summary>
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (Visible && !closed && !running) LoadHistory(false);
+        }
+
+        /// <summary>后台线程把结果交回界面线程；面板已释放或句柄未建时丢弃。</summary>
         private void Post(Action action)
         {
-            if (closed) return;
+            if (closed || !IsHandleCreated) return;
             try { BeginInvoke((Action)delegate { if (!closed && !IsDisposed) action(); }); }
-            catch (InvalidOperationException) { }   // 窗口已关闭
+            catch (ObjectDisposedException) { }
+            catch (InvalidOperationException) { }   // 句柄已销毁
         }
 
         /// <summary>读取操作记录。append 为 true 时接着已列出的最后一条往更早读，否则从最新开始重新读。</summary>
         private void LoadHistory(bool append)
         {
             if (append && (!moreOps || ops.Count == 0)) return;
+            if (database == null)
+            {
+                placeholder = "数据库不可用，无法读取操作记录。";
+                ApplyVisibility();
+                Invalidate();
+                return;
+            }
+            ConfigDatabase store = database;
             int version = ++historyVersion;
             long before = append ? ops[ops.Count - 1].Id : 0;
             bool system = showSystem;
@@ -282,8 +325,8 @@ namespace AppManager
                 Exception error = null;
                 try
                 {
-                    page = ReadOps(database.HistoryPage(before, PageOps + 1, system));
-                    latest = database.LatestBusinessOperation();
+                    page = ReadOps(store.HistoryPage(before, PageOps + 1, system));
+                    latest = store.LatestBusinessOperation();
                 }
                 catch (Exception ex) { error = ex; Paths.LogError(ex); }
                 Post(delegate { if (version == historyVersion) ShowHistory(page, latest, append, error); });
@@ -373,7 +416,7 @@ namespace AppManager
         /// <summary>读取失败的提示放在状态栏；下一次读取成功后清掉，不让过期的报错一直留着。</summary>
         private void ShowReadError(string text)
         {
-            status.Text = text;
+            SetStatus(text, true);
             readFailed = true;
         }
 
@@ -381,7 +424,14 @@ namespace AppManager
         {
             if (!readFailed) return;
             readFailed = false;
-            status.Text = string.Empty;
+            SetStatus(string.Empty, false);
+        }
+
+        /// <summary>底部状态行：操作结果、读取失败等都写在这里（警示用橙色），代替弹出提示框。</summary>
+        private void SetStatus(string text, bool warning)
+        {
+            status.Text = text ?? string.Empty;
+            status.ForeColor = warning ? Theme.WarningText : Theme.TextSecondary;
         }
 
         /// <summary>读取当前记录的一页改动明细；append 为 true 时接着已列出的往后读。</summary>
@@ -389,13 +439,15 @@ namespace AppManager
         {
             if (current == null || (append && (shownRows == 0 || changeList.Items.Count == 0
                 || changeList.Items[changeList.Items.Count - 1] is ChangeRow))) return;
+            if (database == null) return;
             int version = ++detailVersion;
             long id = current.Id, after = append ? lastChangeId : 0;
+            ConfigDatabase store = database;
             ThreadPool.QueueUserWorkItem(delegate
             {
                 OperationDetails page = null;
                 Exception error = null;
-                try { page = database.ChangePage(id, after, PageRows, !append); }
+                try { page = store.ChangePage(id, after, PageRows, !append); }
                 catch (Exception ex) { error = ex; Paths.LogError(ex); }
                 Post(delegate { if (version == detailVersion && current != null && current.Id == id) ShowDetails(page, append, error); });
             });
@@ -440,13 +492,16 @@ namespace AppManager
 
         // ===== 撤销与数据库维护 =====
 
-        /// <summary>在后台执行一项维护操作；期间按钮和列表停用、窗口不可关闭。成功后在界面线程调用 done，失败则提示原因。</summary>
+        /// <summary>
+        /// 在后台执行一项维护操作；期间按钮和列表停用，设置页不能返回或切换。
+        /// 成功后在界面线程调用 done，失败则把原因写在状态行（不弹提示框）。
+        /// </summary>
         private void Work(string busyText, Func<string> action, Action<string> done)
         {
             if (running) return;
             SetRunning(true);
             readFailed = false;
-            status.Text = busyText;
+            SetStatus(busyText, false);
             ThreadPool.QueueUserWorkItem(delegate
             {
                 string result = null;
@@ -456,8 +511,7 @@ namespace AppManager
                 {
                     SetRunning(false);
                     if (error == null) { done(result); return; }
-                    status.Text = "没有完成：" + error.Message;
-                    MessageDialog.Show(this, "操作没有完成，数据保持原样。\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    SetStatus("没有完成，数据保持原样：" + error.Message, true);
                     // 失败可能是因为期间有了新操作（撤销会在事务里复查）：重新读一遍，撤销资格不停留在旧状态
                     if (!closed) LoadHistory(false);
                 });
@@ -467,7 +521,25 @@ namespace AppManager
         private void SetRunning(bool value)
         {
             running = value;
-            maintain.Enabled = undo.Enabled = export.Enabled = close.Enabled = opList.Enabled = changeList.Enabled = !value;
+            maintain.Enabled = undo.Enabled = export.Enabled = opList.Enabled = changeList.Enabled = filter.Enabled = !value;
+            UseWaitCursor = value;
+            EventHandler handler = BusyChanged;
+            if (handler != null) handler(this, EventArgs.Empty);
+        }
+
+        /// <summary>数据库内容已被撤销或恢复改变：通知主窗口重新加载，然后按新内容重新读取记录。</summary>
+        private void AfterDataChanged()
+        {
+            EventHandler handler = DataChanged;
+            if (handler != null) handler(this, EventArgs.Empty);
+            if (!closed) LoadHistory(false);
+        }
+
+        /// <summary>当前数据库；不可用时在状态行说明，菜单点了不会毫无反应。</summary>
+        private ConfigDatabase AvailableDatabase()
+        {
+            if (database == null) SetStatus("数据库不可用，无法执行。请重启程序后再试，详情见 error.log。", true);
+            return database;
         }
 
         private void RequestUndo()
@@ -482,51 +554,70 @@ namespace AppManager
 
         private void StartUndo(long id)
         {
+            ConfigDatabase store = AvailableDatabase();
+            if (store == null) return;
             Work("正在撤销…", delegate
             {
-                DesktopOrganizer.RunExclusive(delegate { database.Undo(id); });
-                return "已撤销。";
-            }, delegate { Changed = true; Close(); });
+                DesktopOrganizer.RunExclusive(delegate { store.Undo(id); });
+                return null;
+            }, delegate
+            {
+                SetStatus("已撤销。需要的话，可以再撤销这次撤销。", false);
+                AfterDataChanged();
+            });
         }
 
         private void Backup()
         {
-            using (SaveFileDialog dialog = new SaveFileDialog { Title = "完整备份", Filter = "数据库备份 (*.db)|*.db",
-                FileName = "AppManager-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".db", OverwritePrompt = true })
+            ConfigDatabase store = AvailableDatabase();
+            if (store == null) return;
+            string path = PathPickerDialog.Pick(new PathPickerOptions
             {
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                string path = dialog.FileName;
-                Work("正在备份…", delegate { database.Backup(path); return "已备份到：" + path; }, delegate(string text) { status.Text = text; });
-            }
+                Title = "完整备份",
+                Hint = "把分类、集合和设置完整备份成一个 .db 文件；选好位置，可以在下面改文件名。",
+                Mode = PathPickerMode.SaveFile,
+                ConfirmText = "备份",
+                FileName = "AppManager-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".db",
+                Extensions = new string[] { ".db" }
+            });
+            if (path == null) return;
+            Work("正在备份…", delegate { store.Backup(path); return "已备份到：" + path; }, delegate(string text) { SetStatus(text, false); });
         }
 
         private void Restore()
         {
-            using (OpenFileDialog dialog = new OpenFileDialog { Title = "从备份恢复", Filter = "数据库备份 (*.db)|*.db" })
+            ConfigDatabase store = AvailableDatabase();
+            if (store == null) return;
+            string path = PathPickerDialog.Pick(new PathPickerOptions
             {
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                string path = dialog.FileName;
-                if (!ConfirmDialog.Show("从备份恢复", "用所选备份替换当前的分类、集合和设置？\r\n替换前会自动保留一份当前数据；磁盘上的文件不变。",
-                    "恢复", "取消")) return;
-                Work("正在恢复…", delegate
-                {
-                    return DesktopOrganizer.RunExclusive<string>(delegate { return database.Restore(path); });
-                }, delegate(string safety)
-                {
-                    MessageDialog.Show(this, "恢复完成。\r\n恢复前的数据保留在：\r\n" + safety, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    Changed = true;
-                    Close();
-                });
-            }
+                Title = "从备份恢复",
+                Hint = "展开文件夹，选中之前「完整备份」得到的 .db 文件；下一步还会再确认一次。",
+                Mode = PathPickerMode.OpenFile,
+                ConfirmText = "下一步",
+                Extensions = new string[] { ".db" }
+            });
+            if (path == null) return;
+            if (!ConfirmDialog.Show("从备份恢复", "用所选备份替换当前的分类、集合和设置？\r\n替换前会自动保留一份当前数据；磁盘上的文件不变。",
+                "恢复", "取消")) return;
+            Work("正在恢复…", delegate
+            {
+                return DesktopOrganizer.RunExclusive<string>(delegate { return store.Restore(path); });
+            }, delegate(string safety)
+            {
+                SetStatus("恢复完成。恢复前的数据保留在：" + safety, false);
+                AfterDataChanged();
+            });
         }
 
         private void CheckDatabase()
         {
-            Work("正在检查…", delegate { return database.Check(); }, delegate(string raw)
+            ConfigDatabase store = AvailableDatabase();
+            if (store == null) return;
+            Work("正在检查…", delegate { return store.Check(); }, delegate(string raw)
             {
                 bool ok;
-                status.Text = OperationHistory.CheckText(raw, out ok);
-                if (!ok) MessageDialog.Show(this, status.Text, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                string text = OperationHistory.CheckText(raw, out ok);
+                SetStatus(text, !ok);
             });
         }
 
@@ -534,12 +625,19 @@ namespace AppManager
         {
             Op op = current;
             if (running || op == null) return;
-            using (SaveFileDialog dialog = new SaveFileDialog { Title = "导出明细", Filter = "变更记录 (*.xml)|*.xml", FileName = "operation-" + op.Id + ".xml" })
+            ConfigDatabase store = AvailableDatabase();
+            if (store == null) return;
+            string path = PathPickerDialog.Pick(new PathPickerOptions
             {
-                if (dialog.ShowDialog(this) != DialogResult.OK) return;
-                string path = dialog.FileName;
-                Work("正在导出…", delegate { database.ExportChanges(op.Id, path); return "明细已导出：" + path; }, delegate(string text) { status.Text = text; });
-            }
+                Title = "导出明细",
+                Hint = "把「" + op.Title + "」的全部改动导出成 .xml 文件；选好位置，可以在下面改文件名。",
+                Mode = PathPickerMode.SaveFile,
+                ConfirmText = "导出",
+                FileName = "operation-" + op.Id + ".xml",
+                Extensions = new string[] { ".xml" }
+            });
+            if (path == null) return;
+            Work("正在导出…", delegate { store.ExportChanges(op.Id, path); return "明细已导出：" + path; }, delegate(string text) { SetStatus(text, false); });
         }
 
         private void ShowMaintainMenu()
@@ -558,19 +656,15 @@ namespace AppManager
             Rectangle work = Screen.GetWorkingArea(point);
             menu.Location = new Point(Math.Max(work.Left, Math.Min(point.X, work.Right - width)),
                 Math.Max(work.Top, Math.Min(point.Y, work.Bottom - menu.Height)));
-            menu.Show(this);
+            menu.Show(FindForm());
         }
 
-        /// <summary>菜单项的动作延后到菜单窗口关闭之后执行：那时本窗口已重新成为活动窗口，文件对话框和确认框才会以它为宿主。</summary>
+        /// <summary>菜单项的动作延后到菜单窗口关闭之后执行：那时主窗口已重新成为活动窗口，文件对话框和确认框才会以它为宿主。</summary>
         private MenuWindow.MenuItem MenuEntry(string text, Action action)
         {
             MenuWindow.MenuItem entry = new MenuWindow.MenuItem();
             entry.Text = text;
-            entry.Action = delegate
-            {
-                if (IsDisposed || !IsHandleCreated) return;
-                BeginInvoke((Action)delegate { if (!IsDisposed && !Disposing && !running) action(); });
-            };
+            entry.Action = delegate { Post(delegate { if (!running) action(); }); };
             return entry;
         }
 
@@ -591,10 +685,16 @@ namespace AppManager
             layingOut = true;
             try
             {
-                int width = ClientSize.Width, height = ClientSize.Height, pad = Dpi(24);
-                int top = Dpi(82), bottom = Math.Max(top + 1, height - Dpi(72));
-                maintain.Bounds = new Rectangle(width - pad - Dpi(128), Dpi(18), Dpi(128), Dpi(34));
-                leftFrame = Rectangle.FromLTRB(pad, top, pad + Dpi(300), bottom);
+                int dpi = DpiHelper.ForControl(this);
+                if (layoutDpi != dpi) RemeasureRows();
+                layoutDpi = dpi;
+                // 上方一行：左边是记录总数，右边是「数据库维护」；下方一行是筛选、状态和操作按钮
+                int width = ClientSize.Width, height = ClientSize.Height, pad = Dpi(Shadow);
+                int buttonTop = Math.Max(0, height - Dpi(34));
+                int top = Dpi(46), bottom = Math.Max(top + 1, buttonTop - Dpi(12));
+                maintain.Bounds = new Rectangle(width - pad - Dpi(128), 0, Dpi(128), Dpi(34));
+                int listWidth = Math.Max(Dpi(220), Math.Min(Dpi(300), (width - pad * 2) * 2 / 5));
+                leftFrame = Rectangle.FromLTRB(pad, top, pad + listWidth, bottom);
                 rightFrame = Rectangle.FromLTRB(leftFrame.Right + Dpi(12), top, Math.Max(leftFrame.Right + Dpi(13), width - pad), bottom);
                 opList.Bounds = Rectangle.Inflate(leftFrame, -Dpi(4), -Dpi(4));
 
@@ -616,9 +716,7 @@ namespace AppManager
                 changeList.Bounds = Rectangle.FromLTRB(rightFrame.X + Dpi(4), y, rightFrame.Right - Dpi(4),
                     Math.Max(y + 1, rightFrame.Bottom - Dpi(4)));
 
-                int buttonTop = height - Dpi(56), right = width - pad;
-                close.Bounds = new Rectangle(right - Dpi(90), buttonTop, Dpi(90), Dpi(34));
-                right = close.Left - Dpi(12);
+                int right = width - pad;
                 if (export.Visible) { export.Bounds = new Rectangle(right - Dpi(100), buttonTop, Dpi(100), Dpi(34)); right = export.Left - Dpi(12); }
                 if (undo.Visible) { undo.Bounds = new Rectangle(right - Dpi(128), buttonTop, Dpi(128), Dpi(34)); right = undo.Left - Dpi(12); }
                 filter.Bounds = new Rectangle(pad, buttonTop, Dpi(132), Dpi(34));
@@ -627,18 +725,10 @@ namespace AppManager
             finally { layingOut = false; }
         }
 
-        protected override void OnDpiScaleChanged()
+        /// <summary>DPI 变化后：操作行高按新 DPI 设置，明细行高重新计算（原样重新放入列表）。</summary>
+        private void RemeasureRows()
         {
-            base.OnDpiScaleChanged();
-            Rectangle work = Screen.FromControl(this).WorkingArea;
-            Size = new Size(Math.Min(Width, work.Width), Math.Min(Height, work.Height));
-            // 窗体按 DPI 放大时左上角不动，大窗口会明显偏向右下：重新对准宿主窗口中央，且不超出屏幕工作区
-            Rectangle host = Owner != null ? Owner.Bounds : work;
-            Location = new Point(Math.Max(work.Left, Math.Min(host.X + (host.Width - Width) / 2, work.Right - Width)),
-                Math.Max(work.Top, Math.Min(host.Y + (host.Height - Height) / 2, work.Bottom - Height)));
-            opList.ItemHeight = Dpi(OpRowHeight);   // 行高不随窗体缩放自动变化
-            LayoutContent();
-            // 明细行高按新的 DPI 重新计算：原样重新放入列表
+            opList.ItemHeight = Dpi(OpRowHeight);   // 行高不随框架缩放自动变化
             object[] rows = new object[changeList.Items.Count];
             changeList.Items.CopyTo(rows, 0);
             int selected = changeList.SelectedIndex;
@@ -652,7 +742,7 @@ namespace AppManager
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            if (!DpiChangeInProgress) LayoutContent();
+            LayoutContent();
         }
 
         // ===== 绘制 =====
@@ -662,16 +752,13 @@ namespace AppManager
             base.OnPaint(e);
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            int pad = Dpi(24);
+            int pad = Dpi(Shadow);
             using (SolidBrush primary = new SolidBrush(Theme.TextPrimary))
             using (SolidBrush secondary = new SolidBrush(Theme.TextSecondary))
             using (SolidBrush tertiary = new SolidBrush(Theme.TextTertiary))
             {
-                Draw.DrawStringLeft(g, "数据维护与操作记录", Theme.DialogTitleFont, primary, new Rectangle(pad, Dpi(18), Dpi(320), Dpi(28)));
-                Draw.DrawStringLeft(g, "程序对分类、集合和设置的每次改动都记在这里；最新的一次可以撤销。", Theme.CaptionFont, secondary,
-                    new Rectangle(pad, Dpi(48), Math.Max(1, maintain.Left - pad - Dpi(12)), Dpi(22)));
-                Draw.DrawStringRight(g, headerSummary, Theme.CaptionFont, secondary,
-                    new Rectangle(Math.Max(pad, maintain.Left - Dpi(12) - Dpi(240)), Dpi(20), Dpi(240), Dpi(24)));
+                Draw.DrawStringLeft(g, headerSummary, Theme.CaptionFont, secondary,
+                    new Rectangle(pad, 0, Math.Max(1, maintain.Left - pad - Dpi(12)), Dpi(34)));
 
                 if (placeholder != null)
                 {
@@ -894,7 +981,7 @@ namespace AppManager
             Rectangle work = Screen.GetWorkingArea(point);
             menu.Location = new Point(Math.Max(work.Left, Math.Min(point.X, work.Right - menu.Width)),
                 Math.Max(work.Top, Math.Min(point.Y, work.Bottom - menu.Height)));
-            menu.Show(this);
+            menu.Show(FindForm());
         }
 
         private void CopyText(string text)
@@ -903,14 +990,12 @@ namespace AppManager
             try { Clipboard.SetText(text); }
             catch (ExternalException)
             {
-                MessageDialog.Show(this, "剪贴板正被其它程序占用，没有复制成功，请再试一次。", Text,
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                SetStatus("剪贴板正被其它程序占用，没有复制成功，请再试一次。", true);
             }
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            if (keyData == Keys.Escape) { Close(); return true; }
             if (running) return base.ProcessCmdKey(ref msg, keyData);
             if (keyData == Keys.Enter)
             {
@@ -918,7 +1003,6 @@ namespace AppManager
                 if (undo.Focused) RequestUndo();
                 else if (export.Focused) Export();
                 else if (maintain.Focused) ShowMaintainMenu();
-                else if (close.Focused) Close();
                 else if (opList.Focused && opList.SelectedIndex >= 0 && !(opList.SelectedItem is Op)) LoadHistory(true);
                 else if (changeList.Focused && changeList.SelectedIndex >= 0 && !(changeList.SelectedItem is ChangeRow)) LoadDetails(true);
                 return true;
@@ -930,19 +1014,6 @@ namespace AppManager
                 return true;
             }
             return base.ProcessCmdKey(ref msg, keyData);
-        }
-
-        protected override void OnFormClosing(FormClosingEventArgs e)
-        {
-            // 备份、恢复、撤销进行中不能关：后台线程还在写文件或数据库
-            if (running) e.Cancel = true;
-            base.OnFormClosing(e);
-        }
-
-        protected override void OnFormClosed(FormClosedEventArgs e)
-        {
-            closed = true;
-            base.OnFormClosed(e);
         }
 
         protected override void Dispose(bool disposing)
