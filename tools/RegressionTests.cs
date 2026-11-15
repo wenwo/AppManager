@@ -183,6 +183,7 @@ namespace AppManager
                 Run("database window lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
+                Run("exporting change details writes a temp file first: a failure keeps the old file and leaves no partial file", ExportChangesAtomic);
             }
             finally
             {
@@ -5190,6 +5191,57 @@ namespace AppManager
                 }
             }
             finally { Directory.Delete(backupDir, true); }
+        }
+
+        private static void ExportChangesAtomic()
+        {
+            string dir = Path.Combine(root, "export-changes");
+            Directory.CreateDirectory(dir);
+            AppConfig c = new AppConfig();
+            c.CustomCategories.Add("工具");
+            Check(c.SaveTo(Path.Combine(dir, "config.xml")), "fixture export");
+            c = ConfigDatabase.Load(Path.Combine(dir, "config.xml"));
+            Check(!c.LoadFailed, c.DatabaseError);
+            c.CustomCategories.Add("游戏");
+            Check(c.Save("OnAddCategory"), c.DatabaseError);
+            long good = c.Database.LatestBusinessOperation();
+            string target = Path.Combine(dir, "明细.xml");
+            // 不用通配符：Windows 下「明细.xml.*」也会匹配「明细.xml」本身
+            Func<string, int> sideFiles = delegate(string name)
+            {
+                return Directory.GetFiles(dir).Count(f => Path.GetFileName(f).StartsWith(name + ".", StringComparison.OrdinalIgnoreCase));
+            };
+            Func<int> leftovers = delegate { return sideFiles("明细.xml"); };
+
+            // 正常导出：新文件完整，换掉旧文件，不留临时文件
+            File.WriteAllText(target, "旧内容");
+            c.Database.ExportChanges(good, target);
+            string exported = File.ReadAllText(target);
+            Check(exported.Contains("<Operation") && exported.Contains("</Operation>") && exported.Contains("游戏") && leftovers() == 0,
+                "export did not replace the old file cleanly: " + leftovers());
+
+            // 写到一半失败（记录里有 XML 不允许的控制字符）：已有的文件原样保留，也不留半截临时文件
+            long broken;
+            using (Sqlite db = new Sqlite(c.Database.FilePath, false))
+            {
+                db.Execute("INSERT INTO operations(utc,action,summary,actor,session,pid) VALUES(?,?,?,?,?,?)",
+                    DateTime.UtcNow.ToString("o"), "OnRenameCategory", "rows=2", "test", "test", 1);
+                broken = Convert.ToInt64(db.Scalar("SELECT max(id) FROM operations"));
+                db.Execute("INSERT INTO changes(operation_id,entity,row_id,undo_sql,redo_sql) VALUES(?,?,?,?,?)", broken, "groups", 1, "SELECT 1", "SELECT 1");
+                db.Execute("INSERT INTO changes(operation_id,entity,row_id,undo_sql,redo_sql) VALUES(?,?,?,?,?)", broken, "groups", 1, "SELECT '\u0001'", "SELECT 1");
+            }
+            bool failed = false;
+            try { c.Database.ExportChanges(broken, target); }
+            catch (ArgumentException) { failed = true; }
+            Check(failed && File.ReadAllText(target) == exported && leftovers() == 0,
+                "a failed export damaged the existing file or left a partial file: failed=" + failed + " leftovers=" + leftovers());
+
+            // 目标不存在时失败：不生成目标文件
+            string fresh = Path.Combine(dir, "新明细.xml");
+            failed = false;
+            try { c.Database.ExportChanges(broken, fresh); }
+            catch (ArgumentException) { failed = true; }
+            Check(failed && !File.Exists(fresh) && sideFiles("新明细.xml") == 0, "a failed export created a partial file");
         }
 
         private static void ThemedToolTipMeasure()

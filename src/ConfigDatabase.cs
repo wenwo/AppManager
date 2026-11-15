@@ -866,28 +866,34 @@ namespace AppManager
                 try
                 {
                     db.Backup(temp);
-                    if (!File.Exists(target)) { File.Move(temp, target); return; }
-                    try { File.Replace(temp, target, null); return; }
-                    catch { }
-
-                    // 文件系统不支持 Replace 时先保留旧备份，再原子换名；失败恢复旧文件。
-                    string previous = target + ".previous-" + Guid.NewGuid().ToString("N");
-                    File.Move(target, previous);
-                    try
-                    {
-                        File.Move(temp, target);
-                        File.Delete(previous);
-                    }
-                    catch
-                    {
-                        if (!File.Exists(target) && File.Exists(previous)) File.Move(previous, target);
-                        throw;
-                    }
+                    PublishTemp(temp, target);
                 }
                 finally
                 {
                     try { if (File.Exists(temp)) File.Delete(temp); } catch { }
                 }
+            }
+        }
+
+        /// <summary>用写完的临时文件换下目标文件；任何一步失败，原有的目标文件保持不变（临时文件由调用方清理）。</summary>
+        private static void PublishTemp(string temp, string target)
+        {
+            if (!File.Exists(target)) { File.Move(temp, target); return; }
+            try { File.Replace(temp, target, null); return; }
+            catch { }
+
+            // 文件系统不支持 Replace 时先保留旧文件，再原子换名；失败恢复旧文件。
+            string previous = target + ".previous-" + Guid.NewGuid().ToString("N");
+            File.Move(target, previous);
+            try
+            {
+                File.Move(temp, target);
+                File.Delete(previous);
+            }
+            catch
+            {
+                if (!File.Exists(target) && File.Exists(previous)) File.Move(previous, target);
+                throw;
             }
         }
         internal void NoteRecovery(string safety)
@@ -958,18 +964,28 @@ namespace AppManager
             if (string.Equals(target, Path.GetFullPath(FilePath), StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(target, Path.GetFullPath(FilePath) + "-wal", StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(target, Path.GetFullPath(FilePath) + "-shm", StringComparison.OrdinalIgnoreCase)) throw new IOException("导出目标不能覆盖当前数据库。");
-            using (Sqlite db = Open())
-            using (Sqlite.Statement rows = db.Prepare("SELECT id,entity,row_id,undo_sql,redo_sql FROM changes WHERE operation_id=? ORDER BY id"))
-            using (XmlWriter writer = XmlWriter.Create(path, new XmlWriterSettings { Indent = true, Encoding = new UTF8Encoding(false) }))
+            // 先写同目录的临时文件，写完再换上：中途失败不留半截文件，用户选中的旧文件也保持原样
+            string temp = target + ".tmp-" + Guid.NewGuid().ToString("N");
+            try
             {
-                writer.WriteStartElement("Operation"); writer.WriteAttributeString("id", operation.ToString()); rows.Bind(operation);
-                while (rows.Read())
+                using (Sqlite db = Open())
+                using (Sqlite.Statement rows = db.Prepare("SELECT id,entity,row_id,undo_sql,redo_sql FROM changes WHERE operation_id=? ORDER BY id"))
+                using (XmlWriter writer = XmlWriter.Create(temp, new XmlWriterSettings { Indent = true, Encoding = new UTF8Encoding(false) }))
                 {
-                    string[] row = rows.Row(); writer.WriteStartElement("Change"); writer.WriteAttributeString("id", row[0]);
-                    writer.WriteAttributeString("entity", row[1]); writer.WriteAttributeString("row", row[2]);
-                    writer.WriteElementString("Undo", row[3]); writer.WriteElementString("Redo", row[4]); writer.WriteEndElement();
+                    writer.WriteStartElement("Operation"); writer.WriteAttributeString("id", operation.ToString()); rows.Bind(operation);
+                    while (rows.Read())
+                    {
+                        string[] row = rows.Row(); writer.WriteStartElement("Change"); writer.WriteAttributeString("id", row[0]);
+                        writer.WriteAttributeString("entity", row[1]); writer.WriteAttributeString("row", row[2]);
+                        writer.WriteElementString("Undo", row[3]); writer.WriteElementString("Redo", row[4]); writer.WriteEndElement();
+                    }
+                    writer.WriteEndElement();
                 }
-                writer.WriteEndElement();
+                PublishTemp(temp, target);
+            }
+            finally
+            {
+                try { if (File.Exists(temp)) File.Delete(temp); } catch { }
             }
         }
         // 仅撤销最新一次业务事务，避免逆向覆盖后续修改。撤销自身也会产生完整日志。
