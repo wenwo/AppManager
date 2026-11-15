@@ -260,7 +260,7 @@ namespace AppManager.Controls
             if (!collapsed)
             {
                 using (SolidBrush text = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, "分类", Theme.ButtonFont, text,
+                    Draw.DrawStringLeft(g, "分类", Theme.WindowTitleFont, text,
                         new Rectangle(14, 0, Math.Max(0, CollapseRect.Left - 20), CategoryHeaderHeight));
             }
             using (Pen separator = new Pen(Theme.Separator, 1))

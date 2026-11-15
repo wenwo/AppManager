@@ -463,7 +463,7 @@ namespace AppManager.Controls
 
             // 标题 + 右侧/底部分隔线：表头文字与列表表头、左侧首个分类垂直居中于同一水平线
             if (!collapsed)
-                Draw.DrawStringLeft(g, "集合", Theme.ButtonFont, textBrush,
+                Draw.DrawStringLeft(g, "集合", Theme.WindowTitleFont, textBrush,
                     new Rectangle(PadX + 4, 0, Math.Max(0, CollapseRect.Left - PadX - 10), HeaderH));
             PaintCollapseButton(g);
             using (Pen sep = new Pen(Theme.Separator, 1))
