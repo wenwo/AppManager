@@ -5444,7 +5444,7 @@ namespace AppManager
         /// </summary>
         private static bool ClickMessageDialog(Form dialog, int command)
         {
-            string text = command == 6 ? "是" : (command == 7 ? "否" : "取消");
+            string text = command == 6 ? "是" : (command == 7 ? "否" : (command == 1 ? "确定" : "取消"));
             Control button = null;
             foreach (Control child in dialog.Controls) if (child.Text == text) button = child;
             if (button == null && command == 2)
@@ -6152,6 +6152,7 @@ namespace AppManager
             bool retryShown = false;
             string summary = null, first = null, hint = null;
             ImportBatch handed = null;
+            bool cancelAsked = false, cancelKept = false, confirmAsked = false;
             using (ImportHistoryDialog dialog = new ImportHistoryDialog(journal, delegate { return false; }))
             {
                 whenLoaded(dialog, delegate
@@ -6163,14 +6164,32 @@ namespace AppManager
                     retryShown = ((Control)field(dialog, "retry")).Visible;
                     hint = ((Control)field(dialog, "footer")).Text;
                     summary = (string)field(dialog, "headerSummary");
-                    typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(dialog, null);
+                    MethodInfo request = typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private);
+                    // 源文件删除后不进回收站：每次都要确认；点「取消」什么也不交回，窗口留着
+                    cancelAsked = AnswerMessageDialog("导入记录", 2, delegate { request.Invoke(dialog, null); });
+                    cancelKept = dialog.Visible && dialog.RetryBatch == null;
+                    confirmAsked = AnswerMessageDialog("导入记录", 1, delegate { request.Invoke(dialog, null); });
                 });
                 handed = dialog.RetryBatch;
             }
             Check(records == 3 && first != null && first.StartsWith("照片，原件待清理"), "journal not listed newest first: " + records + " / " + first);
             Check(summary == "共 3 次导入 · 1 次需留意 · 1 条记录无法读取", "header summary wrong: " + summary);
             Check(rows == 2 && retryShown && hint.Contains("不进入回收站"), "pending batch does not offer cleanup");
+            Check(cancelAsked && cancelKept && confirmAsked, "cleanup did not ask first, or cancelling still handed the batch back");
             Check(handed != null && handed.Id == pending.Id && handed.DeleteAuthorized, "cleanup request not handed back to the caller");
+            string confirmText = ImportHistoryDialog.DeleteConfirmText(pending);
+            Check(confirmText.Contains("不进回收站") && confirmText.Contains(" 个文件，共 "), "cleanup confirmation does not say what will be deleted: " + confirmText);
+            // 只数还要删的：已删掉的文件、只登记位置的项目、已完成的项目都不算；当时有失败项的批次先说明原因
+            ImportBatch partial = new ImportBatch { Operation = ImportOperation.Move, Committed = true, DeleteAuthorized = false };
+            ImportItem copied = new ImportItem { State = FileImport.Copied, Source = @"C:\src\x", Folder = true };
+            copied.Files.Add(new ImportFileStamp { Relative = "a.jpg", Length = 2048 });
+            copied.Files.Add(new ImportFileStamp { Relative = "b.jpg", Length = 1024, Deleted = true });
+            partial.Items.Add(copied);
+            partial.Items.Add(new ImportItem { State = FileImport.Copied, Reference = true, Source = @"C:\src\ref" });
+            partial.Items.Add(new ImportItem { State = FileImport.Moved, Source = @"C:\src\done" });
+            string partialText = ImportHistoryDialog.DeleteConfirmText(partial);
+            Check(partialText.StartsWith("该批次当时有失败项") && partialText.Contains("确定删除 1 项") && partialText.Contains("（1 个文件，共 2.0 KB）"),
+                "cleanup confirmation counts the wrong files: " + partialText);
 
             // 导入进行中：不提供清理按钮并说明原因；不需要清理的记录同样没有按钮；直接关闭不交回批次
             bool busyHidden = false, cleanHidden = false;
@@ -6556,7 +6575,8 @@ namespace AppManager
                                         found = true;
                                     }
                                 offered = found && ((Control)typeof(ImportHistoryDialog).GetField("retry", Private).GetValue(dialog)).Visible;
-                                if (clean && offered) typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(dialog, null);
+                                if (clean && offered)
+                                    AnswerMessageDialog("导入记录", 1, delegate { typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(dialog, null); });
                             }
                             finally { if (dialog.Visible) dialog.Close(); }
                         };

@@ -409,15 +409,29 @@ namespace AppManager
         {
             if (current == null || !retry.Visible) return;
             ImportBatch batch = current.Batch;
-            if (!batch.DeleteAuthorized)
-            {
-                // 部分失败的批次当时保留了全部源文件；需用户明确确认后才删除已入库项的源文件。
-                if (MessageDialog.Show(this, "该批次当时有失败项，因此保留了全部源文件。\n确定删除已成功入库项目的源文件吗？删除前会再次校验内容。",
-                    "导入记录", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
-                batch.DeleteAuthorized = true;
-            }
+            // 源文件删除后不进回收站：每次都明确确认，默认按钮是「取消」，直接回车不会删除
+            if (MessageDialog.Show(this, DeleteConfirmText(batch), "导入记录", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
+                MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
+            batch.DeleteAuthorized = true;
             RetryBatch = batch;
             Close();
+        }
+
+        /// <summary>清理原件前的确认文字：要删几项、多少文件、多大；当时有失败项的批次先说明为什么保留了源文件。</summary>
+        internal static string DeleteConfirmText(ImportBatch batch)
+        {
+            int items = 0, files = 0;
+            long bytes = 0;
+            foreach (ImportItem item in batch.Items)
+            {
+                if (!MainForm.AwaitsSourceDelete(batch, item)) continue;
+                items++;
+                foreach (ImportFileStamp file in item.Files)
+                    if (!file.Deleted) { files++; bytes += file.Length; }
+            }
+            string reason = batch.DeleteAuthorized ? string.Empty : "该批次当时有失败项，因此保留了全部源文件。\n";
+            return reason + "确定删除 " + items + " 项已入库项目的源文件吗？（" + files + " 个文件，共 " + LocalScanScope.FormatBytes(bytes) + "）\n"
+                + "删除前会逐个核对库里的副本；源文件删除后不进回收站，无法找回。";
         }
 
         // ===== 布局 =====
