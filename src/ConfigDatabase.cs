@@ -875,26 +875,34 @@ namespace AppManager
             }
         }
 
-        /// <summary>用写完的临时文件换下目标文件；任何一步失败，原有的目标文件保持不变（临时文件由调用方清理）。</summary>
+        /// <summary>
+        /// 用写完的临时文件换下目标文件（临时文件由调用方清理）。新文件换上之前任何一步失败，原有的目标文件保持不变；
+        /// 只读的目标不覆盖。
+        /// </summary>
         private static void PublishTemp(string temp, string target)
         {
             if (!File.Exists(target)) { File.Move(temp, target); return; }
+            if ((File.GetAttributes(target) & FileAttributes.ReadOnly) != 0)
+                throw new IOException("目标文件是只读的，没有覆盖；请换一个位置，或先去掉它的只读属性。");
             try { File.Replace(temp, target, null); return; }
-            catch { }
+            catch
+            {
+                // 少数情况下 Replace 已移走旧文件、却没能换上新文件：直接把新文件放上去，不能两头落空
+                if (!File.Exists(target) && File.Exists(temp)) { File.Move(temp, target); return; }
+            }
 
             // 文件系统不支持 Replace 时先保留旧文件，再原子换名；失败恢复旧文件。
             string previous = target + ".previous-" + Guid.NewGuid().ToString("N");
             File.Move(target, previous);
-            try
-            {
-                File.Move(temp, target);
-                File.Delete(previous);
-            }
+            try { File.Move(temp, target); }
             catch
             {
                 if (!File.Exists(target) && File.Exists(previous)) File.Move(previous, target);
                 throw;
             }
+            // 新文件已经换上：旧文件删不掉（被占用等）只记日志，不能再报告失败
+            try { File.Delete(previous); }
+            catch (Exception ex) { Paths.LogError(ex); }
         }
         internal void NoteRecovery(string safety)
         {

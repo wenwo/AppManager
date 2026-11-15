@@ -5242,6 +5242,20 @@ namespace AppManager
             try { c.Database.ExportChanges(broken, fresh); }
             catch (ArgumentException) { failed = true; }
             Check(failed && !File.Exists(fresh) && sideFiles("新明细.xml") == 0, "a failed export created a partial file");
+
+            // 只读的已有文件：不覆盖，内容和只读属性都不变，也不留临时或旧文件副本
+            string locked = Path.Combine(dir, "只读.xml");
+            File.WriteAllText(locked, "保留");
+            File.SetAttributes(locked, FileAttributes.ReadOnly);
+            try
+            {
+                failed = false;
+                try { c.Database.ExportChanges(good, locked); }
+                catch (IOException ex) { failed = ex.Message.Contains("只读"); }
+                Check(failed && File.ReadAllText(locked) == "保留" && (File.GetAttributes(locked) & FileAttributes.ReadOnly) != 0
+                    && sideFiles("只读.xml") == 0, "a read-only export target was overwritten or left side files: " + sideFiles("只读.xml"));
+            }
+            finally { File.SetAttributes(locked, FileAttributes.Normal); }
         }
 
         private static void ThemedToolTipMeasure()
@@ -5439,7 +5453,7 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 点自绘提示框上的按钮，沿用系统提示框的按钮编号：6 是、7 否、2 取消；
+        /// 点自绘提示框上的按钮，沿用系统提示框的按钮编号：1 确定、6 是、7 否、2 取消；
         /// 只有一个按钮的提示框没有「取消」，2 对应它唯一的「知道了」（系统提示框里 2 同样等于关掉它）。
         /// </summary>
         private static bool ClickMessageDialog(Form dialog, int command)
@@ -6152,7 +6166,7 @@ namespace AppManager
             bool retryShown = false;
             string summary = null, first = null, hint = null;
             ImportBatch handed = null;
-            bool cancelAsked = false, cancelKept = false, confirmAsked = false;
+            bool cancelAsked = false, cancelKept = false, confirmAsked = false, enterKept = false, escapeKept = false;
             using (ImportHistoryDialog dialog = new ImportHistoryDialog(journal, delegate { return false; }))
             {
                 whenLoaded(dialog, delegate
@@ -6165,6 +6179,28 @@ namespace AppManager
                     hint = ((Control)field(dialog, "footer")).Text;
                     summary = (string)field(dialog, "headerSummary");
                     MethodInfo request = typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private);
+                    // 确认框默认按钮是「取消」：直接回车、按 Esc 都不删除
+                    Func<Keys, bool> pressOnConfirm = delegate(Keys key)
+                    {
+                        bool pressed = false;
+                        using (System.Windows.Forms.Timer press = new System.Windows.Forms.Timer { Interval = 10 })
+                        {
+                            press.Tick += delegate
+                            {
+                                Form message = FindMessageDialog("导入记录");
+                                if (message == null) return;
+                                press.Stop();
+                                message.Opacity = 0;
+                                typeof(Control).GetMethod("OnKeyDown", Private).Invoke(message, new object[] { new KeyEventArgs(key) });
+                                pressed = true;
+                            };
+                            press.Start();
+                            request.Invoke(dialog, null);
+                        }
+                        return pressed && dialog.Visible && dialog.RetryBatch == null;
+                    };
+                    enterKept = pressOnConfirm(Keys.Enter);
+                    escapeKept = pressOnConfirm(Keys.Escape);
                     // 源文件删除后不进回收站：每次都要确认；点「取消」什么也不交回，窗口留着
                     cancelAsked = AnswerMessageDialog("导入记录", 2, delegate { request.Invoke(dialog, null); });
                     cancelKept = dialog.Visible && dialog.RetryBatch == null;
@@ -6176,9 +6212,12 @@ namespace AppManager
             Check(summary == "共 3 次导入 · 1 次需留意 · 1 条记录无法读取", "header summary wrong: " + summary);
             Check(rows == 2 && retryShown && hint.Contains("不进入回收站"), "pending batch does not offer cleanup");
             Check(cancelAsked && cancelKept && confirmAsked, "cleanup did not ask first, or cancelling still handed the batch back");
+            Check(enterKept && escapeKept, "pressing Enter or Esc on the cleanup confirmation deleted the sources");
             Check(handed != null && handed.Id == pending.Id && handed.DeleteAuthorized, "cleanup request not handed back to the caller");
             string confirmText = ImportHistoryDialog.DeleteConfirmText(pending);
-            Check(confirmText.Contains("不进回收站") && confirmText.Contains(" 个文件，共 "), "cleanup confirmation does not say what will be deleted: " + confirmText);
+            // 这批记录没有文件信息（旧记录）：写明项数和后果，不写「0 个文件」，也不说成只剩文件夹
+            Check(confirmText.Contains("确定删除 1 项") && confirmText.Contains("不进回收站") && !confirmText.Contains("0 个文件")
+                && !confirmText.Contains("文件夹"), "cleanup confirmation does not say what will be deleted: " + confirmText);
             // 只数还要删的：已删掉的文件、只登记位置的项目、已完成的项目都不算；当时有失败项的批次先说明原因
             ImportBatch partial = new ImportBatch { Operation = ImportOperation.Move, Committed = true, DeleteAuthorized = false };
             ImportItem copied = new ImportItem { State = FileImport.Copied, Source = @"C:\src\x", Folder = true };
@@ -6188,8 +6227,11 @@ namespace AppManager
             partial.Items.Add(new ImportItem { State = FileImport.Copied, Reference = true, Source = @"C:\src\ref" });
             partial.Items.Add(new ImportItem { State = FileImport.Moved, Source = @"C:\src\done" });
             string partialText = ImportHistoryDialog.DeleteConfirmText(partial);
-            Check(partialText.StartsWith("该批次当时有失败项") && partialText.Contains("确定删除 1 项") && partialText.Contains("（1 个文件，共 2.0 KB）"),
+            Check(partialText.StartsWith("该批次当时没有全部完成") && partialText.Contains("确定删除 1 项") && partialText.Contains("（1 个文件，共 2.0 KB）"),
                 "cleanup confirmation counts the wrong files: " + partialText);
+            copied.Files[0].Deleted = true;   // 上次删到一半中断：文件都删了，只剩源文件夹
+            string foldersOnly = ImportHistoryDialog.DeleteConfirmText(partial);
+            Check(foldersOnly.Contains("只剩空的源文件夹") && !foldersOnly.Contains("0 个文件"), "an empty-folder cleanup was described as 0 files: " + foldersOnly);
 
             // 导入进行中：不提供清理按钮并说明原因；不需要清理的记录同样没有按钮；直接关闭不交回批次
             bool busyHidden = false, cleanHidden = false;

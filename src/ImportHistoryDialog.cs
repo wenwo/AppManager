@@ -417,20 +417,25 @@ namespace AppManager
             Close();
         }
 
-        /// <summary>清理原件前的确认文字：要删几项、多少文件、多大；当时有失败项的批次先说明为什么保留了源文件。</summary>
+        /// <summary>清理原件前的确认文字：要删几项、多少文件、多大；当时没有全部完成的批次先说明为什么保留了源文件。</summary>
         internal static string DeleteConfirmText(ImportBatch batch)
         {
             int items = 0, files = 0;
             long bytes = 0;
+            bool foldersOnly = true;
             foreach (ImportItem item in batch.Items)
             {
                 if (!MainForm.AwaitsSourceDelete(batch, item)) continue;
                 items++;
+                if (!item.Folder) foldersOnly = false;
                 foreach (ImportFileStamp file in item.Files)
                     if (!file.Deleted) { files++; bytes += file.Length; }
             }
-            string reason = batch.DeleteAuthorized ? string.Empty : "该批次当时有失败项，因此保留了全部源文件。\n";
-            return reason + "确定删除 " + items + " 项已入库项目的源文件吗？（" + files + " 个文件，共 " + LocalScanScope.FormatBytes(bytes) + "）\n"
+            string reason = batch.DeleteAuthorized ? string.Empty : "该批次当时没有全部完成（有失败项或中途取消），因此保留了全部源文件。\n";
+            // 数不出文件时不显示「0 个文件，共 0 B」：只剩源文件夹（例如上次删到一半中断）就照实说，其它情况（旧记录没有文件信息）不写数字
+            string scope = files > 0 ? "（" + files + " 个文件，共 " + LocalScanScope.FormatBytes(bytes) + "）"
+                : (foldersOnly ? "（文件已删完，只剩空的源文件夹）" : string.Empty);
+            return reason + "确定删除 " + items + " 项已入库项目的源文件吗？" + scope + "\n"
                 + "删除前会逐个核对库里的副本；源文件删除后不进回收站，无法找回。";
         }
 
