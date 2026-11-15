@@ -80,7 +80,7 @@ namespace AppManager
             for (int i = 0; i < items.Count; i++)
                 h += items[i].Separator ? 9 : ItemH;
             ClientSize = new Size(width, h);
-            try { using (GraphicsPath path = Draw.RoundedPath(ClientRectangle, S(12))) Region = new Region(path); } catch { }
+            try { using (GraphicsPath path = Draw.RoundedPath(ClientRectangle, MainForm.WindowCornerRadius(this))) Region = new Region(path); } catch { }
             if (!isSubmenu)
             {
                 // 仅根菜单持有收起定时器：光标离开级联链后延时收起子菜单
@@ -143,8 +143,10 @@ namespace AppManager
             g.Clear(Theme.MenuBg);
             // 1px 描边：菜单悬浮于内容之上，用边界线明确「菜单层」与底层内容的分界
             using (Pen border = new Pen(Theme.Separator, S(1)))
-                Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, ClientSize.Width - S(1), ClientSize.Height - S(1)), S(12));
+                Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, ClientSize.Width - S(1), ClientSize.Height - S(1)), MainForm.WindowCornerRadius(this));
             int y = S(4);
+            bool checkColumn = false;
+            foreach (MenuItem item in items) if (item.Checked) { checkColumn = true; break; }
             for (int i = 0; i < items.Count; i++)
             {
                 MenuItem it = items[i];
@@ -166,8 +168,8 @@ namespace AppManager
                 bool hasCheck = it.Checked;
                 // iOS 上下文菜单：悬停浅灰高亮，文字保持深色（选中态不反白）
                 Color tc = it.Disabled ? Theme.TextTertiary : Theme.TextPrimary;
-                // 勾选态在左侧预留 checkmark 占位，文字整体右移
-                int leftPad = S(PadX + (hasCheck ? 18 : 0));
+                // 菜单里只要有一项处于勾选态，所有项都在左侧留出对勾的位置：勾与不勾的文字对齐
+                int leftPad = S(PadX + (checkColumn ? 18 : 0));
                 int tw = r.Width - leftPad - S(PadX) - (hasSub ? S(ArrowW) : 0);
                 using (SolidBrush br = new SolidBrush(tc))
                     Draw.DrawStringLeft(g, it.Text, font, br,
@@ -583,6 +585,23 @@ namespace AppManager
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw, true);
         }
+
+        /// <summary>
+        /// 无边框弹窗统一画一圈细描边，圆角与窗口实际圆角一致：
+        /// 灰底大窗口和白底小弹窗压在遮罩上都有清楚的边界。子类在 base.OnPaint 之后画的内容不受影响。
+        /// </summary>
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            if (FormBorderStyle != FormBorderStyle.None || ClientSize.Width < 2 || ClientSize.Height < 2) return;
+            Graphics g = e.Graphics;
+            SmoothingMode old = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (Pen border = new Pen(Theme.ControlBorder, Math.Max(1F, LayoutDpi / 96F)))
+                Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1),
+                    MainForm.WindowCornerRadius(this));
+            g.SmoothingMode = old;
+        }
     }
 
     /// <summary>
@@ -598,58 +617,13 @@ namespace AppManager
         /// <summary>按钮文字可定制：取消一侧会产生后果（如放弃修改）时，用明确的动词代替“取消”。Esc 等同点击右侧按钮。</summary>
         public static bool Show(string title, string message, string okText, string cancelText)
         {
-            bool result = false;
-            Form f = new BufferedDialogForm();
-            f.FormBorderStyle = FormBorderStyle.None;
-            f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(400, 200);
-            f.BackColor = Theme.Card;
-            f.ShowInTaskbar = false;
-            f.KeyPreview = true;
-            f.KeyDown += delegate(object sender, KeyEventArgs e)
+            // 与提示框（MessageDialog）共用同一个窗体：正文自动换行，高度随内容变化
+            using (MessageForm f = new MessageForm(title, message, new string[] { okText, cancelText },
+                new DialogResult[] { DialogResult.OK, DialogResult.Cancel }, 0, DialogResult.Cancel))
             {
-                if (e.KeyCode == Keys.Escape)
-                {
-                    result = false;
-                    f.DialogResult = DialogResult.Cancel;
-                    f.Close();
-                    e.Handled = true;
-                }
-                else if (e.KeyCode == Keys.Enter)
-                {
-                    result = true;
-                    f.DialogResult = DialogResult.OK;
-                    f.Close();
-                    e.Handled = true;
-                }
-            };
-            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
-            f.Paint += delegate(object s, PaintEventArgs e)
-            {
-                Graphics g = e.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                int dpi = DpiHelper.ForControl(f);
-                Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
-                using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
-                using (Pen border = new Pen(Theme.ControlBorder, 1F * (dpi <= 0 ? 1f : dpi / 96f)))
-                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - S(1), f.Height - S(1)), S(18));
-                using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb, new Rectangle(S(24), S(18), f.Width - S(48), S(30)));
-                using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, message, Theme.BodyFont, mb, new Rectangle(S(24), S(60), f.Width - S(48), S(60)));
-            };
-            RoundButton ok = MakeBtn(okText, true);
-            ok.Bounds = new Rectangle(192, 142, 84, 34);
-            ok.Click += delegate { result = true; f.DialogResult = DialogResult.OK; f.Close(); };
-            RoundButton cancel = MakeBtn(cancelText, false);
-            cancel.Bounds = new Rectangle(292, 142, 84, 34);
-            cancel.Click += delegate { result = false; f.DialogResult = DialogResult.Cancel; f.Close(); };
-            f.Controls.Add(ok);
-            f.Controls.Add(cancel);
-            ShowModal(f);
-            f.Dispose();
-            return result;
+                ShowModal(f);
+                return f.Result == DialogResult.OK;
+            }
         }
 
         internal static RoundButton MakeBtn(string text, bool accent)
@@ -667,15 +641,28 @@ namespace AppManager
         /// </summary>
         internal static void ShowModal(Form f)
         {
-            Form owner = ResolveOwner(f);
+            ShowModal(f, null);
+        }
+
+        /// <summary>preferred：程序不在前台（没有活动窗口）时优先归属的窗口，后台操作结束后弹提示时用。</summary>
+        internal static void ShowModal(Form f, Form preferred)
+        {
+            Form owner = ResolveOwner(f, preferred);
             Form scrim = null;
             try
             {
-                if (owner != null)
+                if (owner != null && owner.WindowState != FormWindowState.Minimized)
                 {
                     scrim = CreateScrim(owner);
                     scrim.Show(owner);
                     f.ShowDialog(scrim);   // CenterParent 以遮罩为基准，边界与宿主一致，定位不变
+                    return;
+                }
+                if (owner != null)
+                {
+                    // 宿主已最小化：它的边界在屏幕外，遮罩和 CenterParent 都会跟着跑出去，改为屏幕居中、不盖遮罩
+                    f.StartPosition = FormStartPosition.CenterScreen;
+                    f.ShowDialog(owner);
                     return;
                 }
                 f.ShowDialog();
@@ -725,10 +712,11 @@ namespace AppManager
 
         /// <summary>解析宿主窗口：优先当前活动窗体，其次首个可见窗体；均无则返回 null。
         /// 跳过上下文菜单（MenuWindow）：菜单触发动作瞬间尚未完全关闭，不能成为模态宿主。</summary>
-        private static Form ResolveOwner(Form self)
+        private static Form ResolveOwner(Form self, Form preferred)
         {
             Form active = Form.ActiveForm;
             if (active != null && active != self && !(active is MenuWindow)) return active;
+            if (preferred != null && preferred != self && !preferred.IsDisposed && preferred.Visible) return preferred;
             foreach (Form open in Application.OpenForms)
                 if (open != null && open != self && open.Visible && !(open is MenuWindow)) return open;
             return null;
@@ -748,11 +736,10 @@ namespace AppManager
             Form form = new BufferedDialogForm();
             form.FormBorderStyle = FormBorderStyle.None;
             form.StartPosition = FormStartPosition.CenterParent;
-            form.ClientSize = new Size(400, 286);
+            form.ClientSize = new Size(400, 296);
             form.BackColor = Theme.Card;
             form.ShowInTaskbar = false;
             form.KeyPreview = true;
-            try { using (GraphicsPath path = Draw.RoundedPath(form.ClientRectangle, 18)) form.Region = new Region(path); } catch { }
             form.Paint += delegate(object sender, PaintEventArgs e)
             {
                 Graphics graphics = e.Graphics;
@@ -760,7 +747,7 @@ namespace AppManager
                 int dpi = DpiHelper.ForControl(form);
                 Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
                 using (SolidBrush background = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, S(18));
+                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, MainForm.WindowCornerRadius(form));
                 using (SolidBrush title = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(graphics, "选择分类图标", Theme.DialogTitleFont, title,
                         new Rectangle(DpiHelper.Scale(22, DpiHelper.ForControl(form)), DpiHelper.Scale(14, DpiHelper.ForControl(form)), DpiHelper.Scale(250, DpiHelper.ForControl(form)), DpiHelper.Scale(28, DpiHelper.ForControl(form))));
@@ -816,10 +803,10 @@ namespace AppManager
                 form.Close();
             };
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
-            ok.Bounds = new Rectangle(204, 242, 78, 30);
+            ok.Bounds = new Rectangle(198, 238, 84, 34);
             ok.Click += delegate { result = selected; form.DialogResult = DialogResult.OK; form.Close(); };
             RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
-            cancel.Bounds = new Rectangle(296, 242, 78, 30);
+            cancel.Bounds = new Rectangle(292, 238, 84, 34);
             cancel.Click += delegate { result = null; form.DialogResult = DialogResult.Cancel; form.Close(); };
             form.Controls.Add(ok);
             form.Controls.Add(cancel);
@@ -860,7 +847,6 @@ namespace AppManager
             form.ClientSize = new Size(420, 324);
             form.BackColor = Theme.Card;
             form.ShowInTaskbar = false;
-            try { using (GraphicsPath path = Draw.RoundedPath(form.ClientRectangle, 18)) form.Region = new Region(path); } catch { }
             form.Paint += delegate(object sender, PaintEventArgs e)
             {
                 Graphics graphics = e.Graphics;
@@ -868,9 +854,7 @@ namespace AppManager
                 int dpi = DpiHelper.ForControl(form);
                 Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
                 using (SolidBrush background = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, S(18));
-                using (Pen border = new Pen(Theme.ControlBorder, 1F))
-                    Draw.DrawRoundedRect(graphics, border, new Rectangle(0, 0, form.Width - 1, form.Height - 1), 18);
+                    Draw.FillRoundedRect(graphics, background, form.ClientRectangle, MainForm.WindowCornerRadius(form));
                 using (SolidBrush titleBrush = new SolidBrush(Theme.TextPrimary))
                 {
                     Draw.DrawStringLeft(graphics, title, Theme.FontOf(13F, FontStyle.Bold), titleBrush,
@@ -919,7 +903,7 @@ namespace AppManager
                 form.Invalidate();
             };
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
-            ok.Bounds = new Rectangle(216, 272, 84, 34);
+            ok.Bounds = new Rectangle(218, 272, 84, 34);
             ok.Click += delegate
             {
                 if (string.IsNullOrWhiteSpace(box.Text)) { box.Focus(); return; }
@@ -991,7 +975,6 @@ namespace AppManager
             f.ClientSize = new Size(400, 218 + extra);
             f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
-            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
@@ -999,9 +982,7 @@ namespace AppManager
                 int dpi = DpiHelper.ForControl(f);
                 Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, dpi); };
                 using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
-                using (Pen border = new Pen(Theme.ControlBorder, 1F * (dpi <= 0 ? 1f : dpi / 96f)))
-                    Draw.DrawRoundedRect(g, border, new Rectangle(0, 0, f.Width - S(1), f.Height - S(1)), S(18));
+                    Draw.FillRoundedRect(g, b, f.ClientRectangle, MainForm.WindowCornerRadius(f));
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(g, title, Theme.FontOf(13F, FontStyle.Bold), tb, new Rectangle(S(24), S(18), f.Width - S(48), S(30)));
                 using (SolidBrush mb = new SolidBrush(Theme.TextPrimary))
@@ -1035,7 +1016,7 @@ namespace AppManager
                 f.Close();
             };
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
-            ok.Bounds = new Rectangle(192, 158 + extra, 84, 34);
+            ok.Bounds = new Rectangle(198, 158 + extra, 84, 34);
             ok.Click += delegate { accept(); };
             RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
             cancel.Bounds = new Rectangle(292, 158 + extra, 84, 34);
@@ -1055,6 +1036,36 @@ namespace AppManager
             ConfirmDialog.ShowModal(f);
             f.Dispose();
             return result;
+        }
+
+        /// <summary>
+        /// 多行文本框只在内容放不下时才显示系统滚动条，内容少时不留一条空滚动条。
+        /// 切换滚动条会重建文本框句柄：先记下光标和选区，重建后放回去，正在输入时不受影响。
+        /// </summary>
+        internal static void ScrollBarsWhenNeeded(TextBox box)
+        {
+            box.ScrollBars = ScrollBars.None;
+            bool updating = false;
+            EventHandler update = delegate
+            {
+                if (updating || box.IsDisposed || !box.IsHandleCreated) return;
+                int lines = box.GetLineFromCharIndex(box.TextLength) + 1;
+                ScrollBars wanted = lines * box.Font.Height > box.ClientSize.Height ? ScrollBars.Vertical : ScrollBars.None;
+                if (box.ScrollBars == wanted) return;
+                updating = true;
+                try
+                {
+                    int start = box.SelectionStart, length = box.SelectionLength;
+                    box.ScrollBars = wanted;
+                    box.Select(start, length);
+                    box.ScrollToCaret();
+                }
+                finally { updating = false; }
+            };
+            // HandleCreated 发生在窗口创建过程中，此时改 ScrollBars 会重建一个还没建完的句柄（抛异常）：延后到消息循环再判断
+            box.HandleCreated += delegate { box.BeginInvoke(update, box, EventArgs.Empty); };
+            box.TextChanged += update;
+            box.SizeChanged += update;
         }
 
         /// <summary>
@@ -1113,17 +1124,16 @@ namespace AppManager
             Form f = new BufferedDialogForm();
             f.FormBorderStyle = FormBorderStyle.None;
             f.StartPosition = FormStartPosition.CenterParent;
-            f.ClientSize = new Size(400, 260);
-            f.BackColor = Theme.Background;
+            f.ClientSize = new Size(400, 272);
+            f.BackColor = Theme.Card;
             f.ShowInTaskbar = false;
-            try { using (GraphicsPath path = Draw.RoundedPath(f.ClientRectangle, 18)) f.Region = new Region(path); } catch { }
             f.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 Func<int, int> S = delegate(int value) { return DpiHelper.Scale(value, DpiHelper.ForControl(f)); };
                 using (SolidBrush b = new SolidBrush(Theme.Card))
-                    Draw.FillRoundedRect(g, b, f.ClientRectangle, S(18));
+                    Draw.FillRoundedRect(g, b, f.ClientRectangle, MainForm.WindowCornerRadius(f));
                 using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
                     Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, tb,
                         new Rectangle(S(22), S(16), f.Width - S(44), S(26)));
@@ -1143,8 +1153,8 @@ namespace AppManager
             descBox.Font = Theme.BodyFont;
             descBox.ForeColor = Theme.TextPrimary;
             descBox.BackColor = Theme.SearchBg;
-            descBox.ScrollBars = ScrollBars.Vertical;
             descBox.Text = desc0;
+            InputDialog.ScrollBarsWhenNeeded(descBox);
             Panel descPanel = new Panel();
             descPanel.BackColor = Theme.Card;
             descPanel.Bounds = new Rectangle(22, 136, f.ClientSize.Width - 44, 62);
@@ -1166,14 +1176,14 @@ namespace AppManager
             f.Controls.Add(descPanel);
 
             RoundButton ok = ConfirmDialog.MakeBtn("确定", true);
-            ok.Bounds = new Rectangle(f.Width / 2 - 130, f.Height - 52, 120, 32);
+            ok.Bounds = new Rectangle(f.ClientSize.Width - 22 - 84 - 10 - 84, f.ClientSize.Height - 22 - 34, 84, 34);
             ok.Click += delegate
             {
                 string name = (nameBox.Text ?? string.Empty).Trim();
                 string error = CategoryRules.ValidateCollectionName(name);
                 if (error != null)
                 {
-                    MessageBox.Show(error, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageDialog.Show(error, title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 result = new ResourceCollection();
@@ -1184,7 +1194,7 @@ namespace AppManager
                 f.Close();
             };
             RoundButton cancel = ConfirmDialog.MakeBtn("取消", false);
-            cancel.Bounds = new Rectangle(f.Width / 2 + 10, f.Height - 52, 120, 32);
+            cancel.Bounds = new Rectangle(f.ClientSize.Width - 22 - 84, f.ClientSize.Height - 22 - 34, 84, 34);
             cancel.Click += delegate { result = null; f.DialogResult = DialogResult.Cancel; f.Close(); };
             f.Controls.Add(ok);
             f.Controls.Add(cancel);

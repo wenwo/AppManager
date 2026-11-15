@@ -23,7 +23,7 @@ namespace AppManager
             if (missingMusicCleanupRunning) return;
             if (!CanEditCategory("音乐"))
             {
-                MessageBox.Show(this, "当前无法编辑「音乐」分类。", "清理失效音乐记录",
+                MessageDialog.Show(this, "当前无法编辑「音乐」分类。", "清理失效音乐记录",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -52,7 +52,7 @@ namespace AppManager
                     {
                         missingMusicCleanupRunning = false;
                         Paths.LogError(failure);
-                        MessageBox.Show(this, "检查失效音乐记录失败。\n" + failure.Message, "清理失效音乐记录",
+                        MessageDialog.Show(this, "检查失效音乐记录失败。\n" + failure.Message, "清理失效音乐记录",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
@@ -91,7 +91,7 @@ namespace AppManager
                     if (failure != null)
                     {
                         Paths.LogError(failure);
-                        MessageBox.Show(this, "复核失效音乐记录失败，未做任何清理。\n" + failure.Message,
+                        MessageDialog.Show(this, "复核失效音乐记录失败，未做任何清理。\n" + failure.Message,
                             "清理失效音乐记录", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
@@ -108,7 +108,7 @@ namespace AppManager
                     }
                     if (!config.Save("cleanup.missing.music"))
                     {
-                        MessageBox.Show(this, "清理失效音乐记录未能保存。\n" + config.DatabaseError,
+                        MessageDialog.Show(this, "清理失效音乐记录未能保存。\n" + config.DatabaseError,
                             "清理失效音乐记录", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         StartScan(false);
                         return;
@@ -158,13 +158,13 @@ namespace AppManager
             if (localMusicScanRunning) return;
             if (!CanEditCategory("音乐"))
             {
-                MessageBox.Show(this, "当前无法编辑「音乐」分类。", "扫描本机音乐",
+                MessageDialog.Show(this, "当前无法编辑「音乐」分类。", "扫描本机音乐",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             if (ActiveResourceStoreRoots().Count == 0)
             {
-                MessageBox.Show(this, "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。",
+                MessageDialog.Show(this, "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。",
                     "扫描本机音乐", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -221,7 +221,7 @@ namespace AppManager
                                                             + (string.IsNullOrEmpty(availabilityError) ? "" : availabilityError + "\n\n")
                                                             + "是否按扩展名继续扫描？\n"
                                                             + "选择「是」将按扩展名收录，仍会跳过系统和程序目录、过小文件、云端占位文件和已排除项。";
-                                                        fallback = MessageBox.Show(dialog, message, "播放组件缺失",
+                                                        fallback = MessageDialog.Show(dialog, message, "播放组件缺失",
                                                             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
                                                         answer.Set();
                                                     });
@@ -373,7 +373,7 @@ namespace AppManager
         {
             if (ActiveResourceStoreRoots().Count == 0)
             {
-                MessageBox.Show(this, "未启用任何资源存储位置，本次扫描结果未导入。",
+                MessageDialog.Show(this, "未启用任何资源存储位置，本次扫描结果未导入。",
                     "扫描本机音乐", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }

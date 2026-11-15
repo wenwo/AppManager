@@ -170,6 +170,15 @@ namespace AppManager
                 Run("import history sorts problems first and names each record's state", ImportHistoryRules);
                 Run("import history dialog loads the journal and hands back the batch to clean up", ImportHistoryDialogFlow);
                 Run("import history cleanup deletes sources through the import queue; closing deletes nothing", ImportHistoryCleanupEndToEnd);
+                Run("message dialog keeps MessageBox buttons, results, Esc and default button", MessageDialogResults);
+                Run("category picker preselects the suggestion, confirms with Enter, cancels with Esc", CategoryPickerFlow);
+                Run("duplicate dialog lists keepable rows first and returns only checked sources", DuplicateDialogFlow);
+                Run("desktop backup cards show names and raise remove only when idle", DesktopBackupListRules);
+                Run("check rows toggle, radio rows stay exclusive and follow arrow keys", CheckRowBehaviour);
+                Run("main grid scrolls itself: clamps, follows the wheel and keeps the old position API", GridThinScroll);
+                Run("thin list scrollbar appears only on overflow and narrows the rows", ThinListScrollBar);
+                Run("themed tooltip sizes bound and directly shown text, skips empty text", ThemedToolTipMeasure);
+                Run("review fixes: long text boxes open safely, keyboard restore, left-click only, radio tab stop, MTA fallback", ReviewFollowUps);
                 Run("operation history names actions and explains each change in plain words", OperationHistoryRules);
                 Run("database window lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
             }
@@ -1337,6 +1346,9 @@ namespace AppManager
 
         [DllImport("user32.dll")]
         private static extern bool PostMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hWnd, int index);
 
         [DllImport("user32.dll")]
         private static extern bool ShowWindow(IntPtr hWnd, int command);
@@ -2544,7 +2556,9 @@ namespace AppManager
                 Application.DoEvents();
                 Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
                 Control strip = (Control)typeof(MainForm).GetField("headerStrip", Private).GetValue(form);
-                Check(grid.ClientSize.Width < grid.Width, "fixture did not show a vertical scrollbar");
+                // 主列表改用自绘细滚动条：内容溢出时也不再占用客户区宽度
+                Check(grid.AutoScrollMinSize.Height > grid.ClientSize.Height, "fixture does not overflow the grid");
+                Check(grid.ClientSize.Width == grid.Width, "a system scrollbar still narrows the grid");
                 Check(strip.Width == grid.ClientSize.Width, "header strip width " + strip.Width + " differs from grid client width " + grid.ClientSize.Width);
             }
         }
@@ -3044,7 +3058,7 @@ namespace AppManager
                     db.Execute("BEGIN IMMEDIATE");
                     try
                     {
-                        bool extraPrompt = AnswerNativeMessageBox("资源存储位置", 2,
+                        bool extraPrompt = AnswerMessageDialog("资源存储位置", 2,
                             delegate { ClickSettingsZone(page, second, "StoreToggle"); }, out unexpectedDialog);
                         Check(!extraPrompt && !unexpectedDialog, "failed location save raised its own prompt on top of the shared one");
                     }
@@ -3065,7 +3079,7 @@ namespace AppManager
                 Invoke(form, "AddStoreLocation", third);
                 Check(config.ResourceStoreLocations.Count == 3 && SameText(config.ResourceStoreLocations[2].Path, third)
                     && config.ResourceStoreLocations[2].Enabled && SettingsRowIndex(page, third) >= 0, "a new location was not appended and shown");
-                bool rejected = AnswerNativeMessageBox("资源存储位置", 2,
+                bool rejected = AnswerMessageDialog("资源存储位置", 2,
                     delegate { Invoke(form, "AddStoreLocation", Path.Combine(third, "inner")); });
                 Check(rejected && config.ResourceStoreLocations.Count == 3, "a nested location was accepted or rejected silently");
                 Check(AppConfig.Load().ResourceStoreLocations.Count == 3, "added location was not persisted");
@@ -4347,7 +4361,7 @@ namespace AppManager
                 string oldPath = app.TargetPath;
                 string renamedPath = Path.Combine(Path.GetDirectoryName(oldPath), "renamed.txt");
                 string result = null;
-                bool answered = AnswerNativeMessageBox("文本", 2,
+                bool answered = AnswerMessageDialog("文本", 2,
                     delegate { result = (string)Invoke(form, "TryRenameOnDisk", app, oldPath, false, "renamed.txt"); });
                 Check(answered, "disk rename did not ask about unsaved text");
                 Check(result == string.Empty && File.Exists(oldPath) && !File.Exists(renamedPath),
@@ -4425,7 +4439,7 @@ namespace AppManager
                 };
                 Action wrapped = (Action)Invoke(form, "WrapViewerMenuAction", mutation, oldPath, (Control)viewer);
                 bool unexpected;
-                bool answered = AnswerNativeMessageBox("文本", save ? 6 : 7, wrapped, out unexpected);
+                bool answered = AnswerMessageDialog("文本", save ? 6 : 7, wrapped, out unexpected);
                 Check(answered && !unexpected, "dirty rename opened an old-path or unexpected dialog");
                 Check(result == null, "dirty rename failed: " + result);
                 Check(!File.Exists(oldPath) && File.Exists(newPath), "dirty rename did not move the file");
@@ -4453,8 +4467,7 @@ namespace AppManager
                 bool confirm, native, unexpected;
                 using (FileStream locked = new FileStream(app.TargetPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
                 {
-                    // 只有“确定”的系统提示框，按钮控件 ID 是 IDCANCEL(2) 而不是 IDOK(1)：发 1 会被忽略，
-                    // 发 2 等同按确定/Esc，MessageBox 仍返回 OK。
+                    // 失败提示只有一个「知道了」按钮，编号 2 对应它（见 ClickMessageDialog）。
                     RunDeleteFlow(delete.Action, true, "删除", 2, out confirm, out native, out unexpected);
                 }
                 Check(confirm, "delete confirmation was not executed");
@@ -4551,7 +4564,7 @@ namespace AppManager
                 MakeTextDirty(viewer);
                 File.Delete(app.TargetPath);
                 object result = null;
-                bool answered = AnswerNativeMessageBox("文本", 7,
+                bool answered = AnswerMessageDialog("文本", 7,
                     delegate { result = Invoke(form, "BuildViewerResourceMenu", (Control)viewer, app.TargetPath); });
                 Check(answered, "external deletion discarded unsaved text without asking");
                 Check(result == null && !viewer.Visible, "external deletion left the dirty viewer open");
@@ -4714,6 +4727,351 @@ namespace AppManager
             return target.GetType().GetField(name, Private).GetValue(target);
         }
 
+        // 自绘提示框：按钮组合、返回值、Esc 和默认按钮都要与系统提示框一致，替换后调用方的判断不变。
+        private static void MessageDialogResults()
+        {
+            DialogResult ok = DialogResult.None, yes = DialogResult.None, no = DialogResult.None, cancel = DialogResult.None;
+            Check(AnswerMessageDialog("回归提示", 2, delegate { ok = MessageDialog.Show("只有一个按钮", "回归提示", MessageBoxButtons.OK, MessageBoxIcon.None); })
+                && ok == DialogResult.OK, "single-button prompt did not return OK: " + ok);
+            Check(AnswerMessageDialog("回归提示", 6, delegate { yes = MessageDialog.Show(null, "是否保存", "回归提示", MessageBoxButtons.YesNoCancel, MessageBoxIcon.None); })
+                && yes == DialogResult.Yes, "yes was not returned: " + yes);
+            Check(AnswerMessageDialog("回归提示", 7, delegate { no = MessageDialog.Show(null, "是否保存", "回归提示", MessageBoxButtons.YesNo, MessageBoxIcon.None); })
+                && no == DialogResult.No, "no was not returned: " + no);
+            Check(AnswerMessageDialog("回归提示", 2, delegate { cancel = MessageDialog.Show(null, "是否保存", "回归提示", MessageBoxButtons.YesNoCancel, MessageBoxIcon.None); })
+                && cancel == DialogResult.Cancel, "cancel was not returned: " + cancel);
+
+            // Esc：确定/取消 → 取消；是/否没有 Esc（与系统一致，窗口不关）；回车选默认按钮（这里是第二个）
+            DialogResult esc = DialogResult.None, enter = DialogResult.None;
+            bool stayed = false;
+            PressModalKey(Keys.Escape, delegate { esc = MessageDialog.Show(null, "继续？", "回归提示", MessageBoxButtons.OKCancel, MessageBoxIcon.None); });
+            Check(esc == DialogResult.Cancel, "escape on OK/Cancel did not cancel: " + esc);
+            using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                probe.Tick += delegate
+                {
+                    Form dialog = FindMessageDialog("回归提示");
+                    if (dialog == null) return;
+                    probe.Stop();
+                    dialog.Opacity = 0;
+                    MethodInfo key = typeof(Control).GetMethod("OnKeyDown", Private);
+                    key.Invoke(dialog, new object[] { new KeyEventArgs(Keys.Escape) });
+                    stayed = !dialog.IsDisposed && dialog.Visible;
+                    key.Invoke(dialog, new object[] { new KeyEventArgs(Keys.Enter) });
+                };
+                probe.Start();
+                enter = MessageDialog.Show(null, "删除？", "回归提示", MessageBoxButtons.YesNo, MessageBoxIcon.None, MessageBoxDefaultButton.Button2);
+            }
+            Check(stayed, "escape closed a yes/no prompt that has no cancel");
+            Check(enter == DialogResult.No, "enter did not choose the default (second) button: " + enter);
+
+            // 不支持的组合（如 中止/重试/忽略）退回系统提示框，不抛异常
+            bool native = false;
+            using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                probe.Tick += delegate
+                {
+                    IntPtr hwnd = FindOwnDialog("回归原生");
+                    if (hwnd == IntPtr.Zero) return;
+                    probe.Stop();
+                    native = true;
+                    PostMessage(hwnd, 0x0010, IntPtr.Zero, IntPtr.Zero);
+                };
+                probe.Start();
+                MessageDialog.Show(null, "原生", "回归原生", MessageBoxButtons.RetryCancel, MessageBoxIcon.None);
+            }
+            Check(native, "unsupported button set did not fall back to the system prompt");
+        }
+
+        private static void CategoryPickerFlow()
+        {
+            List<string> names = new List<string> { "照片", "视频", "文档", "文件" };
+            List<CategoryIconKind> icons = new List<CategoryIconKind>();
+            foreach (string name in names) icons.Add(CategoryIcons.ForCategory(name));
+            Func<Keys[], string> run = delegate(Keys[] keys)
+            {
+                string picked = "unset";
+                using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+                {
+                    probe.Tick += delegate
+                    {
+                        Form dialog = FindModalForm();
+                        if (dialog == null) return;
+                        probe.Stop();
+                        dialog.Opacity = 0;
+                        Control tiles = dialog.Controls.OfType<Controls.ScrollListBase>().First();
+                        MethodInfo down = typeof(Control).GetMethod("OnKeyDown", Private);
+                        MethodInfo cmd = dialog.GetType().GetMethod("ProcessCmdKey", Private);
+                        foreach (Keys key in keys)
+                        {
+                            if (key == Keys.Enter || key == Keys.Escape) cmd.Invoke(dialog, new object[] { new Message(), key });
+                            else down.Invoke(tiles, new object[] { new KeyEventArgs(key) });
+                        }
+                        if (!dialog.IsDisposed && dialog.Visible) dialog.Close();
+                    };
+                    probe.Start();
+                    picked = CategoryPickerDialog.Show(null, "导入到…", "回归", names, icons, "文档");
+                }
+                return picked;
+            };
+            Check(run(new Keys[] { Keys.Enter }) == "文档", "the suggested category was not preselected");
+            Check(run(new Keys[] { Keys.Right, Keys.Enter }) == "文件", "arrow keys did not move the selection");
+            Check(run(new Keys[] { Keys.Up, Keys.Up, Keys.Enter }) == "文档", "moving past the first row wrapped or jumped");
+            Check(run(new Keys[] { Keys.Escape }) == null, "escape did not cancel");
+        }
+
+        private static void DuplicateDialogFlow()
+        {
+            ImportDuplicateReport report = new ImportDuplicateReport();
+            report.Add(ImportDuplicateKind.OtherCategoryContent, null, "C:\\in\\reuse.jpg", "D:\\lib\\文档\\reuse.jpg", "", false, "h0");
+            report.Add(ImportDuplicateKind.SameCategoryContent, null, "C:\\in\\a.jpg", "D:\\lib\\照片\\a.jpg", "", true, "h1");
+            report.Add(ImportDuplicateKind.BatchContentDuplicate, null, "C:\\in\\copy\\b.jpg", "C:\\in\\b.jpg", "", true, "h2");
+            report.Add(ImportDuplicateKind.Unchecked, null, "\\\\nas\\c.jpg", null, "", false, null);
+            report.Findings[2].Keep = true;
+
+            List<ImportDuplicateFinding> rows = ImportDuplicateDialog.Rows(report);
+            Check(rows.Count == 4 && rows[0].CanKeep && rows[1].CanKeep && !rows[2].CanKeep, "keepable rows are not listed first");
+            Check(ImportDuplicateDialog.Outcome(report.Findings[0], false) == "复用已有" && ImportDuplicateDialog.Outcome(report.Findings[1], true) == "仍然添加"
+                && ImportDuplicateDialog.Outcome(report.Findings[1], false) == "跳过" && ImportDuplicateDialog.Outcome(report.Findings[3], false) == "照常导入",
+                "row outcome text wrong");
+            Check(ImportDuplicateDialog.Detail(report.Findings[2]).Contains("与本次选择的这一项重复") && ImportDuplicateDialog.Detail(report.Findings[1]).Contains("库里已有")
+                && ImportDuplicateDialog.Detail(report.Findings[3]) == "\\\\nas\\c.jpg", "row detail text wrong");
+            for (int i = 0; i < ImportDuplicateDialog.MaxRows + 5; i++)
+                report.Add(ImportDuplicateKind.SameCategoryContent, null, "C:\\in\\many" + i + ".jpg", "D:\\lib\\m" + i, "", true, "m" + i);
+            Check(ImportDuplicateDialog.Rows(report).Count == ImportDuplicateDialog.MaxRows, "row list is not capped");
+
+            ImportDuplicateReport small = new ImportDuplicateReport();
+            small.Add(ImportDuplicateKind.SameCategoryContent, null, "C:\\in\\a.jpg", "D:\\lib\\a.jpg", "", true, "h1");
+            small.Add(ImportDuplicateKind.SameCategoryContent, null, "C:\\in\\b.jpg", "D:\\lib\\b.jpg", "", true, "h2");
+            small.Add(ImportDuplicateKind.OtherCategoryContent, null, "C:\\in\\r.jpg", "D:\\lib\\r.jpg", "", false, "h3");
+            Func<int[], bool, ICollection<string>> run = delegate(int[] toggles, bool confirm)
+            {
+                ICollection<string> keep = null;
+                using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+                {
+                    probe.Tick += delegate
+                    {
+                        Form dialog = FindModalForm();
+                        if (dialog == null) return;
+                        probe.Stop();
+                        dialog.Opacity = 0;
+                        MethodInfo toggle = dialog.GetType().GetMethod("Toggle", Private);
+                        foreach (int index in toggles) toggle.Invoke(dialog, new object[] { index });
+                        dialog.GetType().GetMethod("ProcessCmdKey", Private).Invoke(dialog, new object[] { new Message(), confirm ? Keys.Enter : Keys.Escape });
+                        if (!dialog.IsDisposed && dialog.Visible) dialog.Close();
+                    };
+                    probe.Start();
+                    keep = ImportDuplicateDialog.Show(null, small);
+                }
+                return keep;
+            };
+            ICollection<string> kept = run(new int[] { 1, 2 }, true);   // 第 3 行不可勾选，点了也不算
+            Check(kept != null && kept.Count == 1 && kept.Contains("C:\\in\\b.jpg"), "checked sources wrong: " + (kept == null ? "null" : string.Join("|", kept.ToArray())));
+            Check(run(new int[] { 0 }, false) == null, "cancel did not return null");
+            Check(ImportDuplicateDialog.Show(null, new ImportDuplicateReport()).Count == 0, "a report without findings prompted");
+        }
+
+        private static void DesktopBackupListRules()
+        {
+            DesktopBackupEntry folder = new DesktopBackupEntry { CurrentPath = "D:\\stash\\项目\\", OriginalPath = "C:\\Users\\me\\Desktop\\项目", IsDir = true };
+            DesktopBackupEntry odd = new DesktopBackupEntry { CurrentPath = "D:\\stash\\bad|name.txt", OriginalPath = "" };
+            Check(Controls.DesktopBackupListControl.DisplayName(folder) == "项目", "folder name wrong: " + Controls.DesktopBackupListControl.DisplayName(folder));
+            Check(Controls.DesktopBackupListControl.DisplayName(odd).EndsWith("name.txt"), "invalid path characters threw or lost the name");
+            Check(Controls.DesktopBackupListControl.OriginText(odd) == "原位置未知", "missing origin not explained");
+
+            using (Controls.DesktopBackupListControl list = new Controls.DesktopBackupListControl())
+            {
+                list.Size = new Size(500, 300);
+                IntPtr handle = list.Handle;
+                List<DesktopBackupEntry> removed = new List<DesktopBackupEntry>();
+                list.RemoveRequested += delegate(DesktopBackupEntry e) { removed.Add(e); };
+                list.SetItems(new DesktopBackupEntry[] { folder, odd, null });
+                Check(list.Count == 2, "null entries were not skipped");
+                MethodInfo down = typeof(Control).GetMethod("OnKeyDown", Private);
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Down) });
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Down) });
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Delete) });
+                Check(removed.Count == 1 && removed[0] == odd, "delete did not remove the selected card");
+                list.SetBusy(true);
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Delete) });
+                Check(removed.Count == 1, "remove was requested while busy");
+                list.SetBusy(false);
+                list.SetItems(new DesktopBackupEntry[] { folder });   // 清单变短：选中落到最后一项，不越界
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Delete) });
+                Check(removed.Count == 2 && removed[1] == folder, "selection was lost after the list shrank");
+            }
+        }
+
+        private static void CheckRowBehaviour()
+        {
+            using (Form host = new Form())
+            {
+                Controls.CheckRow box = new Controls.CheckRow { Text = "勾选" };
+                Controls.CheckRow first = new Controls.CheckRow { Radio = true, Text = "一", Checked = true };
+                Controls.CheckRow second = new Controls.CheckRow { Radio = true, Text = "二" };
+                host.Controls.AddRange(new Control[] { box, first, second });
+                int changes = 0;
+                box.CheckedChanged += delegate { changes++; };
+                MethodInfo click = typeof(Control).GetMethod("OnClick", Private);
+                MethodInfo down = typeof(Control).GetMethod("OnKeyDown", Private);
+                click.Invoke(box, new object[] { EventArgs.Empty });
+                down.Invoke(box, new object[] { new KeyEventArgs(Keys.Space) });
+                Check(!box.Checked && changes == 2, "check row did not toggle on click and space");
+                click.Invoke(second, new object[] { EventArgs.Empty });
+                Check(second.Checked && !first.Checked, "radio rows are not exclusive");
+                click.Invoke(second, new object[] { EventArgs.Empty });
+                Check(second.Checked, "clicking a checked radio row cleared it");
+                down.Invoke(second, new object[] { new KeyEventArgs(Keys.Up) });
+                Check(first.Checked && !second.Checked, "arrow up did not select the previous radio row");
+                down.Invoke(first, new object[] { new KeyEventArgs(Keys.Up) });
+                Check(first.Checked, "arrow up wrapped past the first radio row");
+                Check(!box.Checked, "a radio row changed an unrelated check row");
+            }
+        }
+
+        private static void GridThinScroll()
+        {
+            using (Form host = new Form())
+            using (Controls.AppGridControl grid = new Controls.AppGridControl())
+            {
+                host.ClientSize = new Size(600, 300);
+                grid.Dock = DockStyle.Fill;
+                host.Controls.Add(grid);
+                IntPtr handle = host.Handle;
+                List<AppInfo> apps = new List<AppInfo>();
+                for (int i = 0; i < 80; i++) apps.Add(new AppInfo { Key = "k" + i, Name = "条目 " + i, TargetPath = "C:\\x\\" + i + ".exe" });
+                grid.SetApps(apps);
+                int content = grid.AutoScrollMinSize.Height;
+                Check(content > grid.ClientSize.Height, "fixture does not overflow");
+                Check((GetWindowLong(grid.Handle, -16) & 0x00300000) == 0, "system scrollbars are still shown");
+                grid.AutoScrollPosition = new Point(0, 120);
+                Check(grid.AutoScrollPosition.Y == -120, "position API changed meaning: " + grid.AutoScrollPosition.Y);
+                grid.AutoScrollPosition = new Point(0, 1000000);
+                int max = content - grid.ClientSize.Height;
+                Check(grid.AutoScrollPosition.Y == -max, "scrolling past the end was not clamped");
+                typeof(Control).GetMethod("OnMouseWheel", Private).Invoke(grid, new object[] { new HandledMouseEventArgs(MouseButtons.None, 0, 10, 10, 120) });
+                Check(grid.AutoScrollPosition.Y > -max, "wheel up did not scroll");
+                grid.SetApps(apps.GetRange(0, 2));
+                Check(grid.AutoScrollPosition.Y == 0, "position was not clamped after the content shrank");
+            }
+        }
+
+        private static void ThinListScrollBar()
+        {
+            using (Form host = new Form())
+            {
+                host.ClientSize = new Size(300, 200);
+                SoftwarePickerDialog.PickerList list = new SoftwarePickerDialog.PickerList();
+                list.ItemHeight = 30;
+                list.SetBounds(0, 0, 280, 180);
+                host.Controls.Add(list);
+                IntPtr handle = host.Handle;
+                int fullWidth = list.ClientSize.Width;
+                list.Items.AddRange(new object[] { "a", "b" });
+                Check(list.RowWidth == fullWidth && (GetWindowLong(list.Handle, -16) & 0x00200000) == 0, "a short list reserved a scrollbar");
+                for (int i = 0; i < 30; i++) list.Items.Add("row " + i);
+                Check(list.RowWidth < fullWidth && list.RowBounds(0).Width == list.RowWidth, "an overflowing list did not show the thin scrollbar");
+                list.TopIndex = 10;
+                Check(list.TopIndex == 10, "the list could not scroll without a system scrollbar");
+                list.Items.Clear();
+                Check(list.RowWidth == fullWidth, "the thin scrollbar stayed after clearing the list");
+            }
+        }
+
+        private static void ThemedToolTipMeasure()
+        {
+            using (Form host = new Form())
+            using (Controls.ThemedToolTip tip = new Controls.ThemedToolTip())
+            {
+                Button bound = new Button();
+                host.Controls.Add(bound);
+                MethodInfo measure = typeof(Controls.ThemedToolTip).GetMethod("OnPopupMeasure", Private);
+                Func<Control, PopupEventArgs> popup = delegate(Control control)
+                {
+                    PopupEventArgs e = new PopupEventArgs(host, control, false, new Size(1, 1));
+                    measure.Invoke(tip, new object[] { tip, e });
+                    return e;
+                };
+                Check(popup(host).Cancel, "a tooltip with no text was shown");
+                tip.SetToolTip(bound, "很长的一段说明文字，用来确认提示会按最大宽度换行，而不是拉成一整行横穿屏幕。很长的一段说明文字，用来确认提示会按最大宽度换行。");
+                PopupEventArgs boundTip = popup(bound);
+                Check(!boundTip.Cancel && boundTip.ToolTipSize.Width <= DpiHelper.Scale(440, DpiHelper.ForControl(bound)) + 2
+                    && boundTip.ToolTipSize.Height > boundTip.ToolTipSize.Width / 20, "bound tooltip was not wrapped: " + boundTip.ToolTipSize);
+                // 直接 Show(文字, 窗口, …) 的提示不挂在控件上：要用 Show 时给的文字来量
+                typeof(Controls.ThemedToolTip).GetField("shownText", Private).SetValue(tip, "当前以管理员身份运行");
+                PopupEventArgs shown = popup(host);
+                Check(!shown.Cancel && shown.ToolTipSize.Width > 20, "directly shown tooltip was cancelled or unsized");
+            }
+        }
+
+        private static void ReviewFollowUps()
+        {
+            // 1. 文本框一打开就放不下：句柄创建时不能重建句柄（曾抛「创建窗口句柄时出错」），显示后才切换滚动条
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000) })
+            {
+                TextBox box = new TextBox { Multiline = true, Bounds = new Rectangle(0, 0, 200, 40) };
+                InputDialog.ScrollBarsWhenNeeded(box);
+                box.Text = string.Join("\r\n", Enumerable.Range(0, 30).Select(i => "第 " + i + " 行").ToArray());
+                host.Controls.Add(box);
+                host.Show();
+                PumpUntil(delegate { return box.ScrollBars == ScrollBars.Vertical; }, 2000);
+                Check(box.ScrollBars == ScrollBars.Vertical && box.Text.StartsWith("第 0 行"), "overflowing text box did not get its scrollbar after opening");
+                box.Text = "短";
+                Check(box.ScrollBars == ScrollBars.None, "scrollbar stayed after the text became short");
+                host.Hide();
+            }
+
+            // 3. 桌面备份清单：松开回车才还原；按住不放产生的重复回车不算
+            using (Controls.DesktopBackupListControl list = new Controls.DesktopBackupListControl())
+            {
+                list.Size = new Size(400, 300);
+                IntPtr handle = list.Handle;
+                DesktopBackupEntry entry = new DesktopBackupEntry { CurrentPath = "D:\\stash\\a.txt", OriginalPath = "C:\\a.txt" };
+                List<DesktopBackupEntry> restored = new List<DesktopBackupEntry>();
+                list.RestoreRequested += delegate(DesktopBackupEntry e) { restored.Add(e); };
+                list.SetItems(new DesktopBackupEntry[] { entry });
+                MethodInfo down = typeof(Control).GetMethod("OnKeyDown", Private), up = typeof(Control).GetMethod("OnKeyUp", Private);
+                FieldInfo repeat = typeof(Controls.DesktopBackupListControl).GetField("enterRepeat", Private);
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Down) });
+                repeat.SetValue(list, true);
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Enter) });
+                up.Invoke(list, new object[] { new KeyEventArgs(Keys.Enter) });
+                Check(restored.Count == 0, "a held-down enter restored an entry");
+                repeat.SetValue(list, false);
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Enter) });
+                Check(restored.Count == 0, "restore started on key down");
+                up.Invoke(list, new object[] { new KeyEventArgs(Keys.Enter) });
+                Check(restored.Count == 1 && restored[0] == entry, "enter did not restore the selected entry");
+            }
+
+            // 4 + 5. 勾选项只认左键；单选组只在选中项上停 Tab
+            using (Form host = new Form())
+            {
+                Controls.CheckRow box = new Controls.CheckRow { Text = "勾选" };
+                Controls.CheckRow first = new Controls.CheckRow { Radio = true, Checked = true };
+                Controls.CheckRow second = new Controls.CheckRow { Radio = true };
+                host.Controls.AddRange(new Control[] { box, first, second });
+                MethodInfo click = typeof(Control).GetMethod("OnClick", Private);
+                click.Invoke(box, new object[] { new MouseEventArgs(MouseButtons.Right, 1, 2, 2, 0) });
+                Check(!box.Checked, "right click toggled a check row");
+                click.Invoke(box, new object[] { new MouseEventArgs(MouseButtons.Left, 1, 2, 2, 0) });
+                Check(box.Checked, "left click did not toggle a check row");
+                Check(first.TabStop && !second.TabStop && box.TabStop, "radio group tab stops wrong before change");
+                second.Checked = true;
+                Check(!first.TabStop && second.TabStop, "radio group tab stop did not follow the selection");
+            }
+
+            // 7. 非 STA 线程（线程池等）不建自绘提示框，退回系统提示框
+            MethodInfo onUi = typeof(MessageDialog).GetMethod("OnUiThread", BindingFlags.Static | BindingFlags.NonPublic);
+            bool fromMta = true;
+            Thread worker = new Thread(delegate() { fromMta = (bool)onUi.Invoke(null, new object[] { null }); });
+            worker.SetApartmentState(ApartmentState.MTA);
+            worker.Start();
+            worker.Join();
+            Check(!fromMta, "a non-STA thread was treated as the UI thread");
+            using (TextBox noHandle = new TextBox())
+                Check((bool)onUi.Invoke(null, new object[] { noHandle }), "UI thread with an unhandled owner was rejected");
+        }
+
         private static Form FindModalForm()
         {
             foreach (Form form in Application.OpenForms)
@@ -4759,11 +5117,10 @@ namespace AppManager
                     }
                     if (nativeTitle != null && !answered)
                     {
-                        IntPtr hwnd = FindOwnDialog(nativeTitle);
-                        if (hwnd != IntPtr.Zero)
+                        Form message = FindMessageDialog(nativeTitle);
+                        if (message != null && ClickMessageDialog(message, nativeCommand))
                         {
                             answered = true;
-                            PostMessage(hwnd, 0x0111, (IntPtr)nativeCommand, IntPtr.Zero);
                             return;
                         }
                     }
@@ -4799,48 +5156,69 @@ namespace AppManager
             unexpected = stray;
         }
 
-        private static bool AnswerNativeMessageBox(string title, int command, Action action)
+        /// <summary>找标题为 title 的自绘提示框（MessageDialog）；title 为 null 时匹配任意标题。</summary>
+        private static Form FindMessageDialog(string title)
         {
-            bool unexpected;
-            return AnswerNativeMessageBox(title, command, action, out unexpected);
+            foreach (Form form in Application.OpenForms)
+                if (form.Visible && form.Modal && form is MessageForm && (title == null || form.Text == title)) return form;
+            return null;
         }
 
-        private static bool AnswerNativeMessageBox(string title, int command, Action action, out bool unexpected)
+        /// <summary>
+        /// 点自绘提示框上的按钮，沿用系统提示框的按钮编号：6 是、7 否、2 取消；
+        /// 只有一个按钮的提示框没有「取消」，2 对应它唯一的「知道了」（系统提示框里 2 同样等于关掉它）。
+        /// </summary>
+        private static bool ClickMessageDialog(Form dialog, int command)
+        {
+            string text = command == 6 ? "是" : (command == 7 ? "否" : "取消");
+            Control button = null;
+            foreach (Control child in dialog.Controls) if (child.Text == text) button = child;
+            if (button == null && command == 2)
+                foreach (Control child in dialog.Controls) if (child.Text == "知道了") button = child;
+            if (button == null) return false;
+            dialog.Opacity = 0;
+            typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });
+            return true;
+        }
+
+        private static bool AnswerMessageDialog(string title, int command, Action action)
+        {
+            bool unexpected;
+            return AnswerMessageDialog(title, command, action, out unexpected);
+        }
+
+        /// <summary>执行 action，期间出现标题为 title 的提示框就按 command 回答；返回是否回答过，unexpected 表示还冒出了别的对话框。</summary>
+        private static bool AnswerMessageDialog(string title, int command, Action action, out bool unexpected)
         {
             bool answered = false;
             bool stray = false;
-            IntPtr answeredHwnd = IntPtr.Zero;
             Stopwatch elapsed = Stopwatch.StartNew();
             using (System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer { Interval = 10 })
             {
                 timer.Tick += delegate
                 {
-                    IntPtr hwnd = FindOwnDialog(title);
-                    if (!answered && hwnd != IntPtr.Zero)
+                    Form message = answered ? null : FindMessageDialog(title);
+                    if (message != null && ClickMessageDialog(message, command))
                     {
                         answered = true;
-                        answeredHwnd = hwnd;
-                        PostMessage(hwnd, 0x0111, (IntPtr)command, IntPtr.Zero);
                         return;
                     }
+                    Form modal = FindModalForm();
+                    IntPtr other = FindOwnDialog(null);
                     if (!answered)
                     {
-                        Form modal = FindModalForm();
                         if (modal != null && elapsed.ElapsedMilliseconds > 300) modal.Close();
                     }
-                    else
+                    else if (modal != null || other != IntPtr.Zero)
                     {
-                        IntPtr other = FindOwnDialog(null);
-                        if (other != IntPtr.Zero && other != answeredHwnd)
-                        {
-                            stray = true;
-                            PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
-                        }
+                        stray = true;
+                        if (modal != null) modal.Close();
+                        if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
                     }
                     if (elapsed.ElapsedMilliseconds > 8000)
                     {
                         stray = true;
-                        IntPtr other = FindOwnDialog(null);
+                        if (modal != null) modal.Close();
                         if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
                         timer.Stop();
                     }
@@ -5034,7 +5412,7 @@ namespace AppManager
                     return string.Join("|", list.ConvertAll(delegate(AppInfo a) { return a.Name; }).ToArray());
                 };
                 Check(offered() == "Picker Gone|Picker Store|Picker Tool", "candidates wrong: " + offered());
-                bool reported = AnswerNativeMessageBox("添加软件", 2,
+                bool reported = AnswerMessageDialog("添加软件", 2,
                     delegate { Invoke(form, "AddPickedSoftware", new List<AppInfo> { tool, store, gone }, "开发工具"); });
                 Check(reported, "missing program was not reported");
                 Check((bool)Invoke(form, "InCategory", tool, "开发工具") && (bool)Invoke(form, "InCategory", store, "开发工具"), "picked software did not join the category");
@@ -5326,7 +5704,7 @@ namespace AppManager
                     MethodInfo key = dialog.GetType().GetMethod("ProcessCmdKey", Private);
                     key.Invoke(dialog, new object[] { new Message(), Keys.Enter });
                     stayedOpen = !dialog.IsDisposed && dialog.Visible;
-                    CheckBox option = dialog.Controls.OfType<CheckBox>().FirstOrDefault();
+                    Controls.CheckRow option = dialog.Controls.OfType<Controls.CheckRow>().FirstOrDefault();
                     if (option != null)
                     {
                         shownText = option.Text;
@@ -7910,7 +8288,8 @@ namespace AppManager
                     Application.DoEvents();
 
                     Controls.AppGridControl grid = (Controls.AppGridControl)typeof(MainForm).GetField("grid", Private).GetValue(form);
-                    Check(grid.ClientSize.Width < grid.Width, "fixture did not show a vertical scrollbar");
+                    // 主列表的滚动条已是自绘细条（在客户区内），这里只需确认内容确实溢出、滚动条会出现
+                    Check(grid.AutoScrollMinSize.Height > grid.ClientSize.Height, "fixture does not overflow the grid");
                     int edge = DpiHelper.Scale(7, DpiHelper.ForControl(form));
                     int middleY = grid.Top + grid.Height / 2;
                     MethodInfo hitTest = typeof(MainForm).GetMethod("ResizeHitTest", Private);

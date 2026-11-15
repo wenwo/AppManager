@@ -284,7 +284,7 @@ namespace AppManager.Controls
             SetStyle(ControlStyles.Selectable, true);   // 允许接收键盘焦点（方向键/Enter/Delete 操作条目）
             TabStop = true;
             BackColor = Theme.Background;
-            AutoScroll = true;
+            AutoScroll = false;   // 不用系统滚动条：滚动位置与细滚动条由本控件自己管理（见「细滚动条」一节）
             Font = Theme.BodyFont;
             DoubleBuffered = true;
             subFont = Theme.CaptionFont;
@@ -508,6 +508,157 @@ namespace AppManager.Controls
         {
             base.OnClientSizeChanged(e);
             RefreshLayoutCaches();
+            SetScrollY(scrollY);   // 变高后可能已不需要滚这么多
+        }
+
+        // ===== 细滚动条 =====
+        // 替代系统滚动条：内容高度与滚动位置沿用 AutoScrollMinSize / AutoScrollPosition 的名字和含义
+        // （位置读取为负，设置时给正数），内部代码与测试无需区分；右侧画一条与侧栏、设置页一致的细滑块。
+
+        private const int ScrollBarW = 4;
+        private const int ScrollHitW = 12;
+        private int contentHeight;
+        private int scrollY;
+        private int wheelRemainder;     // 不足一像素的滚轮累计量（单位：delta × 像素）
+        private int scrollGrabDy;
+        private bool scrollDragging;
+        private bool scrollbarHot;
+
+        /// <summary>内容总高度（只用 Height）。</summary>
+        public new Size AutoScrollMinSize
+        {
+            get { return new Size(0, contentHeight); }
+            set
+            {
+                contentHeight = Math.Max(0, value.Height);
+                SetScrollY(scrollY);
+                Invalidate();
+            }
+        }
+
+        /// <summary>滚动位置：读取时为负的已滚动像素，设置时给要滚到的正数位置（与 ScrollableControl 相同）。</summary>
+        public new Point AutoScrollPosition
+        {
+            get { return new Point(0, -scrollY); }
+            set { SetScrollY(value.Y < 0 ? -value.Y : value.Y); }
+        }
+
+        private int MaxScrollY { get { return Math.Max(0, contentHeight - ClientSize.Height); } }
+
+        private void SetScrollY(int y)
+        {
+            int max = MaxScrollY;
+            if (y > max) y = max;
+            if (y < 0) y = 0;
+            if (y == scrollY) return;
+            scrollY = y;
+            // 滚动不触发 MouseMove，需按当前光标位置重算悬停项，否则高亮会停留在错误的条目上
+            if (IsHandleCreated) SyncHoverToCursor();
+            Invalidate();
+        }
+
+        /// <summary>滑块轨道：列表模式让出顶部固定表头。</summary>
+        private Rectangle ScrollTrackRect()
+        {
+            int w = Dpi(ScrollBarW);
+            int top = (grid ? 0 : Dpi(ListHeaderH)) + Dpi(4);
+            return new Rectangle(ClientSize.Width - Dpi(3) - w, top, w, Math.Max(0, ClientSize.Height - top - Dpi(4)));
+        }
+
+        private Rectangle ScrollHitRect()
+        {
+            Rectangle track = ScrollTrackRect();
+            int w = Dpi(ScrollHitW);
+            return new Rectangle(ClientSize.Width - w, track.Top, w, track.Height);
+        }
+
+        private Rectangle ScrollThumbRect()
+        {
+            if (MaxScrollY <= 0) return Rectangle.Empty;
+            Rectangle t = ScrollTrackRect();
+            int thumbH = (int)((long)t.Height * ClientSize.Height / Math.Max(1, contentHeight));
+            if (thumbH < Dpi(30)) thumbH = Dpi(30);
+            if (thumbH > t.Height) thumbH = t.Height;
+            int travel = t.Height - thumbH;
+            int y = t.Y + (travel <= 0 ? 0 : (int)((long)travel * scrollY / MaxScrollY));
+            return new Rectangle(t.X, y, t.Width, thumbH);
+        }
+
+        private void PaintScrollBar(Graphics g)
+        {
+            if (MaxScrollY <= 0) return;
+            GraphicsState state = g.Save();
+            g.ResetTransform();
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush thumb = new SolidBrush(scrollbarHot || scrollDragging ? Theme.ScrollThumbHot : Theme.ScrollThumb))
+                Draw.FillRoundedRect(g, thumb, ScrollThumbRect(), Dpi(ScrollBarW) / 2);
+            g.Restore(state);
+        }
+
+        private void InvalidateScrollBar()
+        {
+            Invalidate(new Rectangle(ClientSize.Width - Dpi(ScrollHitW), 0, Dpi(ScrollHitW), ClientSize.Height));
+        }
+
+        private void DragScrollTo(int y)
+        {
+            Rectangle track = ScrollTrackRect();
+            int travel = track.Height - ScrollThumbRect().Height;
+            if (travel > 0) SetScrollY((int)((long)(y - scrollGrabDy - track.Y) * MaxScrollY / travel));
+        }
+
+        /// <summary>左键按在滚动条上：开始拖动滑块（点在轨道空白处时滑块先跳过去）。返回 true 表示本次按下属于滚动条。</summary>
+        private bool ScrollBarMouseDown(MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left || MaxScrollY <= 0 || !ScrollHitRect().Contains(e.Location)) return false;
+            Rectangle thumb = ScrollThumbRect();
+            scrollDragging = true;
+            if (e.Y >= thumb.Y && e.Y <= thumb.Bottom) scrollGrabDy = e.Y - thumb.Y;
+            else
+            {
+                scrollGrabDy = thumb.Height / 2;
+                DragScrollTo(e.Y);
+            }
+            InvalidateScrollBar();
+            return true;
+        }
+
+        /// <summary>拖动中或指针停在滚动条上时返回 true：此时不做条目悬停与拖动排序。</summary>
+        private bool ScrollBarMouseMove(MouseEventArgs e)
+        {
+            if (scrollDragging)
+            {
+                DragScrollTo(e.Y);
+                return true;
+            }
+            bool hot = MaxScrollY > 0 && e.Button == MouseButtons.None && ScrollHitRect().Contains(e.Location);
+            if (hot != scrollbarHot)
+            {
+                scrollbarHot = hot;
+                InvalidateScrollBar();
+            }
+            return hot;
+        }
+
+        private bool ScrollBarMouseUp(MouseEventArgs e)
+        {
+            if (!scrollDragging) return false;
+            scrollDragging = false;
+            InvalidateScrollBar();
+            return true;
+        }
+
+        /// <summary>按滚轮增量滚动（与侧栏、设置页同一速度）。</summary>
+        private void ScrollByWheel(int delta)
+        {
+            if (delta == 0 || MaxScrollY <= 0) return;
+            int lines = SystemInformation.MouseWheelScrollLines;
+            if (lines <= 0) lines = 3;
+            // 按像素换算并累计余数：精确式触控板每次 delta 小于 120，整除会得到 0 而完全滚不动
+            wheelRemainder += delta * Dpi(32) * lines;
+            int pixels = wheelRemainder / 120;
+            wheelRemainder -= pixels * 120;
+            if (pixels != 0) SetScrollY(scrollY - pixels);
         }
 
         /// <summary>
@@ -790,6 +941,7 @@ namespace AppManager.Controls
 
             if (dragging && dragGap >= 0) PaintDropIndicator(g);
             if (dragging && dropTarget >= 0) PaintFolderDropHighlight(g);
+            PaintScrollBar(g);
         }
 
         /// <summary>绘制失败时的可读占位；只记录一次异常，避免重绘时反复写日志。</summary>
@@ -1277,6 +1429,11 @@ namespace AppManager.Controls
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e);
+            if (ScrollBarMouseMove(e))
+            {
+                if (hoverIndex != -1) { hoverIndex = -1; Invalidate(); }
+                return;
+            }
 
             // 拖动排序：越过系统拖拽阈值才开始，避免与单击/双击冲突
             if (dragPending && (e.Button & MouseButtons.Left) == MouseButtons.Left)
@@ -1393,6 +1550,7 @@ namespace AppManager.Controls
 
         protected override void OnMouseLeave(EventArgs e)
         {
+            scrollbarHot = false;
             hoverIndex = -1;
             if (dropTarget != -1) dropTarget = -1;   // 拖出网格时清除搬迁落点高亮
             dropTargetIntent = DragDropIntent.Neutral;
@@ -1402,20 +1560,11 @@ namespace AppManager.Controls
 
         protected override void OnMouseWheel(MouseEventArgs e)
         {
-            int oldY = AutoScrollPosition.Y;
             base.OnMouseWheel(e);
-            // 滚轮滚动不触发 Scroll 事件：滚动后按光标位置重算悬停项，避免高亮停留在错误条目
-            if (AutoScrollPosition.Y == oldY) return;
-            SyncHoverToCursor();
-        }
-
-        protected override void OnScroll(ScrollEventArgs se)
-        {
-            base.OnScroll(se);
-            // 滚动不触发 MouseMove，需按当前光标位置重算悬停项，否则高亮会停留在错误的条目上
-            SyncHoverToCursor();
-            // 滚动由系统整体位移（blit）实现，吸顶表头必须整屏重绘，否则会被滚动上来的行覆盖
-            Invalidate();
+            // 悬停重算与重绘在 SetScrollY 里完成；标记已处理，避免默认窗口过程再把滚轮交给父窗体
+            ScrollByWheel(e.Delta);
+            HandledMouseEventArgs handled = e as HandledMouseEventArgs;
+            if (handled != null) handled.Handled = true;
         }
 
         private void SyncHoverToCursor()
@@ -1608,6 +1757,7 @@ namespace AppManager.Controls
             base.OnMouseDown(e);
             if (e.Button == MouseButtons.Left) Focus();   // 点击后获得焦点，方向键/Enter/Delete 才能作用于网格
             suppressClick = false;
+            if (ScrollBarMouseDown(e)) { suppressClick = true; return; }   // 按在滚动条上：不选中、不开始拖动排序
             if (e.Button != MouseButtons.Left) return;
 
             int idx = HitIndex(e.Location);
@@ -1726,6 +1876,7 @@ namespace AppManager.Controls
 
         protected override void OnMouseUp(MouseEventArgs e)
         {
+            if (ScrollBarMouseUp(e)) { base.OnMouseUp(e); return; }
             handlingMouseUp = true;
             try
             {
@@ -1781,6 +1932,7 @@ namespace AppManager.Controls
         protected override void OnMouseCaptureChanged(EventArgs e)
         {
             base.OnMouseCaptureChanged(e);
+            if (scrollDragging && !Capture) { scrollDragging = false; InvalidateScrollBar(); }
             // OLE 接管时系统会释放鼠标捕获；松手时也会释放。两种都不应取消当前拖影会话。
             if (!handlingMouseUp && !externalDragActive && (dragPending || dragging) && !Capture)
                 CancelDrag();

@@ -136,7 +136,7 @@ namespace AppManager
         {
             if (cut && !CanMoveOut(apps))
             {
-                MessageBox.Show(this, "所选项目中包含软件、网址或未收录的条目，无法剪切。\n可以改用复制。", "剪切",
+                MessageDialog.Show(this, "所选项目中包含软件、网址或未收录的条目，无法剪切。\n可以改用复制。", "剪切",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -144,14 +144,14 @@ namespace AppManager
             List<string> paths = ExportPaths(apps, out complete);
             if (paths.Count == 0 || (cut && !complete))
             {
-                MessageBox.Show(this, "所选项目没有可" + (cut ? "剪切" : "复制") + "的文件（文件可能已被移动或删除）。",
+                MessageDialog.Show(this, "所选项目没有可" + (cut ? "剪切" : "复制") + "的文件（文件可能已被移动或删除）。",
                     cut ? "剪切" : "复制", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             try { Clipboard.SetDataObject(ExportData(paths, cut ? DragDropEffects.Move : DragDropEffects.Copy), true, 5, 100); }
             catch (ExternalException ex)
             {
-                MessageBox.Show(this, "剪贴板被其它程序占用，请重试。\n" + ex.Message, cut ? "剪切" : "复制",
+                MessageDialog.Show(this, "剪贴板被其它程序占用，请重试。\n" + ex.Message, cut ? "剪切" : "复制",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -293,7 +293,7 @@ namespace AppManager
             bool resource = contentMode == SidebarControl.ContentMode.Website;
             if (cut.Resource != resource)
             {
-                MessageBox.Show(this, "剪切的是" + (cut.Resource ? "资源" : "软件页面中的文件") + "，请切换到对应页面后再粘贴。",
+                MessageDialog.Show(this, "剪切的是" + (cut.Resource ? "资源" : "软件页面中的文件") + "，请切换到对应页面后再粘贴。",
                     "粘贴", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }

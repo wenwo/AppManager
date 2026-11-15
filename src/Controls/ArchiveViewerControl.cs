@@ -22,6 +22,7 @@ namespace AppManager.Controls
 
         private readonly ListView list;
         private readonly ImageList icons;
+        private readonly ImageList rowSpacer;   // 不放图片，只用它的高度撑开行高；图标由 DrawRowCell 从 icons 里画
         private readonly PreviewLoader<ArchivePreview> loader;
         private readonly RoundButton externalButton;
         private readonly Timer hintTimer;
@@ -89,12 +90,13 @@ namespace AppManager.Controls
             {
                 if (paths.Count == 0) return;
                 if (!Launcher.OpenWith(paths[index]))
-                    MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageDialog.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
             Controls.Add(externalButton);
 
             icons = new ImageList { ColorDepth = ColorDepth.Depth32Bit, ImageSize = new Size(16, 16) };
-            list = new ListView
+            rowSpacer = new ImageList { ImageSize = new Size(1, RowHeight) };
+            list = new BlankAreaListView
             {
                 View = View.Details,
                 VirtualMode = true,
@@ -103,10 +105,11 @@ namespace AppManager.Controls
                 MultiSelect = false,
                 BorderStyle = BorderStyle.None,
                 HeaderStyle = ColumnHeaderStyle.Clickable,
-                BackColor = Color.White,
+                BackColor = Theme.Card,
                 ForeColor = Theme.TextPrimary,
                 Font = Theme.BodyFont,
-                SmallImageList = icons,
+                SmallImageList = rowSpacer,
+                OwnerDraw = true,   // 表头和行按主题自绘，与程序里其它列表一致
                 Visible = false
             };
             list.Columns.Add("名称");
@@ -114,6 +117,12 @@ namespace AppManager.Controls
             list.Columns.Add("类型");
             list.Columns.Add("修改时间");
             list.RetrieveVirtualItem += OnRetrieveItem;
+            list.DrawColumnHeader += DrawHeaderCell;
+            list.DrawItem += delegate(object sender, DrawListViewItemEventArgs e) { e.DrawDefault = false; };   // 整行由各单元格画
+            list.DrawSubItem += DrawRowCell;
+            // 自绘列表默认不双缓冲，选中、滚动时会闪
+            typeof(Control).GetProperty("DoubleBuffered", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                .SetValue(list, true, null);
             list.ItemActivate += delegate { ActivateSelected(); };
             list.ColumnClick += delegate(object sender, ColumnClickEventArgs e) { SortBy(e.Column); };
             list.MouseDown += delegate(object sender, MouseEventArgs e)
@@ -369,6 +378,7 @@ namespace AppManager.Controls
         /// <summary>图标随 DPI 缩放：尺寸变化时重建图标表，列表重新取图。</summary>
         private void EnsureIconSize()
         {
+            if (rowSpacer.ImageSize.Height != Dpi(RowHeight)) rowSpacer.ImageSize = new Size(1, Dpi(RowHeight));
             int size = Dpi(16);
             if (icons.ImageSize.Width == size) return;
             icons.Images.Clear();
@@ -468,8 +478,97 @@ namespace AppManager.Controls
             list.Invalidate();
         }
 
+        // ===== 列表自绘 =====
+
+        private const int RowHeight = 30;
+        private const TextFormatFlags CellFlags = TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
+            | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine;
+
+        /// <summary>表头：白底、底部一条分隔线，次要文字色；当前排序列文字加深并在右侧画箭头。</summary>
+        private void DrawHeaderCell(object sender, DrawListViewColumnHeaderEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Rectangle r = e.Bounds;
+            using (SolidBrush back = new SolidBrush(Theme.Card)) g.FillRectangle(back, r);
+            using (Pen line = new Pen(Theme.Separator)) g.DrawLine(line, r.Left, r.Bottom - 1, r.Right, r.Bottom - 1);
+            bool sorted = e.ColumnIndex == sortColumn;
+            int arrow = Dpi(8);
+            Rectangle text = new Rectangle(r.X + Dpi(8), r.Y, Math.Max(0, r.Width - Dpi(16) - arrow - Dpi(4)), r.Height);
+            TextFormatFlags flags = CellFlags | (e.Header.TextAlign == HorizontalAlignment.Right ? TextFormatFlags.Right : TextFormatFlags.Left);
+            TextRenderer.DrawText(g, e.Header.Text, Theme.CaptionFont, text, sorted ? Theme.TextPrimary : Theme.TextSecondary, Theme.Card, flags);
+            if (!sorted) return;
+            float cx = r.Right - Dpi(8) - arrow / 2F, cy = r.Y + r.Height / 2F, half = arrow / 2F, rise = arrow / 4F;
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (Pen pen = new Pen(Theme.TextSecondary, Math.Max(1.2F, Dpi(15) / 10F)))
+            {
+                pen.StartCap = pen.EndCap = System.Drawing.Drawing2D.LineCap.Round;
+                float tip = sortDescending ? cy + rise : cy - rise, tail = sortDescending ? cy - rise : cy + rise;
+                g.DrawLines(pen, new PointF[] { new PointF(cx - half, tail), new PointF(cx, tip), new PointF(cx + half, tail) });
+            }
+        }
+
+        /// <summary>行：白底，选中行用主题选中色；名称列前画类型图标，名称用主文字色，其余列用次要文字色。</summary>
+        private void DrawRowCell(object sender, DrawListViewSubItemEventArgs e)
+        {
+            Graphics g = e.Graphics;
+            Rectangle r = e.Bounds;
+            if (r.Width <= 0 || r.Height <= 0) return;
+            Color back = e.Item.Selected ? Theme.SelectionBg : Theme.Card;
+            using (SolidBrush fill = new SolidBrush(back)) g.FillRectangle(fill, r);
+            Rectangle text = new Rectangle(r.X + Dpi(8), r.Y, Math.Max(0, r.Width - Dpi(16)), r.Height);
+            if (e.ColumnIndex == 0)
+            {
+                int size = icons.ImageSize.Width;
+                // 不读 e.Item.ImageIndex：列表挂的是撑行高的空图片表，ImageIndex 会被它截成 -1
+                int icon = e.ItemIndex >= 0 && e.ItemIndex < rows.Count ? IconFor(rows[e.ItemIndex]) : -1;
+                if (icon >= 0 && icon < icons.Images.Count)
+                    icons.Draw(g, r.X + Dpi(8), r.Y + (r.Height - size) / 2, icon);
+                text.X += size + Dpi(8);
+                text.Width = Math.Max(0, text.Width - size - Dpi(8));
+            }
+            TextFormatFlags flags = CellFlags | (list.Columns[e.ColumnIndex].TextAlign == HorizontalAlignment.Right ? TextFormatFlags.Right : TextFormatFlags.Left);
+            TextRenderer.DrawText(g, e.SubItem.Text, list.Font, text, e.ColumnIndex == 0 ? Theme.TextPrimary : Theme.TextSecondary, back, flags);
+        }
+
+        /// <summary>
+        /// 自绘的详细信息列表：系统会在最后一行以下的空白处画出淡色的列分隔线，
+        /// 自绘行里没有这些线，空白处单独露出来很突兀。每次绘制后把这块空白重新铺成底色。
+        /// </summary>
+        private sealed class BlankAreaListView : ListView
+        {
+            private const int WM_PAINT = 0x000F;
+
+            [StructLayout(LayoutKind.Sequential)]
+            private struct RECT { public int Left, Top, Right, Bottom; }
+
+            [DllImport("user32.dll")]
+            private static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
+
+            /// <summary>空列表时空白从表头下沿开始：表头是子窗口，不能把它一起盖掉。</summary>
+            private int HeaderBottom()
+            {
+                IntPtr header = SendMessage(Handle, LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
+                RECT r;
+                if (header == IntPtr.Zero || !GetWindowRect(header, out r)) return 0;
+                return PointToClient(new Point(r.Left, r.Bottom)).Y;
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                base.WndProc(ref m);
+                if (m.Msg != WM_PAINT || !IsHandleCreated || VirtualListSize < 0) return;
+                int count = VirtualMode ? VirtualListSize : Items.Count;
+                int top = count > 0 ? GetItemRect(count - 1).Bottom : HeaderBottom();
+                if (top < 0 || top >= ClientSize.Height) return;   // 最后一行在视口上方或下方：没有空白
+                using (Graphics g = Graphics.FromHwnd(Handle))
+                using (SolidBrush back = new SolidBrush(BackColor))
+                    g.FillRectangle(back, 0, top, ClientSize.Width, ClientSize.Height - top);
+            }
+        }
+
         private void UpdateSortArrows()
         {
+            list.Invalidate();   // 自绘表头按 sortColumn 画箭头；下面同时设置系统标记，供读屏软件识别排序列
             if (!list.IsHandleCreated) return;
             IntPtr header = SendMessage(list.Handle, LVM_GETHEADER, IntPtr.Zero, IntPtr.Zero);
             if (header == IntPtr.Zero) return;
@@ -737,6 +836,7 @@ namespace AppManager.Controls
                 hintTimer.Dispose();
                 list.Dispose();
                 icons.Dispose();
+                rowSpacer.Dispose();
             }
             base.Dispose(disposing);
         }

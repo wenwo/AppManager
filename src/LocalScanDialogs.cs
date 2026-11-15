@@ -53,6 +53,9 @@ namespace AppManager
         private volatile bool finished;
         private bool cancelRequested;
 
+        /// <summary>点了取消之后显示的状态文字；扫描以外的用途（接收文件、检查重复）各自改成合适的说法。</summary>
+        internal string CancelingText = "正在取消扫描…";
+
         internal LocalScanProgressDialog(string title, string status, string detail, CancellationTokenSource cancel)
         {
             this.cancel = cancel;
@@ -149,7 +152,7 @@ namespace AppManager
             catch (ObjectDisposedException) { }   // 扫描已经结束并释放了取消源：没有可取消的工作
             cancelButton.Enabled = false;
             cancelButton.Text = "正在取消…";
-            statusLabel.Text = "正在取消扫描…";
+            statusLabel.Text = CancelingText;
         }
 
         protected override void OnFormClosing(FormClosingEventArgs e)
@@ -199,8 +202,8 @@ namespace AppManager
             private readonly bool hasNewItems;
             private readonly TextBox details;
             private readonly Rectangle detailsFrame;   // 明细外框（96 DPI 设计坐标）
-            private readonly RadioButton move;
-            private readonly CheckBox option;
+            private readonly CheckRow move;
+            private readonly CheckRow option;
             private readonly bool optionRequired;
             private readonly Label warning;
             private readonly RoundButton importButton = new RoundButton();
@@ -260,7 +263,7 @@ namespace AppManager
                     details.Multiline = true;
                     details.ReadOnly = true;
                     details.WordWrap = true;
-                    details.ScrollBars = ScrollBars.Vertical;
+                    InputDialog.ScrollBarsWhenNeeded(details);
                     details.BorderStyle = BorderStyle.None;
                     details.BackColor = Theme.Card;
                     details.ForeColor = Theme.TextPrimary;
@@ -275,13 +278,8 @@ namespace AppManager
 
                 if (canImport && !string.IsNullOrEmpty(optionText))
                 {
-                    option = new CheckBox();
+                    option = new CheckRow();
                     option.Text = optionText;
-                    option.Font = Theme.BodyFont;
-                    option.ForeColor = Theme.TextPrimary;
-                    option.AutoSize = false;
-                    option.AutoEllipsis = true;
-                    option.UseMnemonic = false;
                     option.SetBounds(24, y, 552, 24);
                     option.CheckedChanged += delegate { UpdateButtons(); };
                     Controls.Add(option);
@@ -299,22 +297,18 @@ namespace AppManager
                     Controls.Add(modeLabel);
                     y += 26;
 
-                    move = new RadioButton();
+                    move = new CheckRow();
+                    move.Radio = true;
                     move.Text = "移入资源库并清理原件（推荐：成功项删源，失败项保留）";
-                    move.Font = Theme.BodyFont;
-                    move.ForeColor = Theme.TextPrimary;
-                    move.AutoSize = true;
-                    move.Location = new Point(24, y);
+                    move.SetBounds(24, y, 552, 24);
                     move.Checked = true;
                     Controls.Add(move);
                     y += 26;
 
-                    RadioButton copy = new RadioButton();
+                    CheckRow copy = new CheckRow();
+                    copy.Radio = true;
                     copy.Text = "仅复制，保留原件";
-                    copy.Font = Theme.BodyFont;
-                    copy.ForeColor = Theme.TextPrimary;
-                    copy.AutoSize = true;
-                    copy.Location = new Point(24, y);
+                    copy.SetBounds(24, y, 552, 24);
                     Controls.Add(copy);
                     y += 28;
 
@@ -416,7 +410,7 @@ namespace AppManager
         }
 
         /// <summary>一排等宽的数字卡片：上面是数值，下面是说明。只负责显示，不接收焦点。</summary>
-        private sealed class StatStrip : Control
+        internal sealed class StatStrip : Control
         {
             private readonly IList<LocalScanStat> stats;
 

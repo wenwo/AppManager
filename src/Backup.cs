@@ -828,7 +828,7 @@ namespace AppManager
             if (operationRunning || info == null) return;
             if (info.Incomplete)
             {
-                MessageBox.Show(this, "这份恢复前残留可能不完整，只能删除，不能恢复。", "布局备份",
+                MessageDialog.Show(this, "这份恢复前残留可能不完整，只能删除，不能恢复。", "布局备份",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -842,7 +842,7 @@ namespace AppManager
             }, delegate
             {
                 Restored = true;
-                MessageBox.Show(this, "已恢复到" + Quote(info) + "。\r\n恢复前的布局已自动留底，需要时可以回到这里再恢复回去。",
+                MessageDialog.Show(this, "已恢复到" + Quote(info) + "。\r\n恢复前的布局已自动留底，需要时可以回到这里再恢复回去。",
                     "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 Close();   // 主窗口在本窗口关闭后重新加载，不必再手动关一次
             });
@@ -918,7 +918,7 @@ namespace AppManager
                         {
                             // 失败也可能改动了磁盘（恢复中断会留下不完整的留底、删除可能只删了一半）：先按实际情况刷新列表
                             ReloadList();
-                            MessageBox.Show(this, failPrefix + error, "布局备份",
+                            MessageDialog.Show(this, failPrefix + error, "布局备份",
                                 MessageBoxButtons.OK, MessageBoxIcon.Error);
                             return;
                         }

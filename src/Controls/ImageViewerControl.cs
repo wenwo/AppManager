@@ -93,7 +93,7 @@ namespace AppManager.Controls
             externalButton.Click += delegate
             {
                 if (paths.Count > 0 && !Launcher.OpenWith(paths[index]))
-                    MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageDialog.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
             Controls.Add(externalButton);
         }

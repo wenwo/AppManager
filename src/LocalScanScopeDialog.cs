@@ -776,7 +776,7 @@ namespace AppManager
         /// 自绘行的清单：行高随行类型变化，记录鼠标悬停行和是否悬停在「移除」上，
         /// 并且不整块擦除背景（行由 DrawItem 整行重绘）。
         /// </summary>
-        private sealed class ScopeList : ListBox
+        private sealed class ScopeList : ThinScrollListBox
         {
             private const int WM_ERASEBKGND = 0x0014;
 
@@ -810,7 +810,7 @@ namespace AppManager
                 if (index < 0 || index >= Items.Count) return false;
                 LocalScanScopeRow row = Items[index] as LocalScanScopeRow;
                 return row != null && row.Kind == LocalScanScopeRowKind.Custom
-                    && p.X >= GetItemRectangle(index).Right - RemoveZoneWidth;
+                    && p.X >= RowBounds(index).Right - RemoveZoneWidth;
             }
 
             internal void InvalidateRow(int index)

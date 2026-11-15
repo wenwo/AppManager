@@ -264,7 +264,7 @@ namespace AppManager.Controls
             if (!string.IsNullOrEmpty(imagePath)
                 && (!MediaRules.IsImage(imagePath) || !System.IO.File.Exists(imagePath)))
             {
-                MessageBox.Show(FindForm(), "无法读取该图片，请选择常见的图片格式。", "选择封面",
+                MessageDialog.Show(FindForm(), "无法读取该图片，请选择常见的图片格式。", "选择封面",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -360,12 +360,12 @@ namespace AppManager.Controls
                     SelectCoverPath(path);
                     return;
                 }
-                MessageBox.Show(FindForm(), "剪贴板中没有可用的图片。\r\n可复制图片文件或图片内容后再试。",
+                MessageDialog.Show(FindForm(), "剪贴板中没有可用的图片。\r\n可复制图片文件或图片内容后再试。",
                     "粘贴封面", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch
             {
-                MessageBox.Show(FindForm(), "读取剪贴板失败，请稍后重试。", "粘贴封面",
+                MessageDialog.Show(FindForm(), "读取剪贴板失败，请稍后重试。", "粘贴封面",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
@@ -569,7 +569,7 @@ namespace AppManager.Controls
             descBox = new TextBox();
             descBox.Multiline = true;
             descBox.BorderStyle = BorderStyle.None;
-            descBox.ScrollBars = ScrollBars.Vertical;
+            InputDialog.ScrollBarsWhenNeeded(descBox);
             descBox.Font = Theme.BodyFont;
             descBox.ForeColor = Theme.TextPrimary;
             descBox.BackColor = Theme.SearchBg;
@@ -614,7 +614,7 @@ namespace AppManager.Controls
             string n = (nameBox.Text ?? string.Empty).Trim();
             if (n.Length == 0)
             {
-                MessageBox.Show(FindForm(), "集合名称不能为空。", "编辑集合",
+                MessageDialog.Show(FindForm(), "集合名称不能为空。", "编辑集合",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 nameBox.Focus();
                 return;
@@ -1036,8 +1036,8 @@ namespace AppManager.Controls
             if (!enabled) fill = Theme.SegmentBg;
             else if (primary)
             {
-                fill = pressBtn == id ? Color.FromArgb(255, 0, 96, 200)
-                    : (hoverBtn == id ? Color.FromArgb(255, 0, 108, 226) : Theme.Accent);
+                fill = pressBtn == id ? Theme.AccentPressed
+                    : (hoverBtn == id ? Theme.AccentHover : Theme.Accent);
             }
             else
             {

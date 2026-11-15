@@ -181,7 +181,7 @@ namespace AppManager
             string blocker = RenameBlocker(oldPath, folder);
             if (blocker != null)
             {
-                MessageBox.Show(this, blocker, "改名", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(this, blocker, "改名", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             string initial = InitialRenameText(app, oldPath, folder);

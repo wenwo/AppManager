@@ -45,7 +45,7 @@ namespace AppManager
                 RunOnUi(delegate
                 {
                     ReloadUiAfterSaveFailure();
-                    MessageBox.Show(this, "变更未保存，已恢复为数据库中的原数据。\n" + error, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageDialog.Show(this, "变更未保存，已恢复为数据库中的原数据。\n" + error, "保存失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 });
             };
         }

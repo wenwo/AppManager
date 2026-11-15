@@ -18,11 +18,16 @@ namespace AppManager
         public static readonly Color SearchBg = Color.FromArgb(240, 242, 245);
         public static readonly Color RowHover = Color.FromArgb(237, 240, 244);
         public static readonly Color SelectionBg = Color.FromArgb(230, 240, 255);
+        public static readonly Color SelectedCard = Color.FromArgb(246, 250, 255); // 选中的卡片底色（配强调色描边），比 SelectionBg 更浅
 
         // 强调色
         public static readonly Color Accent = Color.FromArgb(22, 119, 255); // #1677FF，图标/描边/实底按钮
         public static readonly Color AccentText = Color.FromArgb(9, 88, 217); // #0958D9，浅底小字号文字专用高对比蓝
         public static readonly Color AccentRipple = Color.FromArgb(32, 22, 119, 255);
+        public static readonly Color AccentDisabled = Color.FromArgb(150, 194, 255);
+        // 实底主按钮的悬停 / 按下色：所有自绘主按钮共用，悬停略亮、按下略暗
+        public static readonly Color AccentHover = Color.FromArgb(45, 132, 255);
+        public static readonly Color AccentPressed = Color.FromArgb(20, 105, 225); // 停用状态下的强调色（已勾选但不可改的勾选框等）
 
         // 文字：主文字近黑；次文字保证小字号可读；第三级仅用于占位与禁用
         public static readonly Color TextPrimary = Color.FromArgb(32, 33, 36);
@@ -34,12 +39,23 @@ namespace AppManager
 
         // 语义色：危险/成功/状态等，集中管理避免魔法值散落
         public static readonly Color DeleteRed = Color.FromArgb(245, 74, 69);
+        // 状态文字与浅底：成功 / 警示 / 失败，导入记录、布局备份、设置页等共用同一组
+        public static readonly Color SuccessText = Color.FromArgb(24, 128, 66);
+        public static readonly Color SuccessBg = Color.FromArgb(228, 245, 234);
+        public static readonly Color WarningText = Color.FromArgb(196, 98, 0);
+        public static readonly Color WarningBg = Color.FromArgb(255, 241, 222);
+        public static readonly Color DangerText = Color.FromArgb(207, 48, 42);
+        public static readonly Color DangerBg = Color.FromArgb(255, 235, 233);
+        public static readonly Color NeutralTint = Color.FromArgb(110, 116, 125);   // 图标块的中性灰（停用项、恢复前留底等）
         public static readonly Color ToggleGreen = Color.FromArgb(52, 199, 89);
         public static readonly Color ToggleOn = Accent;
         public static readonly Color SegmentBg = Color.FromArgb(233, 236, 241);
         public static readonly Color ChipBg = Color.FromArgb(239, 241, 245);
         public static readonly Color StatusBarBg = Color.FromArgb(250, 251, 252);
         public static readonly Color TooltipBg = Color.FromArgb(235, 30, 30, 32); // 悬浮信息卡深底
+        // 自绘细滚动条的滑块：平时浅，指针移上去或拖动时加深
+        public static readonly Color ScrollThumb = Color.FromArgb(80, 60, 60, 67);
+        public static readonly Color ScrollThumbHot = Color.FromArgb(150, 60, 60, 67);
 
         // 菜单：白底 + 分隔线色描边（MenuWindow.OnPaint 内绘制），与底层内容形成清晰边界
         public static readonly Color MenuBg = Color.White;

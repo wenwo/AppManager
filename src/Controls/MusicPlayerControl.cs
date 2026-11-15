@@ -586,7 +586,7 @@ namespace AppManager.Controls
                     Theme.TextSecondary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
             DrawButtonBackground(g, previousRect, 1, 8);
             DrawPreviousNext(g, previousRect, false);
-            using (Brush brush = new SolidBrush(hover == 2 ? Color.FromArgb(9, 101, 224) : Theme.Accent)) g.FillEllipse(brush, playRect);
+            using (Brush brush = new SolidBrush(hover == 2 ? Theme.AccentHover : Theme.Accent)) g.FillEllipse(brush, playRect);
             if (playing)
             {
                 using (Brush brush = new SolidBrush(Color.White))

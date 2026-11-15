@@ -16,7 +16,7 @@ namespace AppManager
         private readonly Queue<Action> importQueue = new Queue<Action>();
         private bool importRunning, importExitPending, importStatusShown;
         private CancellationTokenSource importCancel = new CancellationTokenSource();
-        private readonly ToolTip importTip = new ToolTip();
+        private readonly ThemedToolTip importTip = new ThemedToolTip();
         private System.Windows.Forms.Timer importStatusTimer;
         private string importTipText;
         private DragProbe dragProbe;
@@ -211,20 +211,16 @@ namespace AppManager
                 {
                     // 没有异步契约时来源可能在 Drop 返回后立即释放临时文件，必须完成接收再返回。
                     using (CancellationTokenSource receiveCancel = CancellationTokenSource.CreateLinkedTokenSource(importCancel.Token))
-                    using (Form waiting = new Form { Text = "正在接收文件…", StartPosition = FormStartPosition.CenterParent,
-                        ClientSize = new Size(380, 110), ControlBox = false, FormBorderStyle = FormBorderStyle.FixedDialog })
+                    using (LocalScanProgressDialog waiting = new LocalScanProgressDialog("正在接收文件…",
+                        "请等待文件接收完成，再关闭来源窗口。", string.Empty, receiveCancel))
                     {
-                        waiting.Controls.Add(new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter,
-                            Text = "请等待文件接收完成，再关闭来源窗口。" });
-                        Button cancelReceive = new Button { Dock = DockStyle.Bottom, Height = 32, Text = "取消接收" };
-                        cancelReceive.Click += delegate { receiveCancel.Cancel(); cancelReceive.Enabled = false; cancelReceive.Text = "正在取消…"; };
-                        waiting.Controls.Add(cancelReceive);
+                        waiting.CancelingText = "正在取消接收…";
                         waiting.Shown += delegate
                         {
                             CompleteDrop(paths, target, targetCollection, choose, navigate, mixed, modifiers, allowed, operation, resource,
-                                delegate(ImportBatch batch) { transfer.Complete(batch); waiting.Close(); }, receiveCancel.Token);
+                                delegate(ImportBatch batch) { transfer.Complete(batch); waiting.Finish(); }, receiveCancel.Token);
                         };
-                        try { waiting.ShowDialog(this); } finally { transfer.Complete(null); }
+                        try { ConfirmDialog.ShowModal(waiting, this); } finally { transfer.Complete(null); }
                     }
                 }
                 // 不允许来源根据返回 Move 再次删除；实际结果通过 Performed DropEffect / EndOperation 通知。
@@ -232,7 +228,7 @@ namespace AppManager
             }
             catch (Exception ex)
             {
-                if (drop) MessageBox.Show(this, ex.Message, "无法导入", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (drop) MessageDialog.Show(this, ex.Message, "无法导入", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 else ShowImportTip("无法读取来源或目标目录", e);
                 return DragDropEffects.None;
             }
@@ -258,7 +254,7 @@ namespace AppManager
                     if (effect == DragDropEffects.None) return;
                     operation = effect == DragDropEffects.Move ? ImportOperation.Move : ImportOperation.Copy;
                     string action = operation == ImportOperation.Move ? "移动" : "复制";
-                    if (MessageBox.Show(this, action + " " + paths.Length + " 项到「" + category + "」？", "导入文件",
+                    if (MessageDialog.Show(this, action + " " + paths.Length + " 项到「" + category + "」？", "导入文件",
                         MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
                 }
                 else if (navigate && CanEditCategory(category)
@@ -271,7 +267,7 @@ namespace AppManager
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, ex.Message, "无法导入", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageDialog.Show(this, ex.Message, "无法导入", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             finally { if (!queued) completed(null); }
         }
@@ -293,24 +289,23 @@ namespace AppManager
         /// </summary>
         private string PickImportCategory(bool resource, IList<string> paths = null, bool[] folders = null)
         {
-            using (Form dialog = new Form { Text = "导入到…", StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ClientSize = new Size(360, 140) })
+            IEnumerable<string> categories = resource ? CategoryRules.ResourceBuiltIn.Concat(config.ResourceCategories)
+                : CategoryRules.BuiltIn.Concat(config.CustomCategories).Concat(new string[] { QuickCenter });
+            string preferred = resource ? "文件" : "其他";
+            if (resource && paths != null && paths.Count > 0)
+                categories = ResourceImportChoices(categories, paths, folders ?? paths.Select(p => Directory.Exists(p)).ToArray(), ref preferred);
+            List<string> names = categories.Distinct().ToList();
+            List<CategoryIconKind> icons = new List<CategoryIconKind>();
+            foreach (string name in names)
             {
-                Label label = new Label { Text = "选择目标分类", AutoSize = true, Location = new Point(18, 18) };
-                ComboBox choices = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Location = new Point(18, 45), Width = 322 };
-                IEnumerable<string> categories = resource ? CategoryRules.ResourceBuiltIn.Concat(config.ResourceCategories)
-                    : CategoryRules.BuiltIn.Concat(config.CustomCategories).Concat(new string[] { QuickCenter });
-                string preferred = resource ? "文件" : "其他";
-                if (resource && paths != null && paths.Count > 0)
-                    categories = ResourceImportChoices(categories, paths, folders ?? paths.Select(p => Directory.Exists(p)).ToArray(), ref preferred);
-                foreach (string category in categories.Distinct()) choices.Items.Add(category);
-                choices.SelectedItem = preferred;
-                if (choices.SelectedIndex < 0 && choices.Items.Count > 0) choices.SelectedIndex = 0;
-                Button ok = new Button { Text = "确定", DialogResult = DialogResult.OK, Location = new Point(180, 94) };
-                Button cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Location = new Point(266, 94) };
-                dialog.Controls.AddRange(new Control[] { label, choices, ok, cancel }); dialog.AcceptButton = ok; dialog.CancelButton = cancel;
-                return dialog.ShowDialog(this) == DialogResult.OK ? choices.SelectedItem as string : null;
+                // 与侧栏同一套图标：先看用户给这个分类选的图标，没有再按分类名推断
+                string iconName;
+                CategoryIconKind fallback = CategoryIcons.ForCategory(name);
+                icons.Add(config.CategoryIconNames.TryGetValue(CategoryIcons.ConfigKey(resource, name), out iconName)
+                    || config.CategoryIconNames.TryGetValue(name, out iconName) ? CategoryIcons.Parse(iconName, fallback) : fallback);
             }
+            string hint = (paths != null && paths.Count > 0 ? "为 " + paths.Count + " 个项目选择目标分类" : "选择目标分类") + "；双击可以直接确认。";
+            return CategoryPickerDialog.Show(this, "导入到…", hint, names, icons, preferred);
         }
 
         private bool ClipboardHasFiles()
@@ -353,7 +348,7 @@ namespace AppManager
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, "无法读取剪贴板，请重试。\n" + ex.Message, "粘贴文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageDialog.Show(this, "无法读取剪贴板，请重试。\n" + ex.Message, "粘贴文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return true;
             }
         }
@@ -368,7 +363,7 @@ namespace AppManager
             string message = lead + "的格式不符合「" + category + "」分类。\n\n"
                 + "不支持：" + formats + "\n\n"
                 + "支持格式（不区分大小写）：\n" + MediaRules.CategorySupportedFormats(category);
-            MessageBox.Show(this, message, "格式不支持", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageDialog.Show(this, message, "格式不支持", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         private void EnqueueImport(Action action)
@@ -399,7 +394,7 @@ namespace AppManager
                 try { action(); }
                 catch (Exception ex)
                 {
-                    RunOnUi(delegate { MessageBox.Show(this, "导入中断，未完成的源删除不会自动重试。\n" + ex.Message, "导入文件", MessageBoxButtons.OK, MessageBoxIcon.Warning); });
+                    RunOnUi(delegate { MessageDialog.Show(this, "导入中断，未完成的源删除不会自动重试。\n" + ex.Message, "导入文件", MessageBoxButtons.OK, MessageBoxIcon.Warning); });
                 }
                 finally { RunOnUi(StartNextImport); }
             });
@@ -409,7 +404,7 @@ namespace AppManager
         private void RequestImportExit()
         {
             if (importExitPending) return;
-            if (MessageBox.Show(this, "文件导入尚未完成。\n是否取消剩余项目，并在当前文件处理完后退出？\n已入库的项目会保留，未完成项目的源文件不会被删除。",
+            if (MessageDialog.Show(this, "文件导入尚未完成。\n是否取消剩余项目，并在当前文件处理完后退出？\n已入库的项目会保留，未完成项目的源文件不会被删除。",
                 "导入文件", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             importExitPending = true;
             // 已协商异步的来源必须收到结束通知；排队任务用已取消 token 收尾，不能直接丢弃回调。
@@ -501,7 +496,7 @@ namespace AppManager
                     RunOnUi(delegate
                     {
                         if (completed != null) completed(failed);
-                        MessageBox.Show(this, "读取收录记录失败，本次导入未处理任何文件，源文件均已保留。\n" + ex.Message, "导入文件",
+                        MessageDialog.Show(this, "读取收录记录失败，本次导入未处理任何文件，源文件均已保留。\n" + ex.Message, "导入文件",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     });
                     return;
@@ -561,7 +556,7 @@ namespace AppManager
             RunOnUi(delegate
             {
                 if (completed != null) completed(batch);
-                MessageBox.Show(this, message, "导入文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageDialog.Show(this, message, "导入文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             });
         }
 
@@ -619,7 +614,7 @@ namespace AppManager
             catch (Exception ex)
             {
                 Paths.LogError(new IOException("导入重复检查失败（" + snapshot.Count + " 项）", ex));
-                MessageBox.Show(this, "重复检查失败，本次未导入任何文件，源文件均已保留。\n" + ex.Message,
+                MessageDialog.Show(this, "重复检查失败，本次未导入任何文件，源文件均已保留。\n" + ex.Message,
                     title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return null;
             }
@@ -895,7 +890,7 @@ namespace AppManager
                 if (batch.SpaceLimited)
                 {
                     bool shared = batch.Items.Any(i => i.Files.Any(f => f.Linked && !f.Deleted));
-                    MessageBox.Show(this, FileImport.SpaceMessage + (shared
+                    MessageDialog.Show(this, FileImport.SpaceMessage + (shared
                         ? "\n\n部分源路径和库路径仍可能指向同一份文件，编辑一边会影响另一边，请暂勿编辑。详情见导入记录。" : ""),
                         "磁盘空间不足", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }

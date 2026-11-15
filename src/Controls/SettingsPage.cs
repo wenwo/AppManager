@@ -49,8 +49,8 @@ namespace AppManager.Controls
         private static readonly Color TintOrange = Color.FromArgb(240, 140, 30);
         private static readonly Color TintPurple = Color.FromArgb(124, 92, 235);
         private static readonly Color TintTeal = Color.FromArgb(16, 160, 170);
-        private static readonly Color TintGray = Color.FromArgb(110, 116, 125);
-        private static readonly Color WarningText = Color.FromArgb(196, 98, 0);
+        private static readonly Color TintGray = Theme.NeutralTint;
+        private static readonly Color WarningText = Theme.WarningText;
 
         // 路径文本过长时省略中间，保留盘符和末级目录
         private static readonly StringFormat PathFormat = MakePathFormat();
@@ -106,7 +106,7 @@ namespace AppManager.Controls
         }
 
         private readonly RoundButton backBtn;
-        private readonly ToolTip pathTip = new ToolTip();   // 悬停存储位置行时显示完整路径
+        private readonly ThemedToolTip pathTip = new ThemedToolTip();   // 悬停存储位置行时显示完整路径
         private string pathTipText = string.Empty;
         private readonly List<Section> sections = new List<Section>();
         private readonly List<Row> rows = new List<Row>();

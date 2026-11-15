@@ -36,12 +36,12 @@ namespace AppManager
             string title = "整理本机" + noun, scanTitle = "扫描本机" + noun;
             if (!CanEditCategory(category))
             {
-                MessageBox.Show(this, "当前无法编辑「" + category + "」分类。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(this, "当前无法编辑「" + category + "」分类。", title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             if (ActiveResourceStoreRoots().Count == 0)
             {
-                MessageBox.Show(this, "请先在设置 > 存储位置中启用至少一个现有资源存储位置。\n本功能不会新增或修改存储位置。",
+                MessageDialog.Show(this, "请先在设置 > 存储位置中启用至少一个现有资源存储位置。\n本功能不会新增或修改存储位置。",
                     title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -260,7 +260,7 @@ namespace AppManager
                 .OrderByDescending(value => value).ToList();
             if (config.Collections.Count + missing.Count > CollectionKeys.MaxCollections)
             {
-                MessageBox.Show(this, "集合数量已达上限，尚未开始收录" + noun + "。", "整理本机" + noun,
+                MessageDialog.Show(this, "集合数量已达上限，尚未开始收录" + noun + "。", "整理本机" + noun,
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
@@ -268,7 +268,7 @@ namespace AppManager
                 config.Collections.Add(new ResourceCollection { Parent = category, Name = year + "年" });
             if (missing.Count == 0) return true;
             if (config.Save(category == "照片" ? "photos.years" : "videos.years")) return true;
-            MessageBox.Show(this, "年份集合未能保存，尚未开始收录" + noun + "。\n" + config.DatabaseError,
+            MessageDialog.Show(this, "年份集合未能保存，尚未开始收录" + noun + "。\n" + config.DatabaseError,
                 "整理本机" + noun, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }

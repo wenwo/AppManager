@@ -29,12 +29,12 @@ namespace AppManager
         private static readonly string MoreRows = "显示更多";
         private const int BatchRowHeight = 58;
 
-        private static readonly Color GoodText = Color.FromArgb(24, 128, 66);
-        private static readonly Color GoodBg = Color.FromArgb(228, 245, 234);
-        private static readonly Color WarnText = Color.FromArgb(196, 98, 0);
-        private static readonly Color WarnBg = Color.FromArgb(255, 241, 222);
-        private static readonly Color BadText = Color.FromArgb(207, 48, 42);
-        private static readonly Color BadBg = Color.FromArgb(255, 235, 233);
+        private static readonly Color GoodText = Theme.SuccessText;
+        private static readonly Color GoodBg = Theme.SuccessBg;
+        private static readonly Color WarnText = Theme.WarningText;
+        private static readonly Color WarnBg = Theme.WarningBg;
+        private static readonly Color BadText = Theme.DangerText;
+        private static readonly Color BadBg = Theme.DangerBg;
 
         // 仅界面线程使用的共享绘制格式：路径在中间省略（保留盘符和文件名），错误信息折行显示
         private static readonly StringFormat PathFormat = new StringFormat
@@ -54,7 +54,7 @@ namespace AppManager
         private readonly Label footer = new Label();
         private readonly RoundButton retry = new RoundButton();
         private readonly RoundButton close = new RoundButton();
-        private readonly ToolTip tip = new ToolTip();
+        private readonly ThemedToolTip tip = new ThemedToolTip();
 
         private Rectangle leftFrame, rightFrame, tilesRect, noticeRect;   // 已按当前 DPI 换算
         private string placeholder = "正在读取导入记录…";
@@ -412,7 +412,7 @@ namespace AppManager
             if (!batch.DeleteAuthorized)
             {
                 // 部分失败的批次当时保留了全部源文件；需用户明确确认后才删除已入库项的源文件。
-                if (MessageBox.Show(this, "该批次当时有失败项，因此保留了全部源文件。\n确定删除已成功入库项目的源文件吗？删除前会再次校验内容。",
+                if (MessageDialog.Show(this, "该批次当时有失败项，因此保留了全部源文件。\n确定删除已成功入库项目的源文件吗？删除前会再次校验内容。",
                     "导入记录", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return;
                 batch.DeleteAuthorized = true;
             }
@@ -702,7 +702,7 @@ namespace AppManager
             if (index >= 0 && index < itemList.Items.Count)
             {
                 Row row = itemList.Items[index] as Row;
-                int room = itemList.ClientSize.Width - Dpi(12 + 22 + 12);
+                int room = itemList.RowWidth - Dpi(12 + 22 + 12);
                 if (row != null && (Wider(row.Item.Source, room) || Wider(row.Item.Target, room) || Wider(row.Name, room - Dpi(110))
                     || row.ErrorLines > 1 || Wider(row.Item.Error, room + Dpi(22))))
                     text = RowText(row);
@@ -753,7 +753,7 @@ namespace AppManager
             try { Clipboard.SetText(text); }
             catch (ExternalException)
             {
-                MessageBox.Show(this, "剪贴板正被其它程序占用，没有复制成功，请再试一次。", "导入记录",
+                MessageDialog.Show(this, "剪贴板正被其它程序占用，没有复制成功，请再试一次。", "导入记录",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }

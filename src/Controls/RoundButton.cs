@@ -42,6 +42,8 @@ namespace AppManager.Controls
         }
         protected override void OnMouseUp(MouseEventArgs e) { _pressed = false; Invalidate(); base.OnMouseUp(e); }
         protected override void OnLostFocus(EventArgs e) { _pressed = false; Invalidate(); base.OnLostFocus(e); }
+        protected override void OnEnabledChanged(EventArgs e) { _hover = false; _pressed = false; Invalidate(); base.OnEnabledChanged(e); }
+        protected override void OnTextChanged(EventArgs e) { Invalidate(); base.OnTextChanged(e); }
         protected override void OnKeyDown(KeyEventArgs e)
         {
             if (e.KeyCode == Keys.Space)
@@ -74,39 +76,50 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle r = ClientRectangle;
             r.Inflate(-1, -1);
+            int radius = DpiHelper.Scale(6, DpiHelper.ForControl(this));
+            if (!Enabled)
+            {
+                // 停用：灰底、浅字，主按钮也一样，一眼能看出现在点不了
+                using (SolidBrush b = new SolidBrush(Theme.SegmentBg)) Draw.FillRoundedRect(g, b, r, radius);
+                using (SolidBrush br = new SolidBrush(Theme.TextTertiary))
+                {
+                    if (_icon.HasValue) PaintIconAndText(g, r, br, Theme.TextTertiary);
+                    else Draw.DrawStringCenter(g, Text, Font, br, r);
+                }
+                return;
+            }
             if (_accent)
             {
-                Color bg = Theme.Accent;
-                if (_pressed) bg = Blend(bg, Color.Black, 0.12f);
-                else if (_hover) bg = Blend(bg, Color.White, 0.10f);
-                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 6);
+                Color bg = _pressed ? Theme.AccentPressed : (_hover ? Theme.AccentHover : Theme.Accent);
+                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, radius);
             }
             else
             {
                 Color bg = Theme.Card;
                 if (_pressed) bg = Blend(bg, Color.Black, 0.06f);
                 else if (_hover) bg = Theme.CardHover;
-                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 6);
+                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, radius);
                 Color border = _hover ? Blend(Theme.ControlBorder, Theme.Accent, 0.2f) : Theme.ControlBorder;
-                using (Pen p = new Pen(border, 1)) Draw.DrawRoundedRect(g, p, r, 6);
+                using (Pen p = new Pen(border, 1)) Draw.DrawRoundedRect(g, p, r, radius);
             }
             Color tc = _accent ? Color.White : Theme.TextPrimary;
             using (SolidBrush br = new SolidBrush(tc))
             {
-                if (!_icon.HasValue)
-                {
-                    Draw.DrawStringCenter(g, Text, Font, br, r);
-                    return;
-                }
-                Size textSize = TextRenderer.MeasureText(Text, Font);
-                int contentWidth = textSize.Width + 22;
-                int startX = r.X + Math.Max(8, (r.Width - contentWidth) / 2);
-                Rectangle iconRect = new Rectangle(startX, r.Y + (r.Height - 18) / 2, 18, 18);
-                Draw.DrawIcon(g, _icon.Value, iconRect, tc);
-                Rectangle textRect = new Rectangle(startX + 22, r.Y,
-                    Math.Max(0, r.Right - startX - 26), r.Height);
-                Draw.DrawStringLeft(g, Text, Font, br, textRect);
+                if (_icon.HasValue) PaintIconAndText(g, r, br, tc);
+                else Draw.DrawStringCenter(g, Text, Font, br, r);
             }
+        }
+
+        private void PaintIconAndText(Graphics g, Rectangle r, Brush br, Color tc)
+        {
+            Size textSize = TextRenderer.MeasureText(Text, Font);
+            int contentWidth = textSize.Width + 22;
+            int startX = r.X + Math.Max(8, (r.Width - contentWidth) / 2);
+            Rectangle iconRect = new Rectangle(startX, r.Y + (r.Height - 18) / 2, 18, 18);
+            Draw.DrawIcon(g, _icon.Value, iconRect, tc);
+            Rectangle textRect = new Rectangle(startX + 22, r.Y,
+                Math.Max(0, r.Right - startX - 26), r.Height);
+            Draw.DrawStringLeft(g, Text, Font, br, textRect);
         }
 
         private static Color Blend(Color a, Color b, float t)

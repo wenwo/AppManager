@@ -21,12 +21,12 @@ namespace AppManager
         private static readonly string MoreOps = "显示更早的记录", MoreRows = "显示更多";
         private const int OpRowHeight = 58, MenuWidth = 176;
 
-        private static readonly Color GoodText = Color.FromArgb(24, 128, 66);
-        private static readonly Color GoodBg = Color.FromArgb(228, 245, 234);
-        private static readonly Color WarnText = Color.FromArgb(196, 98, 0);
-        private static readonly Color WarnBg = Color.FromArgb(255, 241, 222);
-        private static readonly Color BadText = Color.FromArgb(207, 48, 42);
-        private static readonly Color BadBg = Color.FromArgb(255, 235, 233);
+        private static readonly Color GoodText = Theme.SuccessText;
+        private static readonly Color GoodBg = Theme.SuccessBg;
+        private static readonly Color WarnText = Theme.WarningText;
+        private static readonly Color WarnBg = Theme.WarningBg;
+        private static readonly Color BadText = Theme.DangerText;
+        private static readonly Color BadBg = Theme.DangerBg;
 
         // 仅界面线程使用的共享绘制格式：说明文字放不下时在末尾省略
         private static readonly StringFormat DetailFormat = new StringFormat
@@ -57,7 +57,7 @@ namespace AppManager
         private readonly RoundButton undo = new RoundButton();
         private readonly RoundButton export = new RoundButton();
         private readonly RoundButton close = new RoundButton();
-        private readonly ToolTip tip = new ToolTip();
+        private readonly ThemedToolTip tip = new ThemedToolTip();
         private readonly List<Op> ops = new List<Op>();
 
         private Rectangle leftFrame, rightFrame, tilesRect, noticeRect;   // 已按当前 DPI 换算
@@ -453,7 +453,7 @@ namespace AppManager
                     SetRunning(false);
                     if (error == null) { done(result); return; }
                     status.Text = "没有完成：" + error.Message;
-                    MessageBox.Show(this, "操作没有完成，数据保持原样。\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageDialog.Show(this, "操作没有完成，数据保持原样。\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 });
             });
         }
@@ -507,7 +507,7 @@ namespace AppManager
                     return DesktopOrganizer.RunExclusive<string>(delegate { return database.Restore(path); });
                 }, delegate(string safety)
                 {
-                    MessageBox.Show(this, "恢复完成。\r\n恢复前的数据保留在：\r\n" + safety, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageDialog.Show(this, "恢复完成。\r\n恢复前的数据保留在：\r\n" + safety, Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     Changed = true;
                     Close();
                 });
@@ -520,7 +520,7 @@ namespace AppManager
             {
                 bool ok;
                 status.Text = OperationHistory.CheckText(raw, out ok);
-                if (!ok) MessageBox.Show(this, status.Text, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (!ok) MessageDialog.Show(this, status.Text, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
             });
         }
 
@@ -897,7 +897,7 @@ namespace AppManager
             try { Clipboard.SetText(text); }
             catch (ExternalException)
             {
-                MessageBox.Show(this, "剪贴板正被其它程序占用，没有复制成功，请再试一次。", Text,
+                MessageDialog.Show(this, "剪贴板正被其它程序占用，没有复制成功，请再试一次。", Text,
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }

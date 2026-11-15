@@ -201,6 +201,64 @@ namespace AppManager
             }
         }
 
+        /// <summary>两色线性混合：amount 为 b 所占比例（0~1）。</summary>
+        public static Color Mix(Color a, Color b, float amount)
+        {
+            return Color.FromArgb(
+                (int)Math.Round(a.R + (b.R - a.R) * amount),
+                (int)Math.Round(a.G + (b.G - a.G) * amount),
+                (int)Math.Round(a.B + (b.B - a.B) * amount));
+        }
+
+        /// <summary>
+        /// 自绘勾选框：未勾选是白底描边，勾选后是强调色实底加白色对勾；停用时整体变浅。
+        /// r 为已按 DPI 换算好的方框，dpi 用来换算圆角和线宽。
+        /// </summary>
+        public static void DrawCheckBox(Graphics g, Rectangle r, bool isChecked, bool enabled, int dpi)
+        {
+            int radius = DpiHelper.Scale(4, dpi);
+            if (!isChecked)
+            {
+                using (SolidBrush fill = new SolidBrush(enabled ? Theme.Card : Theme.SearchBg)) FillRoundedRect(g, fill, r, radius);
+                using (Pen border = new Pen(Theme.ControlBorder, Math.Max(1F, DpiHelper.Scale(3, dpi) / 2F)))
+                    DrawRoundedRect(g, border, new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), radius);
+                return;
+            }
+            using (SolidBrush fill = new SolidBrush(enabled ? Theme.Accent : Theme.AccentDisabled)) FillRoundedRect(g, fill, r, radius);
+            using (Pen mark = new Pen(Color.White, Math.Max(1.6F, DpiHelper.Scale(2, dpi))))
+            {
+                mark.StartCap = LineCap.Round;
+                mark.EndCap = LineCap.Round;
+                mark.LineJoin = LineJoin.Round;
+                float w = r.Width, h = r.Height;
+                g.DrawLines(mark, new PointF[]
+                {
+                    new PointF(r.X + w * 0.26F, r.Y + h * 0.52F),
+                    new PointF(r.X + w * 0.44F, r.Y + h * 0.70F),
+                    new PointF(r.X + w * 0.76F, r.Y + h * 0.34F)
+                });
+            }
+        }
+
+        /// <summary>
+        /// 自绘单选圆点：未选中是白底描边的圆，选中后是强调色实底加白色圆心；停用时整体变浅。
+        /// </summary>
+        public static void DrawRadio(Graphics g, Rectangle r, bool isChecked, bool enabled, int dpi)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            Rectangle circle = new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1);
+            if (!isChecked)
+            {
+                using (SolidBrush fill = new SolidBrush(enabled ? Theme.Card : Theme.SearchBg)) g.FillEllipse(fill, circle);
+                using (Pen border = new Pen(Theme.ControlBorder, Math.Max(1F, DpiHelper.Scale(3, dpi) / 2F))) g.DrawEllipse(border, circle);
+                return;
+            }
+            using (SolidBrush fill = new SolidBrush(enabled ? Theme.Accent : Theme.AccentDisabled)) g.FillEllipse(fill, circle);
+            float dot = r.Width * 0.38F;
+            using (SolidBrush center = new SolidBrush(Color.White))
+                g.FillEllipse(center, r.X + (r.Width - 1 - dot) / 2F, r.Y + (r.Height - 1 - dot) / 2F, dot, dot);
+        }
+
         /// <summary>绘制柔和阴影（多层半透明圆角，由外向内加深）。</summary>
         public static void DrawShadow(Graphics g, Rectangle rect, int radius)
         {

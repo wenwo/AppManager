@@ -15,7 +15,7 @@ namespace AppManager
     {
         private static readonly OpenWithQueue openWithQueue = new OpenWithQueue(ShowOpenWithDialog, delegate
         {
-            MessageBox.Show("无法打开文件，请检查文件是否存在或重新选择查看器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageDialog.Show("无法打开文件，请检查文件是否存在或重新选择查看器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         });
 
         static Launcher()

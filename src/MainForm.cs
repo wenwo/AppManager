@@ -493,7 +493,7 @@ namespace AppManager
             {
                 e.Cancel = true;
                 exiting = false;
-                MessageBox.Show(this, "桌面整理或还原正在进行，完成后再退出，避免文件已移动却没有登记。", "退出",
+                MessageDialog.Show(this, "桌面整理或还原正在进行，完成后再退出，避免文件已移动却没有登记。", "退出",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -799,7 +799,7 @@ namespace AppManager
             }
             if (DesktopWorkRunning())
             {
-                MessageBox.Show(this, "桌面整理或还原正在进行，完成后再退出，避免文件已移动却没有登记。", "退出",
+                MessageDialog.Show(this, "桌面整理或还原正在进行，完成后再退出，避免文件已移动却没有登记。", "退出",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -1392,6 +1392,7 @@ namespace AppManager
                     if (DwmSetWindowAttribute(f.Handle, DWMWA_WINDOW_CORNER_PREFERENCE,
                             ref pref, sizeof(int)) == 0)
                     {
+                        systemCorners = true;
                         f.Region = null;
                         return;
                     }
@@ -1405,6 +1406,18 @@ namespace AppManager
                     f.Region = new Region(path);
             }
             catch { }
+        }
+
+        // 系统已接管窗口圆角（Windows 11 DWM，半径 8）；否则窗口按半径 12 的区域裁剪
+        private static bool systemCorners;
+
+        /// <summary>
+        /// 无边框窗口实际的圆角半径（已按 DPI 换算）。窗口自己画的底色、描边要用这个半径，
+        /// 否则描边的圆角和窗口被裁出来的圆角对不上，四角会露出缝或被切掉一截。
+        /// </summary>
+        internal static int WindowCornerRadius(Control c)
+        {
+            return DpiHelper.Scale(systemCorners ? 8 : 12, DpiHelper.ForControl(c));
         }
 
         /// <summary>通过 RtlGetVersion 判断是否为 Windows 11（Build ≥ 22000）。</summary>
@@ -2439,7 +2452,7 @@ namespace AppManager
             if (srcIsDir && config.AddedItems.EntriesUnder(sp).Count > 0)
             {
                 if (showHint)
-                    MessageBox.Show(this, "「" + src.DisplayName() + "」内包含其它已收录的项目，移动后这些项目会失效。\n请先移除这些项目后再移动。",
+                    MessageDialog.Show(this, "「" + src.DisplayName() + "」内包含其它已收录的项目，移动后这些项目会失效。\n请先移除这些项目后再移动。",
                         "移动", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return DragDropIntent.Reject;
             }
@@ -2465,7 +2478,7 @@ namespace AppManager
             // 文件夹内还有其它收录项时，移动会让它们全部指向旧路径而失效
             if (srcIsDir && config.AddedItems.EntriesUnder(sp).Count > 0)
             {
-                MessageBox.Show(this, "「" + src.DisplayName() + "」内包含其它已收录的项目，移动后这些项目会失效。\n请先移除这些项目后再移动。",
+                MessageDialog.Show(this, "「" + src.DisplayName() + "」内包含其它已收录的项目，移动后这些项目会失效。\n请先移除这些项目后再移动。",
                     "移动", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -2495,7 +2508,7 @@ namespace AppManager
                     HideStatusBar();
                     if (failure != null)
                     {
-                        MessageBox.Show(this, "无法移动「" + displayName + "」，原文件保持不变。\n" + failure.Message, "移动",
+                        MessageDialog.Show(this, "无法移动「" + displayName + "」，原文件保持不变。\n" + failure.Message, "移动",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
@@ -2517,10 +2530,10 @@ namespace AppManager
                             {
                                 StartScan(false);
                                 if (rollbackError == null)
-                                    MessageBox.Show(this, "资源库未能保存，已把「" + displayName + "」恢复到原位置。\n" + config.DatabaseError,
+                                    MessageDialog.Show(this, "资源库未能保存，已把「" + displayName + "」恢复到原位置。\n" + config.DatabaseError,
                                         "移动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                                 else
-                                    MessageBox.Show(this, "资源库未能保存，且文件回滚失败。\n原位置：" + sp + "\n目标位置：" + dest + "\n" + rollbackError,
+                                    MessageDialog.Show(this, "资源库未能保存，且文件回滚失败。\n原位置：" + sp + "\n目标位置：" + dest + "\n" + rollbackError,
                                         "移动", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             });
                         });
@@ -2528,7 +2541,7 @@ namespace AppManager
                     }
                     StartScan(false);
                     if (!sourceRemoved)
-                        MessageBox.Show(this, "已移动到「" + dp + "」，但原位置有内容未能删除（可能正被使用，或在移动期间被修改），已保留在：\n" + sp,
+                        MessageDialog.Show(this, "已移动到「" + dp + "」，但原位置有内容未能删除（可能正被使用，或在移动期间被修改），已保留在：\n" + sp,
                             "移动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 });
             });
@@ -2612,7 +2625,7 @@ namespace AppManager
                 ResourceCollection target = FindCollectionByKey(collectionKey);
                 if (target == null || !string.Equals(target.Parent, currentCategory, StringComparison.Ordinal))
                 {
-                    MessageBox.Show(this, "当前集合已不存在，请返回后重试。", "新建",
+                    MessageDialog.Show(this, "当前集合已不存在，请返回后重试。", "新建",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
@@ -2621,7 +2634,7 @@ namespace AppManager
             List<string> roots = ActiveResourceStoreRoots();
             if (roots.Count == 0)
             {
-                MessageBox.Show(this, "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。",
+                MessageDialog.Show(this, "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。",
                     "新建", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -2635,7 +2648,7 @@ namespace AppManager
                     0, tried, out dir, out error);
                 if (root == null)
                 {
-                    MessageBox.Show(this, error ?? ResourceStore.CapacityMessage, "新建",
+                    MessageDialog.Show(this, error ?? ResourceStore.CapacityMessage, "新建",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -2656,7 +2669,7 @@ namespace AppManager
                         continue;
                     }
                     Paths.LogError(new IOException("新建" + (folder ? "文件夹" : "文档") + "失败: " + dir, ex));
-                    MessageBox.Show(this, "新建失败：" + ex.Message, "新建",
+                    MessageDialog.Show(this, "新建失败：" + ex.Message, "新建",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -2679,7 +2692,7 @@ namespace AppManager
                 }
                 catch (Exception ex) { Paths.LogError(new IOException("新建条目保存失败后清理文件失败: " + path, ex)); }
                 InvalidateAddedIndex();
-                MessageBox.Show(this, "新建条目未能保存，已撤销本次创建。\n" + config.DatabaseError,
+                MessageDialog.Show(this, "新建条目未能保存，已撤销本次创建。\n" + config.DatabaseError,
                     "新建", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -2802,18 +2815,18 @@ namespace AppManager
             if (deleted + purged == 0)
             {
                 if (failed > 0)
-                    MessageBox.Show("删除失败，文件可能正被占用或权限不足。", "删除",
+                    MessageDialog.Show("删除失败，文件可能正被占用或权限不足。", "删除",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             if (!config.Save("physical.files.delete"))
             {
-                MessageBox.Show("删除结果未能保存，磁盘文件可能已进入回收站。\n" + config.DatabaseError,
+                MessageDialog.Show("删除结果未能保存，磁盘文件可能已进入回收站。\n" + config.DatabaseError,
                     "删除", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
             StartScan(false);
             if (failed > 0)
-                MessageBox.Show("有 " + failed + " 个项目删除失败，可能正被占用或权限不足。", "删除",
+                MessageDialog.Show("有 " + failed + " 个项目删除失败，可能正被占用或权限不足。", "删除",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
@@ -3496,7 +3509,7 @@ namespace AppManager
                 Paths.LogError(ex);
                 config.ReloadFromDatabase();
                 RestoreCollectionMoveUi(previousCollection, previousEntered, previousReveal, previousExpanded, previousScroll);
-                MessageBox.Show(this, "移动集合失败，已恢复原状态。\n" + ex.Message, "移动集合",
+                MessageDialog.Show(this, "移动集合失败，已恢复原状态。\n" + ex.Message, "移动集合",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -3766,7 +3779,7 @@ namespace AppManager
             string parentError;
             if (!ResolveCollectionCreationParent(parentCollectionKey, out parent, out root, out parentError))
             {
-                MessageBox.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             string title = parent == null
@@ -3783,13 +3796,13 @@ namespace AppManager
                 // 对话框关闭后重新验证父集合，避免分类/集合上下文已变化时落到错误父级。
                 if (!ResolveCollectionCreationParent(parentCollectionKey, out parent, out root, out parentError))
                 {
-                    MessageBox.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageDialog.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 string error = ValidateCollectionDraft(draft, root, parentCollectionKey);
                 if (error != null)
                 {
-                    MessageBox.Show(this, error, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageDialog.Show(this, error, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     seed = draft;
                     continue;
                 }
@@ -3812,7 +3825,7 @@ namespace AppManager
                 }
                 if (!config.Save())
                 {
-                    MessageBox.Show(this, "新建文件夹未能保存，请重试或取消。\n" + config.DatabaseError,
+                    MessageDialog.Show(this, "新建文件夹未能保存，请重试或取消。\n" + config.DatabaseError,
                         "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     seed = draft;   // 保留名称/简介；config.Save 已回滚到数据库状态
                     continue;
@@ -3928,13 +3941,13 @@ namespace AppManager
             string nameError = CategoryRules.ValidateCollectionName(name);
             if (nameError != null)
             {
-                MessageBox.Show(this, nameError, "编辑集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(this, nameError, "编辑集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             if (!string.Equals(name, c.Name, StringComparison.Ordinal)
                 && CollectionOps.NameExists(config, c.Parent, c.ParentCollection, name))
             {
-                MessageBox.Show(this, "集合「" + name + "」已存在，请换一个名称。", "编辑集合",
+                MessageDialog.Show(this, "集合「" + name + "」已存在，请换一个名称。", "编辑集合",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -3945,7 +3958,7 @@ namespace AppManager
                 string saved = SaveManagedCoverImage(pastedCover);
                 if (string.IsNullOrEmpty(saved))
                 {
-                    MessageBox.Show(this, "保存封面图片失败，请重试。", "编辑集合",
+                    MessageDialog.Show(this, "保存封面图片失败，请重试。", "编辑集合",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
@@ -3962,7 +3975,7 @@ namespace AppManager
                 catch (InvalidOperationException ex)
                 {
                     DeleteManagedCoverIfUnused(finalCover, oldCover);
-                    MessageBox.Show(this, ex.Message, "编辑集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageDialog.Show(this, ex.Message, "编辑集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
                 string newKey = CollectionKeys.GetKey(c);
@@ -4098,7 +4111,7 @@ namespace AppManager
             CollectionOps.RemoveSubtree(config, c);
             if (!config.Save())
             {
-                MessageBox.Show(this, "删除集合未能保存。\n" + config.DatabaseError, "删除集合",
+                MessageDialog.Show(this, "删除集合未能保存。\n" + config.DatabaseError, "删除集合",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 currentCollection = browsingKey == null || FindCollectionByKey(browsingKey) == null ? null : browsingKey;
                 RefreshGrid();
@@ -4288,7 +4301,7 @@ namespace AppManager
             string error = CategoryNameError(name, resource, null);
             if (error != null)
             {
-                MessageBox.Show(error, "新建分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(error, "新建分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             cats.Add(name);
@@ -4344,7 +4357,7 @@ namespace AppManager
             string error = CategoryNameError(name, resource, oldName);
             if (error != null)
             {
-                MessageBox.Show(error, "重命名分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(error, "重命名分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return false;
             }
             if (name == oldName)
@@ -4358,7 +4371,7 @@ namespace AppManager
             // 旧名称已同时被另一模式使用：数据库里两边是同一行，改名会连带搬走另一边的成员。
             if (CategoryNameInUse(oldName, !resource))
             {
-                MessageBox.Show("「" + oldName + "」同时在软件和资源模式中使用，无法安全改名。\n请先删除另一模式的同名分类。",
+                MessageDialog.Show("「" + oldName + "」同时在软件和资源模式中使用，无法安全改名。\n请先删除另一模式的同名分类。",
                     "重命名分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return false;
             }
@@ -4444,7 +4457,7 @@ namespace AppManager
             // 跨模式同名：两边共用同名分组，按名称清理会波及另一模式。正常情况下启动时已拆分，这里兜底拒绝
             if (CategoryNameInUse(category, !resource))
             {
-                MessageBox.Show(this, "「" + category + "」同时在软件和资源模式中使用，暂不能删除。\n请重新启动程序完成同名分类拆分后再删除。",
+                MessageDialog.Show(this, "「" + category + "」同时在软件和资源模式中使用，暂不能删除。\n请重新启动程序完成同名分类拆分后再删除。",
                     "删除分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -4482,7 +4495,7 @@ namespace AppManager
             if (resource) CollectionOps.RemoveByParent(config, category);
             if (!config.Save())
             {
-                MessageBox.Show(this, "删除分类未能保存。\n" + config.DatabaseError, "删除分类",
+                MessageDialog.Show(this, "删除分类未能保存。\n" + config.DatabaseError, "删除分类",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 RefreshGrid();
                 return;
@@ -4549,7 +4562,7 @@ namespace AppManager
             if (resourceFile)
             {
                 if (!Launcher.OpenWith(app.TargetPath))
-                    MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "打开文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageDialog.Show(this, "无法启动 Windows 打开方式选择器。", "打开文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             Launcher.Launch(app);
@@ -5913,7 +5926,7 @@ namespace AppManager
             string error = CategoryNameError(name, false, null);
             if (error != null)
             {
-                MessageBox.Show(error, "添加到自定义", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(error, "添加到自定义", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             EnsureCustomCategory(name, edit.Icon);
@@ -5932,7 +5945,7 @@ namespace AppManager
             string error = CategoryNameError(name, false, null);
             if (error != null)
             {
-                MessageBox.Show(error, "添加到自定义", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(error, "添加到自定义", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             EnsureCustomCategory(name, edit.Icon);
@@ -6108,7 +6121,7 @@ namespace AppManager
                 else missing.Add(a.DisplayName());
             }
             if (missing.Count > 0)
-                MessageBox.Show(this, "以下 " + missing.Count + " 项的程序文件已不存在，未添加：\n" + string.Join("\n", missing.Take(10).ToArray())
+                MessageDialog.Show(this, "以下 " + missing.Count + " 项的程序文件已不存在，未添加：\n" + string.Join("\n", missing.Take(10).ToArray())
                     + (missing.Count > 10 ? "\n……" : ""), "添加软件", MessageBoxButtons.OK, MessageBoxIcon.Information);
             AddItemsToCategory(usable, category);
         }
@@ -6697,10 +6710,18 @@ namespace AppManager
                 items.Add(MkMenu("还原全部", delegate { DoRestore(); }));
             }
             items.Add(MkSep());
-            items.Add(MkMenu((config.OrganizeCopy ? "√ " : "   ") + "副本模式（保留桌面原件）", delegate { ToggleOrganizeCopy(); }));
-            items.Add(MkMenu((config.OrganizeShortcut ? "√ " : "   ") + "收纳范围：快捷方式", delegate { ToggleOrganizeScope(0); }));
-            items.Add(MkMenu((config.OrganizeFile ? "√ " : "   ") + "收纳范围：文件", delegate { ToggleOrganizeScope(1); }));
-            items.Add(MkMenu((config.OrganizeDir ? "√ " : "   ") + "收纳范围：文件夹", delegate { ToggleOrganizeScope(2); }));
+            MenuWindow.MenuItem copyMode = MkMenu("副本模式（保留桌面原件）", delegate { ToggleOrganizeCopy(); });
+            copyMode.Checked = config.OrganizeCopy;
+            MenuWindow.MenuItem scopeShortcut = MkMenu("收纳范围：快捷方式", delegate { ToggleOrganizeScope(0); });
+            scopeShortcut.Checked = config.OrganizeShortcut;
+            MenuWindow.MenuItem scopeFile = MkMenu("收纳范围：文件", delegate { ToggleOrganizeScope(1); });
+            scopeFile.Checked = config.OrganizeFile;
+            MenuWindow.MenuItem scopeDir = MkMenu("收纳范围：文件夹", delegate { ToggleOrganizeScope(2); });
+            scopeDir.Checked = config.OrganizeDir;
+            items.Add(copyMode);
+            items.Add(scopeShortcut);
+            items.Add(scopeFile);
+            items.Add(scopeDir);
             items.Add(MkSep());
             items.Add(MkMenu("导出备份包…", delegate { ExportBackup(); }));
             items.Add(MkMenu("导入备份包…", delegate { ImportBackup(); }));
@@ -6728,7 +6749,7 @@ namespace AppManager
                 if (which == 0) config.OrganizeShortcut = true;
                 else if (which == 1) config.OrganizeFile = true;
                 else config.OrganizeDir = true;
-                MessageBox.Show("至少保留一项收纳范围。", "整理桌面",
+                MessageDialog.Show("至少保留一项收纳范围。", "整理桌面",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             config.Save();
@@ -6784,12 +6805,12 @@ namespace AppManager
                     ReportBatchSaveFailure(cfg, saveError);
                     if (failure != null)
                     {
-                        MessageBox.Show("操作失败：" + failure.Message, "整理桌面",
+                        MessageDialog.Show("操作失败：" + failure.Message, "整理桌面",
                             MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
                     ReloadLibrary();
-                    MessageBox.Show(successText(count), "整理桌面",
+                    MessageDialog.Show(successText(count), "整理桌面",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 });
             });
@@ -6819,65 +6840,71 @@ namespace AppManager
             {
                 f.FormBorderStyle = FormBorderStyle.None;
                 f.StartPosition = FormStartPosition.CenterParent;
-                f.ClientSize = new Size(560, 440);
+                f.ClientSize = new Size(640, 560);
                 f.BackColor = Theme.Background;
                 f.ShowInTaskbar = false;
+                f.Text = "桌面备份清单";
+                f.KeyPreview = true;
                 ApplyRoundedCorners(f);
 
                 Label title = new Label();
-                title.Text = "桌面备份清单";
+                title.Text = f.Text;
                 title.Font = Theme.DialogTitleFont;
                 title.ForeColor = Theme.TextPrimary;
                 title.BackColor = Color.Transparent;
-                title.Location = new Point(24, 18);
-                title.AutoSize = true;
+                title.AutoSize = false;
+                title.SetBounds(24, 18, 300, 28);
                 f.Controls.Add(title);
 
                 Label desc = new Label();
-                desc.Text = "选择一项后可单独还原或移除；「还原」对搬家项移回桌面、对副本项清理备份副本。";
                 desc.Font = Theme.CaptionFont;
                 desc.ForeColor = Theme.TextSecondary;
                 desc.BackColor = Color.Transparent;
-                desc.Location = new Point(24, 48);
-                desc.AutoSize = true;
+                desc.AutoSize = false;
+                desc.AutoEllipsis = true;
+                desc.SetBounds(24, 52, f.ClientSize.Width - 48, 20);
                 f.Controls.Add(desc);
 
-                ListBox list = new ListBox();
-                list.BorderStyle = BorderStyle.None;
-                list.Font = Theme.BodyFont;
-                list.BackColor = Color.White;
-                list.IntegralHeight = false;
-                list.Location = new Point(24, 78);
-                list.Size = new Size(f.ClientSize.Width - 48, f.ClientSize.Height - 158);
+                IconButton close = new IconButton();
+                close.Kind = IconKind.Close;
+                close.Bounds = new Rectangle(f.ClientSize.Width - 14 - 34, 18, 34, 30);
+                close.Click += delegate { f.Close(); };
+                f.Controls.Add(close);
+
+                RoundButton restoreAll = new RoundButton();
+                restoreAll.Text = "全部还原";
+                restoreAll.Bounds = new Rectangle(close.Left - 8 - 96, 16, 96, 34);
+                f.Controls.Add(restoreAll);
+
+                // 列表比标题左右各宽 8px：卡片自带 8px 留白放阴影，卡片边缘正好与标题对齐
+                DesktopBackupListControl list = new DesktopBackupListControl();
+                list.Bounds = new Rectangle(16, 84, f.ClientSize.Width - 32, f.ClientSize.Height - 84 - 16);
+                list.AccessibleName = "桌面备份清单";
                 f.Controls.Add(list);
+                f.ActiveControl = list;
+                // 焦点不在列表上（例如停在按钮上）时，滚轮同样滚动列表
+                f.MouseWheel += delegate(object sender, MouseEventArgs e) { list.ScrollByWheel(e.Delta); };
+                f.KeyDown += delegate(object sender, KeyEventArgs e)
+                {
+                    if (e.KeyCode != Keys.Escape) return;
+                    e.Handled = true;
+                    f.Close();
+                };
+
                 bool busy = false;
                 Action<bool> setBusy = null;
 
-                Action refresh = null;
-                refresh = delegate
+                Action refresh = delegate
                 {
-                    int sel = list.SelectedIndex;
-                    list.BeginUpdate();
-                    list.Items.Clear();
-                    foreach (DesktopBackupEntry e in config.DesktopBackup)
-                        list.Items.Add(Path.GetFileName(e.CurrentPath) + (e.IsCopy ? "（副本）" : ""));
-                    list.EndUpdate();
-                    if (list.Items.Count > 0)
-                        list.SelectedIndex = Math.Min(Math.Max(sel, 0), list.Items.Count - 1);
+                    list.SetItems(config.DesktopBackup);
+                    desc.Text = "共 " + config.DesktopBackup.Count + " 项。「还原」把搬家的条目移回桌面、清理副本条目的备份副本；「移除」只删清单记录，不动文件。";
+                    restoreAll.Enabled = !busy && config.DesktopBackup.Count > 0;
                 };
                 refresh();
 
-                RoundButton restoreSel = new RoundButton();
-                restoreSel.Text = "还原选中";
-                restoreSel.Accent = true;
-                restoreSel.Size = new Size(96, 32);
-                restoreSel.Location = new Point(f.ClientSize.Width - 424, f.ClientSize.Height - 56);
-                restoreSel.Click += delegate
+                list.RestoreRequested += delegate(DesktopBackupEntry e)
                 {
-                    if (busy) return;
-                    int idx = list.SelectedIndex;
-                    if (idx < 0 || idx >= config.DesktopBackup.Count) return;
-                    DesktopBackupEntry e = config.DesktopBackup[idx];
+                    if (busy || !config.DesktopBackup.Contains(e)) return;
                     if (!ConfirmDialog.Show("还原条目", "把「" + Path.GetFileName(e.CurrentPath) + "」还原到桌面？")) return;
                     setBusy(true);
                     AppConfig cfg = config;
@@ -6907,29 +6934,20 @@ namespace AppManager
                             ReloadLibrary();
                             refresh();
                             if (failure != null)
-                                MessageBox.Show(this, "还原失败：" + failure.Message, "还原", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                MessageDialog.Show(this, "还原失败：" + failure.Message, "还原", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             else if (!restored)
-                                MessageBox.Show(this, "还原失败：" + (restoreError ?? "未知原因") + "\n已保留该清单项。", "还原",
+                                MessageDialog.Show(this, "还原失败：" + (restoreError ?? "未知原因") + "\n已保留该清单项。", "还原",
                                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                             else if (error != null && saveError == null)
-                                MessageBox.Show(this, error, "还原", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                MessageDialog.Show(this, error, "还原", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         });
                     });
                 };
-                f.Controls.Add(restoreSel);
 
-                RoundButton removeSel = new RoundButton();
-                removeSel.Text = "移除选中";
-                removeSel.Accent = false;
-                removeSel.Size = new Size(96, 32);
-                removeSel.Location = new Point(f.ClientSize.Width - 320, f.ClientSize.Height - 56);
-                removeSel.Click += delegate
+                list.RemoveRequested += delegate(DesktopBackupEntry e)
                 {
-                    if (busy) return;
-                    int idx = list.SelectedIndex;
-                    if (idx < 0 || idx >= config.DesktopBackup.Count) return;
+                    if (busy || !config.DesktopBackup.Contains(e)) return;
                     if (!ConfirmDialog.Show("移除清单项", "仅从清单移除记录，不会删除备份文件。确认？")) return;
-                    DesktopBackupEntry e = config.DesktopBackup[idx];
                     setBusy(true);
                     AppConfig cfg = config;
                     DesktopOrganizer worker = organizer;
@@ -6948,22 +6966,16 @@ namespace AppManager
                             if (saveError != null) ReportBatchSaveFailure(cfg, "清单项未能移除：" + (error ?? saveError));
                             refresh();
                             if (failure != null)
-                                MessageBox.Show(this, "移除失败：" + failure.Message, "移除清单项", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                MessageDialog.Show(this, "移除失败：" + failure.Message, "移除清单项", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             else if (error != null && saveError == null)
-                                MessageBox.Show(this, "移除失败：" + error, "移除清单项", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                                MessageDialog.Show(this, "移除失败：" + error, "移除清单项", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         });
                     });
                 };
-                f.Controls.Add(removeSel);
 
-                RoundButton restoreAll = new RoundButton();
-                restoreAll.Text = "全部还原";
-                restoreAll.Accent = false;
-                restoreAll.Size = new Size(96, 32);
-                restoreAll.Location = new Point(f.ClientSize.Width - 216, f.ClientSize.Height - 56);
                 restoreAll.Click += delegate
                 {
-                    if (busy) return;
+                    if (busy || config.DesktopBackup.Count == 0) return;
                     if (!ConfirmDialog.Show("还原全部", "将清单中的 " + config.DesktopBackup.Count + " 个条目全部还原到桌面？")) return;
                     setBusy(true);
                     AppConfig cfg = config;
@@ -6984,30 +6996,19 @@ namespace AppManager
                             ReloadLibrary();
                             refresh();
                             if (failure != null)
-                                MessageBox.Show(this, "还原失败：" + failure.Message, "还原全部", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                                MessageDialog.Show(this, "还原失败：" + failure.Message, "还原全部", MessageBoxButtons.OK, MessageBoxIcon.Error);
                             else
-                                MessageBox.Show(this, "已还原 " + n + " 个条目到桌面。", "还原全部",
+                                MessageDialog.Show(this, "已还原 " + n + " 个条目到桌面。", "还原全部",
                                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                         });
                     });
                 };
-                f.Controls.Add(restoreAll);
-
-                RoundButton close = new RoundButton();
-                close.Text = "关闭";
-                close.Accent = false;
-                close.Size = new Size(96, 32);
-                close.Location = new Point(f.ClientSize.Width - 112, f.ClientSize.Height - 56);
-                close.Click += delegate { f.Close(); };
-                f.Controls.Add(close);
 
                 setBusy = delegate(bool value)
                 {
                     busy = value;
-                    list.Enabled = !value;
-                    restoreSel.Enabled = !value;
-                    removeSel.Enabled = !value;
-                    restoreAll.Enabled = !value;
+                    list.SetBusy(value);
+                    restoreAll.Enabled = !value && config.DesktopBackup.Count > 0;
                     close.Enabled = !value;
                 };
                 f.FormClosing += delegate(object sender, FormClosingEventArgs e) { if (busy) e.Cancel = true; };
@@ -7100,12 +7101,12 @@ namespace AppManager
                 try
                 {
                     if (!config.ExportTo(dlg.FileName)) throw new IOException("备份包未能写入，请检查目标路径和磁盘空间。");
-                    MessageBox.Show("已导出备份包：\n" + dlg.FileName, "导出备份包",
+                    MessageDialog.Show("已导出备份包：\n" + dlg.FileName, "导出备份包",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show("导出失败：" + ex.Message, "导出备份包",
+                    MessageDialog.Show("导出失败：" + ex.Message, "导出备份包",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
@@ -7156,19 +7157,19 @@ namespace AppManager
                     HideStatusBar();
                     if (failure != null)
                     {
-                        MessageBox.Show(this, "导入失败：" + failure.Message, "导入备份包",
+                        MessageDialog.Show(this, "导入失败：" + failure.Message, "导入备份包",
                             MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return;
                     }
                     if (imported == null)
                     {
-                        MessageBox.Show("备份包无效或已损坏，已中止导入。", "导入备份包",
+                        MessageDialog.Show("备份包无效或已损坏，已中止导入。", "导入备份包",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
                     if (validation != null)
                     {
-                        MessageBox.Show("备份包内容不安全或名称无效，已中止导入：\n" + validation, "导入备份包",
+                        MessageDialog.Show("备份包内容不安全或名称无效，已中止导入：\n" + validation, "导入备份包",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
@@ -7187,7 +7188,7 @@ namespace AppManager
                     string bak = config.BackupSnapshot();
                     if (bak == null)
                     {
-                        MessageBox.Show("无法备份当前配置，已中止导入。", "导入备份包",
+                        MessageDialog.Show("无法备份当前配置，已中止导入。", "导入备份包",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
@@ -7195,7 +7196,7 @@ namespace AppManager
                     int migratedFiles = imported.MigrateSoftwareFilesToResources().Count;
                     if (!imported.Save("import.ambak"))
                     {
-                        MessageBox.Show(this, "导入未保存：" + imported.DatabaseError, "导入备份包", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        MessageDialog.Show(this, "导入未保存：" + imported.DatabaseError, "导入备份包", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                         return;
                     }
                     config = imported;
@@ -7212,7 +7213,7 @@ namespace AppManager
                     addBtn.Visible = CanEditCategory(currentCategory);
                     LayoutControls();
                     ReloadLibrary();
-                    MessageBox.Show("导入完成，已还原至备份包状态。"
+                    MessageDialog.Show("导入完成，已还原至备份包状态。"
                         + (migratedFiles > 0 ? "\n软件页面只收录软件：备份包中 " + migratedFiles + " 个文件/文件夹已放到资源页面（磁盘位置不变）。" : "")
                         + "\n原配置已备份至：\n" + bak, "导入备份包",
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -7284,13 +7285,13 @@ namespace AppManager
                     settingsPage.SetSelfTestRunning(false);
                     HideStatusBar();
                     if (pass < 0)
-                        MessageBox.Show("自测运行异常或超时，详见 error.log。", "自测",
+                        MessageDialog.Show("自测运行异常或超时，详见 error.log。", "自测",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     else if (total == 0)
-                        MessageBox.Show("自测进程已结束，但未读到通过数，详见 selftest.log。", "自测",
+                        MessageDialog.Show("自测进程已结束，但未读到通过数，详见 selftest.log。", "自测",
                             MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     else
-                        MessageBox.Show("自测完成：通过 " + pass + "/" + total + "，详见 selftest.log。", "自测",
+                        MessageDialog.Show("自测完成：通过 " + pass + "/" + total + "，详见 selftest.log。", "自测",
                             MessageBoxButtons.OK, pass == total ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
                 });
             });
@@ -7410,7 +7411,7 @@ namespace AppManager
             string error;
             bool changed = ApplyStoreEdits(config, edited, out error);
             if (error != null)
-                MessageBox.Show(this, error, "资源存储位置", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(this, error, "资源存储位置", MessageBoxButtons.OK, MessageBoxIcon.Information);
             else if (changed)
             {
                 List<ResourceStoreLocation> applied = config.ResourceStoreLocations;

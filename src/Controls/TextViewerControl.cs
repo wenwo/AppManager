@@ -95,7 +95,7 @@ namespace AppManager.Controls
             {
                 if (paths.Count == 0 || !ConfirmLeave("打开外部程序前，是否保存对“{0}”的修改？", false)) return;
                 if (!Launcher.OpenWith(paths[index]))
-                    MessageBox.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    MessageDialog.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
             Controls.Add(externalButton);
             saveButton = new RoundButton { Text = "保存", Accent = true, Visible = false };
@@ -401,10 +401,10 @@ namespace AppManager.Controls
             try
             {
                 if (File.Exists(path) && File.GetLastWriteTimeUtc(path) != current.LastWriteUtc
-                    && MessageBox.Show(this, "“" + Path.GetFileName(path) + "”已在外部被修改，保存将覆盖这些修改。是否继续？",
+                    && MessageDialog.Show(this, "“" + Path.GetFileName(path) + "”已在外部被修改，保存将覆盖这些修改。是否继续？",
                         "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return false;
-                if (current.MixedNewlines && MessageBox.Show(this, "“" + Path.GetFileName(path) + "”混用了多种换行符，保存后会统一为 "
+                if (current.MixedNewlines && MessageDialog.Show(this, "“" + Path.GetFileName(path) + "”混用了多种换行符，保存后会统一为 "
                         + (newline == "\r\n" ? "CRLF" : newline == "\n" ? "LF" : "CR") + "。是否继续？",
                         "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return false;
@@ -423,7 +423,7 @@ namespace AppManager.Controls
                 try { TextPreview.Write(target, content, encoding); }
                 catch (EncoderFallbackException)
                 {
-                    if (MessageBox.Show(this, "部分字符无法用原编码（" + encoding.EncodingName + "）保存，是否改用 UTF-8 保存？",
+                    if (MessageDialog.Show(this, "部分字符无法用原编码（" + encoding.EncodingName + "）保存，是否改用 UTF-8 保存？",
                             "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                         return false;
                     encoding = new UTF8Encoding(false);
@@ -440,7 +440,7 @@ namespace AppManager.Controls
             {
                 if (!(ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException
                     || ex is NotSupportedException || ex is System.Security.SecurityException)) throw;
-                MessageBox.Show(this, "保存失败：" + ex.Message, "保存", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageDialog.Show(this, "保存失败：" + ex.Message, "保存", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return false;
             }
         }
@@ -466,7 +466,7 @@ namespace AppManager.Controls
         private bool ConfirmLeave(string format, bool discardOnNo)
         {
             if (!HasUnsavedChanges()) return true;
-            DialogResult result = MessageBox.Show(this, string.Format(format, Path.GetFileName(paths[index])), "文本",
+            DialogResult result = MessageDialog.Show(this, string.Format(format, Path.GetFileName(paths[index])), "文本",
                 MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
             if (result == DialogResult.Yes) return Save();
             if (result != DialogResult.No) return false;
@@ -481,7 +481,7 @@ namespace AppManager.Controls
         private void ResolvePendingEdits()
         {
             if (!HasUnsavedChanges()) return;
-            if (MessageBox.Show(this, "是否保存对“" + Path.GetFileName(paths[index]) + "”的修改？", "文本",
+            if (MessageDialog.Show(this, "是否保存对“" + Path.GetFileName(paths[index]) + "”的修改？", "文本",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
                 // 这里无法取消离开，“取消”实为丢弃修改：按钮直接写明“放弃修改”，避免误点。

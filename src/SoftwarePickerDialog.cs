@@ -485,7 +485,7 @@ namespace AppManager
         }
 
         /// <summary>自绘行的列表：记录鼠标悬停行，并且不整块擦除背景（行由 DrawItem 整行重绘）。导入记录窗口复用。</summary>
-        internal sealed class PickerList : ListBox
+        internal sealed class PickerList : ThinScrollListBox
         {
             private const int WM_ERASEBKGND = 0x0014;
             private const int WM_MOUSEWHEEL = 0x020A;

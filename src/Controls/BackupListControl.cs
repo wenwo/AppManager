@@ -37,10 +37,10 @@ namespace AppManager.Controls
         private const string GlyphBackup = "";
         private const string GlyphUndo = "";
 
-        private static readonly Color TintGray = Color.FromArgb(110, 116, 125);
-        private static readonly Color WarningText = Color.FromArgb(176, 96, 0);
-        private static readonly Color DangerText = Color.FromArgb(207, 34, 46);
-        private static readonly Color SelectedFill = Color.FromArgb(246, 250, 255);
+        private static readonly Color TintGray = Theme.NeutralTint;
+        private static readonly Color WarningText = Theme.WarningText;
+        private static readonly Color DangerText = Theme.DangerText;
+        private static readonly Color SelectedFill = Theme.SelectedCard;
 
         private sealed class Card
         {
@@ -89,7 +89,7 @@ namespace AppManager.Controls
         private string busyText;
         private bool enterRepeat;           // 最近一次回车按下是按住不放产生的重复
         private bool enterArmed;            // 回车在本控件上按下过：松开时才发起恢复
-        private readonly ToolTip nameTip = new ToolTip();
+        private readonly ThemedToolTip nameTip = new ThemedToolTip();
         private string nameTipText = string.Empty;
 
         public event Action<LayoutBackupInfo> RestoreRequested;

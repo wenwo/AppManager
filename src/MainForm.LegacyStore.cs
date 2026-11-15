@@ -379,7 +379,7 @@ namespace AppManager
             string head = result.Moved > 0 ? "已把 " + result.Moved + " 个旧文件/文件夹移到资源存储位置（" + resourceRoot + "）。"
                 : "旧文件没有移动，下次启动会再询问。";
             if (lines.Count == 0) { ShowNotice(head); return; }
-            MessageBox.Show(this, head + "\n\n" + string.Join("\n\n", lines), "整理旧文件", MessageBoxButtons.OK,
+            MessageDialog.Show(this, head + "\n\n" + string.Join("\n\n", lines), "整理旧文件", MessageBoxButtons.OK,
                 result.Error != null || result.Failed.Count > 0 ? MessageBoxIcon.Warning : MessageBoxIcon.Information);
         }
 
