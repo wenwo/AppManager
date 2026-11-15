@@ -203,14 +203,21 @@ namespace AppManager
             try
             {
                 DriveInfo drive = new DriveInfo(root);
-                if (!drive.IsReady)
+                // 先看盘符类型（不访问磁盘）：断开的网络映射盘、空光驱查「是否就绪」会卡住调用方（可能是界面线程）几十秒
+                DriveType type = drive.DriveType;
+                if (type == DriveType.Network || type == DriveType.CDRom || type == DriveType.Ram)
                 {
-                    reason = "磁盘未就绪。";
+                    reason = UnsupportedDriveReason(type, true);
                     return false;
                 }
-                if (drive.DriveType != DriveType.Fixed && drive.DriveType != DriveType.Removable)
+                if (!drive.IsReady)
                 {
-                    reason = UnsupportedDriveReason(drive.DriveType, drive.IsReady);
+                    reason = "磁盘未就绪。";   // 包括盘符已消失（拔掉的 U 盘）
+                    return false;
+                }
+                if (type != DriveType.Fixed && type != DriveType.Removable)
+                {
+                    reason = UnsupportedDriveReason(type, true);
                     return false;
                 }
                 if (!Directory.Exists(full))

@@ -35,6 +35,8 @@ namespace AppManager.Controls
         private readonly Strip strip;
         private int wheelRemainder;     // 不足一行的滚轮累计量（单位：delta × 行）
         private bool syncing;
+        // 列表框暂停重绘期间（BeginUpdate，AddRange 内部也会暂停）：逐项增删不同步滑块，恢复重绘时统一同步一次
+        private bool redrawSuspended;
         // 内容是否超出、滑块条是否该显示。不用 strip.Visible 判断：父窗口还没显示时它总是 false
         private bool overflowing;
 
@@ -87,6 +89,12 @@ namespace AppManager.Controls
             return Math.Max(1, rows);
         }
 
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            redrawSuspended = false;   // 新句柄默认允许重绘
+            base.OnHandleCreated(e);
+        }
+
         protected override void OnDrawItem(DrawItemEventArgs e)
         {
             if (overflowing && e.Bounds.Width > strip.Width)
@@ -122,6 +130,7 @@ namespace AppManager.Controls
         protected override void WndProc(ref Message m)
         {
             base.WndProc(ref m);
+            if (m.Msg == WM_SETREDRAW) redrawSuspended = m.WParam == IntPtr.Zero;
             // 没有系统滚动条的列表框不发滚动通知：在可能改变行数、首行或高度的消息处理完之后比对一次
             int msg = m.Msg;
             bool relevant = Array.IndexOf(ChangingMessages, msg) >= 0 || msg == WM_VSCROLL || msg == WM_SIZE || msg == WM_SETREDRAW || msg == WM_KEYDOWN
@@ -132,7 +141,7 @@ namespace AppManager.Controls
 
         private void SyncStrip()
         {
-            if (syncing || !IsHandleCreated || IsDisposed || Disposing || RecreatingHandle) return;
+            if (syncing || redrawSuspended || !IsHandleCreated || IsDisposed || Disposing || RecreatingHandle) return;
             syncing = true;
             try
             {

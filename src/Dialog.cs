@@ -1040,7 +1040,9 @@ namespace AppManager
 
         /// <summary>
         /// 多行文本框只在内容放不下时才显示系统滚动条，内容少时不留一条空滚动条。
-        /// 切换滚动条会重建文本框句柄：先记下光标和选区，重建后放回去，正在输入时不受影响。
+        /// 切换滚动条会重建文本框句柄：先记下光标和选区，重建后放回去。
+        /// 重建会清空撤销记录、打断输入法组字，所以用户正在编辑（有焦点且已有可撤销的输入）时不切换，焦点移到别的控件后再补上；
+        /// 刚打开、程序设置文字时没有撤销记录，照常切换。
         /// </summary>
         internal static void ScrollBarsWhenNeeded(TextBox box)
         {
@@ -1049,6 +1051,7 @@ namespace AppManager
             EventHandler update = delegate
             {
                 if (updating || box.IsDisposed || !box.IsHandleCreated) return;
+                if (!box.ReadOnly && box.Focused && box.CanUndo) return;
                 int lines = box.GetLineFromCharIndex(box.TextLength) + 1;
                 ScrollBars wanted = lines * box.Font.Height > box.ClientSize.Height ? ScrollBars.Vertical : ScrollBars.None;
                 if (box.ScrollBars == wanted) return;
@@ -1066,6 +1069,9 @@ namespace AppManager
             box.HandleCreated += delegate { box.BeginInvoke(update, box, EventArgs.Empty); };
             box.TextChanged += update;
             box.SizeChanged += update;
+            // 焦点移到窗口里别的控件时补上（切到别的程序不算离开，撤销记录保留）。
+            // 用键盘或 Focus() 换焦点时 Leave 先于失去焦点发生，延后到消息循环再判断
+            box.Leave += delegate { if (box.IsHandleCreated && !box.IsDisposed) box.BeginInvoke(update, box, EventArgs.Empty); };
         }
 
         /// <summary>

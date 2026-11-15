@@ -51,9 +51,8 @@ namespace AppManager
 
         public static List<LayoutBackupInfo> List()
         {
-            if (!Monitor.TryEnter(listLock)) return new List<LayoutBackupInfo>();
-            try { return ListCore(); }
-            finally { Monitor.Exit(listLock); }
+            // 等上一次读取（例如刚关掉的窗口留下的后台统计）结束，不返回空列表：空列表会被显示成「还没有备份」。
+            lock (listLock) return ListCore();
         }
 
         private static List<LayoutBackupInfo> ListCore()
@@ -627,6 +626,8 @@ namespace AppManager
         private bool reloadRunning;
         private bool reloadPending;
         private string pendingSelection;
+        /// <summary>操作成功后保持忙碌，直到重新读出的列表换上，避免在已删除或已改名的旧卡片上继续操作。</summary>
+        private bool busyUntilReload;
 
         /// <summary>是否执行过恢复（主窗口据此重载配置与重扫）。</summary>
         public bool Restored;
@@ -725,6 +726,11 @@ namespace AppManager
                         {
                             reloadPending = false;
                             ReloadList(pendingSelection);
+                        }
+                        else if (busyUntilReload)
+                        {
+                            busyUntilReload = false;
+                            ShowBusy(false, null, null);
                         }
                     });
                 }
@@ -842,6 +848,9 @@ namespace AppManager
             }, delegate
             {
                 Restored = true;
+                // 恢复后直接关窗、不刷新列表：先解除忙碌，提示框背后的卡片不停在「正在恢复…」
+                busyUntilReload = false;
+                ShowBusy(false, null, null);
                 MessageDialog.Show(this, "已恢复到" + Quote(info) + "。\r\n恢复前的布局已自动留底，需要时可以回到这里再恢复回去。",
                     "布局备份", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 Close();   // 主窗口在本窗口关闭后重新加载，不必再手动关一次
@@ -913,16 +922,24 @@ namespace AppManager
                     {
                         if (IsDisposed || Disposing) return;
                         operationRunning = false;
-                        ShowBusy(false, null, null);
                         if (error != null)
                         {
+                            ShowBusy(false, null, null);
                             // 失败也可能改动了磁盘（恢复中断会留下不完整的留底、删除可能只删了一半）：先按实际情况刷新列表
                             ReloadList();
                             MessageDialog.Show(this, failPrefix + error, "布局备份",
                                 MessageBoxButtons.OK, MessageBoxIcon.Error);
                             return;
                         }
+                        // 成功后的刷新在后台统计目录大小，可能要几秒：期间保持停用，新列表换上后再解除
+                        busyUntilReload = true;
                         onSuccess();
+                        if (IsDisposed || Disposing) return;
+                        if (!reloadRunning && busyUntilReload)
+                        {
+                            busyUntilReload = false;
+                            ShowBusy(false, null, null);
+                        }
                     });
                 }
                 catch (ObjectDisposedException) { }

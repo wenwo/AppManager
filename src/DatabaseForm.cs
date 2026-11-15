@@ -58,6 +58,8 @@ namespace AppManager
         private readonly RoundButton export = new RoundButton();
         private readonly RoundButton close = new RoundButton();
         private readonly ThemedToolTip tip = new ThemedToolTip();
+        // 切换选中后稍等再读明细：按住方向键划过列表时不为每一行都发起一次整次操作的统计
+        private readonly System.Windows.Forms.Timer detailDelay = new System.Windows.Forms.Timer { Interval = 120 };
         private readonly List<Op> ops = new List<Op>();
 
         private Rectangle leftFrame, rightFrame, tilesRect, noticeRect;   // 已按当前 DPI 换算
@@ -92,6 +94,7 @@ namespace AppManager
             opList.AccessibleName = "操作记录";
             opList.DrawItem += DrawOp;
             opList.SelectedIndexChanged += delegate { Op op = opList.SelectedItem as Op; if (op != null && op != current) ShowOp(op); };
+            detailDelay.Tick += delegate { detailDelay.Stop(); if (!closed && current != null) LoadDetails(false); };
             opList.MouseUp += delegate(object s, MouseEventArgs e)
             {
                 int index = opList.HitRow(e.Location);
@@ -348,8 +351,9 @@ namespace AppManager
             changeList.Items.Clear();
             changeList.ResetHover();
             ApplyUndoState();
-            if (op != null) LoadDetails(false);
-            else detailVersion++;
+            detailVersion++;   // 上一条记录还没回来的明细作废
+            detailDelay.Stop();
+            if (op != null) detailDelay.Start();
         }
 
         /// <summary>按当前记录和最新的业务操作编号，更新说明文字和「撤销」「导出」按钮。</summary>
@@ -454,6 +458,8 @@ namespace AppManager
                     if (error == null) { done(result); return; }
                     status.Text = "没有完成：" + error.Message;
                     MessageDialog.Show(this, "操作没有完成，数据保持原样。\r\n" + error.Message, Text, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    // 失败可能是因为期间有了新操作（撤销会在事务里复查）：重新读一遍，撤销资格不停留在旧状态
+                    if (!closed) LoadHistory(false);
                 });
             });
         }
@@ -942,7 +948,7 @@ namespace AppManager
         protected override void Dispose(bool disposing)
         {
             closed = true;
-            if (disposing) tip.Dispose();
+            if (disposing) { detailDelay.Dispose(); tip.Dispose(); }
             base.Dispose(disposing);
         }
     }

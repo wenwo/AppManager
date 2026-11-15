@@ -112,9 +112,17 @@ namespace AppManager
                 list.ItemHeight = RowHeight;
                 list.AccessibleName = "重复或需要确认的文件";
                 list.DrawItem += DrawRow;
+                // 只在同一行按下并松开时切换：拖到别的行再松开、或在上一个窗口按下后松开到这里，都不算点击
+                int pressedRow = -1;
+                list.MouseDown += delegate(object s, MouseEventArgs e)
+                {
+                    pressedRow = e.Button == MouseButtons.Left ? list.HitRow(e.Location) : -1;
+                };
                 list.MouseUp += delegate(object s, MouseEventArgs e)
                 {
-                    if (e.Button == MouseButtons.Left) Toggle(list.HitRow(e.Location));
+                    int row = pressedRow;
+                    pressedRow = -1;
+                    if (e.Button == MouseButtons.Left && row >= 0 && row == list.HitRow(e.Location)) Toggle(row);
                 };
                 list.KeyDown += delegate(object s, KeyEventArgs e)
                 {

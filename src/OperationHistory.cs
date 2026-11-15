@@ -155,7 +155,7 @@ namespace AppManager
                 && (Titles.ContainsKey(action) || action.StartsWith("migration.", StringComparison.Ordinal));
         }
 
-        /// <summary>扫描时自动产生、与用户操作无关的记录；窗口默认不列出。</summary>
+        /// <summary>扫描时自动产生、与用户操作无关的记录；窗口默认不列出。范围与 LatestBusinessSql 一致：也不挡撤销。</summary>
         internal static bool IsSystem(string action)
         {
             return action != null && action.StartsWith("catalog.", StringComparison.Ordinal);
@@ -622,8 +622,11 @@ namespace AppManager
 
     internal sealed partial class ConfigDatabase
     {
-        /// <summary>只有编号最大的业务操作可以撤销；扫描登记和目录重建不算业务操作，不挡撤销。Undo 与操作记录窗口共用。</summary>
-        private const string LatestBusinessSql = "SELECT max(id) FROM operations WHERE action NOT IN('catalog.discover','catalog.rebuild')";
+        /// <summary>
+        /// 只有编号最大的业务操作可以撤销；catalog.*（扫描登记、重建目录、启动时修复目录）只改可重建的目录投影和标识注册表，
+        /// 撤销后会按需重建，不算业务操作、不挡撤销。Undo 与操作记录窗口共用。
+        /// </summary>
+        private const string LatestBusinessSql = "SELECT max(id) FROM operations WHERE action NOT LIKE 'catalog.%'";
 
         /// <summary>当前唯一可能被撤销的操作编号（是否真的可撤销还取决于操作类型）；没有任何业务操作时为 0。</summary>
         internal long LatestBusinessOperation()

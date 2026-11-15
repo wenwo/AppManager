@@ -174,11 +174,22 @@ namespace AppManager
             return format;
         }
 
+        private bool chosen;
+
         private void Choose(DialogResult result)
         {
+            chosen = true;
             Result = result;
             DialogResult = result;
             Close();
+        }
+
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            // 「是/否」这类 Esc 无效的组合，系统提示框也关不掉：Alt+F4 不能悄悄当成「否」（例如丢掉未保存的修改）。
+            // 关机、程序退出、宿主关闭等非用户关闭照常放行。
+            if (!chosen && escapeResult == DialogResult.None && e.CloseReason == CloseReason.UserClosing) e.Cancel = true;
+            base.OnFormClosing(e);
         }
 
         private const int WM_DPICHANGED = 0x02E0;

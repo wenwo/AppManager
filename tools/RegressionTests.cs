@@ -181,6 +181,8 @@ namespace AppManager
                 Run("review fixes: long text boxes open safely, keyboard restore, left-click only, radio tab stop, MTA fallback", ReviewFollowUps);
                 Run("operation history names actions and explains each change in plain words", OperationHistoryRules);
                 Run("database window lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
+                Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
+                    RetrospectiveFixes);
             }
             finally
             {
@@ -4977,6 +4979,219 @@ namespace AppManager
             }
         }
 
+        private static void RetrospectiveFixes()
+        {
+            // 1. 启动时的「修复项目目录」和扫描登记一样：默认不列出，也不挡住用户上一次操作的撤销
+            Check(OperationHistory.IsSystem("catalog.repair") && OperationHistory.IsSystem("catalog.rebuild")
+                && OperationHistory.IsSystem("catalog.discover") && !OperationHistory.IsSystem("catalogue"), "system record range differs from the undo rule");
+            string path = Path.Combine(root, "retrospective-history", "config.xml");
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            AppConfig c = new AppConfig();
+            c.CustomCategories.Add("工具");
+            Check(c.SaveTo(path), "fixture export");
+            c = ConfigDatabase.Load(path);
+            Check(!c.LoadFailed, c.DatabaseError);
+            c.CustomCategories.Add("游戏");
+            Check(c.Save("OnAddCategory"), c.DatabaseError);
+            long business = c.Database.LatestBusinessOperation();
+            using (Sqlite db = new Sqlite(c.Database.FilePath, false))
+                foreach (string action in new string[] { "catalog.repair", "catalog.discover" })
+                    db.Execute("INSERT INTO operations(utc,action,summary,actor,session,pid) VALUES(?,?,?,?,?,?)",
+                        DateTime.UtcNow.ToString("o"), action, "rows=1", "test", "test", 1);
+            List<string[]> visible = c.Database.HistoryPage(0, 1000, false);
+            Check(c.Database.LatestBusinessOperation() == business && visible.Count > 1 && Convert.ToInt64(visible[0][0]) == business
+                && visible.All(row => !row[2].StartsWith("catalog.")), "a startup repair blocks undo or is listed by default");
+
+            // 1b. 操作记录窗口：切换记录后稍等再读明细；维护操作失败后重新读取记录，撤销资格不停在旧状态
+            using (DatabaseForm dialog = new DatabaseForm(c.Database))
+            {
+                Func<string, object> field = delegate(string name) { return typeof(DatabaseForm).GetField(name, Private).GetValue(dialog); };
+                Func<bool> loaded = delegate
+                {
+                    return (string)field("placeholder") != "正在读取操作记录…" && (string)field("detailText") != "正在读取明细…";
+                };
+                dialog.Opacity = 0;
+                dialog.Show();
+                PumpUntil(loaded, 15000);
+                ListBox ops = (ListBox)field("opList");
+                Control undo = (Control)field("undo");
+                Check(ops.Items.Count > 1 && undo.Visible, "the latest business operation was not offered for undo after a startup repair");
+                ops.SelectedIndex = 1;
+                Check(((System.Windows.Forms.Timer)field("detailDelay")).Enabled && (string)field("detailText") == "正在读取明细…",
+                    "details were read immediately instead of after the selection settled");
+                ops.SelectedIndex = 0;
+                PumpUntil(loaded, 15000);
+                Check(!((System.Windows.Forms.Timer)field("detailDelay")).Enabled && (string)field("detailText") == null, "details never loaded after the selection settled");
+
+                int versionBefore = (int)field("historyVersion");
+                MethodInfo work = typeof(DatabaseForm).GetMethod("Work", Private);
+                Check(AnswerMessageDialog(dialog.Text, 2, delegate
+                {
+                    work.Invoke(dialog, new object[] { "正在测试…", (Func<string>)delegate { throw new IOException("模拟失败"); }, (Action<string>)delegate { } });
+                    PumpUntil(delegate { return !(bool)field("running") && (int)field("historyVersion") > versionBefore; }, 15000);
+                }), "the failure was not reported");
+                Check((int)field("historyVersion") > versionBefore, "a failed maintenance step did not reload the history");
+                PumpUntil(loaded, 15000);
+                dialog.Close();
+            }
+            c.Database.Undo(business);   // 修复和扫描记录更新也不挡：直接能撤销
+
+            // 2. 批量加入（AddRange 内部暂停重绘）期间不逐项同步滑块，恢复重绘后同步一次
+            using (Form host = new Form())
+            {
+                host.ClientSize = new Size(300, 200);
+                SoftwarePickerDialog.PickerList list = new SoftwarePickerDialog.PickerList();
+                list.ItemHeight = 30;
+                list.SetBounds(0, 0, 280, 180);
+                host.Controls.Add(list);
+                IntPtr handle = host.Handle, listHandle = list.Handle;   // 宿主未显示时子控件不会自动建句柄
+                int fullWidth = list.ClientSize.Width;
+                list.BeginUpdate();
+                for (int i = 0; i < 30; i++) list.Items.Add("row " + i);
+                Check(list.RowWidth == fullWidth, "the scrollbar was synced for every row while redraw was suspended");
+                list.EndUpdate();
+                Check(list.RowWidth < fullWidth, "the scrollbar was not synced after redraw resumed");
+                list.Items.Clear();
+                object[] many = Enumerable.Range(0, 5000).Select(i => (object)("item " + i)).ToArray();
+                Stopwatch fill = Stopwatch.StartNew();
+                list.Items.AddRange(many);
+                fill.Stop();
+                Check(list.RowWidth < fullWidth && fill.ElapsedMilliseconds < 2000, "adding 5000 rows was slow or left the scrollbar hidden: " + fill.ElapsedMilliseconds + "ms");
+            }
+
+            // 3. 「是/否」提示框和系统提示框一样关不掉：Alt+F4（用户关闭）不能悄悄当成「否」；有取消的组合照常关闭
+            using (MessageForm yesNo = new MessageForm("保存", "是否保存修改？", new string[] { "是", "否" },
+                new DialogResult[] { DialogResult.Yes, DialogResult.No }, 0, DialogResult.None))
+            {
+                yesNo.Opacity = 0;
+                yesNo.Show();
+                yesNo.Close();
+                Check(yesNo.Visible && !yesNo.IsDisposed, "a yes/no message box closed without an answer");
+                typeof(Control).GetMethod("OnClick", Private).Invoke(FindControlByText(yesNo, "是"), new object[] { EventArgs.Empty });
+                Check(!yesNo.Visible && yesNo.Result == DialogResult.Yes, "answering yes did not close the message box");
+            }
+            using (MessageForm okCancel = new MessageForm("提示", "继续吗？", new string[] { "确定", "取消" },
+                new DialogResult[] { DialogResult.OK, DialogResult.Cancel }, 0, DialogResult.Cancel))
+            {
+                okCancel.Opacity = 0;
+                okCancel.Show();
+                okCancel.Close();
+                Check(!okCancel.Visible && okCancel.Result == DialogResult.Cancel, "a cancellable message box could not be closed");
+            }
+
+            // 4. 重复文件列表：在一行按下、拖到另一行松开不算点击；同一行按下并松开才切换
+            ImportDuplicateReport report = new ImportDuplicateReport();
+            report.Add(ImportDuplicateKind.SameCategoryContent, null, "C:\\in\\a.jpg", "D:\\lib\\a.jpg", "", true, "h1");
+            report.Add(ImportDuplicateKind.SameCategoryContent, null, "C:\\in\\b.jpg", "D:\\lib\\b.jpg", "", true, "h2");
+            ICollection<string> kept = null;
+            using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
+            {
+                probe.Tick += delegate
+                {
+                    Form dialog = FindModalForm();
+                    if (dialog == null) return;
+                    probe.Stop();
+                    dialog.Opacity = 0;
+                    ListBox rows = (ListBox)dialog.GetType().GetField("list", Private).GetValue(dialog);
+                    Rectangle first = rows.GetItemRectangle(0), second = rows.GetItemRectangle(1);
+                    Point a = new Point(first.Left + 20, first.Top + first.Height / 2), b = new Point(second.Left + 20, second.Top + second.Height / 2);
+                    MethodInfo down = typeof(Control).GetMethod("OnMouseDown", Private), up = typeof(Control).GetMethod("OnMouseUp", Private);
+                    down.Invoke(rows, new object[] { new MouseEventArgs(MouseButtons.Left, 1, a.X, a.Y, 0) });
+                    up.Invoke(rows, new object[] { new MouseEventArgs(MouseButtons.Left, 1, b.X, b.Y, 0) });   // 旧逻辑会在这里勾上第二行
+                    down.Invoke(rows, new object[] { new MouseEventArgs(MouseButtons.Left, 1, a.X, a.Y, 0) });
+                    up.Invoke(rows, new object[] { new MouseEventArgs(MouseButtons.Left, 1, a.X, a.Y, 0) });
+                    dialog.GetType().GetMethod("ProcessCmdKey", Private).Invoke(dialog, new object[] { new Message(), Keys.Enter });
+                    if (!dialog.IsDisposed && dialog.Visible) dialog.Close();
+                };
+                probe.Start();
+                kept = ImportDuplicateDialog.Show(null, report);
+            }
+            Check(kept != null && kept.Count == 1 && kept.Contains("C:\\in\\a.jpg"),
+                "dragging across rows toggled the wrong row: " + (kept == null ? "null" : string.Join("|", kept.ToArray())));
+
+            // 5. 正在编辑的多行框不切换滚动条（切换会重建句柄、清空撤销记录），焦点离开后再补上
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000) })
+            {
+                TextBox box = new TextBox { Multiline = true, Bounds = new Rectangle(0, 0, 200, 40) };
+                Button other = new Button { Bounds = new Rectangle(0, 60, 80, 30) };
+                InputDialog.ScrollBarsWhenNeeded(box);
+                host.Controls.Add(box);
+                host.Controls.Add(other);
+                host.Show();
+                Application.DoEvents();
+                box.Focus();
+                Check(box.Focused, "the text box could not take focus");
+                {
+                    IntPtr before = box.Handle;
+                    box.Paste(string.Join("\r\n", Enumerable.Range(0, 30).Select(i => "第 " + i + " 行").ToArray()));
+                    Application.DoEvents();
+                    Check(box.ScrollBars == ScrollBars.None && box.Handle == before && box.CanUndo, "editing recreated the text box and lost its undo history");
+                    other.Focus();
+                    PumpUntil(delegate { return box.ScrollBars == ScrollBars.Vertical; }, 2000);
+                    Check(box.ScrollBars == ScrollBars.Vertical, "the scrollbar did not appear after leaving the overflowing text box");
+                }
+                host.Hide();
+            }
+
+            // 7. 扫描范围：盘符已消失（拔掉的 U 盘）提示「磁盘未就绪」，不说成不支持
+            char missing = "ZYXWVUTSRQPONMLKJIHGFED".FirstOrDefault(letter => new DriveInfo(letter + ":\\").DriveType == DriveType.NoRootDirectory);
+            if (missing != '\0')
+            {
+                string normalized, reason;
+                Check(!LocalScanScope.TryValidate(missing + @":\照片", null, out normalized, out reason) && reason == "磁盘未就绪。",
+                    "a vanished drive was not reported as not ready: " + reason);
+            }
+            else Check(false, "no free drive letter to test a vanished drive");
+
+            // 6. 布局备份：读取正忙时等它结束，不返回空列表（会被显示成「还没有备份」）；操作成功后保持停用直到新列表换上
+            object listLock = typeof(LayoutBackup).GetField("listLock", BindingFlags.NonPublic | BindingFlags.Static).GetValue(null);
+            string backupId = "20260101-retro01";
+            string backupDir = Path.Combine(Paths.BackupsDir, backupId);
+            Directory.CreateDirectory(backupDir);
+            File.WriteAllText(Path.Combine(backupDir, "config.xml"), "<AppConfig />");
+            File.WriteAllText(Path.Combine(backupDir, "meta.xml"), "<Backup name=\"retro\" />");
+            try
+            {
+                List<LayoutBackupInfo> listed = null;
+                Thread reader;
+                Monitor.Enter(listLock);
+                try
+                {
+                    reader = new Thread(delegate() { listed = LayoutBackup.List(); });
+                    reader.Start();
+                    Check(!reader.Join(300), "listing returned while another read held the lock");
+                }
+                finally { Monitor.Exit(listLock); }
+                Check(reader.Join(10000) && listed != null && listed.Any(i => i.Id == backupId), "listing gave up instead of waiting for the earlier read");
+
+                using (BackupForm form = new BackupForm())
+                {
+                    form.Opacity = 0;
+                    form.Show();
+                    Controls.BackupListControl cards = (Controls.BackupListControl)typeof(BackupForm).GetField("list", Private).GetValue(form);
+                    FieldInfo busy = typeof(Controls.BackupListControl).GetField("busy", Private);
+                    FieldInfo running = typeof(BackupForm).GetField("operationRunning", Private);
+                    FieldInfo reloading = typeof(BackupForm).GetField("reloadRunning", Private);
+                    FieldInfo loading = typeof(Controls.BackupListControl).GetField("loading", Private);
+                    PumpUntil(delegate { return !(bool)loading.GetValue(cards) && !(bool)reloading.GetValue(form); }, 15000);
+                    MethodInfo operate = typeof(BackupForm).GetMethod("RunBackupOperation", Private);
+                    Action reload = (Action)Delegate.CreateDelegate(typeof(Action), form, typeof(BackupForm).GetMethod("ReloadList", Private, null, Type.EmptyTypes, null));
+                    Monitor.Enter(listLock);
+                    try
+                    {
+                        operate.Invoke(form, new object[] { backupId, "正在重命名…", "失败：", (Func<string>)delegate { return null; }, reload });
+                        PumpUntil(delegate { return !(bool)running.GetValue(form); }, 15000);
+                        Check(!(bool)running.GetValue(form) && (bool)busy.GetValue(cards), "cards became clickable before the refreshed list arrived");
+                    }
+                    finally { Monitor.Exit(listLock); }
+                    PumpUntil(delegate { return !(bool)busy.GetValue(cards); }, 15000);
+                    Check(!(bool)busy.GetValue(cards) && !(bool)reloading.GetValue(form), "cards stayed disabled after the list was refreshed");
+                    form.Close();
+                }
+            }
+            finally { Directory.Delete(backupDir, true); }
+        }
+
         private static void ThemedToolTipMeasure()
         {
             using (Form host = new Form())
@@ -5072,6 +5287,13 @@ namespace AppManager
                 Check((bool)onUi.Invoke(null, new object[] { noHandle }), "UI thread with an unhandled owner was rejected");
         }
 
+        /// <summary>关掉测试没预料到的模态窗口。「是/否」提示框和系统提示框一样不能直接关，先点「否」或「取消」。</summary>
+        private static void DismissModal(Form modal)
+        {
+            if (modal is MessageForm && (ClickMessageDialog(modal, 7) || ClickMessageDialog(modal, 2))) return;
+            modal.Close();
+        }
+
         private static Form FindModalForm()
         {
             foreach (Form form in Application.OpenForms)
@@ -5133,7 +5355,7 @@ namespace AppManager
                             stray = true;
                             answered = true;
                             if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
-                            if (modal != null) modal.Close();
+                            if (modal != null) DismissModal(modal);
                             return;
                         }
                     }
@@ -5143,7 +5365,7 @@ namespace AppManager
                         IntPtr other = FindOwnDialog(null);
                         if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
                         Form modal = FindModalForm();
-                        if (modal != null) modal.Close();
+                        if (modal != null) DismissModal(modal);
                         timer.Stop();
                     }
                 };
@@ -5207,18 +5429,18 @@ namespace AppManager
                     IntPtr other = FindOwnDialog(null);
                     if (!answered)
                     {
-                        if (modal != null && elapsed.ElapsedMilliseconds > 300) modal.Close();
+                        if (modal != null && elapsed.ElapsedMilliseconds > 300) DismissModal(modal);
                     }
                     else if (modal != null || other != IntPtr.Zero)
                     {
                         stray = true;
-                        if (modal != null) modal.Close();
+                        if (modal != null) DismissModal(modal);
                         if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
                     }
                     if (elapsed.ElapsedMilliseconds > 8000)
                     {
                         stray = true;
-                        if (modal != null) modal.Close();
+                        if (modal != null) DismissModal(modal);
                         if (other != IntPtr.Zero) PostMessage(other, 0x0010, IntPtr.Zero, IntPtr.Zero);
                         timer.Stop();
                     }
