@@ -986,7 +986,7 @@ namespace AppManager
             videoPlayer = new VideoPlayerControl();
             videoPlayer.CloseRequested += OnVideoCloseRequested;     // 全屏时先退全屏再退播放器
             videoPlayer.FullscreenRequested += ToggleVideoFullscreen;
-            videoPlayer.PlaybackStarting += delegate { StopMusicPlayer(); };
+            videoPlayer.PlaybackStarting += delegate { PauseMusicForVideo(); };
             videoPlayer.ResourceContextRequested += delegate(string path, Point screen)
                 { ShowViewerResourceMenu(videoPlayer, path, screen); };
             Controls.Add(videoPlayer);
@@ -4697,7 +4697,7 @@ namespace AppManager
         /// <summary>双击视频：在当前列表的视频序列中打开内置播放器。</summary>
         private void ShowVideoPlayer(AppInfo app)
         {
-            StopMusicPlayer();
+            // 音乐在视频真正开始播放时才暂停（PlaybackStarting）：交给外部程序打开或加载失败时不打断音乐
             List<string> vids = MediaSequence(MediaRules.IsVideo);
             if (vids.Count == 0) { Launcher.Launch(app); return; }
             int idx = vids.FindIndex(delegate(string p) { return string.Equals(p, app.TargetPath, StringComparison.OrdinalIgnoreCase); });
@@ -5033,12 +5033,19 @@ namespace AppManager
             PauseMusicIfUnreachable();
         }
 
+        /// <summary>视频开始播放：暂停音乐，保留列表和进度，看完可在迷你播放器里接着放。</summary>
+        private void PauseMusicForVideo()
+        {
+            musicOpenGeneration++;   // 还没读完的音乐列表作废，免得读完后盖到视频上开播
+            if (musicSession != null) musicSession.Pause();
+        }
+
         /// <summary>停止完整播放器并隐藏界面；即使播放器已经隐藏也必须释放后台会话。</summary>
         private void StopMusicPlayer()
         {
             musicOpenGeneration++;
             if (musicSession == null) return;
-            // 打开设置页、播放视频都会停掉音乐：先记下停之前的列表和进度，退出时仍按它保存
+            // 停止会清空列表和进度：先记下停之前的状态，退出时仍按它保存
             if (musicSession.HasTracks) stoppedMusicState = MusicResumeState.Capture(musicSession, MiniMusicCollectionKey());
             musicSession.Stop();
             if (musicPlayer != null && !musicPlayer.IsDisposed && musicPlayer.Visible) musicPlayer.Visible = false;
@@ -5049,7 +5056,7 @@ namespace AppManager
         // 上次播放状态成功读完前不按“空状态”写回：读取未完成或读取出错（文件被占用、损坏、版本不认识）时，
         // 退出只在本次放过音乐时才保存，避免用默认值冲掉原记录
         private bool musicStateRestored;
-        // 最近一次被设置页、视频等停掉前的播放状态；退出时播放器已空就按它保存
+        // 最近一次被 StopMusicPlayer 停掉前的播放状态；退出时播放器已空就按它保存
         private MusicResumeState stoppedMusicState;
 
         private string MiniMusicCollectionKey()
@@ -7374,7 +7381,7 @@ namespace AppManager
             HideTextViewer();
             HideArchiveViewer();
             HideVideoPlayer();
-            StopMusicPlayer();
+            HideMusicPlayer();   // 只收起完整播放器，音乐继续播放；返回后由迷你播放器接管
             // 重新进入时清掉上次的扫描结果提示；扫描回调丢失时也不让「正在扫描」一直卡住
             if (!scanRunning) settingsRescan = false;
             settingsPage.SetRescanState(settingsRescan

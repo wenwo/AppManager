@@ -138,6 +138,8 @@ namespace AppManager
                 Run("settings in the main window: rescan feedback, storage edits with save rollback, wheel routing", SettingsRescanFeedback);
                 Run("minimize keeps the laid-out controls and restore lays out at the real size", MinimizeKeepsLayout);
                 Run("tray hide keeps the music playlist and current track", TrayHideKeepsMusicPlaylist);
+                Run("opening settings keeps the music playlist and position", SettingsKeepsMusicPlaylist);
+                Run("opening a video pauses music and keeps the playlist and position", VideoKeepsMusicPlaylist);
                 Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
                 Run("collection tree auto-expands and searches only direct members", CollectionTreeSearchAndInfo);
                 Run("collection creation uses active folder scope and enforces tree limits", CollectionCreateScopeAndLimits);
@@ -1514,7 +1516,7 @@ namespace AppManager
         }
 
         // 启动后恢复成暂停在上次位置（不创建播放内核）；退出时把之后的调整写回。
-        // 覆盖真实路径：设置页/视频停掉音乐后退出、读取期间已在放别的、状态文件读取出错。状态文件放在临时数据目录。
+        // 覆盖真实路径：视频停掉音乐后退出、读取期间已在放别的、状态文件读取出错。状态文件放在临时数据目录。
         private static void MusicStateAcrossRestart()
         {
             string stateFile = MusicResumeState.FilePath;
@@ -1531,7 +1533,7 @@ namespace AppManager
                 saved.Tracks.Add(second);
                 saved.Save(stateFile);
 
-                // 一、恢复后调整，再被设置页/视频停掉音乐（共用 StopMusicPlayer），然后正常关闭窗口
+                // 一、恢复后调整，再被视频停掉音乐（StopMusicPlayer），然后正常关闭窗口
                 using (MainForm form = MusicStateForm())
                 {
                     PumpUntil(delegate { return (bool)restored.GetValue(form); }, 10000);
@@ -1552,7 +1554,7 @@ namespace AppManager
                 }
                 MusicResumeState after = MusicResumeState.Load(stateFile);
                 Check(after != null && after.Tracks.Count == 2 && after.Index == 1 && after.Position == 90 && after.Duration == 200,
-                    "music stopped by settings/video was not remembered on exit");
+                    "music stopped by video was not remembered on exit");
                 Check(after.Volume == 45 && !after.Muted && after.Mode == Controls.PlaybackMode.Shuffle
                     && after.CollectionKey == "col:音乐/回归", "exit did not save mode/volume/collection");
                 Check(!File.Exists(stateFile + ".tmp"), "exit left a temporary state file");
@@ -3465,6 +3467,87 @@ namespace AppManager
                 Check(form.Visible && session.PathCount == 1 && session.CurrentPath == song,
                     "restoring from tray lost the music session");
             }
+        }
+
+        // 完整播放器打开时进入设置页：只收起播放器，不清空列表和进度；返回后迷你播放器接管同一会话
+        private static void SettingsKeepsMusicPlaylist()
+        {
+            AppConfig config = RenameConfig("settings-music");
+            config.AutoScan = false;
+            Check(config.Save(), "database fixture save failed");
+            string song = Path.Combine(config.ResourceStorePath, "settings-song.mp3");
+            string next = Path.Combine(config.ResourceStorePath, "settings-next.mp3");
+            using (MainForm form = new MainForm(config))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Size = new Size(1200, 700);
+                form.Show();
+                Application.DoEvents();
+
+                Controls.MusicPlaybackSession session = MusicSessionOf(form);
+                Control player = (Control)typeof(MainForm).GetField("musicPlayer", Private).GetValue(form);
+                Control mini = (Control)typeof(MainForm).GetField("miniMusic", Private).GetValue(form);
+                session.Stop();   // 启动时的后台状态恢复可能先到，测试列表以这里为准
+                Check(session.Restore(new List<string> { song, next }, 1, 42, 180), "fixture could not load a playlist");
+                Invoke(form, "ExpandMiniMusicPlayer", 1);
+                Application.DoEvents();
+                Check(player.Visible, "fixture: full music player did not open");
+
+                Invoke(form, "OpenSettings");
+                Application.DoEvents();
+                Check(!player.Visible, "settings page left the full music player visible");
+                Check(session.PathCount == 2 && session.Index == 1 && session.CurrentPath == next && session.Position == 42,
+                    "opening settings stopped or reset the music session: " + session.PathCount + " @ " + session.Position);
+                Check(typeof(MainForm).GetField("stoppedMusicState", Private).GetValue(form) == null,
+                    "opening settings went through the stop path");
+
+                Invoke(form, "OpenSettings");   // 重复进入为空操作
+                Invoke(form, "CloseSettings");
+                Application.DoEvents();
+                Check(mini.Visible, "mini player not shown after leaving settings");
+                Check(session.PathCount == 2 && session.CurrentPath == next && session.Position == 42,
+                    "leaving settings lost the music session");
+            }
+            // 关闭窗口会写下播放状态：删掉，免得后面的用例启动时恢复出这里的测试列表
+            if (File.Exists(MusicResumeState.FilePath)) File.Delete(MusicResumeState.FilePath);
+        }
+
+        // 打开视频只暂停音乐：视频加载失败、视频开始播放（PlaybackStarting）都不清空音乐列表和进度
+        private static void VideoKeepsMusicPlaylist()
+        {
+            string dir = Path.Combine(root, "video-music");
+            Directory.CreateDirectory(dir);
+            string song = Path.Combine(dir, "song.mp3"), video = Path.Combine(dir, "clip.mp4");
+            File.WriteAllBytes(song, new byte[16]);
+            File.WriteAllBytes(video, new byte[16]);
+            using (MainForm form = MusicStateForm())
+            {
+                Application.DoEvents();
+                Controls.MusicPlaybackSession session = MusicSessionOf(form);
+                session.Stop();   // 启动时的后台状态恢复可能先到，测试列表以这里为准
+                Check(session.Restore(new List<string> { song }, 0, 33, 120), "fixture could not load a playlist");
+                AppInfo clip = new AppInfo { Key = "add:" + video, TargetPath = video, Name = "clip", IsFile = true, Source = "Added" };
+                typeof(MainForm).GetField("shownApps", Private).SetValue(form, new List<AppInfo> { clip });
+
+                Invoke(form, "ShowVideoPlayer", clip);   // 测试环境没有可用的视频内核或文件无效：加载失败
+                Application.DoEvents();
+                Check(session.PathCount == 1 && session.CurrentPath == song && session.Position == 33,
+                    "opening a video cleared the music session: " + session.PathCount + " @ " + session.Position);
+
+                Control player = (Control)typeof(MainForm).GetField("videoPlayer", Private).GetValue(form);
+                Action starting = (Action)typeof(Controls.VideoPlayerControl).GetField("PlaybackStarting", Private).GetValue(player);
+                Check(starting != null, "fixture: video PlaybackStarting has no handler");
+                starting();
+                Check(session.PathCount == 1 && session.CurrentPath == song && session.Position == 33 && !session.IsPlaying,
+                    "video playback start cleared or kept playing the music session");
+                Check(typeof(MainForm).GetField("stoppedMusicState", Private).GetValue(form) == null,
+                    "video playback went through the stop path");
+                Invoke(form, "HideVideoPlayer");
+            }
+            if (File.Exists(MusicResumeState.FilePath)) File.Delete(MusicResumeState.FilePath);
         }
 
         private static void CollectionSidebarTreeInteraction()
