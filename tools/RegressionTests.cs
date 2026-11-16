@@ -189,6 +189,7 @@ namespace AppManager
                 Run("operation history names actions and explains each change in plain words", OperationHistoryRules);
                 Run("database panel lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
                 Run("path picker checks paths, asks before creating or replacing and keeps failed validation in the window", PathPickerFlow);
+                Run("cover picker lists thumbnails, previews, blocks unreadable images, opens typed folders and remembers the last cover", CoverPickerFlow);
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
                 Run("exporting change details writes a temp file first: a failure keeps the old file and leaves no partial file", ExportChangesAtomic);
@@ -6949,6 +6950,154 @@ namespace AppManager
                 }
             }
             finally { File.SetAttributes(locked, FileAttributes.Normal); }
+        }
+
+        private static void CoverPickerFlow()
+        {
+            string dir = Path.Combine(root, "cover-picker");
+            string sub = Path.Combine(dir, "子文件夹");
+            Directory.CreateDirectory(sub);
+            string wide = Path.Combine(dir, "a-宽图.png"), tall = Path.Combine(dir, "b-竖图.png"), broken = Path.Combine(dir, "c-损坏.jpg");
+            using (Bitmap bmp = new Bitmap(16, 10)) bmp.Save(wide, System.Drawing.Imaging.ImageFormat.Png);
+            using (Bitmap bmp = new Bitmap(6, 12)) bmp.Save(tall, System.Drawing.Imaging.ImageFormat.Png);
+            File.WriteAllText(broken, "not an image");
+            File.WriteAllText(Path.Combine(dir, "notes.txt"), "text");
+
+            Check(CoverPickerDialog.IsWithin("C:\\a", "C:\\a\\b") && CoverPickerDialog.IsWithin("C:\\", "C:\\x")
+                && !CoverPickerDialog.IsWithin("C:\\a", "C:\\ab") && !CoverPickerDialog.IsWithin(null, "C:\\a"),
+                "place matching treats a sibling with the same prefix as inside");
+            Check(CoverPickerDialog.DescribeImage(1920, 1080, 2048) == "1920 × 1080 · 2.0 KB" && CoverPickerDialog.DescribeImage(0, 0, -1) == string.Empty,
+                "image description is wrong: " + CoverPickerDialog.DescribeImage(1920, 1080, 2048));
+
+            // 防误点计时：开机 24.9 天后 TickCount 为负、49.7 天回绕，都只按差值判断
+            Check(AppManager.Controls.CoverImageGrid.InSuppressWindow(int.MinValue + 10, int.MinValue + 100, 500)
+                && !AppManager.Controls.CoverImageGrid.InSuppressWindow(int.MinValue + 10, int.MinValue + 900, 500)
+                && AppManager.Controls.CoverImageGrid.InSuppressWindow(int.MaxValue - 100, int.MinValue + 100, 500)
+                && !AppManager.Controls.CoverImageGrid.InSuppressWindow(-5000, -100, 500),
+                "click suppression breaks when the tick count is negative or wraps");
+
+            Type gridType = typeof(AppManager.Controls.CoverImageGrid);
+            Func<object, string, object> field = delegate(object o, string name) { return o.GetType().GetField(name, Private).GetValue(o); };
+            using (CoverPickerDialog picker = new CoverPickerDialog(dir))
+            {
+                picker.Opacity = 0;
+                picker.Show();
+                AppManager.Controls.CoverImageGrid grid = (AppManager.Controls.CoverImageGrid)field(picker, "grid");
+                TextBox box = (TextBox)field(picker, "pathBox");
+                Control confirmButton = (Control)field(picker, "confirmButton");
+                Action confirm = delegate
+                {
+                    picker.Confirm();
+                    PumpUntil(delegate
+                    {
+                        return !(bool)field(picker, "checking") && !(bool)field(picker, "previewLoading") && !(bool)field(picker, "confirmAfterPreview");
+                    }, 15000);
+                };
+                Action<int> select = delegate(int index)
+                {
+                    gridType.GetMethod("SelectIndex", Private).Invoke(grid, new object[] { index, true });
+                    PumpUntil(delegate { return !(bool)field(picker, "previewLoading"); }, 15000);
+                };
+
+                // 先列子文件夹再列图片，不是图片的文件不列；露出来的缩略图在后台解出，解不开的标记失败
+                PumpUntil(delegate { return grid.Count == 4; }, 15000);
+                Check(grid.Count == 4 && !confirmButton.Enabled && box.Text.Length == 0, "folder listing is wrong: " + grid.Count);
+                PumpUntil(delegate { return grid.ThumbCount == 2 && grid.FailedCount == 1; }, 15000);
+                Check(grid.ThumbCount == 2 && grid.FailedCount == 1, "thumbnails did not load: " + grid.ThumbCount + "/" + grid.FailedCount);
+
+                // 解不开的图片：说明原因，不能当封面
+                select(3);
+                Check(box.Text == broken && picker.StatusText.Contains("无法读取") && !confirmButton.Enabled, "an unreadable image was offered: " + picker.StatusText);
+                picker.Confirm();
+                Check(picker.Visible && picker.ResultPath == null, "an unreadable image closed the picker");
+                // 手快：选中后预览还没读完就确定（双击），读完发现解不开也不能返回
+                MethodInfo choose = typeof(CoverPickerDialog).GetMethod("ChooseImage", Private);
+                choose.Invoke(picker, new object[] { tall });
+                choose.Invoke(picker, new object[] { broken });
+                picker.Confirm();
+                PumpUntil(delegate { return !(bool)field(picker, "previewLoading") && !(bool)field(picker, "checking"); }, 15000);
+                Application.DoEvents();
+                Check(picker.Visible && picker.ResultPath == null && picker.StatusText.Contains("无法读取"),
+                    "a fast confirm returned an unreadable image: " + picker.StatusText);
+
+                // 输入文件夹路径确定：进入文件夹，不关闭；上一级回来时光标落在刚才的文件夹上
+                box.Text = sub;
+                confirm();
+                PumpUntil(delegate { return grid.EmptyText.Contains("没有图片"); }, 15000);
+                Check(picker.Visible && (string)field(picker, "currentFolder") == sub && box.Text.Length == 0, "a typed folder was not opened");
+                picker.GoUp();
+                PumpUntil(delegate { return grid.Count == 4; }, 15000);
+                Check((string)field(picker, "currentFolder") == dir && grid.SelectedFolder == sub, "going up did not reveal the folder: " + grid.SelectedFolder);
+
+                // 不存在的图片：留在窗口里说明
+                box.Text = Path.Combine(dir, "没有.png");
+                confirm();
+                Check(picker.Visible && picker.StatusText.Contains("不存在"), "a missing image was not reported: " + picker.StatusText);
+
+                // 刚进入文件夹的双击间隔内不响应点击：双击文件夹的第二下不会把新文件夹里的图片当封面用掉
+                grid.SuppressClicksBriefly();
+                Rectangle cell = (Rectangle)gridType.GetMethod("ClientCell", Private).Invoke(grid, new object[] { 1 });
+                MouseEventArgs click = new MouseEventArgs(MouseButtons.Left, 1, cell.X + cell.Width / 2, cell.Y + cell.Width / 2, 0);
+                gridType.GetMethod("OnMouseDown", Private).Invoke(grid, new object[] { click });
+                gridType.GetMethod("OnMouseDoubleClick", Private).Invoke(grid, new object[] { click });
+                Check(picker.Visible && grid.SelectedImage == null, "a click right after opening a folder chose an image");
+
+                // 从别的文件夹拖进多张：进入图片所在文件夹并选中第一张，「只用第一张」的提示在读完文件夹后仍在
+                picker.Navigate(sub);
+                PumpUntil(delegate { return grid.EmptyText.Contains("没有图片"); }, 15000);
+                picker.DropPath(tall, true);
+                PumpUntil(delegate { return grid.SelectedImage == tall; }, 15000);
+                Application.DoEvents();
+                Check((string)field(picker, "currentFolder") == dir && box.Text == tall && picker.StatusText.Contains("只能选一张"),
+                    "dropping several images lost the notice: " + picker.StatusText);
+
+                // 正常图片：预览给出原始尺寸
+                select(1);
+                Check(box.Text == wide && picker.StatusText.StartsWith("16 × 10") && confirmButton.Enabled, "image preview is wrong: " + picker.StatusText);
+                // 预览还在读时确定：读完能用就继续确定并返回，记住位置
+                choose.Invoke(picker, new object[] { tall });
+                picker.Confirm();
+                Check(picker.Visible && (bool)field(picker, "confirmAfterPreview") && !confirmButton.Enabled, "a confirm during preview did not wait");
+                PumpUntil(delegate { return !picker.Visible; }, 15000);
+                Check(picker.DialogResult == DialogResult.OK && picker.ResultPath == tall, "the chosen image was not returned: " + picker.ResultPath);
+            }
+
+            // 再次打开：回到上次的文件夹并选中上次用的图片
+            using (CoverPickerDialog picker = new CoverPickerDialog(null))
+            {
+                picker.Opacity = 0;
+                picker.Show();
+                AppManager.Controls.CoverImageGrid grid = (AppManager.Controls.CoverImageGrid)field(picker, "grid");
+                PumpUntil(delegate { return grid.SelectedImage != null; }, 15000);
+                Check((string)field(picker, "currentFolder") == dir && grid.SelectedImage == tall && ((TextBox)field(picker, "pathBox")).Text == tall,
+                    "the last cover was not reselected: " + grid.SelectedImage);
+            }
+
+            // 缩略图还在解码时关闭：这一批任务被取消，后台线程全部退出，不抛异常
+            string many = Path.Combine(root, "cover-picker-many");
+            Directory.CreateDirectory(many);
+            for (int i = 0; i < 60; i++)
+                using (Bitmap bmp = new Bitmap(1600, 1200)) bmp.Save(Path.Combine(many, "p" + i + ".png"), System.Drawing.Imaging.ImageFormat.Png);
+            CoverPickerDialog closing = new CoverPickerDialog(many);
+            closing.Opacity = 0;
+            closing.Show();
+            AppManager.Controls.CoverImageGrid closingGrid = (AppManager.Controls.CoverImageGrid)field(closing, "grid");
+            PumpUntil(delegate { return closingGrid.Count == 60; }, 15000);
+            closingGrid.Refresh();   // 画一次，让露出来的格子排队解码
+            object closingBatch = field(closingGrid, "batch");
+            Func<int> active = delegate { lock (closingBatch) return (int)field(closingBatch, "Active"); };
+            Check(active() > 0, "no thumbnail decode was running before closing");
+            closing.Close();
+            closing.Dispose();
+            PumpUntil(delegate { return active() == 0; }, 15000);
+            CancellationTokenSource closingCancel = (CancellationTokenSource)field(closingBatch, "Cancel");
+            Check(closingCancel.IsCancellationRequested && active() == 0 && closingGrid.ThumbCount == 0,
+                "closing the picker left thumbnail work running: active=" + active());
+
+            // 缩略图解码：取正方形中间，解不开返回 null
+            using (Bitmap tile = AppManager.Controls.CoverImageGrid.DecodeTile(tall, 40, CancellationToken.None))
+                Check(tile != null && tile.Width == 40 && tile.Height == 40, "tile decode size is wrong");
+            Check(AppManager.Controls.CoverImageGrid.DecodeTile(broken, 40, CancellationToken.None) == null, "a broken image produced a tile");
         }
 
         private static void DatabaseFormFlow()

@@ -4075,15 +4075,8 @@ namespace AppManager
         /// <summary>信息页「更换封面」：选择图片并回传路径（保存后才写入配置）。</summary>
         private void OnCollectionPickCover()
         {
-            // 只列内置解码器能打开的图片：封面要由程序自己绘制
-            string path = PathPickerDialog.Pick(new PathPickerOptions
-            {
-                Title = "选择集合封面",
-                Hint = "展开文件夹，选中一张图片作封面；也可以在下面粘贴路径或把图片拖进来。",
-                Mode = PathPickerMode.OpenFile,
-                ConfirmText = "使用",
-                Extensions = MediaRules.ImageExt
-            });
+            // 专用的选封面窗口：按缩略图挑图、按封面比例预览；只列内置解码器能打开的图片
+            string path = CoverPickerDialog.Pick();
             if (path != null) collectionInfo.SetEditCoverPath(path, path);
         }
 
