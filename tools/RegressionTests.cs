@@ -6671,6 +6671,95 @@ namespace AppManager
                     confirm(picker);
                     Check(picker.DialogResult == DialogResult.OK && picker.ResultPath == existing, "confirming the replacement did not return the file");
                 }
+
+                // 多选：只允许打开模式；跨文件夹勾选、取消勾选；拖入时跳过类型不符的；确认时已删除的取消勾选并留在窗口；输入框里的路径一并加入
+                bool rejectedMode = false;
+                try { new PathPickerDialog(new PathPickerOptions { Mode = PathPickerMode.Folder, AllowMultiple = true }).Dispose(); }
+                catch (ArgumentException) { rejectedMode = true; }
+                Check(rejectedMode, "multiple selection was allowed outside open-file mode");
+                string sub = Path.Combine(dir, "多选子目录");
+                Directory.CreateDirectory(sub);
+                string first = Path.Combine(dir, "a.db"), second = Path.Combine(sub, "b.db"), doomed = Path.Combine(sub, "c.db");
+                foreach (string file in new string[] { first, second, doomed }) File.WriteAllText(file, "db");
+                Check(PathPickerDialog.UnavailableFiles(new string[] { first, sub, Path.Combine(dir, "没有.db") }).Count == 2,
+                    "a folder or a missing file was treated as an available file");
+                using (PathPickerDialog picker = new PathPickerDialog(new PathPickerOptions
+                {
+                    Title = "测试", Mode = PathPickerMode.OpenFile, AllowMultiple = true, ConfirmText = "添加", InitialFolder = dir, Extensions = db
+                }))
+                {
+                    picker.Opacity = 0;
+                    picker.Show();
+                    ListBox list = (ListBox)field(picker, "list");
+                    PumpUntil(delegate { return list.Items.Cast<object>().Any(r => r.ToString() == "a.db"); }, 15000);
+                    Label notice = (Label)field(picker, "noticeLabel");
+                    Control button = (Control)field(picker, "confirmButton");
+                    Check(!button.Enabled && notice.Text.Contains("勾选"), "confirm was enabled before anything was checked: " + notice.Text);
+                    picker.ToggleFile(first);
+                    picker.ToggleFile(doomed);
+                    picker.ToggleFile(second);
+                    picker.ToggleFile(second);
+                    Check(button.Enabled && notice.Text.Contains("已选 2 个") && notice.Text.Contains("a.db"), "checking and unchecking files: " + notice.Text);
+                    picker.DropMany(new string[] { second, other, first });
+                    Check(notice.Text.Contains("已勾选 1 个") && notice.Text.Contains("1 项") && notice.Text.Contains("跳过"),
+                        "dropping did not add matching files and skip the rest: " + notice.Text);
+                    // 勾选的文件画成勾选框
+                    int fileRow = list.Items.Cast<object>().ToList().FindIndex(r => r.ToString() == "a.db");
+                    using (Bitmap canvas = new Bitmap(600, 60))
+                    using (Graphics g = Graphics.FromImage(canvas))
+                        typeof(PathPickerDialog).GetMethod("DrawRow", Private).Invoke(picker, new object[] { list,
+                            new DrawItemEventArgs(g, list.Font, new Rectangle(0, 0, 600, 40), fileRow, DrawItemState.None) });
+                    // 快速点两下：勾上又取消（双击的第二下 Clicks == 2 同样切换），双击本身不会确定
+                    list.TopIndex = fileRow;
+                    Rectangle cell = list.GetItemRectangle(fileRow);
+                    MouseEventArgs press = new MouseEventArgs(MouseButtons.Left, 1, cell.Right - 20, cell.Top + cell.Height / 2, 0);
+                    MouseEventArgs repress = new MouseEventArgs(MouseButtons.Left, 2, press.X, press.Y, 0);
+                    typeof(PathPickerDialog).GetMethod("List_MouseDown", Private).Invoke(picker, new object[] { list, press });
+                    Check(!((List<string>)field(picker, "checkedFiles")).Contains(first), "a click did not uncheck the file");
+                    typeof(PathPickerDialog).GetMethod("List_MouseDown", Private).Invoke(picker, new object[] { list, repress });
+                    typeof(PathPickerDialog).GetMethod("List_MouseDoubleClick", Private).Invoke(picker, new object[] { list, repress });
+                    Check(picker.Visible && !(bool)field(picker, "checking") && ((List<string>)field(picker, "checkedFiles")).Contains(first),
+                        "a quick double click submitted the batch or left the file unchecked");
+                    File.Delete(doomed);
+                    confirm(picker);
+                    Check(picker.Visible && picker.ResultPaths == null && notice.Text.Contains("c.db") && notice.Text.Contains("剩下的 2 个"),
+                        "a deleted file was returned or the picker closed: " + notice.Text);
+                    ((TextBox)field(picker, "pathBox")).Text = existing;
+                    confirm(picker);
+                    Check(picker.DialogResult == DialogResult.OK && picker.ResultPaths != null
+                        // a.db 在上面的双击测试里取消后重新勾上，排到了 b.db 后面
+                        && picker.ResultPaths.SequenceEqual(new string[] { second, first, existing }) && picker.ResultPath == second,
+                        "checked and typed files were not returned in order: " + (picker.ResultPaths == null ? "null" : string.Join(" | ", picker.ResultPaths)));
+                }
+                using (PathPickerDialog picker = new PathPickerDialog(new PathPickerOptions
+                {
+                    Title = "测试", Mode = PathPickerMode.OpenFile, AllowMultiple = true, InitialFolder = dir, Extensions = db
+                }))
+                {
+                    picker.Opacity = 0;
+                    picker.Show();
+                    // Ctrl+A：勾上文件夹里列出的全部文件，再按一次全部取消
+                    ListBox list = (ListBox)field(picker, "list");
+                    PumpUntil(delegate { return list.Items.Cast<object>().Any(r => r.ToString() == "a.db"); }, 15000);
+                    int omittedHere;
+                    string listError;
+                    int listed = PathPickerDialog.ListFiles(dir, db, out omittedHere, out listError).Count;
+                    picker.ToggleFolderFiles(dir);
+                    Check(listed >= 3 && ((List<string>)field(picker, "checkedFiles")).Count == listed, "select-all did not check every listed file");
+                    picker.ToggleFolderFiles(dir);
+                    Check(((List<string>)field(picker, "checkedFiles")).Count == 0, "a second select-all did not clear the folder");
+                    Check(PathPickerDialog.DescribeExtensions(new string[] { ".a", ".b" }) == ".a / .b"
+                        && PathPickerDialog.DescribeExtensions(MediaRules.ImageExt).EndsWith("等 " + MediaRules.ImageExt.Length + " 种"),
+                        "long extension lists were not shortened");
+                    string[] overLimit = new string[PathPickerDialog.MaxCheckedFiles + 1];
+                    for (int i = 0; i < overLimit.Length; i++) overLimit[i] = Path.Combine(dir, "上限", i + ".db");
+                    picker.DropMany(overLimit);
+                    Label notice = (Label)field(picker, "noticeLabel");
+                    Check(((List<string>)field(picker, "checkedFiles")).Count == PathPickerDialog.MaxCheckedFiles && notice.Text.Contains("最多"),
+                        "the checked-file limit was not enforced: " + notice.Text);
+                    picker.ToggleFile(Path.Combine(dir, "再加一个.db"));
+                    Check(((List<string>)field(picker, "checkedFiles")).Count == PathPickerDialog.MaxCheckedFiles, "toggling passed the limit");
+                }
             }
             finally { File.SetAttributes(locked, FileAttributes.Normal); }
         }

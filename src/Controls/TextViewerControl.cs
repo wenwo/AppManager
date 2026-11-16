@@ -414,11 +414,17 @@ namespace AppManager.Controls
                 if (!File.Exists(path))
                 {
                     // 原文件已被外部删除/移走：写回必然失败，提供另存为
-                    using (SaveFileDialog pick = new SaveFileDialog { FileName = Path.GetFileName(path), OverwritePrompt = true })
+                    // 不限扩展名：文本查看器能打开多种文本格式，另存时按用户写的文件名保存
+                    target = PathPickerDialog.Pick(new PathPickerOptions
                     {
-                        if (pick.ShowDialog(this) != DialogResult.OK) return false;
-                        target = pick.FileName;
-                    }
+                        Title = "另存为",
+                        Hint = "原文件已被删除或移走，选一个位置另存；可以在下面改文件名。",
+                        Mode = PathPickerMode.SaveFile,
+                        ConfirmText = "保存",
+                        InitialFolder = Path.GetDirectoryName(path),
+                        FileName = Path.GetFileName(path)
+                    });
+                    if (target == null) return false;
                 }
                 try { TextPreview.Write(target, content, encoding); }
                 catch (EncoderFallbackException)

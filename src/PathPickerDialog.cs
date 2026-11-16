@@ -27,7 +27,9 @@ namespace AppManager
         internal string[] Extensions = new string[0];
         /// <summary>选文件夹时允许填一个还不存在的路径（再确认一次后新建）。</summary>
         internal bool AllowCreateFolder;
-        /// <summary>选定后、关闭前的业务校验（界面线程调用）：返回错误说明则留在窗口里显示，返回 null 表示通过。</summary>
+        /// <summary>打开模式下允许勾选多个文件（可以跨文件夹）；由 PickMany 打开，结果见 ResultPaths。</summary>
+        internal bool AllowMultiple;
+        /// <summary>选定后、关闭前的业务校验（界面线程调用）：返回错误说明则留在窗口里显示，返回 null 表示通过。多选时逐个校验。</summary>
         internal Func<string, string> Validate;
     }
 
@@ -58,6 +60,8 @@ namespace AppManager
         private const int ChevronWidth = 20;
         private const int IconSize = 18;
         internal const int MaxListedFiles = 500;
+        /// <summary>多选时一次最多勾选的文件数。</summary>
+        internal const int MaxCheckedFiles = 1000;
         private const int EM_SETCUEBANNER = 0x1501;
 
         private const string GlyphFolder = "\uE8B7";
@@ -120,9 +124,13 @@ namespace AppManager
         private bool checking;
         private int checkVersion;
         private bool settingText;         // 程序改写输入框时不清掉提示和待确认状态
+        private readonly List<string> checkedFiles = new List<string>();   // 多选：按勾选先后
+        private readonly HashSet<string> checkedSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>确定后的完整路径（保存模式已补好扩展名）。</summary>
+        /// <summary>确定后的完整路径（保存模式已补好扩展名；多选时是第一个）。</summary>
         internal string ResultPath;
+        /// <summary>多选确定后的全部文件，按勾选先后。</summary>
+        internal List<string> ResultPaths;
 
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, string lParam);
@@ -137,9 +145,24 @@ namespace AppManager
             }
         }
 
+        /// <summary>以模态方式显示可多选文件的窗口（打开模式），返回勾选的全部文件；取消返回 null。</summary>
+        internal static List<string> PickMany(PathPickerOptions options)
+        {
+            if (options == null) throw new ArgumentNullException("options");
+            options.Mode = PathPickerMode.OpenFile;
+            options.AllowMultiple = true;
+            using (PathPickerDialog dialog = new PathPickerDialog(options))
+            {
+                ConfirmDialog.ShowModal(dialog);
+                return dialog.DialogResult == DialogResult.OK ? dialog.ResultPaths : null;
+            }
+        }
+
         internal PathPickerDialog(PathPickerOptions options)
         {
             if (options == null) throw new ArgumentNullException("options");
+            if (options.AllowMultiple && options.Mode != PathPickerMode.OpenFile)
+                throw new ArgumentException("只有打开文件时可以多选。", "options");
             this.options = options;
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
@@ -170,9 +193,10 @@ namespace AppManager
 
             list.DrawMode = DrawMode.OwnerDrawVariable;
             list.SetBounds(listFrame.X + 4, listFrame.Y + 4, listFrame.Width - 8, listFrame.Height - 8);
-            list.AccessibleName = options.Mode == PathPickerMode.Folder ? "文件夹" : "文件夹和文件";
+            list.AccessibleName = options.Mode == PathPickerMode.Folder ? "文件夹" : Multi ? "文件夹和可勾选的文件" : "文件夹和文件";
             list.MeasureItem += MeasureRow;
             list.DrawItem += DrawRow;
+            list.MouseDown += List_MouseDown;
             list.MouseUp += List_MouseUp;
             list.MouseDoubleClick += List_MouseDoubleClick;
             list.KeyDown += List_KeyDown;
@@ -232,8 +256,11 @@ namespace AppManager
             RefreshRows();
         }
 
+        private bool Multi { get { return options.AllowMultiple; } }
+
         private string DefaultHint()
         {
+            if (Multi) return "点左侧箭头展开文件夹，点文件勾选，可以在几个文件夹里一起选；也可以把多个文件拖进来。";
             switch (options.Mode)
             {
                 case PathPickerMode.OpenFile: return "点左侧箭头展开文件夹，选中要打开的文件；也可以在下面粘贴路径或把文件拖进来。";
@@ -244,6 +271,7 @@ namespace AppManager
 
         private string CueText()
         {
+            if (Multi) return "也可以粘贴一个文件路径，确定时和勾选的一起加入";
             switch (options.Mode)
             {
                 case PathPickerMode.OpenFile: return "粘贴或输入文件路径，也可以把文件拖进来";
@@ -380,6 +408,7 @@ namespace AppManager
                 return;
             }
             if (dropped == null || dropped.Length == 0) return;
+            if (Multi) { DropMany(dropped); return; }
             string path = dropped[0];
             bool folder = false;
             try { folder = Directory.Exists(path); } catch { }
@@ -389,6 +418,89 @@ namespace AppManager
             if (dropped.Length > 1) SetNotice("一次只能选一项，已使用第一项：" + path, false);
             else RefreshNotice();
             list.Invalidate();
+        }
+
+        /// <summary>
+        /// 多选时拖进来的文件全部勾上；类型不符的跳过并说明。这里只看扩展名、不访问磁盘（网络路径会卡住界面），
+        /// 是否存在、是不是文件夹留到确定时在后台检查。
+        /// </summary>
+        internal void DropMany(string[] dropped)
+        {
+            if (checking) return;
+            int added = 0, skipped = 0, over = 0;
+            foreach (string item in dropped)
+            {
+                if (string.IsNullOrEmpty(item) || !HasExtension(item, options.Extensions)) { skipped++; continue; }
+                if (checkedSet.Contains(item)) continue;
+                if (checkedFiles.Count >= MaxCheckedFiles) { over++; continue; }
+                AddChecked(item);
+                added++;
+            }
+            list.Invalidate();
+            if (over > 0) SetNotice("一次最多选 " + MaxCheckedFiles + " 个文件，有 " + over + " 个没有加入。", true);
+            else if (skipped > 0)
+                SetNotice("已勾选 " + added + " 个；" + skipped + " 项不是" + (ExtensionText().Length > 0 ? " " + ExtensionText() : "可选的") + "文件，已跳过。", false);
+            else { notice = null; RefreshNotice(); }
+        }
+
+        /// <summary>多选：切换一个文件的勾选；超过上限时提示，不勾上。检查期间不改动勾选。</summary>
+        internal void ToggleFile(string path)
+        {
+            if (checking || string.IsNullOrEmpty(path)) return;
+            if (checkedSet.Contains(path)) RemoveChecked(path);
+            else if (checkedFiles.Count >= MaxCheckedFiles) { SetNotice("一次最多选 " + MaxCheckedFiles + " 个文件。", true); return; }
+            else AddChecked(path);
+            notice = null;
+            RefreshNotice();
+            list.Invalidate();
+        }
+
+        /// <summary>
+        /// 多选 Ctrl+A：当前行所在文件夹（选中的是展开的文件夹时就是它自己）里列出的文件全部勾上；
+        /// 已经全部勾上时全部取消。只处理清单里列出的文件，超过上限的不勾。
+        /// </summary>
+        private void ToggleFolderFiles(Row row)
+        {
+            ToggleFolderFiles(row == null || row.Path == null ? null
+                : row.Kind == RowKind.File ? Path.GetDirectoryName(row.Path) : row.Expanded ? row.Path : null);
+        }
+
+        internal void ToggleFolderFiles(string folder)
+        {
+            if (checking) return;
+            Contents current;
+            if (folder == null || !contents.TryGetValue(folder, out current) || current.Loading || current.Files.Count == 0)
+            {
+                SetNotice("先展开一个文件夹，或选中其中的文件，再按 Ctrl+A 全选里面列出的文件。", false);
+                return;
+            }
+            bool all = true;
+            foreach (string file in current.Files) if (!checkedSet.Contains(file)) { all = false; break; }
+            int changed = 0, over = 0;
+            foreach (string file in current.Files)
+            {
+                if (all) { RemoveChecked(file); changed++; continue; }
+                if (checkedSet.Contains(file)) continue;
+                if (checkedFiles.Count >= MaxCheckedFiles) { over++; continue; }
+                AddChecked(file);
+                changed++;
+            }
+            list.Invalidate();
+            string name = Path.GetFileName(folder.TrimEnd('\\'));
+            if (name.Length == 0) name = folder;
+            if (over > 0) SetNotice("一次最多选 " + MaxCheckedFiles + " 个文件，「" + name + "」里有 " + over + " 个没有勾上。", true);
+            else SetNotice((all ? "已取消勾选「" : "已勾选「") + name + "」里列出的 " + changed + " 个文件；共选 " + checkedFiles.Count + " 个。", false);
+        }
+
+        private void AddChecked(string path)
+        {
+            if (checkedSet.Add(path)) checkedFiles.Add(path);
+        }
+
+        private void RemoveChecked(string path)
+        {
+            if (!checkedSet.Remove(path)) return;
+            checkedFiles.RemoveAll(delegate(string value) { return string.Equals(value, path, StringComparison.OrdinalIgnoreCase); });
         }
 
         // ===== 目录读取 =====
@@ -578,7 +690,8 @@ namespace AppManager
             foreach (string file in current.Files)
                 rows.Add(new Row { Kind = RowKind.File, Title = Path.GetFileName(file), Path = file, Depth = depth });
             if (current.Omitted > 0)
-                rows.Add(new Row { Kind = RowKind.Note, Title = "还有 " + current.Omitted + " 项没有列出，可以在下面直接输入路径。", Depth = depth, Enabled = false });
+                rows.Add(new Row { Kind = RowKind.Note, Title = "还有 " + current.Omitted + " 项没有列出，可以在下面直接输入路径"
+                    + (Multi ? "，或从资源管理器全选后拖进来。" : "。"), Depth = depth, Enabled = false });
             else if (current.Error == null && current.Folders.Count == 0 && current.Files.Count == 0)
                 rows.Add(new Row { Kind = RowKind.Note, Title = options.Mode == PathPickerMode.Folder ? "没有子文件夹" : "没有子文件夹或可选的文件", Depth = depth, Enabled = false });
         }
@@ -594,31 +707,50 @@ namespace AppManager
             return Dpi(IndentBase + row.Depth * IndentStep + ChevronWidth + 2);
         }
 
+        /// <summary>
+        /// 多选时文件行每按一下就切换一次勾选，快速点两下等于勾上又取消；双击不会确定，
+        /// 避免想撤销勾选时把整批文件提交出去。
+        /// </summary>
+        private void List_MouseDown(object sender, MouseEventArgs e)
+        {
+            if (!Multi || e.Button != MouseButtons.Left) return;
+            int index = list.HitRow(e.Location);
+            Row row = RowAt(index);
+            if (row == null || !row.Enabled || row.Kind != RowKind.File) return;
+            list.SelectedIndex = index;
+            ToggleFile(row.Path);
+        }
+
         private void List_MouseUp(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
             int index = list.HitRow(e.Location);
             Row row = RowAt(index);
             if (row == null || !row.Enabled) return;
+            if (Multi && row.Kind == RowKind.File) return;   // 已在按下时切换
             if (row.Expandable && e.X < IconLeft(row)) ToggleExpand(index);
             else Choose(index);
         }
 
-        /// <summary>双击文件：选中并确定；双击文件夹：展开或收起（打开模式下单击文件夹只选中这一行，同样双击展开）。</summary>
+        /// <summary>
+        /// 双击文件：选中并确定（多选时不确定，每一下都已在按下时切换勾选）；
+        /// 双击文件夹：展开或收起（打开模式下单击文件夹只选中这一行，同样双击展开）。
+        /// </summary>
         private void List_MouseDoubleClick(object sender, MouseEventArgs e)
         {
             if (e.Button != MouseButtons.Left) return;
             int index = list.HitRow(e.Location);
             Row row = RowAt(index);
             if (row == null || !row.Enabled || (row.Expandable && e.X < IconLeft(row))) return;
-            if (row.Kind == RowKind.File) Confirm();
+            if (row.Kind == RowKind.File) { if (!Multi) Confirm(); }
             else if (row.Expandable) ToggleExpand(index);
         }
 
         private void List_KeyDown(object sender, KeyEventArgs e)
         {
             Row row = RowAt(list.SelectedIndex);
-            if (e.KeyCode == Keys.Space) Choose(list.SelectedIndex);
+            if (Multi && e.Control && e.KeyCode == Keys.A) ToggleFolderFiles(row);
+            else if (e.KeyCode == Keys.Space) Choose(list.SelectedIndex);
             else if (e.KeyCode == Keys.Down) MoveSelection(1);
             else if (e.KeyCode == Keys.Up) MoveSelection(-1);
             else if (e.KeyCode == Keys.Right) { if (row != null && row.Expandable && !row.Expanded) ToggleExpand(list.SelectedIndex); }
@@ -660,6 +792,7 @@ namespace AppManager
             Row row = RowAt(index);
             if (row == null || !row.Enabled || row.Path == null) return;
             list.SelectedIndex = index;
+            if (Multi && row.Kind == RowKind.File) { ToggleFile(row.Path); return; }
             if (row.Kind == RowKind.File) SetPathText(row.Path);
             else if (options.Mode == PathPickerMode.OpenFile) { list.Invalidate(); return; }
             else if (options.Mode == PathPickerMode.SaveFile) ChooseFolder(row.Path);
@@ -729,6 +862,12 @@ namespace AppManager
                 noticeLabel.Text = notice;
                 noticeLabel.ForeColor = noticeIsError ? Theme.DeleteRed : Theme.WarningText;
             }
+            else if (Multi)
+            {
+                bool any = checkedFiles.Count > 0 || pathBox.Text.Trim().Length > 0;
+                noticeLabel.ForeColor = any ? Theme.AccentText : Theme.TextSecondary;
+                noticeLabel.Text = MultiSummary();
+            }
             else
             {
                 string text = pathBox.Text.Trim();
@@ -739,15 +878,35 @@ namespace AppManager
                 else
                     noticeLabel.Text = (options.Mode == PathPickerMode.SaveFile ? "将保存为：" : "已选：") + text;
             }
-            bool ready = !checking && pathBox.Text.Trim().Length > 0;
+            bool ready = !checking && (pathBox.Text.Trim().Length > 0 || (Multi && checkedFiles.Count > 0));
             confirmButton.Enabled = ready;
             confirmButton.Accent = ready;
+        }
+
+        /// <summary>多选时提示行：勾了几个、前几个叫什么；输入框里还有路径时说明会一起加入。</summary>
+        private string MultiSummary()
+        {
+            string typed = pathBox.Text.Trim();
+            if (checkedFiles.Count == 0)
+                return typed.Length == 0 ? "勾选要添加的" + (ExtensionText().Length > 0 ? " " + ExtensionText() : string.Empty) + "文件，可以在几个文件夹里一起选；Ctrl+A 全选当前文件夹。" : "已选：" + typed;
+            List<string> names = new List<string>();
+            for (int i = 0; i < checkedFiles.Count && i < 3; i++) names.Add(Path.GetFileName(checkedFiles[i]));
+            string text = "已选 " + checkedFiles.Count + " 个：" + string.Join("、", names.ToArray()) + (checkedFiles.Count > 3 ? " 等" : string.Empty);
+            return typed.Length == 0 ? text : text + "；另加输入框里的路径";
         }
 
         private string ExtensionText()
         {
             return options.Extensions == null || options.Extensions.Length == 0 ? string.Empty
-                : string.Join(" / ", options.Extensions) + " ";
+                : DescribeExtensions(options.Extensions) + " ";
+        }
+
+        /// <summary>提示里写的类型：不超过 4 种全部列出，再多只列前 3 种加总数，免得一行提示被扩展名占满、截掉真正的说明。</summary>
+        internal static string DescribeExtensions(string[] extensions)
+        {
+            if (extensions == null || extensions.Length == 0) return string.Empty;
+            if (extensions.Length <= 4) return string.Join(" / ", extensions);
+            return string.Join(" / ", extensions, 0, 3) + " 等 " + extensions.Length + " 种";
         }
 
         // ===== 确定 =====
@@ -759,6 +918,7 @@ namespace AppManager
         internal void Confirm()
         {
             if (checking) return;
+            if (Multi) { ConfirmMany(); return; }
             string reason;
             string cleaned = LocalScanScope.CleanTypedPath(pathBox.Text, out reason);
             if (cleaned == null)
@@ -820,6 +980,90 @@ namespace AppManager
             Close();
         }
 
+        /// <summary>
+        /// 多选确定：输入框里有路径时先按打开文件检查它，通过后并入勾选；再在后台核对每个勾选的文件现在还在。
+        /// 已经不在（或其实是文件夹）的取消勾选并说明，留在窗口里让用户再确认剩下的，不会把失效路径交给调用方。
+        /// </summary>
+        private void ConfirmMany()
+        {
+            string cleaned = null;
+            if (pathBox.Text.Trim().Length > 0)
+            {
+                string reason;
+                cleaned = LocalScanScope.CleanTypedPath(pathBox.Text, out reason);
+                if (cleaned == null) { SetNotice(reason ?? "路径格式不正确。", true); return; }
+            }
+            else if (checkedFiles.Count == 0) { SetNotice("请先勾选文件。", true); return; }
+            checking = true;
+            confirmButton.Text = "正在检查…";
+            RefreshNotice();
+            int version = ++checkVersion;
+            string[] extensions = options.Extensions;
+            List<string> chosen = new List<string>(checkedFiles);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                PathPickerCheck typed = null;
+                List<string> gone;
+                try
+                {
+                    if (cleaned != null) typed = CheckPath(PathPickerMode.OpenFile, cleaned, extensions, false, null, null);
+                    gone = UnavailableFiles(chosen);
+                }
+                catch (Exception ex)
+                {
+                    Paths.LogError(ex);
+                    typed = new PathPickerCheck { Error = ex.Message };
+                    gone = new List<string>();
+                }
+                Post(delegate { if (version == checkVersion) FinishConfirmMany(typed, gone); });
+            });
+        }
+
+        private void FinishConfirmMany(PathPickerCheck typed, List<string> gone)
+        {
+            checking = false;
+            confirmButton.Text = options.ConfirmText;
+            if (typed != null)
+            {
+                if (typed.Error != null) { SetNotice(typed.Error, true); return; }
+                if (!checkedSet.Contains(typed.Path) && checkedFiles.Count >= MaxCheckedFiles)
+                {
+                    SetNotice("一次最多选 " + MaxCheckedFiles + " 个文件，输入框里的文件没有加入。", true);
+                    return;
+                }
+                AddChecked(typed.Path);
+                SetPathText(string.Empty);
+            }
+            list.Invalidate();
+            if (gone.Count > 0)
+            {
+                foreach (string path in gone) RemoveChecked(path);
+                SetNotice(gone.Count + " 个已选的文件已不存在或不是文件（" + Path.GetFileName(gone[0]) + (gone.Count > 1 ? " 等" : string.Empty)
+                    + "），已取消勾选" + (checkedFiles.Count > 0 ? "；确认剩下的 " + checkedFiles.Count + " 个请再点一次「" + options.ConfirmText + "」。" : "。"), true);
+                return;
+            }
+            if (checkedFiles.Count == 0) { SetNotice("请先勾选文件。", true); return; }
+            foreach (string path in checkedFiles)
+            {
+                string error = RunValidate(path);
+                if (error != null) { SetNotice(error, true); return; }
+            }
+            ResultPaths = new List<string>(checkedFiles);
+            ResultPath = ResultPaths[0];
+            lastFolder = Path.GetDirectoryName(ResultPath);
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        /// <summary>列出现在已经不存在、或其实是文件夹的路径（会访问磁盘，只在后台线程调用）。</summary>
+        internal static List<string> UnavailableFiles(IEnumerable<string> paths)
+        {
+            List<string> gone = new List<string>();
+            foreach (string path in paths)
+                if (!File.Exists(path)) gone.Add(path);
+            return gone;
+        }
+
         /// <summary>调用方的业务校验；没有校验时返回 null。校验本身出错时记日志并当作不通过，窗口留着可以换个路径重试。</summary>
         private string RunValidate(string path)
         {
@@ -874,7 +1118,7 @@ namespace AppManager
             if (mode == PathPickerMode.OpenFile)
             {
                 result.Path = full;
-                if (!HasExtension(name, extensions)) result.Error = "只能选择 " + string.Join(" / ", extensions) + " 文件。";
+                if (!HasExtension(name, extensions)) result.Error = "只能选择 " + DescribeExtensions(extensions) + " 文件。";
                 else if (!File.Exists(full)) result.Error = "文件不存在或当前不可访问。";
                 return result;
             }
@@ -913,6 +1157,7 @@ namespace AppManager
         private bool IsChosen(Row row)
         {
             if (row.Path == null) return false;
+            if (Multi && row.Kind == RowKind.File && checkedSet.Contains(row.Path)) return true;
             string text = pathBox.Text.Trim().Trim('"');
             if (text.Length == 0) return false;
             string target = options.Mode == PathPickerMode.SaveFile && row.Kind != RowKind.File ? SafeDirectory(text) : text;
@@ -975,7 +1220,9 @@ namespace AppManager
             string glyph = item.Kind == RowKind.File ? GlyphFile : item.Kind == RowKind.Drive ? GlyphDrive : GlyphFolder;
             Color iconColor = !item.Enabled ? Theme.TextTertiary : chosen ? Theme.Accent
                 : item.Kind == RowKind.File ? Theme.TextSecondary : Color.FromArgb(232, 160, 40);
-            Draw.DrawGlyph(g, glyph, icon, iconColor);
+            // 多选时文件行的图标位置换成勾选框
+            if (Multi && item.Kind == RowKind.File) Draw.DrawCheckBox(g, icon, checkedSet.Contains(item.Path), item.Enabled, CurrentDpi);
+            else Draw.DrawGlyph(g, glyph, icon, iconColor);
 
             int textX = icon.Right + Dpi(10);
             int textWidth = Math.Max(0, row.Right - textX - Dpi(10));

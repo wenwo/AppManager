@@ -959,8 +959,8 @@ namespace AppManager
                 && MediaRules.IsImageDocument(@"C:\a\photo.rw2"), "RW2 image classification");
             Check(MediaRules.MatchCategoryExt("照片", "photo.rw2") && MediaRules.MatchCategoryExt("证件", "photo.RW2"),
                 "RW2 category inheritance");
-            Check(MediaRules.ResourceCategoryFilter("照片").Contains("*.rw2")
-                && MediaRules.DecodableImageFilter().Contains("*.rw2"), "RW2 filters");
+            Check(Array.IndexOf(MediaRules.ResourceCategoryExt("照片"), ".rw2") >= 0
+                && Array.IndexOf(MediaRules.ImageExt, ".rw2") >= 0, "RW2 filters");
             Check(!MediaRules.IsRawImage("photo.jpg") && MediaRules.IsImage("photo.jpg"), "JPEG affected by raw rule");
 
             DateTime taken;

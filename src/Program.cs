@@ -62,7 +62,12 @@ namespace AppManager
                 Application.SetCompatibleTextRenderingDefault(false);
                 // 全局异常兜底：UI 线程与后台线程异常都写入 error.log，避免无声崩溃
                 Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-                Application.ThreadException += delegate(object s, ThreadExceptionEventArgs te) { Paths.LogError(te.Exception); };
+                Application.ThreadException += delegate(object s, ThreadExceptionEventArgs te)
+                {
+                    Paths.LogError(te.Exception);
+                    Action hook = uiErrorHook;
+                    if (hook != null) hook();
+                };
                 AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs ue)
                 {
                     Exception err = ue.ExceptionObject as Exception;
@@ -73,12 +78,10 @@ namespace AppManager
                 {
                     if (MessageBox.Show("数据读取失败，原数据已保留。\n" + config.DatabaseError + "\n\n是否选择数据库完整备份恢复？", "应用中心",
                         MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes) return 1;
-                    using (OpenFileDialog recovery = new OpenFileDialog { Filter = "数据库备份 (*.db)|*.db" })
-                    {
-                        if (recovery.ShowDialog() != DialogResult.OK) return 1;
-                        try { DatabaseRecovery.Restore(ConfigDatabase.DatabasePath(Paths.ConfigFile), recovery.FileName); }
-                        catch (Exception ex) { Paths.LogError(ex); MessageBox.Show(ex.Message, "恢复失败", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1; }
-                    }
+                    string backupFile = PickRecoveryBackup();
+                    if (backupFile == null) return 1;
+                    try { DatabaseRecovery.Restore(ConfigDatabase.DatabasePath(Paths.ConfigFile), backupFile); }
+                    catch (Exception ex) { Paths.LogError(ex); MessageBox.Show(ex.Message, "恢复失败", MessageBoxButtons.OK, MessageBoxIcon.Error); return 1; }
                     config = AppConfig.Load();
                     if (config.LoadFailed) return 1;
                 }
@@ -87,6 +90,49 @@ namespace AppManager
                 finally { RemoveInstancePid(); }
             }
             return 0;
+        }
+
+        /// <summary>
+        /// 界面线程未处理异常的附加通知（全局处理已记日志后调用）。Application.ThreadException 再次订阅会替换掉
+        /// 原有处理而不是叠加，所以需要临时感知异常的地方挂在这里。
+        /// </summary>
+        private static Action uiErrorHook;
+
+        /// <summary>
+        /// 启动时数据库读不出来：选一个完整备份来恢复，取消返回 null。主窗口还没打开，先用程序内的选择窗口；
+        /// 它打开失败、或运行中出现未处理异常时，记日志、关掉它并退回系统的打开窗口，保证这条最后的恢复入口一定能用。
+        /// </summary>
+        internal static string PickRecoveryBackup()
+        {
+            bool failed = false;
+            PathPickerDialog dialog = null;
+            uiErrorHook = delegate
+            {
+                failed = true;
+                if (dialog != null && !dialog.IsDisposed) dialog.Close();
+            };
+            try
+            {
+                using (dialog = new PathPickerDialog(new PathPickerOptions
+                {
+                    Title = "选择数据库备份",
+                    Hint = "展开文件夹，选中之前「完整备份」得到的 .db 文件；恢复前会保留一份当前数据。",
+                    Mode = PathPickerMode.OpenFile,
+                    ConfirmText = "恢复",
+                    Extensions = new string[] { ".db" }
+                }))
+                {
+                    // 没有主窗口可依附：给它任务栏按钮并在屏幕居中，切到别的程序后还能找回来
+                    dialog.ShowInTaskbar = true;
+                    dialog.StartPosition = FormStartPosition.CenterScreen;
+                    dialog.ShowDialog();
+                    if (!failed) return dialog.DialogResult == DialogResult.OK ? dialog.ResultPath : null;
+                }
+            }
+            catch (Exception ex) { Paths.LogError(ex); }
+            finally { uiErrorHook = null; }
+            using (OpenFileDialog recovery = new OpenFileDialog { Filter = "数据库备份 (*.db)|*.db" })
+                return recovery.ShowDialog() == DialogResult.OK ? recovery.FileName : null;
         }
 
         /// <summary>

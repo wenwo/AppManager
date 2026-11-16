@@ -4073,13 +4073,16 @@ namespace AppManager
         /// <summary>信息页「更换封面」：选择图片并回传路径（保存后才写入配置）。</summary>
         private void OnCollectionPickCover()
         {
-            using (OpenFileDialog dlg = new OpenFileDialog())
+            // 只列内置解码器能打开的图片：封面要由程序自己绘制
+            string path = PathPickerDialog.Pick(new PathPickerOptions
             {
-                dlg.Title = "选择集合封面";
-                dlg.Filter = MediaRules.DecodableImageFilter();
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                collectionInfo.SetEditCoverPath(dlg.FileName, dlg.FileName);
-            }
+                Title = "选择集合封面",
+                Hint = "展开文件夹，选中一张图片作封面；也可以在下面粘贴路径或把图片拖进来。",
+                Mode = PathPickerMode.OpenFile,
+                ConfirmText = "使用",
+                Extensions = MediaRules.ImageExt
+            });
+            if (path != null) collectionInfo.SetEditCoverPath(path, path);
         }
 
         /// <summary>信息页「恢复自动」：按首个图片成员重新生成预览（无图片成员时回退版式化封面）。</summary>
@@ -6080,19 +6083,16 @@ namespace AppManager
         {
             // 优先从已安装的软件里勾选加入当前分类；便携程序等不在列表里的 exe 再用文件浏览器选择
             if (PickFromAppList()) return;
-            using (OpenFileDialog dlg = new OpenFileDialog())
+            List<string> picked = PathPickerDialog.PickMany(new PathPickerOptions
             {
-                dlg.Title = "添加软件到「" + currentCategory + "」";
-                dlg.Multiselect = true;
-                dlg.CheckFileExists = true;
-                dlg.Filter = "程序 (*.exe)|*.exe";
-                if (dlg.ShowDialog(this) == DialogResult.OK)
-                {
-                    List<string> files = new List<string>();
-                    foreach (string file in dlg.FileNames) if (IsSoftwareFile(file)) files.Add(file);
-                    AddPaths(files.ToArray(), currentCategory);
-                }
-            }
+                Title = "添加软件到「" + currentCategory + "」",
+                ConfirmText = "添加",
+                Extensions = new string[] { ".exe" }
+            });
+            if (picked == null) return;
+            List<string> files = new List<string>();
+            foreach (string file in picked) if (IsSoftwareFile(file)) files.Add(file);
+            AddPaths(files.ToArray(), currentCategory);
         }
 
         /// <summary>
@@ -6170,29 +6170,26 @@ namespace AppManager
         /// <summary>资源页面多选文件加入当前分类：按分类限定文件类型（对话框过滤 + 入库前二次校验）。</summary>
         private void PickFiles()
         {
-            using (OpenFileDialog dlg = new OpenFileDialog())
+            List<string> picked = PathPickerDialog.PickMany(new PathPickerOptions
             {
-                dlg.Title = "添加" + MediaRules.ResourceCategoryTypeName(currentCategory) + "到「" + currentCategory + "」";
-                dlg.Filter = MediaRules.ResourceCategoryFilter(currentCategory);
-                dlg.Multiselect = true;
-                if (dlg.ShowDialog(this) == DialogResult.OK)
-                    AddPaths(dlg.FileNames, currentCategory, ActiveCollectionKey);   // 集合视图内：入库后自动加入集合
-            }
+                Title = "添加" + MediaRules.ResourceCategoryTypeName(currentCategory) + "到「" + currentCategory + "」",
+                ConfirmText = "添加",
+                Extensions = MediaRules.ResourceCategoryExt(currentCategory) ?? new string[0]
+            });
+            if (picked != null) AddPaths(picked.ToArray(), currentCategory, ActiveCollectionKey);   // 集合视图内：入库后自动加入集合
         }
 
         /// <summary>选择文件夹加入当前分类。</summary>
         private void PickFolder()
         {
-            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+            string path = PathPickerDialog.Pick(new PathPickerOptions
             {
-                dlg.Description = "添加文件夹到「" + currentCategory + "」";
-                dlg.ShowNewFolderButton = false;
-                if (dlg.ShowDialog(this) == DialogResult.OK)
-                {
-                    // 集合视图内：入库后自动加入当前集合
-                    AddPaths(new string[] { dlg.SelectedPath }, currentCategory, ActiveCollectionKey);
-                }
-            }
+                Title = "添加文件夹到「" + currentCategory + "」",
+                Mode = PathPickerMode.Folder,
+                ConfirmText = "添加"
+            });
+            // 集合视图内：入库后自动加入当前集合
+            if (path != null) AddPaths(new string[] { path }, currentCategory, ActiveCollectionKey);
         }
 
         private void AddPaths(string[] paths, string category, string collectionKey = null)
@@ -7094,23 +7091,26 @@ namespace AppManager
         /// <summary>导出备份包（.ambak，仅记录与设置，不含物理文件）。</summary>
         private void ExportBackup()
         {
-            using (SaveFileDialog dlg = new SaveFileDialog())
+            string path = PathPickerDialog.Pick(new PathPickerOptions
             {
-                dlg.Title = "导出备份包";
-                dlg.Filter = "应用中心备份包 (*.ambak)|*.ambak";
-                dlg.FileName = "AppManagerBackup_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".ambak";
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                try
-                {
-                    if (!config.ExportTo(dlg.FileName)) throw new IOException("备份包未能写入，请检查目标路径和磁盘空间。");
-                    MessageDialog.Show("已导出备份包：\n" + dlg.FileName, "导出备份包",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageDialog.Show("导出失败：" + ex.Message, "导出备份包",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
+                Title = "导出备份包",
+                Hint = "把分类、集合和设置导出成 .ambak 备份包（不含文件本身）；选好位置，可以在下面改文件名。",
+                Mode = PathPickerMode.SaveFile,
+                ConfirmText = "导出",
+                FileName = "AppManagerBackup_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".ambak",
+                Extensions = new string[] { ".ambak" }
+            });
+            if (path == null) return;
+            try
+            {
+                if (!config.ExportTo(path)) throw new IOException("备份包未能写入，请检查目标路径和磁盘空间。");
+                MessageDialog.Show("已导出备份包：\n" + path, "导出备份包",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageDialog.Show("导出失败：" + ex.Message, "导出备份包",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
@@ -7118,14 +7118,15 @@ namespace AppManager
         private void ImportBackup()
         {
             if (importBackupRunning) return;
-            string filePath;
-            using (OpenFileDialog dlg = new OpenFileDialog())
+            string filePath = PathPickerDialog.Pick(new PathPickerOptions
             {
-                dlg.Title = "导入备份包";
-                dlg.Filter = "应用中心备份包 (*.ambak)|*.ambak|所有文件 (*.*)|*.*";
-                if (dlg.ShowDialog(this) != DialogResult.OK) return;
-                filePath = dlg.FileName;
-            }
+                Title = "导入备份包",
+                Hint = "展开文件夹，选中之前导出的 .ambak 备份包；校验通过后还会再确认一次。",
+                Mode = PathPickerMode.OpenFile,
+                ConfirmText = "下一步",
+                Extensions = new string[] { ".ambak" }
+            });
+            if (filePath == null) return;
             importBackupRunning = true;
             ShowStatusBar("正在校验备份包…", 0, 0);
             AppConfig localPaths = new AppConfig
@@ -7501,11 +7502,6 @@ namespace AppManager
             }
         }
 
-        /// <summary>在设置对话框中创建一行「标签 + 圆角路径输入框 + 浏览按钮」（iOS 风格）。</summary>
-        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageW")]
-        private static extern IntPtr SendMessageText(IntPtr h, int msg, IntPtr wp, string lp);
-        private const int EM_SETCUEBANNER = 0x1501;
-
         /// <summary>规范化存储位置输入：空白视为“沿用默认”，返回空串。</summary>
         private static string NormalizeStoreInput(string text)
         {
@@ -7544,65 +7540,6 @@ namespace AppManager
             cfg.ResourceStoreLocations = normalized;
             cfg.ResourceStorePath = legacy;
             return true;
-        }
-
-        private TextBox MakePathRow(Form f, string label, string value, int y, string cue)
-        {
-            Label lb = new Label();
-            lb.Text = label;
-            lb.Font = Theme.BodyFont;
-            lb.ForeColor = Theme.TextSecondary;
-            lb.BackColor = Color.Transparent;
-            lb.Location = new Point(24, y);
-            lb.AutoSize = true;
-            f.Controls.Add(lb);
-
-            // 圆角白底容器：面板底色与对话框一致，仅在其中绘制抗锯齿圆角矩形
-            Panel fieldBg = new Panel();
-            fieldBg.BackColor = Theme.Background;
-            fieldBg.Location = new Point(24, y + 24);
-            fieldBg.Size = new Size(f.ClientSize.Width - 200, 32);
-            fieldBg.Paint += delegate(object s, PaintEventArgs pe)
-            {
-                pe.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-                Rectangle rr = new Rectangle(0, 0, fieldBg.Width - 1, fieldBg.Height - 1);
-                using (SolidBrush b = new SolidBrush(Color.White))
-                    Draw.FillRoundedRect(pe.Graphics, b, rr, 8);
-                using (Pen p = new Pen(Theme.Separator, 1))
-                    Draw.DrawRoundedRect(pe.Graphics, p, rr, 8);
-            };
-            f.Controls.Add(fieldBg);
-
-            TextBox box = new TextBox();
-            box.Font = Theme.BodyFont;
-            box.BorderStyle = BorderStyle.None;
-            box.BackColor = Color.White;
-            box.Text = value;
-            box.Location = new Point(12, 8);
-            box.Width = fieldBg.Width - 24;
-            // 留空时显示占位提示（当前会用到的默认位置），聚焦时也保持显示
-            if (!string.IsNullOrEmpty(cue))
-                box.HandleCreated += delegate { SendMessageText(box.Handle, EM_SETCUEBANNER, (IntPtr)1, cue); };
-            fieldBg.Controls.Add(box);
-
-            RoundButton browse = new RoundButton();
-            browse.Text = "选择…";
-            browse.Accent = false;
-            browse.Size = new Size(96, 32);
-            browse.Location = new Point(f.ClientSize.Width - 116, y + 22);
-            browse.Click += delegate
-            {
-                using (FolderBrowserDialog dlg = new FolderBrowserDialog())
-                {
-                    dlg.Description = "选择" + label;
-                    dlg.ShowNewFolderButton = true;
-                    string cur = box.Text.Trim();
-                    if (cur.Length > 0 && Directory.Exists(cur)) dlg.SelectedPath = cur;
-                    if (dlg.ShowDialog(f) == DialogResult.OK) box.Text = dlg.SelectedPath;
-                }
-            };
-            f.Controls.Add(browse);
-            return box;
         }
 
         // ===== 桌面快捷方式 =====

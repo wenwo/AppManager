@@ -233,24 +233,5 @@ namespace AppManager
             return string.Join("、", exts);
         }
 
-        /// <summary>只含内置解码器能打开的图片（集合封面等需要应用自己绘制的场景），不含 HEIC/SVG 等分类可收但无法解码的格式。</summary>
-        public static string DecodableImageFilter()
-        {
-            string patterns = string.Join(";", Array.ConvertAll(ImageExt, e => "*" + e));
-            return "图片 (" + patterns + ")|" + patterns;
-        }
-
-        /// <summary>选文件对话框的过滤器：按资源分类限定类型，避免选中不符类型的文件。
-        /// 模式必须带 * 通配符（*.mp4），缺少则对话框匹配不到任何文件。</summary>
-        public static string ResourceCategoryFilter(string category)
-        {
-            string[] exts = ResourceCategoryExt(category);
-            if (exts == null) return "所有文件 (*.*)|*.*";
-            string[] wildcards = new string[exts.Length];
-            for (int i = 0; i < exts.Length; i++) wildcards[i] = "*" + exts[i];
-            string patterns = string.Join(";", wildcards);
-            return ResourceCategoryTypeName(category) + " (" + patterns + ")|" + patterns;
-        }
-
     }
 }

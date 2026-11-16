@@ -171,7 +171,7 @@ namespace AppManager
                         Check(MediaRules.SuggestResourceCategory(path, false) == "照片", "RW2 not suggested as photo");
                         Check(MediaRules.MatchCategoryExt("证件", path), "RW2 not accepted by credentials");
                     }
-                    Check(MediaRules.ResourceCategoryFilter("照片").Contains("*.rw2"), "photo filter missing RW2");
+                    Check(Array.IndexOf(MediaRules.ResourceCategoryExt("照片"), ".rw2") >= 0, "photo filter missing RW2");
                 });
                 Test("local music scan is recursive, case-insensitive and skips metadata folders", delegate
                 {

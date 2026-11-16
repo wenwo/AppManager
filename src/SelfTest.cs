@@ -923,10 +923,10 @@ namespace AppManager
                 && !MediaRules.MatchCategoryExt("证件", @"C:\a\a.mp4");
             bool freeOk = MediaRules.MatchCategoryExt("文件", @"C:\a\a.txt")
                 && MediaRules.MatchCategoryExt("我的照片", @"C:\a\a.txt");
-            string photoFilter = MediaRules.ResourceCategoryFilter("照片");
-            bool filterOk = photoFilter.StartsWith("照片 (*.")
-                && photoFilter.Contains("*.jpg") && photoFilter.Contains("|*.jpg")
-                && MediaRules.ResourceCategoryFilter("文件") == "所有文件 (*.*)|*.*";
+            // 选文件窗口按分类扩展名过滤：「文件」分类不限类型
+            string[] photoExt = MediaRules.ResourceCategoryExt("照片");
+            bool filterOk = photoExt != null && Array.IndexOf(photoExt, ".jpg") >= 0
+                && MediaRules.ResourceCategoryExt("文件") == null;
             string docFormats = MediaRules.CategorySupportedFormats("文档");
             bool formatHintOk = docFormats.Contains(".pdf") && docFormats.Contains(".docx")
                 && docFormats.Contains(".ofd") && !docFormats.Contains(".mp4")
@@ -1079,14 +1079,14 @@ namespace AppManager
         {
             Begin("49 媒体类型识别与视频分类过滤器");
             string[] videos = { ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".3gp" };
-            string filter = MediaRules.ResourceCategoryFilter("视频");
+            string[] filter = MediaRules.ResourceCategoryExt("视频");
             bool allVideo = true;
             bool filterAll = true;
             for (int i = 0; i < videos.Length; i++)
             {
                 // 大写扩展名同样命中（播放器按扩展名判定，不受大小写影响）
                 allVideo = allVideo && MediaRules.IsVideo(@"C:\a\clip" + videos[i].ToUpperInvariant());
-                filterAll = filterAll && filter.Contains("*" + videos[i]);
+                filterAll = filterAll && Array.IndexOf(filter, videos[i]) >= 0;
             }
             bool videoOk = allVideo
                 && !MediaRules.IsVideo(@"C:\a\song.mp3")
@@ -1110,10 +1110,8 @@ namespace AppManager
                 && MediaRules.IsText(@"C:\a\notes.TXT")
                 && MediaRules.IsText(@"C:\a\config.json")
                 && !MediaRules.IsText(@"C:\a\archive.zip");
-            bool filterOk = filter.StartsWith("视频 (*.")
-                && filter.Contains("|*.")
-                && !filter.Contains("*.jpg")
-                && !filter.Contains("*.mp3");
+            bool filterOk = Array.IndexOf(filter, ".jpg") < 0
+                && Array.IndexOf(filter, ".mp3") < 0;
             Assert(videoOk && imageOk && audioOk && mediaOk && documentOk && filterOk && filterAll,
                 "视频=" + videoOk + " 图片=" + imageOk + " 音频=" + audioOk
                 + " 媒体=" + mediaOk + " 文档=" + documentOk + " 过滤=" + filterOk + " 全覆盖=" + filterAll);
