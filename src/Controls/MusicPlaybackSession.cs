@@ -25,6 +25,8 @@ namespace AppManager.Controls
         private int index = -1, queuedIndex = -1, volume = 60, autoSkipBudget;
         private bool muted, playing, ended, loaded, loading, engineUnavailable;
         private bool queuedAppended, waitingAutoStart, autoStartFallbackIssued, pendingPause, awaitingManualStart;
+        // 启动时恢复的上次列表：只记下标和进度，不创建内核；首次播放、跳转或切歌时才真正加载
+        private bool restorePending;
         private double position, duration, pendingSeek = -1;
         private string failure = "";
         private DateTime loadDeadline, autoStartDeadline;
@@ -63,6 +65,9 @@ namespace AppManager.Controls
         public PlaybackMode Mode { get { return mode; } }
         internal MpvAudioEngine Engine { get { return engine; } }
         internal bool HasQueuedNext { get { return queuedAppended; } }
+        internal bool IsRestorePending { get { return restorePending; } }
+        /// <summary>退出时应记住的进度：刚发起加载、还没跳到目标位置时取待跳转的位置，不记成 0。</summary>
+        internal double ResumePosition { get { return !loaded && pendingSeek > 0 ? pendingSeek : position; } }
 
         public string PathAt(int value)
         {
@@ -72,16 +77,10 @@ namespace AppManager.Controls
         public List<string> PathsSnapshot() { return new List<string>(paths); }
         public void Open(List<string> audioPaths, int startIndex)
         {
-            Open(audioPaths, startIndex, 0, false, null);
+            Open(audioPaths, startIndex, 0, false);
         }
 
         public void Open(List<string> audioPaths, int startIndex, double startPosition, bool startPaused)
-        {
-            Open(audioPaths, startIndex, startPosition, startPaused, null);
-        }
-
-        public void Open(List<string> audioPaths, int startIndex, double startPosition, bool startPaused,
-            PlaybackMode? modeOverride)
         {
             if (audioPaths == null || audioPaths.Count == 0)
             {
@@ -94,7 +93,6 @@ namespace AppManager.Controls
             }
             paths.Clear();
             paths.AddRange(audioPaths);
-            if (modeOverride.HasValue) mode = modeOverride.Value;
             index = Math.Max(0, Math.Min(startIndex, paths.Count - 1));
             queuedIndex = -1;
             queuedAppended = false;
@@ -102,6 +100,23 @@ namespace AppManager.Controls
             autoSkipBudget = 0;
             currentEntryId = -1;
             LoadAt(index, startPosition, startPaused);
+        }
+
+        /// <summary>
+        /// 恢复上次退出时的列表和进度，停在暂停状态，不加载文件也不创建播放内核；
+        /// 已经有列表时不覆盖（用户在恢复完成前已开始播放别的内容）。
+        /// </summary>
+        public bool Restore(List<string> audioPaths, int startIndex, double startPosition, double knownDuration)
+        {
+            if (paths.Count > 0 || audioPaths == null || audioPaths.Count == 0) return false;
+            paths.AddRange(audioPaths);
+            index = Math.Max(0, Math.Min(startIndex, paths.Count - 1));
+            duration = knownDuration > 0 ? knownDuration : 0;
+            position = startPosition > 0 ? (duration > 0 ? Math.Min(startPosition, duration) : startPosition) : 0;
+            restorePending = true;
+            RaiseTrackChanged();
+            RaiseStateChanged();
+            return true;
         }
 
         public void SetMode(PlaybackMode value)
@@ -157,6 +172,7 @@ namespace AppManager.Controls
         }
         public void TogglePause()
         {
+            if (restorePending) { LoadAt(index, position, false); return; }
             if (engine == null || paths.Count == 0) return;
             if (failure != "") { RestartCurrent(); return; }
             if (ended) { RestartCurrent(); return; }
@@ -188,6 +204,13 @@ namespace AppManager.Controls
 
         public void Seek(double value)
         {
+            if (restorePending)
+            {
+                // 尚未加载：只改记住的进度，按播放时再从这里开始
+                position = Math.Max(0, duration > 0 ? Math.Min(value, duration) : value);
+                RaiseStateChanged();
+                return;
+            }
             if (engine == null || duration <= 0) return;
             position = Math.Max(0, Math.Min(value, duration));
             engine.Seek(position);
@@ -241,6 +264,7 @@ namespace AppManager.Controls
         {
             if (value < 0 || value >= paths.Count) return;
             pollTimer.Stop();
+            restorePending = false;
             index = value;
             queuedIndex = -1;
             queuedAppended = false;
@@ -557,6 +581,7 @@ namespace AppManager.Controls
             waitingAutoStart = false;
             autoStartFallbackIssued = false;
             awaitingManualStart = false;
+            restorePending = false;
             pendingSeek = -1;
             pendingPause = false;
             currentEntryId = -1;

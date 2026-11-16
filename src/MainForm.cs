@@ -268,6 +268,7 @@ namespace AppManager
             {
                 StartScan(true, false);
             }
+            RestoreMusicState();
         }
 
         // ===== 任务栏最小化 / 关闭行为 / 系统托盘 =====
@@ -564,6 +565,7 @@ namespace AppManager
             // 先收起播放器再走基类关闭：mpv 的视频输出挂在宿主窗口上，必须在窗口句柄销毁前终止；
             // 否则（尤其“关闭到托盘”时直接点×退出）终止发生在句柄销毁之后，能否顺利退出取决于 mpv 自身容错。
             try { if (videoPlayer != null && !videoPlayer.IsDisposed) HideVideoPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
+            SaveMusicState();   // 必须在停止播放之前：停止会清空列表和进度
             try { StopMusicPlayer(); } catch (Exception ex) { Paths.LogError(ex); }
             try { if (musicSession != null) musicSession.Dispose(); } catch (Exception ex) { Paths.LogError(ex); }
             try { if (localMusicScanCancel != null) localMusicScanCancel.Cancel(); } catch (Exception ex) { Paths.LogError(ex); }
@@ -5036,10 +5038,73 @@ namespace AppManager
         {
             musicOpenGeneration++;
             if (musicSession == null) return;
+            // 打开设置页、播放视频都会停掉音乐：先记下停之前的列表和进度，退出时仍按它保存
+            if (musicSession.HasTracks) stoppedMusicState = MusicResumeState.Capture(musicSession, MiniMusicCollectionKey());
             musicSession.Stop();
             if (musicPlayer != null && !musicPlayer.IsDisposed && musicPlayer.Visible) musicPlayer.Visible = false;
             SyncContentVisibility();
             if (grid != null && !grid.IsDisposed) grid.Invalidate();
+        }
+
+        // 上次播放状态成功读完前不按“空状态”写回：读取未完成或读取出错（文件被占用、损坏、版本不认识）时，
+        // 退出只在本次放过音乐时才保存，避免用默认值冲掉原记录
+        private bool musicStateRestored;
+        // 最近一次被设置页、视频等停掉前的播放状态；退出时播放器已空就按它保存
+        private MusicResumeState stoppedMusicState;
+
+        private string MiniMusicCollectionKey()
+        {
+            return miniMusic != null && !miniMusic.IsDisposed ? miniMusic.CollectionKey : null;
+        }
+
+        /// <summary>
+        /// 后台读取上次退出时的播放状态，恢复为暂停在原位置，点播放即续播。音量、静音、播放顺序是全局设置，总是恢复；
+        /// 列表只在本次还没播放过任何内容时恢复，以用户当前操作为准。
+        /// </summary>
+        private void RestoreMusicState()
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                MusicResumeState state = null;
+                bool failed = false;
+                try { state = MusicResumeState.Load(MusicResumeState.FilePath); }
+                catch (Exception ex) { failed = true; Paths.LogError(ex); }
+                RunOnUi(delegate
+                {
+                    if (failed || musicSession == null) return;
+                    musicStateRestored = true;
+                    if (state == null) return;
+                    musicSession.SetMode(state.Mode);
+                    musicSession.SetVolume(state.Volume);
+                    musicSession.SetMute(state.Muted);
+                    if (musicSession.HasTracks || stoppedMusicState != null) return;
+                    if (musicSession.Restore(state.Tracks, state.Index, state.Position, state.Duration)
+                        && miniMusic != null && !miniMusic.IsDisposed)
+                        miniMusic.RestoreCollectionKey(state.CollectionKey);
+                });
+            });
+        }
+
+        /// <summary>退出前记下播放状态；写入失败只记日志，保留上一次的记录，不影响退出。</summary>
+        private void SaveMusicState()
+        {
+            if (musicSession == null) return;
+            try
+            {
+                MusicResumeState state;
+                if (musicSession.HasTracks) state = MusicResumeState.Capture(musicSession, MiniMusicCollectionKey());
+                else if (stoppedMusicState != null)
+                {
+                    state = stoppedMusicState;
+                    state.Mode = musicSession.Mode;
+                    state.Volume = musicSession.Volume;
+                    state.Muted = musicSession.Muted;
+                }
+                else if (musicStateRestored) state = MusicResumeState.Capture(musicSession, MiniMusicCollectionKey());
+                else return;
+                state.Save(MusicResumeState.FilePath);
+            }
+            catch (Exception ex) { Paths.LogError(ex); }
         }
 
         /// <summary>窄窗且未最小化、顶部没有可操作入口时暂停播放；最小化不暂停。</summary>

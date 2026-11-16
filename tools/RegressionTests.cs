@@ -190,6 +190,7 @@ namespace AppManager
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
                 Run("exporting change details writes a temp file first: a failure keeps the old file and leaves no partial file", ExportChangesAtomic);
+                Run("music state restores paused on startup and is written back on exit", MusicStateAcrossRestart);
             }
             finally
             {
@@ -1510,6 +1511,109 @@ namespace AppManager
         {
             return string.Equals((a ?? string.Empty).TrimEnd('\\', '/'),
                 (b ?? string.Empty).TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        // 启动后恢复成暂停在上次位置（不创建播放内核）；退出时把之后的调整写回。
+        // 覆盖真实路径：设置页/视频停掉音乐后退出、读取期间已在放别的、状态文件读取出错。状态文件放在临时数据目录。
+        private static void MusicStateAcrossRestart()
+        {
+            string stateFile = MusicResumeState.FilePath;
+            string dir = Path.Combine(root, "music-restart");
+            Directory.CreateDirectory(dir);
+            string first = Path.Combine(dir, "first.mp3"), second = Path.Combine(dir, "second.mp3"), other = Path.Combine(dir, "other.mp3");
+            foreach (string song in new[] { first, second, other }) File.WriteAllBytes(song, new byte[16]);
+            FieldInfo restored = typeof(MainForm).GetField("musicStateRestored", Private);
+            try
+            {
+                MusicResumeState saved = new MusicResumeState { Mode = Controls.PlaybackMode.RepeatOne, Volume = 22, Muted = true,
+                    Index = 1, Position = 61.5, Duration = 200, CollectionKey = "col:音乐/回归" };
+                saved.Tracks.Add(first);
+                saved.Tracks.Add(second);
+                saved.Save(stateFile);
+
+                // 一、恢复后调整，再被设置页/视频停掉音乐（共用 StopMusicPlayer），然后正常关闭窗口
+                using (MainForm form = MusicStateForm())
+                {
+                    PumpUntil(delegate { return (bool)restored.GetValue(form); }, 10000);
+                    Check((bool)restored.GetValue(form), "saved music state was never read");
+                    Controls.MusicPlaybackSession session = MusicSessionOf(form);
+                    Controls.MiniMusicPlayerControl mini = (Controls.MiniMusicPlayerControl)typeof(MainForm).GetField("miniMusic", Private).GetValue(form);
+                    Check(session.IsRestorePending && session.Index == 1 && session.CurrentPath == second && session.Position == 61.5,
+                        "track/position not restored: " + session.Index + " @ " + session.Position);
+                    Check(session.Mode == Controls.PlaybackMode.RepeatOne && session.Volume == 22 && session.Muted, "mode/volume/mute not restored");
+                    Check(!session.IsPlaying && session.Engine == null, "restore started playback or loaded the engine");
+                    Check(mini.CollectionKey == "col:音乐/回归", "mini player collection not restored");
+                    session.Seek(90);
+                    session.SetMode(Controls.PlaybackMode.Shuffle);
+                    Invoke(form, "StopMusicPlayer");
+                    Check(!session.HasTracks, "fixture: stopping did not clear the session");
+                    session.SetVolume(45);   // 停掉之后再调的音量也要记住
+                    form.Close();
+                }
+                MusicResumeState after = MusicResumeState.Load(stateFile);
+                Check(after != null && after.Tracks.Count == 2 && after.Index == 1 && after.Position == 90 && after.Duration == 200,
+                    "music stopped by settings/video was not remembered on exit");
+                Check(after.Volume == 45 && !after.Muted && after.Mode == Controls.PlaybackMode.Shuffle
+                    && after.CollectionKey == "col:音乐/回归", "exit did not save mode/volume/collection");
+                Check(!File.Exists(stateFile + ".tmp"), "exit left a temporary state file");
+
+                // 二、读取结果到达时用户已经在放别的：列表以用户为准，音量/顺序这些全局设置仍然恢复
+                using (MainForm form = MusicStateForm())
+                {
+                    PumpUntil(delegate { return (bool)restored.GetValue(form); }, 10000);
+                    Controls.MusicPlaybackSession session = MusicSessionOf(form);
+                    session.Stop();
+                    session.SetVolume(80);
+                    session.SetMode(Controls.PlaybackMode.Sequential);
+                    Check(session.Restore(new List<string> { other }, 0, 3, 100), "fixture could not start another list");
+                    Invoke(form, "RestoreMusicState");
+                    PumpUntil(delegate { return session.Volume == 45; }, 10000);
+                    Check(session.Volume == 45 && session.Mode == Controls.PlaybackMode.Shuffle, "global settings were not restored while playing");
+                    Check(session.PathCount == 1 && session.CurrentPath == other && session.Position == 3, "late restore replaced the user's list");
+                    form.Close();
+                }
+                after = MusicResumeState.Load(stateFile);
+                Check(after.Tracks.Count == 1 && after.Tracks[0] == other && after.Position == 3, "exit did not save the user's own list");
+
+                // 三、状态文件读取出错：本次没放音乐就退出，不得覆盖原文件
+                string unreadable = "<music version=\"9\" volume=\"7\"/>";
+                File.WriteAllText(stateFile, unreadable);
+                long logBefore = File.Exists(Paths.LogFile) ? new FileInfo(Paths.LogFile).Length : 0;
+                using (MainForm form = MusicStateForm())
+                {
+                    PumpUntil(delegate
+                    {
+                        return File.Exists(Paths.LogFile) && new FileInfo(Paths.LogFile).Length > logBefore
+                            && File.ReadAllText(Paths.LogFile).Contains("音乐播放状态版本不受支持");
+                    }, 10000);
+                    Application.DoEvents();
+                    Check(File.ReadAllText(Paths.LogFile).Contains("音乐播放状态版本不受支持"), "fixture: unreadable state was never attempted");
+                    Check(!(bool)restored.GetValue(form), "failed read was treated as a completed restore");
+                    form.Close();
+                }
+                Check(File.ReadAllText(stateFile) == unreadable, "exit overwrote a state file that could not be read");
+            }
+            finally
+            {
+                if (File.Exists(stateFile)) File.Delete(stateFile);
+            }
+        }
+
+        private static MainForm MusicStateForm()
+        {
+            MainForm form = new MainForm(new AppConfig());
+            typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+            form.ShowInTaskbar = false;
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(-3000, -3000);
+            form.Size = new Size(1200, 700);
+            form.Show();
+            return form;
+        }
+
+        private static Controls.MusicPlaybackSession MusicSessionOf(MainForm form)
+        {
+            return (Controls.MusicPlaybackSession)typeof(MainForm).GetField("musicSession", Private).GetValue(form);
         }
 
         private static void DisposedFormMessageFilter()

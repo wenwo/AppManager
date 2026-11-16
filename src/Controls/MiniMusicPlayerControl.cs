@@ -48,13 +48,19 @@ namespace AppManager.Controls
         {
             List<string> list = songs ?? new List<string>();
             collectionKey = selectedKey ?? "";
-            EnsureSession().Open(list, startIndex, 0, false, PlaybackMode.RepeatAll);
+            EnsureSession().Open(list, startIndex, 0, false);   // 播放顺序沿用播放器当前设置，不随集合切换改变
             if (list.Count == 0)
             {
                 title = "集合中暂无音乐";
                 position = duration = 0;
             }
             Invalidate();
+        }
+
+        /// <summary>启动恢复上次播放列表时还原其来源集合，集合菜单据此勾选；不触发播放。</summary>
+        internal void RestoreCollectionKey(string key)
+        {
+            collectionKey = key;
         }
 
         /// <summary>文件改名或移动后更新播放列表里的路径（含文件夹内的曲目）；不打断正在播放的曲目。</summary>

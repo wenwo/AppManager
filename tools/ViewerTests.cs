@@ -68,6 +68,10 @@ namespace AppManager
                 Run("video output uses valid backends and detects a missing picture", VideoOutputCheck);
                 Run("video failure placeholder does not block previous/next switching", VideoFailureSwitching);
                 Run("music single-track shuffle replays; sequential end leaves the playing state", MusicSingleTrackModes);
+                Run("music exit state saves atomically and loads back with hostile input filtered", MusicResumeStateFile);
+                Run("restored music waits paused, seeks without engine and yields to new playback", MusicRestorePending);
+                Run("restored music resumes from the saved position on play", MusicRestoreResumes);
+                Run("switching collections in the mini player keeps the chosen playback order", MiniCollectionKeepsMode);
                 Run("music queue search maps filtered rows without changing playback order", MusicQueueSearch);
                 Run("music queue scrollbar drags, hides and keeps filtered row hit zones", MusicQueueScrollbar);
                 Run("long music title stays inside its scrolling region", MusicTitleClipping);
@@ -466,6 +470,200 @@ namespace AppManager
                         Check(starts == 1, "sequential single track restarted");
                     }
                     host.Hide();
+                }
+            }
+        }
+
+        // 退出状态文件：往返、文件丢失、恶意内容、损坏、写入失败、超大列表截取都不能丢原记录或把非法路径交给播放内核。
+        private static void MusicResumeStateFile()
+        {
+            string dir = Path.Combine(root, "resume-state");
+            Directory.CreateDirectory(dir);
+            string state = Path.Combine(dir, "music-state.xml");
+            Check(MusicResumeState.Load(state) == null, "missing state file did not load as null");
+            string a = WriteSilence("resume-a.wav", 1), b = WriteSilence("resume-b.wav", 1), c = WriteSilence("resume-c.wav", 1);
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            {
+                session.SetMode(PlaybackMode.Shuffle);
+                session.SetVolume(35);
+                session.SetMute(true);
+                Check(session.Restore(new List<string> { a, b, c }, 1, 42.5, 180), "restore into an empty session failed");
+                MusicResumeState.Capture(session, "col:音乐/收藏").Save(state);
+            }
+            Check(!File.Exists(state + ".tmp"), "temporary state file left behind");
+            MusicResumeState loaded = MusicResumeState.Load(state);
+            Check(loaded.Tracks.Count == 3 && loaded.Index == 1 && loaded.Tracks[1] == b, "track list/index lost: " + loaded.Index);
+            Check(loaded.Position == 42.5 && loaded.Duration == 180, "position lost: " + loaded.Position + "/" + loaded.Duration);
+            Check(loaded.Mode == PlaybackMode.Shuffle && loaded.Volume == 35 && loaded.Muted, "mode/volume/mute lost");
+            Check(loaded.CollectionKey == "col:音乐/收藏", "collection key lost: " + loaded.CollectionKey);
+
+            // 当前曲目被删：从后面第一首还在的开始、进度归零，但列表不删曲目（文件可能只是暂时不在）
+            File.Delete(b);
+            loaded = MusicResumeState.Load(state);
+            Check(loaded.Tracks.Count == 3 && loaded.Index == 2 && loaded.Tracks[2] == c && loaded.Position == 0 && loaded.Duration == 0,
+                "missing current track did not fall forward to the next one");
+            // 往后全都不在（移动盘/网络盘没连上）：列表、曲目、进度原样保留，不被写短
+            File.Delete(a); File.Delete(c);
+            loaded = MusicResumeState.Load(state);
+            Check(loaded.Tracks.Count == 3 && loaded.Index == 1 && loaded.Position == 42.5 && loaded.Duration == 180
+                && loaded.Volume == 35 && loaded.Mode == PlaybackMode.Shuffle, "offline list was not kept as saved");
+
+            // 往后找有上限：第一首还在的超出 50 首就不再找，原样保留
+            string far = WriteSilence("resume-far.wav", 1);
+            List<string> gap = new List<string>();
+            for (int i = 0; i < 52; i++) gap.Add(Path.Combine(root, "resume-offline", "gap" + i + ".mp3"));
+            gap.Add(far);
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            {
+                session.Restore(gap, 0, 12, 100);
+                MusicResumeState.Capture(session, null).Save(state);
+            }
+            loaded = MusicResumeState.Load(state);
+            Check(loaded.Index == 0 && loaded.Position == 12 && loaded.Tracks.Count == 53, "missing-track probe was not bounded");
+            Check(loaded.CollectionKey == null, "absent collection key did not load as null");
+
+            // 「全部音乐」的集合键是空字符串，要和「没有来源集合」区分开
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            {
+                session.Restore(new List<string> { far }, 0, 0, 0);
+                MusicResumeState.Capture(session, "").Save(state);
+            }
+            Check(MusicResumeState.Load(state).CollectionKey == "", "\"all music\" collection key was lost");
+
+            // 恶意或损坏的字段：网址、相对路径、非音频、越界数值、未知模式
+            string good = WriteSilence("resume-good.wav", 1);
+            string text = Path.Combine(root, "resume-note.txt");
+            File.WriteAllText(text, "x");
+            File.WriteAllText(state, "<music version=\"1\" mode=\"Bogus\" volume=\"999\" muted=\"yes\" index=\"3\" position=\"NaN\" duration=\"-5\">"
+                + "<track path=\"http://example.invalid/a.mp3\"/><track path=\"relative.wav\"/><track path=\"" + text + "\"/>"
+                + "<track path=\"" + good + "\"/><track/>"
+                + "<track path=\"" + good + ":evil.wav\"/><track path=\"" + good.Substring(0, 2) + "resume-good.wav\"/>"
+                + "<track path=\"" + good.Substring(2) + "\"/><track path=\"" + @"\\.\" + good + "\"/></music>", new UTF8Encoding(false));
+            loaded = MusicResumeState.Load(state);
+            // 只剩原路径；备用数据流、盘符相对、根目录相对、设备路径都被拒绝
+            Check(loaded.Tracks.Count == 1 && loaded.Tracks[0] == good && loaded.Index == 0,
+                "hostile tracks were not filtered: " + string.Join(" | ", loaded.Tracks.ToArray()));
+            Check(loaded.Mode == PlaybackMode.Sequential && loaded.Volume == 100 && !loaded.Muted
+                && loaded.Position == 0 && loaded.Duration == 0, "hostile numbers were not normalized");
+            File.WriteAllText(state, "<music version=\"9\"/>");
+            Expect<InvalidDataException>(delegate { MusicResumeState.Load(state); });
+            File.WriteAllText(state, "<music version=\"1\"><track");
+            Expect<System.Xml.XmlException>(delegate { MusicResumeState.Load(state); });
+
+            // 写入失败（目标被占成目录）：抛出、不留临时文件、原目标不动
+            string blocked = Path.Combine(dir, "blocked.xml");
+            Directory.CreateDirectory(blocked);
+            Expect<IOException>(delegate { new MusicResumeState { Volume = 10 }.Save(blocked); });
+            Check(Directory.Exists(blocked) && !File.Exists(blocked + ".tmp"), "failed save left a partial state");
+
+            // 覆盖已有文件走原子替换
+            new MusicResumeState { Volume = 77 }.Save(state);
+            Check(MusicResumeState.Load(state).Volume == 77 && !File.Exists(state + ".tmp"), "existing state was not replaced");
+
+            // 超大列表以当前曲目为中心截取；含 XML 非法字符的路径跳过且不打乱当前曲目
+            List<string> many = new List<string>();
+            string manyDir = Path.Combine(root, "resume-many");   // 不创建：同时验证读取不逐个检查 2 万个文件
+            for (int i = 0; i < MusicResumeState.MaxTracks + 5000; i++) many.Add(Path.Combine(manyDir, "song" + i + ".mp3"));
+            many[24001] = Path.Combine(manyDir, "bad" + '\uD800' + ".mp3");
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            {
+                session.Restore(many, 24000, 5, 60);
+                MusicResumeState big = MusicResumeState.Capture(session, null);
+                Check(big.Tracks.Count == MusicResumeState.MaxTracks - 1, "large list not capped: " + big.Tracks.Count);
+                Check(big.Tracks[big.Index] == many[24000] && big.Position == 5, "capped list lost the current track");
+                Check(!big.Tracks.Contains(many[24001]), "invalid XML path was kept");
+                Stopwatch saveWatch = Stopwatch.StartNew();
+                big.Save(state);
+                saveWatch.Stop();
+                Check(new FileInfo(state).Length < 4L * 1024 * 1024, "state file too large: " + new FileInfo(state).Length);
+                Stopwatch loadWatch = Stopwatch.StartNew();
+                MusicResumeState reread = MusicResumeState.Load(state);
+                loadWatch.Stop();
+                Console.WriteLine("  " + big.Tracks.Count + " tracks: save " + saveWatch.ElapsedMilliseconds + " ms (UI thread at exit), load "
+                    + loadWatch.ElapsedMilliseconds + " ms (background), " + new FileInfo(state).Length / 1024 + " KiB");
+                Check(reread.Tracks.Count == big.Tracks.Count && reread.Tracks[reread.Index] == many[24000] && reread.Position == 5,
+                    "large list did not round-trip");
+                Check(saveWatch.ElapsedMilliseconds < 1000, "saving the largest list is too slow for exit");
+
+                // 刚发起加载还没跳到目标位置时，记住待跳转位置；播完或失败的曲目不记进度
+                Set(session, "restorePending", false);
+                Set(session, "position", 0.0);
+                Set(session, "pendingSeek", 33.0);
+                Check(MusicResumeState.Capture(session, null).Position == 33, "pending seek position was not kept");
+                Set(session, "ended", true);
+                Check(MusicResumeState.Capture(session, null).Position == 0, "ended track kept its position");
+                Set(session, "ended", false);
+                Set(session, "failure", "无法播放此音乐");
+                Check(MusicResumeState.Capture(session, null).Position == 0, "failed track kept its position");
+            }
+        }
+
+        // 恢复后的会话不创建内核：显示暂停、可拖进度；用户在此前或之后打开新列表时以新列表为准。
+        private static void MusicRestorePending()
+        {
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+            {
+                mini.AttachSession(session);
+                Check(!session.Restore(new List<string>(), 0, 1, 1) && !session.HasTracks, "empty restore created a list");
+                Check(session.Restore(new List<string> { @"D:\Music\a.mp3", @"D:\Music\b.mp3" }, 5, 300, 200), "restore failed");
+                Check(session.IsRestorePending && session.Index == 1 && session.Engine == null, "restore loaded the engine or kept a bad index");
+                Check(!session.IsPlaying && !session.HasSession && session.Position == 200 && session.Duration == 200,
+                    "restored state is not paused at a clamped position: " + session.Position);
+                Check(mini.CurrentIndex == 1 && mini.Position == 200, "mini player did not show the restored track");
+                session.Seek(-3);
+                Check(session.Position == 0, "pending seek below zero");
+                session.Seek(75);
+                Check(session.Position == 75 && session.Engine == null, "pending seek did not update the remembered position");
+                Check(!session.Restore(new List<string> { @"D:\Music\c.mp3" }, 0, 0, 0) && session.PathCount == 2,
+                    "restore replaced an existing list");
+                session.Stop();
+                Check(!session.IsRestorePending && !session.HasTracks, "stop kept the pending restore");
+            }
+        }
+
+        private static void MusicRestoreResumes()
+        {
+            string runtime = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AppManager");
+            if (!File.Exists(Path.Combine(runtime, "libmpv-2.dll"))) { Console.WriteLine("  SKIP: libmpv-2.dll not installed"); return; }
+            SetDllDirectory(runtime);
+            string first = WriteSilence("restore-first.wav", 1), song = WriteSilence("restore-song.wav", 8);
+            using (MusicPlaybackSession session = new MusicPlaybackSession())
+            using (Form host = new Form { ShowInTaskbar = false, Size = new Size(400, 200), StartPosition = FormStartPosition.Manual, Location = new Point(-2000, -2000) })
+            {
+                host.Show();
+                session.SetMode(PlaybackMode.RepeatOne);
+                session.SetVolume(0);
+                session.Restore(new List<string> { first, song }, 1, 5, 8);
+                Stopwatch sincePlay = Stopwatch.StartNew();
+                session.TogglePause();
+                Check(!session.IsRestorePending, "play did not consume the pending restore");
+                // 从 0 开始播要 5 秒以上才到 5.2 秒；限时 3 秒，只有真的从断点续播才能通过
+                Check(PumpUntil(delegate { return session.IsLoaded && session.IsPlaying && session.Position >= 5.2; }, 3000),
+                    "restored track did not resume near the saved position within 3 s: " + session.Position);
+                Check(session.Index == 1 && session.Position < 7.5 && sincePlay.ElapsedMilliseconds < 3000,
+                    "resume started from the wrong place: " + session.Position + " after " + sincePlay.ElapsedMilliseconds + " ms");
+                Check(session.Mode == PlaybackMode.RepeatOne && session.Volume == 0, "restored mode/volume changed on play");
+                host.Hide();
+            }
+        }
+
+        // 播放顺序只由播放器自己的设置决定：迷你播放器切换集合或点集合里的歌都不能改掉它。
+        private static void MiniCollectionKeepsMode()
+        {
+            foreach (PlaybackMode mode in new[] { PlaybackMode.Sequential, PlaybackMode.RepeatAll, PlaybackMode.RepeatOne, PlaybackMode.Shuffle })
+            {
+                using (MusicPlaybackSession session = new MusicPlaybackSession())
+                using (MiniMusicPlayerControl mini = new MiniMusicPlayerControl { Size = new Size(320, 48) })
+                {
+                    Set(session, "engineUnavailable", true);   // 只验证顺序设置，不真正加载文件
+                    mini.AttachSession(session);
+                    session.SetMode(mode);
+                    mini.LoadPlaylist(new List<string> { @"D:\Music\a.mp3", @"D:\Music\b.mp3" }, "集合一", "col:音乐/集合一", 0);
+                    Check(session.Mode == mode, "first collection changed the order " + mode + " -> " + session.Mode);
+                    mini.LoadPlaylist(new List<string> { @"D:\Music\c.mp3", @"D:\Music\d.mp3" }, "集合二", "col:音乐/集合二", 1);
+                    Check(session.Mode == mode && session.Index == 1 && mini.CollectionKey == "col:音乐/集合二",
+                        "switching collections changed the order " + mode + " -> " + session.Mode);
                 }
             }
         }
