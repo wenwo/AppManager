@@ -32,6 +32,11 @@ namespace AppManager
             Paths.DataDirOverride = root;
             Paths.ConfigFileOverride = Path.Combine(root, "config.xml");
             Directory.CreateDirectory(root);
+            // 桌面也换成临时目录：用例不在真实桌面上建文件，清理失败也不会留下残留
+            DesktopOrganizer.UserDesktopOverride = Path.Combine(root, "Desktop");
+            DesktopOrganizer.PublicDesktopOverride = Path.Combine(root, "PublicDesktop");
+            Directory.CreateDirectory(DesktopOrganizer.UserDesktopOverride);
+            Directory.CreateDirectory(DesktopOrganizer.PublicDesktopOverride);
             try
             {
                 Run("restore targets: missing desktop path / traversal / ADS / relative", Targets);
@@ -190,6 +195,8 @@ namespace AppManager
             {
                 Paths.ConfigFileOverride = null;
                 Paths.DataDirOverride = null;
+                DesktopOrganizer.UserDesktopOverride = null;
+                DesktopOrganizer.PublicDesktopOverride = null;
                 Directory.Delete(root, true);
             }
             Console.WriteLine("RESULT " + passed + " passed, " + failed + " failed");
@@ -1764,8 +1771,8 @@ namespace AppManager
         private static string SafeDesktopTarget(string name)
         {
             string path = Path.Combine(DesktopOrganizer.UserDesktop, name);
-            if (DesktopOrganizer.IsSafeRestoreTarget(path)) return path;
-            path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), name);
+            Check(path.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase),
+                "desktop fixture is outside the temp root: " + path);
             Check(DesktopOrganizer.IsSafeRestoreTarget(path), "no safe desktop fixture path");
             return path;
         }

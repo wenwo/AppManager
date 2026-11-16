@@ -64,16 +64,20 @@ namespace AppManager
         /// <summary>快捷中心收纳主目录：文件夹收进此目录，文件收进其 Files 子目录。</summary>
         public static string QuickCenterDir { get { return QuickCenterDirPath; } }
 
+        /// <summary>自测注入的用户桌面 / 公共桌面目录；非空时替代系统桌面，避免用例在真实桌面上建文件。</summary>
+        internal static string UserDesktopOverride = null;
+        internal static string PublicDesktopOverride = null;
+
         /// <summary>当前用户桌面目录（自动监听用）。</summary>
         public static string UserDesktop
         {
-            get { return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); }
+            get { return UserDesktopOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory); }
         }
 
         /// <summary>公共桌面目录（所有用户共享）。</summary>
         public static string PublicDesktop
         {
-            get { return Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory); }
+            get { return PublicDesktopOverride ?? Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory); }
         }
 
         /// <summary>按真实启动目标判断是否为本程序自身的快捷方式，与显示名称无关。</summary>
@@ -290,7 +294,7 @@ namespace AppManager
             if (string.IsNullOrEmpty(exePath)) return;
             try
             {
-                string desk = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+                string desk = UserDesktop;
                 if (string.IsNullOrEmpty(desk)) return;
                 string lnk = Path.Combine(desk, "应用中心.lnk");
                 CreateShortcut(lnk, exePath, "应用中心");
@@ -343,8 +347,8 @@ namespace AppManager
                 if (config.LoadFailed) throw new IOException("配置读取失败，已停止整理桌面：" + config.DatabaseError);
                 List<string> desktops = new List<string>
                 {
-                    Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
-                    Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory)
+                    UserDesktop,
+                    PublicDesktop
                 };
                 if (!Directory.Exists(BackupDir)) Directory.CreateDirectory(BackupDir);
                 // 合并而非清空：保留历史收纳记录（二次收纳不丢上一批的还原信息），
@@ -1005,8 +1009,8 @@ namespace AppManager
             ne.IsCopy = false;   // 补登的历史条目按搬家处理，避免“还原”误删唯一副本
             // 原路径只能靠猜：公共桌面存在同名项时优先猜公共桌面，否则猜用户桌面
             string name = Path.GetFileName(path);
-            string userGuess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), name);
-            string pubGuess = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory), name);
+            string userGuess = Path.Combine(UserDesktop, name);
+            string pubGuess = Path.Combine(PublicDesktop, name);
             ne.OriginalPath = (File.Exists(pubGuess) || Directory.Exists(pubGuess)) ? pubGuess : userGuess;
             return ne;
         }

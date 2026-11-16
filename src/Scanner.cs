@@ -734,8 +734,8 @@ namespace AppManager
 
         private void ScanDesktop(Dictionary<string, AppInfo> dict)
         {
-            string desk = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            string common = Environment.GetFolderPath(Environment.SpecialFolder.CommonDesktopDirectory);
+            string desk = DesktopOrganizer.UserDesktop;
+            string common = DesktopOrganizer.PublicDesktop;
             // 桌面只扫顶层：递归遍历会把用户放在桌面的工程目录整棵扫进来，耗时且产生噪音条目
             ScanShortcuts(desk, dict, "Desktop", false, true);
             ScanShortcuts(common, dict, "Desktop", false, true);
