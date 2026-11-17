@@ -143,6 +143,9 @@ namespace AppManager
                 Run("collection sidebar tree toggles without selecting and keeps scroll anchors", CollectionSidebarTreeInteraction);
                 Run("collection tree auto-expands and searches only direct members", CollectionTreeSearchAndInfo);
                 Run("collection creation uses active folder scope and enforces tree limits", CollectionCreateScopeAndLimits);
+                Run("collection draft validation covers rename, move and self-nesting", CollectionDraftValidation);
+                Run("collection edit page creates, keeps creating, renames and moves in one save", CollectionEditPageFlow);
+                Run("collection edit page keeps pending members, asks before dropping edits and cleans up failed covers", CollectionEditPageGuards);
                 Run("collection deletion falls back to the nearest surviving ancestor", CollectionDeleteFallback);
                 Run("collection move keeps ids, order and references across parents", CollectionMovePersistence);
                 Run("collection move rejects invalid targets and failed saves stay retryable", CollectionMoveGuards);
@@ -3791,13 +3794,9 @@ namespace AppManager
                 Invoke(form, "UpdateCollectionUi");
                 Check((string)active.GetValue(form, null) == null, "collection info page still used the collection as creation scope");
 
-                MethodInfo validate = typeof(MainForm).GetMethod("ValidateCollectionDraft", Private);
                 Func<string, string, string> check = delegate(string name, string parentCollection)
                 {
-                    return (string)validate.Invoke(form, new object[]
-                    {
-                        new ResourceCollection { Name = name }, "照片", parentCollection
-                    });
+                    return CollectionOps.ValidateDraft(config, "照片", parentCollection, name, null);
                 };
                 Check(check("2024", rootKey) != null, "same-parent duplicate name was accepted");
                 Check(check("2024", childKey) == null, "same name under a different parent was rejected");
@@ -3811,6 +3810,356 @@ namespace AppManager
                 for (int depth = 0; depth < 26; depth++) longParent += "/" + new string('x', 80);
                 string longError = check("y", longParent);
                 Check(longError != null && longError.Contains("过长"), "overlong collection key was not rejected");
+            }
+        }
+
+        // 编辑页的校验：改名、换位置、两者一起改，以及不能放进自己的子树。
+        private static void CollectionDraftValidation()
+        {
+            AppConfig config = new AppConfig();
+            string rootA = CollectionKeys.Make("照片", "旅行");
+            string rootB = CollectionKeys.Make("照片", "风景");
+            string childA = rootA + "/2024";
+            ResourceCollection travel = new ResourceCollection { Parent = "照片", Name = "旅行" };
+            ResourceCollection year = new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootA };
+            config.Collections.Add(travel);
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "风景" });
+            config.Collections.Add(year);
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2025", ParentCollection = rootA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "十月", ParentCollection = childA });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootB });
+            config.Collections.Add(new ResourceCollection { Parent = "文档", Name = "旅行" });
+
+            Check(CollectionOps.ValidateDraft(config, "照片", rootA, "2024", year) == null, "an unchanged collection was rejected");
+            Check(CollectionOps.ValidateDraft(config, "照片", string.Empty, "旅 行", travel) == null, "a plain rename was rejected");
+            Check(CollectionOps.ValidateDraft(config, "照片", string.Empty, "旅行", null) != null, "creating a duplicate root name was accepted");
+            Check(CollectionOps.ValidateDraft(config, "文档", string.Empty, "风景", null) == null, "a name used in another category was rejected");
+            Check(CollectionOps.ValidateDraft(config, "照片", rootA, " 2025 ", year) != null, "renaming onto a sibling was accepted");
+            Check(CollectionOps.ValidateDraft(config, "照片", rootA, "  ", year) != null, "a blank name was accepted");
+            Check(CollectionOps.ValidateDraft(config, "照片", rootA, "a/b", year) != null, "a name with a slash was accepted");
+
+            // 只改大小写不算和自己重名
+            ResourceCollection lower = new ResourceCollection { Parent = "照片", Name = "abc" };
+            config.Collections.Add(lower);
+            Check(CollectionOps.ValidateDraft(config, "照片", string.Empty, "ABC", lower) == null, "a case-only rename was rejected");
+            Check(CollectionOps.ValidateDraft(config, "照片", string.Empty, "ABC", null) != null, "a case-insensitive duplicate was accepted");
+
+            // 换位置：目标里有同名的要拦住；同时改名可以避开；原位置有新名字时要求分两步
+            Check(CollectionOps.ValidateDraft(config, "照片", rootB, "2024", year) != null, "moving onto a same-named sibling was accepted");
+            Check(CollectionOps.ValidateDraft(config, "照片", rootB, "2026", year) == null, "moving with a new free name was rejected");
+            string twoSteps = CollectionOps.ValidateDraft(config, "照片", string.Empty, "2025", year);
+            Check(twoSteps != null && twoSteps.Contains("原来的位置"), "rename plus move was accepted while the old parent still has the new name");
+            Check(CollectionOps.ValidateDraft(config, "照片", string.Empty, "2024", year) == null, "moving to the top level was rejected");
+
+            // 不能放进自己或自己的子文件夹
+            Check(CollectionOps.ValidateDraft(config, "照片", rootA, "旅行", travel) != null, "moving a collection into itself was accepted");
+            Check(CollectionOps.ValidateDraft(config, "照片", childA + "/十月", "旅行", travel) != null, "moving a collection into its descendant was accepted");
+
+            // 整棵子树都要在层级上限内：2024 下面还有「十月」，放到第 15 层会让「十月」落到第 17 层
+            string depth14 = rootB;
+            for (int depth = 2; depth <= 14; depth++) depth14 += "/L" + depth;
+            Check(CollectionOps.ValidateDraft(config, "照片", depth14, "2024", year) == null, "a subtree ending at the 16th level was rejected");
+            string deepError = CollectionOps.ValidateDraft(config, "照片", depth14 + "/L15", "2024", year);
+            Check(deepError != null && deepError.Contains("层级"), "a subtree beyond the 16th level was accepted");
+        }
+
+        // 编辑页：新建（重名拦截、连续新建、换位置）、取消、后台刷新不关页、编辑时改名加移动一次保存、保存失败可重试。
+        private static void CollectionEditPageFlow()
+        {
+            AppConfig config = RenameConfig("collection-edit-page");
+            config.AutoScan = false;
+            string rootA = CollectionKeys.Make("照片", "P旅行");
+            string rootB = CollectionKeys.Make("照片", "P风景");
+            string childA = rootA + "/P2024";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "P旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "P风景" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "P2024", ParentCollection = rootA });
+            AppInfo item = AddEntry(config, "照片",
+                Path.Combine(config.ResourceStorePath, "照片", "edit-page-photo.png"), false, true, "edit page photo");
+            CollectionOps.AddMember(config, item.Key, childA);
+            Check(config.Save(), "collection edit page fixture save failed");
+            long childId;
+            using (Sqlite db = new Sqlite(config.Database.FilePath, false)) childId = GroupIdAt(db, childA);
+
+            using (MainForm form = ResourceForm(config, "照片", item))
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1000, 680);
+                form.Show();
+                Application.DoEvents();
+
+                Type formType = typeof(MainForm), panelType = typeof(Controls.CollectionInfoPanel);
+                Controls.CollectionInfoPanel info = (Controls.CollectionInfoPanel)formType.GetField("collectionInfo", Private).GetValue(form);
+                Controls.AppGridControl grid = (Controls.AppGridControl)formType.GetField("grid", Private).GetValue(form);
+                Controls.SearchField search = (Controls.SearchField)formType.GetField("search", Private).GetValue(form);
+                HashSet<string> expanded = (HashSet<string>)formType.GetField("expandedCollections", Private).GetValue(form);
+                FieldInfo current = formType.GetField("currentCollection", Private);
+                FieldInfo entered = formType.GetField("collectionEntered", Private);
+                MethodInfo create = formType.GetMethod("CreateCollectionUnder", Private);
+                MethodInfo submit = panelType.GetMethod("Submit", Private);
+                FieldInfo issue = panelType.GetField("nameIssue", Private);
+                Action<string> begin = delegate(string parentKey) { create.Invoke(form, new object[] { parentKey, null }); };
+                Func<TextBox> nameBox = delegate { return (TextBox)panelType.GetField("nameBox", Private).GetValue(info); };
+                Func<TextBox> descBox = delegate { return (TextBox)panelType.GetField("descBox", Private).GetValue(info); };
+
+                current.SetValue(form, null);
+                entered.SetValue(form, true);
+                Invoke(form, "UpdateCollectionUi");
+                Check(!info.Visible && grid.Visible, "fixture did not start on the content grid");
+
+                // 新建页盖住网格；重名立刻有提示，提交不落库
+                begin(rootA);
+                Check(info.IsCreating && info.Visible && !grid.Visible, "create page did not replace the grid");
+                Check(info.EditParentKey == rootA, "create page did not start at the requested parent");
+                long revision = config.DatabaseRevision;
+                nameBox().Text = "p2024";
+                Check(issue.GetValue(info) != null, "duplicate name was not flagged while typing");
+                submit.Invoke(info, new object[] { false });
+                Check(info.IsCreating && config.DatabaseRevision == revision, "duplicate name was saved");
+
+                // 连续新建：建好后留在新建页，位置保留、其余清空
+                nameBox().Text = " P十月 ";
+                descBox().Text = "国庆";
+                Check(issue.GetValue(info) == null, "free name was flagged");
+                submit.Invoke(info, new object[] { true });
+                ResourceCollection october = CollectionOps.FindByKey(config, rootA + "/P十月");
+                Check(october != null && october.Description == "国庆" && config.DatabaseRevision > revision,
+                    "create-and-continue did not save the collection");
+                Check(info.IsCreating && nameBox().Text.Length == 0 && descBox().Text.Length == 0 && info.EditParentKey == rootA,
+                    "create-and-continue did not reset the page for the next collection");
+                Check(current.GetValue(form) == null && expanded.Contains(rootA), "create-and-continue changed the selection or left the parent collapsed");
+
+                // 后台刷新不关新建页；搜索词一变就放弃
+                nameBox().Text = "草稿";
+                Invoke(form, "RefreshGrid");
+                Check(info.IsCreating && nameBox().Text == "草稿", "a background refresh closed the create page");
+                search.Text = "x";
+                Invoke(form, "RefreshGrid");
+                Check(!info.IsEditing, "starting a search kept the create page open");
+                search.Text = string.Empty;
+                Invoke(form, "RefreshGrid");
+
+                // 新建页开着时再点新建：只换位置；换到最外层后创建并选中
+                begin(rootA);
+                nameBox().Text = "P新根";
+                begin(string.Empty);
+                Check(info.IsCreating && info.EditParentKey.Length == 0 && nameBox().Text == "P新根",
+                    "re-opening the create page lost the typed name or kept the old location");
+                submit.Invoke(info, new object[] { false });
+                string newRoot = CollectionKeys.Make("照片", "P新根");
+                Check(CollectionOps.FindByKey(config, newRoot) != null && !info.IsEditing, "create did not save or did not close the page");
+                Check((string)current.GetValue(form) == newRoot && !(bool)entered.GetValue(form) && info.Visible,
+                    "created collection was not selected on its info page");
+
+                // 取消：回到打开前的内容（信息页 / 网格）
+                begin(newRoot);
+                info.CancelEdit();
+                Check(!info.IsEditing && info.Visible && !grid.Visible, "cancel from the info page did not restore it");
+                entered.SetValue(form, true);
+                Invoke(form, "RefreshGrid");
+                Check(!info.Visible && grid.Visible, "entering the collection did not show its contents");
+                begin(newRoot);
+                Check(info.IsCreating && !grid.Visible, "create page did not open over the collection contents");
+                info.CancelEdit();
+                Check(!info.Visible && grid.Visible, "cancel from the contents did not restore the grid");
+                Check(CollectionOps.FindByKey(config, newRoot + "/草稿") == null, "cancelled drafts were saved");
+
+                // 编辑：改名 + 换位置一次保存，子树、成员和数据库里的分组 ID 都跟着走
+                Invoke(form, "EditCollection", CollectionOps.FindByKey(config, childA));
+                Check(info.IsEditing && !info.IsCreating && info.EditParentKey == rootA && nameBox().Text == "P2024",
+                    "edit page did not load the collection");
+                revision = config.DatabaseRevision;
+                nameBox().Text = "P改名";
+                info.SetEditLocation(rootB);
+                submit.Invoke(info, new object[] { false });
+                string movedKey = rootB + "/P改名";
+                Check(!info.IsEditing && CollectionOps.FindByKey(config, movedKey) != null
+                    && CollectionOps.FindByKey(config, childA) == null, "rename plus move was not applied");
+                Check((string)current.GetValue(form) == movedKey && expanded.Contains(rootB), "rename plus move lost the selection or left the new parent collapsed");
+                Check(config.ItemCategories[item.Key].Contains(movedKey) && !config.ItemCategories[item.Key].Contains(childA),
+                    "rename plus move did not migrate the member");
+                AppConfig reloaded = AppConfig.Load();
+                Check(CollectionOps.FindByKey(reloaded, movedKey) != null && CollectionOps.FindByKey(reloaded, childA) == null
+                    && reloaded.ItemCategories[item.Key].Contains(movedKey), "rename plus move was not persisted");
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                    Check(GroupIdAt(db, movedKey) == childId, "rename plus move replaced the database group instead of updating it");
+
+                // 只改大小写可以保存
+                Invoke(form, "EditCollection", CollectionOps.FindByKey(config, movedKey));
+                nameBox().Text = "p改名";
+                Check(issue.GetValue(info) == null, "case-only rename was flagged as a duplicate");
+                submit.Invoke(info, new object[] { false });
+                string casedKey = rootB + "/p改名";
+                Check(!info.IsEditing && CollectionOps.FindByKey(AppConfig.Load(), casedKey) != null, "case-only rename was not persisted");
+
+                // 保存失败：数据不变，编辑页和已填内容保留，解除占用后直接重试成功
+                Invoke(form, "EditCollection", CollectionOps.FindByKey(config, casedKey));
+                revision = config.DatabaseRevision;
+                nameBox().Text = "P重试";
+                descBox().Text = "失败后还在";
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                {
+                    db.Execute("BEGIN IMMEDIATE");
+                    try { submit.Invoke(info, new object[] { false }); }
+                    finally { db.Execute("ROLLBACK"); }
+                }
+                Check(info.IsEditing && nameBox().Text == "P重试" && descBox().Text == "失败后还在",
+                    "a failed save closed the edit page or lost the typed content");
+                Check(config.DatabaseRevision == revision && CollectionOps.FindByKey(config, casedKey) != null
+                    && CollectionOps.FindByKey(config, rootB + "/P重试") == null, "a failed save changed the collection tree");
+                submit.Invoke(info, new object[] { false });
+                ResourceCollection retried = CollectionOps.FindByKey(config, rootB + "/P重试");
+                Check(!info.IsEditing && retried != null && retried.Description == "失败后还在" && config.DatabaseRevision > revision,
+                    "retry after a failed save did not succeed");
+            }
+        }
+
+        // 编辑页的几处保护：带着待加入资源新建时换位置不丢资源；编辑到一半再新建要先确认；新建先退出查看器；
+        // 点「编辑」和取消编辑不重新注入信息页；封面存不下 / 保存失败不留孤儿文件；位置菜单不让选自己和子文件夹。
+        private static void CollectionEditPageGuards()
+        {
+            AppConfig config = RenameConfig("collection-edit-guards");
+            config.AutoScan = false;
+            string rootA = CollectionKeys.Make("照片", "G旅行");
+            string rootB = CollectionKeys.Make("照片", "G风景");
+            string childA = rootA + "/G2024";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "G旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "G风景" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "G2024", ParentCollection = rootA, Description = "原简介" });
+            AppInfo first = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "照片", "guard-1.png"), false, true, "guard 1");
+            AppInfo second = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "照片", "guard-2.png"), false, true, "guard 2");
+            Check(config.Save(), "collection edit guards fixture save failed");
+
+            using (MainForm form = ResourceForm(config, "照片", first, second))
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1000, 680);
+                form.Show();
+                Application.DoEvents();
+
+                Type formType = typeof(MainForm), panelType = typeof(Controls.CollectionInfoPanel);
+                Controls.CollectionInfoPanel info = (Controls.CollectionInfoPanel)formType.GetField("collectionInfo", Private).GetValue(form);
+                Control imageViewer = (Control)formType.GetField("imageViewer", Private).GetValue(form);
+                FieldInfo current = formType.GetField("currentCollection", Private);
+                FieldInfo entered = formType.GetField("collectionEntered", Private);
+                MethodInfo create = formType.GetMethod("CreateCollectionUnder", Private);
+                MethodInfo submit = panelType.GetMethod("Submit", Private);
+                Func<TextBox> nameBox = delegate { return (TextBox)panelType.GetField("nameBox", Private).GetValue(info); };
+                Func<TextBox> descBox = delegate { return (TextBox)panelType.GetField("descBox", Private).GetValue(info); };
+                Action<string> begin = delegate(string parentKey) { create.Invoke(form, new object[] { parentKey, null }); };
+
+                current.SetValue(form, null);
+                entered.SetValue(form, true);
+                Invoke(form, "RefreshGrid");
+
+                // 带着两项资源新建：再点一次「新建」只换位置，名称和待加入的资源都还在；创建后一起落库、不留在新建页
+                create.Invoke(form, new object[] { rootA, new List<AppInfo> { first, second } });
+                Check(info.IsCreating && (int)panelType.GetField("joinCount", Private).GetValue(info) == 2,
+                    "create page did not take the items to join");
+                nameBox().Text = "G合集";
+                begin(rootB);
+                Check(info.IsCreating && nameBox().Text == "G合集" && info.EditParentKey == rootB
+                    && (int)panelType.GetField("joinCount", Private).GetValue(info) == 2,
+                    "re-opening the create page dropped the typed name or the items to join");
+                submit.Invoke(info, new object[] { true });
+                string joinedKey = rootB + "/G合集";
+                Check(CollectionOps.FindByKey(config, joinedKey) != null && !info.IsEditing,
+                    "creating with items to join did not save or stayed on the create page");
+                Check(config.ItemCategories[first.Key].Contains(joinedKey) && config.ItemCategories[second.Key].Contains(joinedKey),
+                    "items were not added to the new collection");
+                Check(current.GetValue(form) == null, "creating with items to join changed the selection");
+                AppConfig reloaded = AppConfig.Load();
+                Check(CollectionOps.FindByKey(reloaded, joinedKey) != null && reloaded.ItemCategories[first.Key].Contains(joinedKey),
+                    "collection and members were not persisted together");
+
+                // 新建先退出查看器，不把它盖在下面
+                imageViewer.Visible = true;
+                begin(rootA);
+                Check(info.IsCreating && !imageViewer.Visible, "create page left the image viewer open underneath");
+
+                // 封面存不下：停在新建页并提示，不落库
+                string coverDir = Path.Combine(Paths.DataDir, "CollectionCovers");
+                int coversBefore = Directory.Exists(coverDir) ? Directory.GetFiles(coverDir).Length : 0;
+                long revision = config.DatabaseRevision;
+                nameBox().Text = "G封面";
+                MethodInfo paste = panelType.GetMethod("SetPastedCover", Private);
+                paste.Invoke(info, new object[] { new Bitmap(40, 30) });
+                string realData = Paths.DataDirOverride;
+                string blocked = Path.Combine(root, "cover-blocked-" + Guid.NewGuid().ToString("N"));
+                Directory.CreateDirectory(blocked);
+                File.WriteAllText(Path.Combine(blocked, "CollectionCovers"), "not a folder");
+                Paths.DataDirOverride = blocked;
+                try { submit.Invoke(info, new object[] { false }); }
+                finally { Paths.DataDirOverride = realData; }
+                Check(info.IsCreating && nameBox().Text == "G封面" && config.DatabaseRevision == revision
+                    && panelType.GetField("notice", Private).GetValue(info) != null,
+                    "an unsaved pasted cover did not stop the create with a notice");
+
+                // 保存失败：不留孤儿封面文件，内容保留；重试成功后封面文件在
+                using (Sqlite db = new Sqlite(config.Database.FilePath, false))
+                {
+                    db.Execute("BEGIN IMMEDIATE");
+                    try { submit.Invoke(info, new object[] { false }); }
+                    finally { db.Execute("ROLLBACK"); }
+                }
+                Check(info.IsCreating && nameBox().Text == "G封面" && CollectionOps.FindByKey(config, rootA + "/G封面") == null,
+                    "a failed create closed the page or saved the collection");
+                Check((Directory.Exists(coverDir) ? Directory.GetFiles(coverDir).Length : 0) == coversBefore,
+                    "a failed create left an orphan cover file");
+                submit.Invoke(info, new object[] { false });
+                ResourceCollection covered = CollectionOps.FindByKey(config, rootA + "/G封面");
+                Check(covered != null && File.Exists(covered.Cover) && Directory.GetFiles(coverDir).Length == coversBefore + 1,
+                    "retrying the create did not save the collection with its pasted cover");
+
+                // 信息页点「编辑」再取消：不重新注入信息页（改过的计数还在）
+                Invoke(form, "OnCollectionSelected", childA);
+                Check(info.Visible && !info.IsEditing, "fixture did not show the collection info page");
+                FieldInfo count = panelType.GetField("count", Private);
+                count.SetValue(info, 999);
+                panelType.GetMethod("RequestEdit", Private).Invoke(info, null);
+                Check(info.IsEditing && !info.IsCreating && info.EditParentKey == rootA && nameBox().Text == "G2024",
+                    "the edit button did not open the edit page in place");
+                Check(!info.HasUnsavedEdit, "an untouched edit page reported unsaved changes");
+                info.CancelEdit();
+                Check(!info.IsEditing && info.Visible && (int)count.GetValue(info) == 999,
+                    "edit and cancel rebuilt the info page");
+
+                // 没改动时新建不打扰；改过内容再新建要先确认：取消则留在编辑页，确定才打开新建页
+                panelType.GetMethod("RequestEdit", Private).Invoke(info, null);
+                begin(rootA);
+                Check(info.IsCreating, "an untouched edit page blocked creating");
+                info.CancelEdit();
+                panelType.GetMethod("RequestEdit", Private).Invoke(info, null);
+                descBox().Text = "改到一半";
+                Check(info.HasUnsavedEdit, "a changed description was not reported as unsaved");
+                ClickConfirmation(delegate { begin(rootA); }, false);
+                Check(info.IsEditing && !info.IsCreating && descBox().Text == "改到一半",
+                    "declining the confirmation dropped the unsaved edit");
+                ClickConfirmation(delegate { begin(rootA); }, true);
+                Check(info.IsCreating, "accepting the confirmation did not open the create page");
+                info.CancelEdit();
+                Check(CollectionOps.FindByKey(config, childA).Description == "原简介", "the dropped edit was saved");
+
+                // 位置菜单：自己和子文件夹不能选；有子文件夹的悬停才展开；选中即换位置
+                Invoke(form, "EditCollection", CollectionOps.FindByKey(config, rootA));
+                MethodInfo buildMenu = formType.GetMethod("BuildLocationMenu", Private);
+                List<MenuWindow.MenuItem> menu = (List<MenuWindow.MenuItem>)buildMenu.Invoke(form,
+                    new object[] { new CollectionIndex(config.Collections), null, string.Empty, rootA });
+                MenuWindow.MenuItem self = menu.Find(delegate(MenuWindow.MenuItem m) { return m.Text.StartsWith("G旅行", StringComparison.Ordinal); });
+                MenuWindow.MenuItem other = menu.Find(delegate(MenuWindow.MenuItem m) { return m.Text == "G风景"; });
+                Check(self != null && self.Disabled && self.SubItemsFactory == null && self.Action == null,
+                    "the collection being edited can be picked as its own location");
+                Check(other != null && !other.Disabled && other.SubItemsFactory != null, "a collection with subfolders does not expand");
+                List<MenuWindow.MenuItem> sub = other.SubItemsFactory();
+                Check(sub.Count == 3 && sub[0].Action != null && sub[1].Separator && sub[2].Text == "G合集",
+                    "the submenu does not offer the collection itself plus its subfolders");
+                sub[2].Action();
+                Check(info.EditParentKey == joinedKey, "picking a location did not change the edit page");
+                info.CancelEdit();
             }
         }
 

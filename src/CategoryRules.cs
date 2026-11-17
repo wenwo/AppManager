@@ -74,12 +74,15 @@ namespace AppManager
             return ValidateName(name, "集合名称");
         }
 
+        /// <summary>分类名与集合名的长度上限（字符数）。</summary>
+        public const int MaxNameLength = 80;
+
         private static string ValidateName(string name, string label)
         {
             if (string.IsNullOrWhiteSpace(name)) return label + "不能为空";
             if (name.IndexOf('/') >= 0) return label + "不能包含“/”";
             if (name.StartsWith("col:", StringComparison.OrdinalIgnoreCase)) return label + "不能以“col:”开头";
-            if (name.Length > 80) return label + "过长（最多 80 个字符）";
+            if (name.Length > MaxNameLength) return label + "过长（最多 " + MaxNameLength + " 个字符）";
             return null;
         }
 

@@ -959,7 +959,11 @@ namespace AppManager
             // 集合信息页：选中自定义集合后替换列表区域展示，点「进入」切换为集合内容
             collectionInfo = new CollectionInfoPanel();
             collectionInfo.EnterRequested += delegate { if (currentCollection != null) EnterCollection(currentCollection); };
-            collectionInfo.EditSaveRequested += OnCollectionEditSave;     // 页内编辑保存（名称/简介/封面）
+            collectionInfo.EditRequested += OnCollectionEditRequested;    // 信息页点「编辑」：原地进入编辑页
+            collectionInfo.EditSaveRequested += OnCollectionEditSave;     // 编辑页保存 / 创建（位置/名称/简介/封面）
+            collectionInfo.EditCancelled += OnCollectionEditCancelled;    // 编辑页取消：恢复原来的内容
+            collectionInfo.LocationPickRequested += OnCollectionPickLocation;   // 编辑页换位置
+            collectionInfo.DraftValidator = ValidateCollectionEditDraft;  // 编辑页边输入边校验
             collectionInfo.CoverPickRequested += OnCollectionPickCover;   // 页内编辑更换封面
             collectionInfo.CoverAutoRequested += OnCollectionAutoCover;   // 页内编辑恢复自动封面
             Controls.Add(collectionInfo);
@@ -3262,6 +3266,7 @@ namespace AppManager
         /// <summary>集合信息页：选中自定义集合、未进入内容且非搜索态时展示名称/简介/封面/进入。</summary>
         private void UpdateCollectionInfo()
         {
+            if (KeepCollectionCreatePage()) return;
             if (collectionInfo.IsEditing)
             {
                 // 页内编辑中：后台刷新（自动重扫等）不覆盖表单；离开该集合信息页或进入搜索时才退出编辑
@@ -3792,89 +3797,6 @@ namespace AppManager
             CreateCollectionUnder(null, appsToJoin);
         }
 
-        /// <summary>
-        /// 在资源分类或指定父集合下创建集合。校验和保存失败都保留对话框输入；
-        /// 集合定义与成员归属先提交，展开状态和导航键只在保存成功后更新。
-        /// </summary>
-        private void CreateCollectionUnder(string parentCollectionKey, List<AppInfo> appsToJoin)
-        {
-            if (!CanEditCategory(currentCategory)) return;
-            parentCollectionKey = parentCollectionKey ?? string.Empty;
-            ResourceCollection parent;
-            string root;
-            string parentError;
-            if (!ResolveCollectionCreationParent(parentCollectionKey, out parent, out root, out parentError))
-            {
-                MessageDialog.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            string title = parent == null
-                ? "新建集合（" + currentCategory + "）"
-                : "新建子文件夹（" + CollectionKeys.DisplayPath(parentCollectionKey) + "）";
-
-            ResourceCollection seed = null;
-            string createdKey = null;
-            while (createdKey == null)
-            {
-                ResourceCollection draft = CollectionDialog.Show(title, seed);
-                if (draft == null) return;
-
-                // 对话框关闭后重新验证父集合，避免分类/集合上下文已变化时落到错误父级。
-                if (!ResolveCollectionCreationParent(parentCollectionKey, out parent, out root, out parentError))
-                {
-                    MessageDialog.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-                string error = ValidateCollectionDraft(draft, root, parentCollectionKey);
-                if (error != null)
-                {
-                    MessageDialog.Show(this, error, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    seed = draft;
-                    continue;
-                }
-
-                string name = (draft.Name ?? string.Empty).Trim();
-                string key = CollectionKeys.GetKey(root, parentCollectionKey, name);
-                draft.Parent = root;
-                draft.ParentCollection = parentCollectionKey;
-                draft.Name = name;
-                config.Collections.Add(draft);
-                if (appsToJoin != null)
-                {
-                    for (int i = 0; i < appsToJoin.Count; i++)
-                    {
-                        AppInfo a = appsToJoin[i];
-                        if (a == null || string.IsNullOrEmpty(a.Key)) continue;
-                        if (!CanJoinResourceCategory(a, root)) continue;
-                        CollectionOps.AddMember(config, a.Key, key);
-                    }
-                }
-                if (!config.Save())
-                {
-                    MessageDialog.Show(this, "新建文件夹未能保存，请重试或取消。\n" + config.DatabaseError,
-                        "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    seed = draft;   // 保留名称/简介；config.Save 已回滚到数据库状态
-                    continue;
-                }
-                createdKey = key;
-            }
-
-            collectionInfo.EndEdit();   // 保存成功后才放弃当前页内编辑
-            bool revealNew = appsToJoin == null || appsToJoin.Count == 0;
-            ExpandCollectionAncestors(createdKey);
-            if (!string.IsNullOrEmpty(parentCollectionKey)) expandedCollections.Add(parentCollectionKey);
-            if (revealNew)
-            {
-                currentCollection = createdKey;
-                collectionEntered = false;
-                revealActiveCollection = true;
-                collectionSidebar.SetActive(createdKey);
-            }
-            else revealActiveCollection = false;
-            RefreshGrid();
-            if (revealNew) collectionSidebar.ScrollToKey(createdKey);
-        }
-
         private bool ResolveCollectionCreationParent(string parentCollectionKey, out ResourceCollection parent,
             out string root, out string error)
         {
@@ -3895,26 +3817,6 @@ namespace AppManager
             }
             root = parent.Parent;
             return true;
-        }
-
-        private string ValidateCollectionDraft(ResourceCollection draft, string root, string parentCollectionKey)
-        {
-            string error = CategoryRules.ValidateCollectionName(draft == null ? string.Empty : draft.Name);
-            if (error != null) return error;
-            string name = draft.Name.Trim();
-            if (CollectionOps.NameExists(config, root, parentCollectionKey ?? string.Empty, name))
-                return "集合「" + name + "」已存在，请换一个名称。";
-            string key = CollectionKeys.GetKey(root, parentCollectionKey ?? string.Empty, name);
-            if (key.Length > CollectionKeys.MaxKeyLength)
-                return "集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）。";
-            int depth = CollectionKeys.Depth(key);
-            if (depth <= 0 || depth > CollectionKeys.MaxDepth)
-                return "集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）。";
-            int count = 0;
-            for (int i = 0; i < config.Collections.Count; i++) if (config.Collections[i] != null) count++;
-            if (count >= CollectionKeys.MaxCollections)
-                return "集合数量超过上限（最多 " + CollectionKeys.MaxCollections + " 个）。";
-            return null;
         }
 
         /// <summary>集合右键菜单：编辑 / 删除。</summary>
@@ -3954,82 +3856,7 @@ namespace AppManager
             collectionSidebar.SetActive(key);
             RefreshGrid();          // 先展示信息页，再进入编辑态
             collectionSidebar.ScrollToKey(key);
-            collectionInfo.BeginEdit();
-        }
-
-        /// <summary>信息页「保存」：校验重名并落盘；粘贴图片写入受管封面目录；改名时迁移成员归属键。</summary>
-        private void OnCollectionEditSave(string newName, string newDescription, string newCoverPath,
-            Bitmap pastedCover, float focusX, float focusY)
-        {
-            ResourceCollection c = FindCollectionByKey(currentCollection);
-            if (c == null) { collectionInfo.EndEdit(); return; }
-            string name = (newName ?? string.Empty).Trim();
-            string nameError = CategoryRules.ValidateCollectionName(name);
-            if (nameError != null)
-            {
-                MessageDialog.Show(this, nameError, "编辑集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-            if (!string.Equals(name, c.Name, StringComparison.Ordinal)
-                && CollectionOps.NameExists(config, c.Parent, c.ParentCollection, name))
-            {
-                MessageDialog.Show(this, "集合「" + name + "」已存在，请换一个名称。", "编辑集合",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            string finalCover = newCoverPath ?? string.Empty;
-            if (pastedCover != null)
-            {
-                string saved = SaveManagedCoverImage(pastedCover);
-                if (string.IsNullOrEmpty(saved))
-                {
-                    MessageDialog.Show(this, "保存封面图片失败，请重试。", "编辑集合",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                finalCover = saved;
-            }
-
-            string oldCover = c.Cover;
-            string oldKey = CollectionKeys.GetKey(c);
-            string browsingKey = currentCollection;
-            Dictionary<string, string> renames = null;
-            if (!string.Equals(name, c.Name, StringComparison.Ordinal))
-            {
-                try { renames = CollectionOps.RenameSubtree(config, c, name); }
-                catch (InvalidOperationException ex)
-                {
-                    DeleteManagedCoverIfUnused(finalCover, oldCover);
-                    MessageDialog.Show(this, ex.Message, "编辑集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
-                }
-                string newKey = CollectionKeys.GetKey(c);
-                config.QueueCategoryRename(oldKey, newKey);
-            }
-            c.Description = newDescription ?? string.Empty;
-            c.Cover = finalCover;
-            c.CoverFocusX = ClampFocus(focusX);
-            c.CoverFocusY = ClampFocus(focusY);
-            bool savedConfig = config.Save();
-            if (!savedConfig)
-            {
-                // 配置已回滚到数据库状态；刚写入的受管封面没有任何引用，可以安全清理。
-                currentCollection = browsingKey == null || FindCollectionByKey(browsingKey) == null ? null : browsingKey;
-                DeleteManagedCoverIfUnused(finalCover, null);
-                collectionInfo.EndEdit();
-                RefreshGrid();
-                return;
-            }
-            if (renames != null)
-            {
-                RemapExpandedCollections(renames);
-                string mapped;
-                if (currentCollection != null && renames.TryGetValue(currentCollection, out mapped)) currentCollection = mapped;
-            }
-            DeleteManagedCoverIfUnused(oldCover, finalCover);
-            collectionInfo.EndEdit();
-            RefreshGrid();   // 侧边栏/信息页随名称、简介与封面同步刷新
+            collectionInfo.BeginEdit(c.Parent, c.ParentCollection);
         }
 
         /// <summary>受管封面目录：粘贴生成的封面统一存放于此，便于清理且不污染资源库。</summary>
@@ -7794,7 +7621,7 @@ namespace AppManager
             }
             if (keyData == Keys.Escape && collectionInfo != null && collectionInfo.IsEditing)
             {
-                collectionInfo.EndEdit();   // 取消页内编辑，保留原集合信息展示
+                collectionInfo.CancelEdit();   // 取消编辑 / 新建，回到原来的内容
                 return true;
             }
             if (keyData == Keys.Escape && search != null && !string.IsNullOrEmpty(search.Text))

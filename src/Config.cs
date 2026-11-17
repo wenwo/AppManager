@@ -408,12 +408,76 @@ namespace AppManager
         /// <summary>同一直接父节点下集合名是否已存在；parentCollection 为空表示资源分类下的一级集合。</summary>
         public static bool NameExists(AppConfig cfg, string parent, string parentCollection, string name)
         {
-            if (cfg == null) return false;
+            return cfg != null && SiblingNameTaken(cfg, parent, parentCollection ?? string.Empty, name, null);
+        }
+
+        /// <summary>
+        /// 新建或编辑集合前的整体校验（编辑页边输入边调用，保存前再调用一次）：名称、同级重名、
+        /// 不能放进自身子树、整棵子树的路径长度与层级、集合总数。editing 为 null 表示新建。
+        /// 不检查目标父集合是否存在（由调用方按当前界面上下文判断）。返回给用户看的问题说明；null 表示可以保存。
+        /// </summary>
+        public static string ValidateDraft(AppConfig cfg, string root, string parentCollection, string name,
+            ResourceCollection editing)
+        {
+            if (cfg == null) return "配置不可用。";
+            parentCollection = parentCollection ?? string.Empty;
+            name = (name ?? string.Empty).Trim();
+            string error = CategoryRules.ValidateCollectionName(name);
+            if (error != null) return error;
+
+            string oldKey = editing == null ? null : CollectionKeys.GetKey(editing);
+            string oldParent = editing == null ? null : editing.ParentCollection ?? string.Empty;
+            if (editing != null && CollectionKeys.IsDescendantOrSelf(oldKey, parentCollection))
+                return "不能把集合放进它自己或它的子文件夹里。";
+            if (SiblingNameTaken(cfg, root, parentCollection, name, editing))
+                return "这个位置已经有「" + name + "」了，请换一个名称。";
+            bool moved = editing != null && !string.Equals(oldParent, parentCollection, StringComparison.Ordinal);
+            bool renamed = editing != null && !string.Equals(editing.Name, name, StringComparison.Ordinal);
+            // 改名和移动在同一次保存里按「先改名、再移动」落库：新名称在原位置也必须空着
+            if (moved && renamed && SiblingNameTaken(cfg, root, oldParent, name, editing))
+                return "原来的位置已经有「" + name + "」了：请先只改位置并保存，再改名称。";
+
+            string newKey = CollectionKeys.GetKey(root, parentCollection, name);
+            if (editing == null)
+            {
+                error = KeyLimitError(newKey);
+                if (error != null) return error;
+                int count = 0;
+                for (int i = 0; i < cfg.Collections.Count; i++) if (cfg.Collections[i] != null) count++;
+                if (count >= CollectionKeys.MaxCollections)
+                    return "集合数量超过上限（最多 " + CollectionKeys.MaxCollections + " 个）。";
+                return null;
+            }
+            if (!moved && !renamed) return null;
+            List<ResourceCollection> subtree = Subtree(cfg, editing);
+            for (int i = 0; i < subtree.Count; i++)
+            {
+                error = KeyLimitError(newKey + CollectionKeys.GetKey(subtree[i]).Substring(oldKey.Length));
+                if (error != null) return error;
+            }
+            return null;
+        }
+
+        private static string KeyLimitError(string key)
+        {
+            if (key.Length > CollectionKeys.MaxKeyLength)
+                return "集合路径过长（最多 " + CollectionKeys.MaxKeyLength + " 个字符）。";
+            int depth = CollectionKeys.Depth(key);
+            if (depth <= 0 || depth > CollectionKeys.MaxDepth)
+                return "集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）。";
+            return null;
+        }
+
+        /// <summary>同一直接父节点下是否已有同名集合（不区分大小写）；exclude 是正在编辑的集合自身。</summary>
+        private static bool SiblingNameTaken(AppConfig cfg, string root, string parentCollection, string name,
+            ResourceCollection exclude)
+        {
             for (int i = 0; i < cfg.Collections.Count; i++)
             {
                 ResourceCollection c = cfg.Collections[i];
-                if (c == null || !string.Equals(c.Parent, parent, StringComparison.Ordinal)
-                    || !string.Equals(c.ParentCollection ?? string.Empty, parentCollection ?? string.Empty, StringComparison.Ordinal)
+                if (c == null || ReferenceEquals(c, exclude)
+                    || !string.Equals(c.Parent, root, StringComparison.Ordinal)
+                    || !string.Equals(c.ParentCollection ?? string.Empty, parentCollection, StringComparison.Ordinal)
                     || !string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase)) continue;
                 return true;
             }
