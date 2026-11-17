@@ -190,6 +190,8 @@ namespace AppManager
                 Run("database panel lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
                 Run("path picker checks paths, asks before creating or replacing and keeps failed validation in the window", PathPickerFlow);
                 Run("cover picker lists thumbnails, previews, blocks unreadable images, opens typed folders and remembers the last cover", CoverPickerFlow);
+                Run("add page lists by type, checks across folders, previews, takes drops and typed paths and drops vanished files", MediaAddPageFlow);
+                Run("add page opens inside the main window, stays on top, follows resizes and restores the main content", MediaAddPageInMainWindow);
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
                 Run("exporting change details writes a temp file first: a failure keeps the old file and leaves no partial file", ExportChangesAtomic);
@@ -7098,6 +7100,326 @@ namespace AppManager
             using (Bitmap tile = AppManager.Controls.CoverImageGrid.DecodeTile(tall, 40, CancellationToken.None))
                 Check(tile != null && tile.Width == 40 && tile.Height == 40, "tile decode size is wrong");
             Check(AppManager.Controls.CoverImageGrid.DecodeTile(broken, 40, CancellationToken.None) == null, "a broken image produced a tile");
+        }
+
+        private static void MediaAddPageFlow()
+        {
+            string dir = Path.Combine(root, "add-page");
+            string sub = Path.Combine(dir, "子文件夹");
+            Directory.CreateDirectory(sub);
+            string a = Path.Combine(dir, "a-宽图.png"), b = Path.Combine(dir, "b-竖图.png"), broken = Path.Combine(dir, "c-损坏.jpg");
+            string d = Path.Combine(sub, "d.png"), notes = Path.Combine(dir, "notes.txt"), hidden = Path.Combine(dir, "e-隐藏.png");
+            using (Bitmap bmp = new Bitmap(16, 10)) bmp.Save(a, System.Drawing.Imaging.ImageFormat.Png);
+            using (Bitmap bmp = new Bitmap(6, 12)) { bmp.Save(b, System.Drawing.Imaging.ImageFormat.Png); bmp.Save(d, System.Drawing.Imaging.ImageFormat.Png); }
+            File.WriteAllText(broken, "not an image");
+            File.WriteAllText(notes, "text");
+            File.WriteAllText(hidden, "x");
+            File.SetAttributes(hidden, FileAttributes.Hidden);
+            string song = Path.Combine(dir, "song.mp3");
+            File.WriteAllText(song, "not really mp3");
+
+            Check(AppManager.Controls.MediaAddPage.IsImageOnly(MediaRules.ImageExt) && !AppManager.Controls.MediaAddPage.IsImageOnly(new string[0])
+                && !AppManager.Controls.MediaAddPage.IsImageOnly(null) && !AppManager.Controls.MediaAddPage.IsImageOnly(MediaRules.AudioExt)
+                && !AppManager.Controls.MediaAddPage.IsImageOnly(new string[] { ".png", ".pdf" }),
+                "image-only detection is wrong");
+
+            // 带文件信息的列举：按名称顺序，隐藏文件不列，超过上限只计数，大小来自目录枚举
+            int omitted;
+            string error;
+            List<FileInfo> infos = PathPickerDialog.ListFileInfos(dir, MediaRules.ImageExt, 2, null, out omitted, out error);
+            Check(error == null && infos.Count == 2 && omitted == 1 && infos[0].FullName == a && infos[1].FullName == b && infos[0].Length > 0,
+                "file info listing is wrong: " + infos.Count + "/" + omitted);
+            PathPickerDialog.ListFileInfos(Path.Combine(dir, "不存在"), MediaRules.ImageExt, 10, null, out omitted, out error);
+            Check(error != null, "a missing folder listed without an error");
+            // 换了文件夹：读取马上停下，不再继续枚举
+            infos = PathPickerDialog.ListFileInfos(dir, MediaRules.ImageExt, 10, delegate { return true; }, out omitted, out error);
+            Check(infos.Count == 0 && error == null, "a cancelled listing kept enumerating: " + infos.Count);
+
+            Type gridType = typeof(AppManager.Controls.CoverImageGrid);
+            Type pageType = typeof(AppManager.Controls.MediaAddPage);
+            Func<object, string, object> field = delegate(object o, string name) { return o.GetType().GetField(name, Private).GetValue(o); };
+            MethodInfo check = pageType.GetMethod("Check", Private);
+            MethodInfo processKey = pageType.GetMethod("ProcessCmdKey", Private);
+
+            using (Form host = new Form())
+            {
+                host.ShowInTaskbar = false;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-3000, -3000);
+                host.ClientSize = new Size(1100, 700);
+                AppManager.Controls.MediaAddPage page = new AppManager.Controls.MediaAddPage("测试", "照片", MediaRules.ImageExt, dir);
+                page.Dock = DockStyle.Fill;
+                List<string> confirmed = null;
+                int cancelled = 0;
+                page.Confirmed += delegate(List<string> list) { confirmed = list; };
+                page.Cancelled += delegate { cancelled++; };
+                host.Controls.Add(page);
+                host.Show();
+                AppManager.Controls.CoverImageGrid grid = (AppManager.Controls.CoverImageGrid)field(page, "grid");
+                TextBox box = (TextBox)field(page, "pathBox");
+                Control confirmButton = (Control)field(page, "confirmButton");
+                Func<bool> idle = delegate { return !page.Loading && !page.Checking && !page.PreviewLoading; };
+
+                // 照片用缩略图网格：先子文件夹，再按名称列出图片；隐藏文件和别的类型不列
+                PumpUntil(delegate { return grid.Count == 4 && !page.Loading; }, 15000);
+                Check(grid.Count == 4 && page.ListedFiles.Count == 3 && !confirmButton.Enabled && page.CheckedFiles.Count == 0,
+                    "folder listing is wrong: " + grid.Count + "/" + page.ListedFiles.Count);
+                host.Refresh();
+
+                // 跨文件夹勾选：数量、来自几个文件夹和按钮文字跟着变
+                page.ToggleFile(a);
+                page.Navigate(sub);
+                PumpUntil(delegate { return grid.Count == 1 && !page.Loading; }, 15000);
+                page.ToggleFile(d);
+                Check(page.CheckedFiles.Count == 2 && page.StatusText.Contains("来自 2 个文件夹") && confirmButton.Enabled && confirmButton.Text == "添加 2 个",
+                    "checking across folders is wrong: " + page.StatusText + " / " + confirmButton.Text);
+
+                // 全选当前文件夹：已全部勾上时再按一次是全部取消
+                page.ToggleAllListed();
+                Check(page.CheckedFiles.Count == 1 && !page.CheckedFiles.Contains(d), "select-all did not clear a fully checked folder");
+                page.ToggleAllListed();
+                Check(page.CheckedFiles.Count == 2 && page.CheckedFiles[1] == d, "select-all did not check the folder");
+
+                // 「已选的文件」：几个文件夹里勾的列在一起；取消的留在原处，可以再勾回来
+                page.ShowChecked();
+                Check(page.ShowingChecked && grid.Count == 2 && page.ListedFiles.Count == 2, "the checked view is wrong: " + grid.Count);
+                page.ToggleFile(d);
+                Check(grid.Count == 2 && page.CheckedFiles.Count == 1, "unchecking in the checked view removed the tile");
+                page.ToggleFile(d);
+                host.Refresh();
+
+                // 点格子右上角的勾选框切换勾选（双击不再重复切换）；单击图片只预览，双击才勾选
+                page.Navigate(dir);
+                PumpUntil(delegate { return grid.Count == 4 && !page.Loading; }, 15000);
+                Rectangle cell = (Rectangle)gridType.GetMethod("ClientCell", Private).Invoke(grid, new object[] { 2 });
+                Rectangle checkBox = (Rectangle)gridType.GetMethod("CheckBoxRect", Private).Invoke(grid, new object[] { new Rectangle(cell.X, cell.Y, cell.Width, cell.Width) });
+                MouseEventArgs onBox = new MouseEventArgs(MouseButtons.Left, 1, checkBox.X + checkBox.Width / 2, checkBox.Y + checkBox.Height / 2, 0);
+                gridType.GetMethod("OnMouseDown", Private).Invoke(grid, new object[] { onBox });
+                gridType.GetMethod("OnMouseDoubleClick", Private).Invoke(grid, new object[] { onBox });
+                Check(page.CheckedFiles.Count == 3 && page.CheckedFiles[2] == b, "clicking the check box did not check exactly once");
+                Rectangle brokenCell = (Rectangle)gridType.GetMethod("ClientCell", Private).Invoke(grid, new object[] { 3 });
+                MouseEventArgs onTile = new MouseEventArgs(MouseButtons.Left, 1, brokenCell.X + brokenCell.Width / 3, brokenCell.Y + brokenCell.Width * 2 / 3, 0);
+                gridType.GetMethod("OnMouseDown", Private).Invoke(grid, new object[] { onTile });
+                PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
+                Check(!page.CheckedFiles.Contains(broken) && page.PreviewPath == broken && page.PreviewFailed,
+                    "a single click checked the image or the broken preview was not reported");
+                gridType.GetMethod("OnMouseDoubleClick", Private).Invoke(grid, new object[] { onTile });
+                Check(page.CheckedFiles.Contains(broken), "a double click did not check the image");
+                page.ToggleFile(broken);
+                host.Refresh();
+
+                // 预览：图片给出原始尺寸和大小；音乐读不出标签时用文件名
+                page.StartPreview(a);
+                PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
+                Check(page.PreviewText.Contains("尺寸：16 × 10") && page.PreviewText.Contains("大小：") && page.PreviewText.Contains("位置：" + dir),
+                    "image preview is wrong: " + page.PreviewText);
+                page.StartPreview(song);
+                PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
+                Check(page.PreviewText.Contains("标题：song") && !page.PreviewFailed, "music preview is wrong: " + page.PreviewText);
+                page.StartPreview(Path.Combine(dir, "没有.png"));
+                PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
+                Check(page.PreviewFailed, "a missing file previewed without an error");
+                host.Refresh();
+
+                // 拖进来：类型匹配的勾上，其余跳过并说明；只拖进一个文件夹时打开它
+                page.ToggleFile(b);
+                page.DropMany(new string[] { b, notes });
+                PumpUntil(delegate { return !page.Checking; }, 15000);
+                Check(page.CheckedFiles.Contains(b) && page.StatusText.Contains("跳过"), "dropping mixed files is wrong: " + page.StatusText);
+                page.DropMany(new string[] { sub });
+                PumpUntil(delegate { return idle() && page.CurrentFolder == sub; }, 15000);
+                Check(page.CurrentFolder == sub && box.Text.Length == 0, "dropping a folder did not open it: " + page.CurrentFolder);
+
+                // 输入框回车：不存在的说明原因并留着；文件勾上并转到它所在的文件夹选中它
+                box.Text = Path.Combine(dir, "没有.png");
+                check.Invoke(page, new object[] { false });
+                PumpUntil(delegate { return idle(); }, 15000);
+                Check(page.StatusText.Contains("不存在") && box.Text.Length > 0, "a missing typed file was not reported: " + page.StatusText);
+                page.ToggleFile(b);
+                box.Text = b;
+                check.Invoke(page, new object[] { false });
+                PumpUntil(delegate { return idle() && page.CurrentFolder == dir && grid.SelectedImage == b; }, 15000);
+                Check(page.CheckedFiles.Contains(b) && grid.SelectedImage == b && page.PreviewPath == b && box.Text.Length == 0,
+                    "a typed file was not checked and revealed");
+
+                // 焦点在「全选」「上一级」上按回车：等同点那个按钮，不会把勾选的文件添加掉
+                Control allButton = (Control)field(page, "allButton");
+                allButton.Focus();
+                int beforeAll = page.CheckedFiles.Count;
+                processKey.Invoke(page, new object[] { new Message(), Keys.Enter });
+                Check(allButton.Focused && confirmed == null && !page.Checking && page.CheckedFiles.Count != beforeAll,
+                    "enter on the select-all button confirmed instead of toggling: " + page.CheckedFiles.Count);
+                Check(page.CheckedFiles.Contains(broken), "enter on the select-all button did not check the rest of the folder");
+                page.ToggleFile(broken);
+                Check(page.CheckedFiles.Count == beforeAll, "fixture did not return to the previous selection");
+
+                // 确定时已经不在的文件取消勾选并留在页面里说明，不交给宿主
+                File.Delete(b);
+                page.Confirm();
+                PumpUntil(delegate { return !page.Checking; }, 15000);
+                Check(confirmed == null && !page.CheckedFiles.Contains(b) && page.StatusText.Contains("已不存在"),
+                    "a vanished file was handed over: " + page.StatusText);
+
+                // 确定：按勾选先后交出
+                page.Confirm();
+                PumpUntil(delegate { return confirmed != null; }, 15000);
+                Check(confirmed != null && confirmed.Count == 2 && confirmed[0] == a && confirmed[1] == d,
+                    "the checked files were not returned in order: " + (confirmed == null ? "null" : string.Join("|", confirmed.ToArray())));
+
+                // Esc：经消息队列通知宿主（不在按键处理中途被释放）
+                processKey.Invoke(page, new object[] { new Message(), Keys.Escape });
+                Check(cancelled == 0, "cancel was raised synchronously");
+                PumpUntil(delegate { return cancelled == 1; }, 5000);
+                Check(cancelled == 1, "escape did not cancel");
+            }
+
+            // 再次打开同一类：回到上次添加时的文件夹
+            using (AppManager.Controls.MediaAddPage again = new AppManager.Controls.MediaAddPage("测试", "照片", MediaRules.ImageExt, null))
+                Check(again.CurrentFolder == dir, "the last folder was not remembered: " + again.CurrentFolder);
+
+            // 其它类型用列表：勾选框、双击、单击文件夹进入，空文件夹给出说明，「已选的文件」第二行是所在文件夹
+            using (Form host = new Form())
+            {
+                host.ShowInTaskbar = false;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-3000, -3000);
+                host.ClientSize = new Size(1100, 700);
+                AppManager.Controls.MediaAddPage page = new AppManager.Controls.MediaAddPage("测试", "文件", new string[] { ".txt" }, dir);
+                page.Dock = DockStyle.Fill;
+                host.Controls.Add(page);
+                host.Show();
+                ListBox list = (ListBox)field(page, "fileList");
+                PumpUntil(delegate { return list.Items.Count == 2 && !page.Loading; }, 15000);
+                Check(list.Items.Count == 2 && page.ListedFiles.Count == 1 && page.ListedFiles[0] == notes, "list mode listing is wrong: " + list.Items.Count);
+                host.Refresh();
+                Rectangle fileRow = list.GetItemRectangle(1);
+                MouseEventArgs onBox = new MouseEventArgs(MouseButtons.Left, 1, fileRow.X + 14, fileRow.Y + fileRow.Height / 2, 0);
+                pageType.GetMethod("FileList_MouseDown", Private).Invoke(page, new object[] { list, onBox });
+                pageType.GetMethod("FileList_MouseDoubleClick", Private).Invoke(page, new object[] { list, onBox });
+                Check(page.CheckedFiles.Count == 1 && page.CheckedFiles[0] == notes, "the list check box did not check exactly once");
+                MouseEventArgs onName = new MouseEventArgs(MouseButtons.Left, 2, fileRow.X + 200, fileRow.Y + fileRow.Height / 2, 0);
+                pageType.GetMethod("FileList_MouseDown", Private).Invoke(page, new object[] { list, onName });
+                pageType.GetMethod("FileList_MouseDoubleClick", Private).Invoke(page, new object[] { list, onName });
+                Check(page.CheckedFiles.Count == 0, "a double click on a list row did not toggle");
+                page.ToggleFile(notes);
+                host.Refresh();
+                page.StartPreview(notes);
+                PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
+                Check(page.PreviewText.Contains("大小：") && !page.PreviewText.Contains("尺寸"), "file preview is wrong: " + page.PreviewText);
+
+                Rectangle folderRow = list.GetItemRectangle(0);
+                MouseEventArgs onFolder = new MouseEventArgs(MouseButtons.Left, 1, folderRow.X + 200, folderRow.Y + folderRow.Height / 2, 0);
+                pageType.GetMethod("FileList_MouseDown", Private).Invoke(page, new object[] { list, onFolder });
+                pageType.GetMethod("FileList_MouseUp", Private).Invoke(page, new object[] { list, onFolder });
+                PumpUntil(delegate { return page.CurrentFolder == sub && !page.Loading; }, 15000);
+                Check(page.CurrentFolder == sub && list.Items.Count == 1 && page.ListedFiles.Count == 0, "clicking a folder row did not open it");
+                page.ToggleAllListed();
+                Check(page.CheckedFiles.Count == 1 && page.StatusText.Contains("没有可以勾选"), "select-all in an empty folder is wrong: " + page.StatusText);
+                page.ShowChecked();
+                Check(list.Items.Count == 1 && page.ListedFiles[0] == notes, "the checked list view is wrong");
+                host.Refresh();
+
+                // 文件类型不限的分类：拖进文件夹不会被当成文件勾上
+                using (AppManager.Controls.MediaAddPage any = new AppManager.Controls.MediaAddPage("测试", "文件", new string[0], sub))
+                {
+                    any.Dock = DockStyle.Fill;
+                    host.Controls.Add(any);
+                    any.BringToFront();
+                    PumpUntil(delegate { return !any.Loading; }, 15000);
+                    any.DropMany(new string[] { dir });
+                    PumpUntil(delegate { return !any.Checking && any.CurrentFolder == dir; }, 15000);
+                    Check(any.CurrentFolder == dir && any.CheckedFiles.Count == 0, "an unrestricted drop of a folder checked it as a file");
+                    any.DropMany(new string[] { sub, notes });
+                    PumpUntil(delegate { return !any.Checking; }, 15000);
+                    Check(any.CheckedFiles.Count == 1 && any.CheckedFiles[0] == notes && any.StatusText.Contains("1 个文件夹没有加入"),
+                        "an unrestricted drop of a folder and a file is wrong: " + any.StatusText);
+                    host.Controls.Remove(any);
+                }
+
+                // 检查还在后台时关闭：结果作废，不再通知宿主
+                bool late = false;
+                page.Confirmed += delegate { late = true; };
+                page.Confirm();
+                host.Close();
+                PumpUntil(delegate { return false; }, 500);
+                Check(!late && page.IsDisposed, "a confirm finished after the page was closed");
+            }
+        }
+
+        private static void MediaAddPageInMainWindow()
+        {
+            AppConfig config = RenameConfig("add-page-main");
+            config.AutoScan = false;
+            string collectionKey = CollectionKeys.Make("照片", "旅行");
+            AppInfo image = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "照片", "trip.png"), false, true, "trip");
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            CollectionOps.AddMember(config, image.Key, collectionKey);
+            Check(config.Save(), "database fixture save failed");
+            config.Database.PublishCatalog(config, new List<AppInfo> { image });
+
+            using (MainForm form = new MainForm(config))
+            {
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1200, 720);
+                form.Show();
+                Application.DoEvents();
+                typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo> { image });
+                Invoke(form, "OnModeChanged", Controls.SidebarControl.ContentMode.Website);
+                Application.DoEvents();
+
+                Func<string, object> field = delegate(string name) { return typeof(MainForm).GetField(name, Private).GetValue(form); };
+                Controls.SidebarControl sidebar = (Controls.SidebarControl)field("sidebar");
+                Controls.CollectionSidebar collection = (Controls.CollectionSidebar)field("collectionSidebar");
+                Controls.AppGridControl grid = (Controls.AppGridControl)field("grid");
+                Control settings = (Control)field("settingsPage");
+                Control addBtn = (Control)field("addBtn");
+                Check(collection.Visible && grid.Visible && addBtn.Visible, "fixture did not open an editable resource category");
+
+                // 在主窗口里打开：盖住标题行以下，侧栏、集合栏、列表和添加按钮都收起
+                Invoke(form, "PickFiles");
+                Application.DoEvents();
+                Controls.MediaAddPage page = (Controls.MediaAddPage)field("addPage");
+                Check(page != null && page.Visible && form.Controls.GetChildIndex(page) == 0, "the add page did not open on top");
+                Check(page.Left == 0 && page.Width == form.ClientSize.Width && page.Bottom == form.ClientSize.Height, "the add page does not fill the window: " + page.Bounds);
+                Check(!sidebar.Visible && !collection.Visible && !grid.Visible && !addBtn.Visible, "main content stayed visible under the add page");
+
+                // 打开期间的刷新、集合同步和状态条都不能把别的控件顶到页面上面
+                Invoke(form, "RefreshGrid");
+                Invoke(form, "UpdateCollectionUi");
+                Invoke(form, "ShowStatusBar", "测试", 0, 0);
+                Application.DoEvents();
+                Check(!grid.Visible && !collection.Visible && form.Controls.GetChildIndex(page) == 0, "a refresh surfaced controls over the add page");
+                Invoke(form, "HideStatusBar");
+                Check(!(bool)typeof(MainForm).GetProperty("CanImportHere", Private).GetValue(form, null), "drops and pastes still import while the add page is open");
+
+                // 再点添加不会叠第二个页面；窗口缩放时页面跟着铺满
+                Invoke(form, "PickFiles");
+                Check(ReferenceEquals(field("addPage"), page), "a second add page was opened");
+                form.ClientSize = new Size(1000, 640);
+                Application.DoEvents();
+                Check(page.Width == 1000 && page.Bottom == 640, "the add page did not follow the window size: " + page.Bounds);
+
+                // Esc 返回：页面释放，侧栏、集合栏和列表按原样恢复
+                typeof(Controls.MediaAddPage).GetMethod("ProcessCmdKey", Private).Invoke(page, new object[] { new Message(), Keys.Escape });
+                PumpUntil(delegate { return field("addPage") == null; }, 5000);
+                Application.DoEvents();
+                Check(field("addPage") == null && page.IsDisposed, "escape did not close the add page");
+                Check(sidebar.Visible && collection.Visible && grid.Visible && addBtn.Visible && grid.Left == collection.Right,
+                    "main content did not return after closing the add page");
+
+                // 托盘菜单「设置」：先关掉添加页再进设置页
+                Invoke(form, "PickFiles");
+                page = (Controls.MediaAddPage)field("addPage");
+                Invoke(form, "OpenSettings");
+                Application.DoEvents();
+                Check(field("addPage") == null && page.IsDisposed && settings.Visible && !sidebar.Visible, "opening settings did not close the add page");
+                Invoke(form, "CloseSettings");
+                Application.DoEvents();
+                Check(sidebar.Visible && collection.Visible && grid.Visible, "main content did not return after settings");
+            }
         }
 
         private static void DatabaseFormFlow()

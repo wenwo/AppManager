@@ -10,7 +10,7 @@ using AppManager;
 namespace AppManager.Controls
 {
     /// <summary>
-    /// 选封面窗口右侧的缩略图网格：先列子文件夹，再列图片。单击文件夹进入，单击图片选中，双击图片直接使用；
+    /// 选封面窗口和添加照片页的缩略图网格（添加页用勾选模式，见 IsChecked）：先列子文件夹，再列图片。单击文件夹进入，单击图片选中，双击图片直接使用；
     /// 方向键移动，回车由窗口处理。缩略图只为露出来的格子在后台解码，最多同时解码 MaxWorkers 张、
     /// 最多保留 MaxThumbs 张（超出时先丢离视口最远的）；换文件夹或关闭时取消在途解码并释放全部位图。
     /// </summary>
@@ -59,10 +59,19 @@ namespace AppManager.Controls
         private bool suppressActive;
         private int suppressStart;
         private bool suppressedPress;
+        private bool pressedCheck;   // 这次按下落在勾选框上：已切换勾选，双击不再重复切换
 
         internal event Action<string> FolderOpened;
         internal event Action<string> ImageSelected;
         internal event Action<string> ImageActivated;
+        /// <summary>勾选模式下点了图片右上角的勾选框。</summary>
+        internal event Action<string> CheckToggled;
+
+        /// <summary>
+        /// 勾选模式：非空时每张图片右上角都画勾选框，勾选状态由宿主维护（这里只读）；勾上的格子描粗边。
+        /// 单击仍只是选中（供宿主预览），点勾选框才触发 CheckToggled。为空时保持选封面时的单选样式。
+        /// </summary>
+        internal Func<string, bool> IsChecked;
 
         internal CoverImageGrid()
         {
@@ -290,6 +299,8 @@ namespace AppManager.Controls
             Rectangle tile = new Rectangle(cell.X, cell.Y, cell.Width, cell.Width);
             bool isSelected = index == selected;
             bool isHover = index == hover && !OnScrollBar;
+            bool checkMode = IsChecked != null && !item.Folder;
+            bool isChecked = checkMode && IsChecked(item.Path);
             int radius = Dpi(8);
             using (GraphicsPath clip = Draw.RoundedPath(tile, radius))
             {
@@ -321,10 +332,12 @@ namespace AppManager.Controls
                             new Rectangle(tile.X, tile.Y + tile.Height / 2 + Dpi(8), tile.Width, Dpi(20)), Theme.TextTertiary,
                             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
                 }
-                if (isSelected || (isHover && !item.Folder))
+                // 勾选模式：勾上的描粗边，选中（正在预览）和悬停描细边；否则选中描粗边
+                bool strong = checkMode ? isChecked : isSelected;
+                if (strong || isSelected || (isHover && !item.Folder))
                 {
-                    float width = isSelected ? Math.Max(2F, Dpi(5) / 2F) : 1.5F;
-                    Color color = isSelected ? Theme.Accent : Color.FromArgb(140, Theme.Accent);
+                    float width = strong ? Math.Max(2F, Dpi(5) / 2F) : 1.5F;
+                    Color color = strong ? Theme.Accent : Color.FromArgb(140, Theme.Accent);
                     using (Pen pen = new Pen(color, width))
                     {
                         Rectangle edge = Rectangle.Inflate(tile, -(int)Math.Ceiling(width / 2F), -(int)Math.Ceiling(width / 2F));
@@ -332,16 +345,30 @@ namespace AppManager.Controls
                     }
                 }
             }
-            if (isSelected && !item.Folder)
-            {
-                int badge = Dpi(20);
-                Draw.DrawCheckBox(g, new Rectangle(tile.Right - badge - Dpi(6), tile.Y + Dpi(6), badge, badge), true, true, DpiHelper.ForControl(this));
-            }
+            if (checkMode) Draw.DrawCheckBox(g, CheckBoxRect(tile), isChecked, true, DpiHelper.ForControl(this));
+            else if (isSelected && !item.Folder) Draw.DrawCheckBox(g, CheckBoxRect(tile), true, true, DpiHelper.ForControl(this));
             Rectangle label = new Rectangle(cell.X, tile.Bottom + Dpi(2), cell.Width, Dpi(LabelHeight) - Dpi(2));
             TextRenderer.DrawText(g, item.Name, isSelected ? Theme.FontOf(9F, FontStyle.Bold) : Theme.CaptionFont, label,
                 isSelected ? Theme.AccentText : Theme.TextPrimary,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
                 | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
+        }
+
+        /// <summary>格子右上角的勾选框（与格子同一坐标系）。</summary>
+        private Rectangle CheckBoxRect(Rectangle tile)
+        {
+            int badge = Dpi(20);
+            return new Rectangle(tile.Right - badge - Dpi(6), tile.Y + Dpi(6), badge, badge);
+        }
+
+        /// <summary>勾选模式下客户区坐标是否落在这张图片的勾选框上（四周放宽几像素，好点中）。</summary>
+        private bool HitsCheckBox(int index, Point client)
+        {
+            if (IsChecked == null || index < 0 || index >= items.Count || items[index].Folder) return false;
+            Rectangle cell = ClientCell(index);
+            Rectangle box = CheckBoxRect(new Rectangle(cell.X, cell.Y, cell.Width, cell.Width));
+            box.Inflate(Dpi(5), Dpi(5));
+            return box.Contains(client);
         }
 
         // ===== 缩略图 =====
@@ -555,6 +582,7 @@ namespace AppManager.Controls
             base.OnMouseDown(e);
             Focus();
             suppressedPress = false;
+            pressedCheck = false;
             pressedFolder = -1;
             if (ScrollMouseDown(e) || e.Button != MouseButtons.Left) return;
             if (suppressActive)
@@ -565,7 +593,16 @@ namespace AppManager.Controls
             int index = IndexAt(e.Location);
             if (index < 0) return;
             if (items[index].Folder) pressedFolder = index;
-            else SelectIndex(index, true);
+            else
+            {
+                pressedCheck = HitsCheckBox(index, e.Location);
+                SelectIndex(index, true);
+                if (pressedCheck)
+                {
+                    Invalidate(ClientCell(index));
+                    if (CheckToggled != null) CheckToggled(items[index].Path);
+                }
+            }
         }
 
         protected override void OnMouseUp(MouseEventArgs e)
@@ -582,7 +619,7 @@ namespace AppManager.Controls
         protected override void OnMouseDoubleClick(MouseEventArgs e)
         {
             base.OnMouseDoubleClick(e);
-            if (e.Button != MouseButtons.Left || suppressedPress) return;
+            if (e.Button != MouseButtons.Left || suppressedPress || pressedCheck) return;
             int index = IndexAt(e.Location);
             if (index < 0 || items[index].Folder || index != selected) return;
             if (ImageActivated != null) ImageActivated(items[index].Path);

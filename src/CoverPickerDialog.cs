@@ -241,7 +241,7 @@ namespace AppManager
         }
 
         /// <summary>路径是否在本机固定/可移动磁盘上（只看盘符类型，不访问磁盘）。</summary>
-        private static bool IsQuickLocal(string full)
+        internal static bool IsQuickLocal(string full)
         {
             if (full == null || full.Length < 3 || full[1] != ':') return false;
             try

@@ -557,28 +557,43 @@ namespace AppManager
         /// </summary>
         internal static List<string> ListFiles(string folder, string[] extensions, out int omitted, out string error)
         {
+            List<FileInfo> infos = ListFileInfos(folder, extensions, MaxListedFiles, null, out omitted, out error);
+            List<string> found = new List<string>(infos.Count);
+            foreach (FileInfo file in infos) found.Add(file.FullName);
+            return found;
+        }
+
+        /// <summary>
+        /// 同 ListFiles，但最多列出 max 个，并带回文件信息：大小和修改时间来自目录枚举本身，读取时不再逐个访问磁盘。
+        /// 会访问磁盘，只在后台线程调用；读取中途失败时，已读到的部分照样排序、截断并给出 error。
+        /// cancelled 不为空且返回 true 时立即停止（换了文件夹、页面已关闭），返回值不再使用。
+        /// </summary>
+        internal static List<FileInfo> ListFileInfos(string folder, string[] extensions, int max, Func<bool> cancelled,
+            out int omitted, out string error)
+        {
             omitted = 0;
             error = null;
-            List<string> found = new List<string>();
+            List<FileInfo> found = new List<FileInfo>();
             try
             {
                 foreach (FileInfo file in new DirectoryInfo(folder).EnumerateFiles())
                 {
+                    if (cancelled != null && cancelled()) return found;
                     if ((file.Attributes & FileAttributes.Hidden) != 0) continue;
                     if (!HasExtension(file.Name, extensions)) continue;
-                    found.Add(file.FullName);
+                    found.Add(file);
                 }
             }
-            catch (IOException ex) { error = ex.Message; return found; }
-            catch (UnauthorizedAccessException ex) { error = ex.Message; return found; }
-            catch (System.Security.SecurityException ex) { error = ex.Message; return found; }
-            catch (ArgumentException ex) { error = ex.Message; return found; }
-            try { found.Sort(delegate(string a, string b) { return StrCmpLogicalW(Path.GetFileName(a), Path.GetFileName(b)); }); }
-            catch (InvalidOperationException) { found.Sort(StringComparer.OrdinalIgnoreCase); }
-            if (found.Count > MaxListedFiles)
+            catch (IOException ex) { error = ex.Message; }
+            catch (UnauthorizedAccessException ex) { error = ex.Message; }
+            catch (System.Security.SecurityException ex) { error = ex.Message; }
+            catch (ArgumentException ex) { error = ex.Message; }
+            try { found.Sort(delegate(FileInfo a, FileInfo b) { return StrCmpLogicalW(a.Name, b.Name); }); }
+            catch (InvalidOperationException) { found.Sort(delegate(FileInfo a, FileInfo b) { return StringComparer.OrdinalIgnoreCase.Compare(a.Name, b.Name); }); }
+            if (found.Count > max)
             {
-                omitted = found.Count - MaxListedFiles;
-                found.RemoveRange(MaxListedFiles, omitted);
+                omitted = found.Count - max;
+                found.RemoveRange(max, omitted);
             }
             return found;
         }

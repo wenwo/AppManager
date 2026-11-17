@@ -78,6 +78,7 @@ namespace AppManager
         private LayoutBackupPanel layoutBackupPanel;   // 设置页右侧「布局备份」
         private DatabasePanel databasePanel;           // 设置页右侧「操作记录与数据」
         private bool settingsOpen;         // 是否处于设置页
+        private MediaAddPage addPage;      // 资源分类的「添加文件」页（和设置页一样盖在标题行以下，关闭即释放）
         private bool settingsRescan;       // 设置页「重新扫描」发起的扫描尚未结束（结束时回传结果）
         private ImageViewerControl imageViewer;  // 图片查看器：双击照片后替换列表区域展示大图
         private TextViewerControl textViewer;   // 文本查看器：双击文本资源后替换列表区域展示文本
@@ -627,6 +628,9 @@ namespace AppManager
             if (settingsOpen && settingsPage != null
                 && settingsPage.RectangleToScreen(settingsPage.ClientRectangle).Contains(screen))
                 return settingsPage.HandleWheel(delta);
+            // 添加页打开时：光标在缩略图网格上由网格滚动，其余（原生列表）交给指针下的控件
+            if (addPage != null && addPage.RectangleToScreen(addPage.ClientRectangle).Contains(screen))
+                return addPage.HandleWheel(screen, delta);
             bool sidebarVisible = sidebar != null && sidebar.Visible;
             bool colVisible = collectionSidebar != null && collectionSidebar.Visible;
             if (!sidebarVisible && !colVisible) return false;
@@ -1253,7 +1257,7 @@ namespace AppManager
             miniMusic.Size = new Size(miniWidth, Dpi(34));
             bool miniFits = miniWidth >= miniMin;
             if (!miniFits) PauseMusicIfUnreachable();
-            miniMusic.Visible = !settingsOpen && miniFits;
+            miniMusic.Visible = !settingsOpen && addPage == null && miniFits;
             int countLeft = miniMusic.Visible ? miniMusic.Right + Dpi(8) : miniLeft;
             countLabel.Location = new Point(countLeft, row1);
             countLabel.Size = new Size(Math.Max(0, countRight - countLeft), row2);
@@ -1297,6 +1301,12 @@ namespace AppManager
             // 设置页：铺满标题行以下的全部区域（含侧栏与工具行），隐藏时位置保持有效
             settingsPage.Location = new Point(0, Dpi(Theme.TitleRowHeight));
             settingsPage.Size = new Size(ClientSize.Width, Math.Max(0, ClientSize.Height - Dpi(Theme.TitleRowHeight)));
+            // 添加页与设置页同一区域；DPI 变化时尺寸可能不变，显式重排一次
+            if (addPage != null)
+            {
+                addPage.Bounds = new Rectangle(0, Dpi(Theme.TitleRowHeight), ClientSize.Width, Math.Max(0, ClientSize.Height - Dpi(Theme.TitleRowHeight)));
+                addPage.RefreshLayout();
+            }
 
             // 底部状态条覆盖内容区留白，不压缩列表高度，也不推动原有底栏
             statusBar.Location = new Point(contentX, ClientSize.Height - footerH);
@@ -1805,6 +1815,7 @@ namespace AppManager
                 loadingLabel.BringToFront();
                 // 设置页打开时扫描进度不应压住页面（从设置页「重新扫描」触发）
                 if (settingsOpen) settingsPage.BringToFront();
+                if (addPage != null) addPage.BringToFront();
             }
             // 扫描进行中再次请求：只登记一次补扫，避免多个扫描线程同时回写列表
             if (scanRunning)
@@ -2153,7 +2164,7 @@ namespace AppManager
         /// <summary>内容区显隐：集合信息页/查看器/设置页优先，其余情况展示网格并置前。</summary>
         private void SyncContentVisibility()
         {
-            if (settingsOpen) return;
+            if (settingsOpen || addPage != null) return;
             bool showGrid = !(collectionInfo != null && collectionInfo.Visible)
                 && !imageViewer.Visible && !textViewer.Visible && !archiveViewer.Visible && !videoPlayer.Visible && !musicPlayer.Visible;
             if (showGrid)
@@ -3170,6 +3181,7 @@ namespace AppManager
                 return collectionSidebar != null
                     && contentMode == SidebarControl.ContentMode.Website
                     && !settingsOpen
+                    && addPage == null
                     && CanEditCategory(currentCategory);
             }
         }
@@ -4941,8 +4953,9 @@ namespace AppManager
             int generation = ++miniMusicLoadGeneration;
             QueryMiniMusicSongs(new List<string> { miniMusic.CollectionKey }, delegate(string key, List<string> found)
             {
+                // 查询期间进入了设置页或添加页：不再展开，免得播放器盖到页面上面
                 if (generation != miniMusicLoadGeneration || found.Count == 0 || musicSession == null
-                    || musicSession.HasTracks) return;
+                    || musicSession.HasTracks || settingsOpen || addPage != null) return;
                 HideOtherViewers(musicPlayer);
                 grid.Visible = false;
                 musicPlayer.Visible = true;
@@ -6232,17 +6245,8 @@ namespace AppManager
             return candidates;
         }
 
-        /// <summary>资源页面多选文件加入当前分类：按分类限定文件类型（对话框过滤 + 入库前二次校验）。</summary>
-        private void PickFiles()
-        {
-            List<string> picked = PathPickerDialog.PickMany(new PathPickerOptions
-            {
-                Title = "添加" + MediaRules.ResourceCategoryTypeName(currentCategory) + "到「" + currentCategory + "」",
-                ConfirmText = "添加",
-                Extensions = MediaRules.ResourceCategoryExt(currentCategory) ?? new string[0]
-            });
-            if (picked != null) AddPaths(picked.ToArray(), currentCategory, ActiveCollectionKey);   // 集合视图内：入库后自动加入集合
-        }
+        // 资源页面多选文件加入当前分类：PickFiles / CloseAddPage 见 MainForm.AddPage.cs
+
 
         /// <summary>选择文件夹加入当前分类。</summary>
         private void PickFolder()
@@ -6441,6 +6445,7 @@ namespace AppManager
             statusProgress.Value = Math.Min(value, statusProgress.Maximum);
             statusDetail.Text = string.Empty;
             statusBar.BringToFront();
+            if (addPage != null) addPage.BringToFront();   // 状态条在内容区底部，不能盖住添加页的按钮
             LayoutControls();
         }
 
@@ -7369,6 +7374,7 @@ namespace AppManager
         private void OpenSettings()
         {
             if (settingsOpen) return;
+            DiscardAddPage();   // 托盘菜单「设置」：放弃正在进行的添加；主内容区马上又要隐藏，不必先恢复
             settingsOpen = true;
             HideImageViewer();   // 查看器/播放器属于列表区域，进入设置页前先退出
             HideTextViewer();
@@ -7627,6 +7633,7 @@ namespace AppManager
             using (SolidBrush b = new SolidBrush(Theme.Background))
                 g.FillRectangle(b, ClientRectangle);
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+            if (addPage != null) return;   // 添加页铺满标题行以下，标题行只留底色
             // 设置页铺满标题行以下的整个窗口：标题行与右侧同底色，只把设置页左侧目录的底色和分隔线向上延伸到窗口顶边
             if (settingsOpen)
             {
@@ -7660,7 +7667,7 @@ namespace AppManager
         protected override void OnPaint(PaintEventArgs e)
         {
             // 设置页打开时标题由页面自身绘制，标题行不再重复绘制应用名
-            if (settingsOpen) return;
+            if (settingsOpen || addPage != null) return;
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // 标题：顶栏行1（标题行）
@@ -7828,6 +7835,11 @@ namespace AppManager
             if (keyData == Keys.Escape && settingsOpen)
             {
                 CloseSettings();
+                return true;
+            }
+            if (keyData == Keys.Escape && addPage != null)
+            {
+                CloseAddPage();
                 return true;
             }
             if (keyData == Keys.Escape && collectionInfo != null && collectionInfo.IsEditing)
