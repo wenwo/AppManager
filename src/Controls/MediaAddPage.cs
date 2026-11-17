@@ -11,15 +11,20 @@ using AppManager;
 
 namespace AppManager.Controls
 {
+    /// <summary>添加页的用途：资源文件；文件夹；软件（已安装的软件加便携程序的 .exe）。</summary>
+    internal enum MediaAddKind { Files, Folders, Software }
+
     /// <summary>
-    /// 资源分类的「添加文件」页：和设置页一样盖在主窗口标题行以下，不另弹窗口。
+    /// 主窗口里的「添加」页：和设置页一样盖在主窗口标题行以下，不另弹窗口。
+    /// 同一个页面也用于「添加文件夹」（中栏只列文件夹，可以勾选多个，右栏显示当前所在的文件夹）和「添加软件」
+    /// （左栏多一项「已安装的软件」，和翻到的 .exe 一起勾选，见 MediaAddPage.Software.cs）。下面按添加文件说明：
     /// 左栏是「已选的文件」、常用位置和磁盘；中栏是当前文件夹（照片用缩略图网格，其它类型用带大小和修改时间的列表），
     /// 单击文件夹进入，单击文件在右栏预览，点勾选框或双击勾选，可以在几个文件夹里一起选；
     /// 右栏预览单击的文件（图片显示画面和尺寸，音乐显示封面和歌曲信息，其它显示文件信息）。
     /// 底部是已选数量、粘贴路径的输入框和「添加」「取消」；也可以把文件拖进来或 Ctrl+V 粘贴。
     /// 目录读取、缩略图、预览和确定时的磁盘检查都在后台进行；页面关闭（释放）后迟到的结果直接丢弃。
     /// </summary>
-    internal sealed class MediaAddPage : Control
+    internal sealed partial class MediaAddPage : Control
     {
         /// <summary>一个文件夹最多列出的文件数，其余只计数（缩略图按需解码、有上限，列表只存路径和大小）。</summary>
         internal const int MaxListed = 5000;
@@ -28,6 +33,7 @@ namespace AppManager.Controls
         private const int PlaceRowHeight = 38;
         private const int FileRowHeight = 40;
         private const int CoverMax = 640;   // 音乐封面预览的长边上限：够画右栏，内存有界
+        private const int MaxCounted = 10000;   // 右栏数文件夹内容时最多数这么多项，免得超大文件夹数很久
 
         private const string GlyphFolder = "";
         private const string GlyphDrive = "";
@@ -42,7 +48,7 @@ namespace AppManager.Controls
         /// <summary>本次运行里每类文件上次添加时所在的文件夹：再次打开时回到这里。</summary>
         private static readonly Dictionary<string, string> lastFolders = new Dictionary<string, string>(StringComparer.Ordinal);
 
-        private enum PlaceKind { Header, Note, Checked, Place, Drive }
+        private enum PlaceKind { Header, Note, Installed, Checked, Place, Drive }
 
         private sealed class PlaceRow
         {
@@ -55,7 +61,7 @@ namespace AppManager.Controls
             public override string ToString() { return Title; }
         }
 
-        private enum FileKind { Folder, File, Note }
+        private enum FileKind { Folder, File, App, Note }
 
         private sealed class FileRow
         {
@@ -64,7 +70,8 @@ namespace AppManager.Controls
             internal string Name = string.Empty;
             internal long Length = -1;                       // -1：不知道（「已选的文件」里不再读磁盘）
             internal DateTime Modified = DateTime.MinValue;  // MinValue：不知道
-            internal string Detail;                          // 「已选的文件」里显示所在文件夹
+            internal string Detail;                          // 「已选的文件」里显示所在文件夹；已安装的软件显示分类和位置
+            internal AppInfo App;                            // 已安装的软件（Kind 为 App 时）
 
             public override string ToString() { return Name; }
         }
@@ -73,6 +80,8 @@ namespace AppManager.Controls
         private readonly string typeName;
         private readonly string[] extensions;
         private readonly bool imageMode;
+        private readonly MediaAddKind kind;
+        private readonly string hintText;
 
         private readonly RoundButton backButton = new RoundButton();
         private readonly RoundButton upButton = new RoundButton();
@@ -112,6 +121,8 @@ namespace AppManager.Controls
         private bool previewFailed;
         private string previewError = string.Empty;
         private int previewGen;
+        private bool previewIsIcon;     // 预览图是程序图标：按原尺寸居中画，不放大
+        private bool previewIsFolder;   // 预览的是当前所在的文件夹（添加文件夹时）
 
         private string notice;                       // 最近一次操作的提示；勾选或输入变化时清掉
         private bool noticeIsError;
@@ -133,15 +144,39 @@ namespace AppManager.Controls
         private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, string lParam);
 
         /// <summary>
-        /// title 是页标题；typeName 是分类的类型名（照片、音乐……，决定常用位置和「上次添加」的记忆）；
+        /// 添加资源文件：title 是页标题；typeName 是分类的类型名（照片、音乐……，决定常用位置和「上次添加」的记忆）；
         /// extensions 为空表示不限类型。initialFolder 为空时打开这类文件上次添加时的文件夹，再没有就打开对应的系统文件夹或桌面。
         /// </summary>
         internal MediaAddPage(string title, string typeName, string[] extensions, string initialFolder)
+            : this(MediaAddKind.Files, title, typeName, extensions, initialFolder, null, false)
         {
+        }
+
+        /// <summary>添加文件夹：中栏只列文件夹，可以在几个位置里一起勾选，右栏可以勾选当前所在的文件夹。</summary>
+        internal static MediaAddPage ForFolders(string title, string initialFolder)
+        {
+            return new MediaAddPage(MediaAddKind.Folders, title, "文件夹", new string[0], initialFolder, null, false);
+        }
+
+        /// <summary>添加软件：installed 是可以加入的已安装软件（打开时先列它们）；也可以到各个位置里勾选 .exe。</summary>
+        internal static MediaAddPage ForSoftware(string title, List<AppInfo> installed, bool showSystem, string initialFolder)
+        {
+            return new MediaAddPage(MediaAddKind.Software, title, "软件", new string[] { ".exe" }, initialFolder, installed, showSystem);
+        }
+
+        private MediaAddPage(MediaAddKind kind, string title, string typeName, string[] extensions, string initialFolder,
+            List<AppInfo> installed, bool showSystem)
+        {
+            this.kind = kind;
             pageTitle = title ?? string.Empty;
             this.typeName = typeName ?? string.Empty;
             this.extensions = extensions ?? new string[0];
-            imageMode = IsImageOnly(this.extensions);
+            imageMode = kind == MediaAddKind.Files && IsImageOnly(this.extensions);
+            hintText = kind == MediaAddKind.Folders
+                ? "左侧选位置，单击文件夹进入；点文件夹前的勾选框勾选，右侧可以勾选当前所在的文件夹。可以一次选几个，也可以把文件夹拖进来。"
+                : kind == MediaAddKind.Software
+                ? "先在「已安装的软件」里勾选；便携程序到下面的位置里找 .exe 勾选，两边勾的一起添加。只登记，不移动程序文件。"
+                : "左侧选位置，单击文件夹进入；单击文件在右侧预览，点勾选框或双击勾选。也可以把文件拖进来，或在下方粘贴路径。";
             SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
                 | ControlStyles.ResizeRedraw, true);
             BackColor = Theme.Background;
@@ -193,8 +228,8 @@ namespace AppManager.Controls
                 Controls.Add(fileList);
             }
 
-            checkButton.Text = "勾选这个文件";
-            checkButton.Click += delegate { if (previewPath != null) ToggleFile(previewPath); };
+            checkButton.Text = CheckButtonText(false);
+            checkButton.Click += delegate { TogglePreviewed(); };
             Controls.Add(checkButton);
 
             pathBox.BorderStyle = BorderStyle.None;
@@ -202,7 +237,8 @@ namespace AppManager.Controls
             pathBox.ForeColor = Theme.TextPrimary;
             pathBox.Font = Theme.BodyFont;
             pathBox.AccessibleName = "文件或文件夹路径";
-            pathBox.HandleCreated += delegate { SendMessage(pathBox.Handle, EM_SETCUEBANNER, (IntPtr)1, "粘贴文件或文件夹路径后回车：文件会被勾上，文件夹会被打开"); };
+            pathBox.HandleCreated += delegate { SendMessage(pathBox.Handle, EM_SETCUEBANNER, (IntPtr)1, kind == MediaAddKind.Folders
+                ? "粘贴文件夹路径：回车打开它，点「添加」直接加入" : "粘贴文件或文件夹路径后回车：文件会被勾上，文件夹会被打开"); };
             pathBox.GotFocus += delegate { pathBox.BackColor = Color.White; Invalidate(pathFrame); };
             pathBox.LostFocus += delegate { pathBox.BackColor = Theme.SearchBg; Invalidate(pathFrame); };
             pathBox.TextChanged += delegate
@@ -222,9 +258,11 @@ namespace AppManager.Controls
             cancelButton.Click += delegate { RequestCancel(); };
             Controls.Add(cancelButton);
 
+            if (kind == MediaAddKind.Software) InitSoftware(installed, showSystem);
             BuildPlaces();
             currentFolder = StartFolder(initialFolder);
             RefreshPlaces();
+            SyncHeaderControls();
             RefreshState();
         }
 
@@ -275,10 +313,11 @@ namespace AppManager.Controls
             }
         }
 
-        /// <summary>焦点放到中栏（打开页面时调用）。</summary>
+        /// <summary>焦点放到中栏（打开页面时调用）；列的是已安装的软件时放到搜索框。</summary>
         internal void FocusBrowse()
         {
-            if (imageMode) grid.Focus();
+            if (showingApps && appSearch != null) appSearch.FocusInput();
+            else if (imageMode) grid.Focus();
             else fileList.Focus();
         }
 
@@ -305,6 +344,10 @@ namespace AppManager.Controls
                 case "照片": AddPlace("图片", SafeSpecialFolder(Environment.SpecialFolder.MyPictures), GlyphPicture); break;
                 case "音乐": AddPlace("音乐", SafeSpecialFolder(Environment.SpecialFolder.MyMusic), GlyphAudio); break;
                 case "视频": AddPlace("视频", SafeSpecialFolder(Environment.SpecialFolder.MyVideos), GlyphVideo); break;
+                case "软件":
+                    AddPlace("程序文件夹", SafeSpecialFolder(Environment.SpecialFolder.ProgramFiles), GlyphFolder);
+                    AddPlace("程序文件夹 (x86)", SafeSpecialFolder(Environment.SpecialFolder.ProgramFilesX86), GlyphFolder);
+                    break;
             }
             AddPlace("桌面", SafeSpecialFolder(Environment.SpecialFolder.DesktopDirectory), GlyphFolder);
             string downloads = null;
@@ -361,11 +404,9 @@ namespace AppManager.Controls
         private void RefreshPlaces()
         {
             List<PlaceRow> rows = new List<PlaceRow>();
-            rows.Add(new PlaceRow
-            {
-                Kind = PlaceKind.Checked, Glyph = GlyphChecked,
-                Title = checkedFiles.Count > 0 ? "已选的文件（" + checkedFiles.Count + "）" : "已选的文件"
-            });
+            if (kind == MediaAddKind.Software)
+                rows.Add(new PlaceRow { Kind = PlaceKind.Installed, Glyph = GlyphApps, Title = InstalledTitle() });
+            rows.Add(new PlaceRow { Kind = PlaceKind.Checked, Glyph = GlyphChecked, Title = CheckedTitle() });
             if (places.Count > 0)
             {
                 rows.Add(new PlaceRow { Kind = PlaceKind.Header, Title = "常用位置", Enabled = false });
@@ -393,13 +434,29 @@ namespace AppManager.Controls
             if (top > 0 && top < placeList.Items.Count) placeList.TopIndex = top;
         }
 
-        /// <summary>「已选的文件」一行的数量变了：只改这一行的文字并重画，不重建列表（保留滚动位置）。</summary>
+        /// <summary>「已选的……」一行的数量变了：只改这一行的文字并重画，不重建列表（保留滚动位置）。</summary>
         private void RefreshCheckedPlace()
         {
-            PlaceRow row = PlaceAt(0);
-            if (row == null || row.Kind != PlaceKind.Checked) return;
-            row.Title = checkedFiles.Count > 0 ? "已选的文件（" + checkedFiles.Count + "）" : "已选的文件";
-            placeList.InvalidateRow(0);
+            for (int i = 0; i < placeList.Items.Count && i < 2; i++)
+            {
+                PlaceRow row = PlaceAt(i);
+                if (row == null || row.Kind != PlaceKind.Checked) continue;
+                row.Title = CheckedTitle();
+                placeList.InvalidateRow(i);
+            }
+        }
+
+        /// <summary>左栏「已选的……」一行的文字：名词随用途变，后面带数量。</summary>
+        private string CheckedTitle()
+        {
+            string title = "已选的" + ItemNoun;
+            return TotalChecked > 0 ? title + "（" + TotalChecked + "）" : title;
+        }
+
+        /// <summary>勾选的东西叫什么：文件、文件夹或软件。</summary>
+        private string ItemNoun
+        {
+            get { return kind == MediaAddKind.Folders ? "文件夹" : kind == MediaAddKind.Software ? "软件" : "文件"; }
         }
 
         private PlaceRow PlaceAt(int index)
@@ -416,6 +473,7 @@ namespace AppManager.Controls
                 PlaceRow row = PlaceAt(i);
                 if (row == null) continue;
                 if (showingChecked) { if (row.Kind == PlaceKind.Checked) return row; continue; }
+                if (showingApps) { if (row.Kind == PlaceKind.Installed) return row; continue; }
                 if (row.Path == null || currentFolder == null || !CoverPickerDialog.IsWithin(row.Path, currentFolder)) continue;
                 if (best == null || row.Path.Length > best.Path.Length) best = row;
             }
@@ -426,6 +484,7 @@ namespace AppManager.Controls
         {
             if (row == null || !row.Enabled) return;
             if (row.Kind == PlaceKind.Checked) ShowChecked();
+            else if (row.Kind == PlaceKind.Installed) ShowInstalled();
             else if (row.Path != null) Navigate(row.Path);
         }
 
@@ -495,7 +554,7 @@ namespace AppManager.Controls
                             Draw.FillRoundedRect(g, b, new Rectangle(row.X + Dpi(2), row.Y + 1, row.Width - Dpi(4), row.Height - 2), Dpi(6));
                     int iconSize = Dpi(18);
                     Rectangle icon = new Rectangle(row.X + Dpi(12), row.Y + (row.Height - iconSize) / 2, iconSize, iconSize);
-                    Color iconColor = !item.Enabled ? Theme.TextTertiary : chosen || item.Kind == PlaceKind.Checked ? Theme.Accent
+                    Color iconColor = !item.Enabled ? Theme.TextTertiary : chosen || item.Kind == PlaceKind.Checked || item.Kind == PlaceKind.Installed ? Theme.Accent
                         : item.Kind == PlaceKind.Drive ? Theme.IconColor : Color.FromArgb(232, 160, 40);
                     Draw.DrawGlyph(g, item.Glyph, icon, iconColor);
                     using (SolidBrush brush = new SolidBrush(!item.Enabled ? Theme.TextTertiary : chosen ? Theme.AccentText : Theme.TextPrimary))
@@ -519,6 +578,8 @@ namespace AppManager.Controls
             if (!string.Equals(full, currentFolder, StringComparison.OrdinalIgnoreCase)) pendingSelect = null;
             currentFolder = full;
             showingChecked = false;
+            showingApps = false;
+            SyncHeaderControls();
             LoadFolder();
         }
 
@@ -528,12 +589,15 @@ namespace AppManager.Controls
             int gen = ++loadGen;
             folderSummary = string.Empty;
             listedFiles.Clear();
+            listedApps.Clear();   // 从「已安装的软件」或「已选的」过来：上一个列表的软件不再算在全选里
             loading = folder != null;
             SetBrowseItems(null, null, folder == null ? "从左侧选一个位置。" : "正在读取…");
             placeList.Invalidate();
             RefreshState();
             if (folder == null) return;
+            if (kind == MediaAddKind.Folders) StartFolderPreview(folder);
             string[] wanted = extensions;
+            bool listFiles = kind != MediaAddKind.Folders;
             Func<bool> stale = delegate { return gen != Volatile.Read(ref loadGen); };   // 换了文件夹或页面已关闭
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -545,7 +609,7 @@ namespace AppManager.Controls
                 {
                     folders = LocalScanScope.ListSubfolders(folder, null);
                     error = folders.Error;
-                    if (error == null && !stale())
+                    if (error == null && listFiles && !stale())
                         foreach (FileInfo info in PathPickerDialog.ListFileInfos(folder, wanted, MaxListed, stale, out omitted, out error))
                         {
                             // 大小和时间来自目录枚举；个别文件取不到时只是不显示
@@ -578,8 +642,10 @@ namespace AppManager.Controls
                 omittedMore = folders.OmittedMore;
             }
             listedFiles.Clear();
-            foreach (FileRow file in files) listedFiles.Add(file.Path);
+            if (kind == MediaAddKind.Folders) foreach (FileRow sub in subfolders) listedFiles.Add(sub.Path);
+            else foreach (FileRow file in files) listedFiles.Add(file.Path);
             string empty = error != null ? "无法读取这个文件夹：" + error
+                : kind == MediaAddKind.Folders ? "这个文件夹里没有子文件夹。右侧可以勾选这个文件夹本身。"
                 : "这个文件夹里没有" + (typeName.Length > 0 ? typeName : "可添加的文件") + "，也没有子文件夹。";
             SetBrowseItems(subfolders, files, empty);
             List<string> parts = new List<string>();
@@ -596,20 +662,27 @@ namespace AppManager.Controls
             RefreshState();
         }
 
-        /// <summary>中栏改为显示所有勾选的文件（来自哪个文件夹都在一起），可以在这里取消勾选。</summary>
+        /// <summary>中栏改为显示所有勾选的项（来自哪个文件夹都在一起），可以在这里取消勾选。</summary>
         internal void ShowChecked()
         {
             loadGen++;   // 还在读的文件夹作废
             loading = false;
             showingChecked = true;
+            showingApps = false;
             pendingSelect = null;
+            SyncHeaderControls();
             listedFiles.Clear();
             listedFiles.AddRange(checkedFiles);
+            listedApps.Clear();
+            listedApps.AddRange(checkedApps);
             List<FileRow> rows = new List<FileRow>();
+            foreach (AppInfo app in checkedApps) rows.Add(AppRow(app));
+            FileKind pathKind = kind == MediaAddKind.Folders ? FileKind.Folder : FileKind.File;
             foreach (string path in checkedFiles)
-                rows.Add(new FileRow { Kind = FileKind.File, Path = path, Name = SafeFileName(path), Detail = SafeDirectory(path) });
-            SetBrowseItems(null, rows, "还没有勾选文件。从左侧选位置，在文件上点勾选框或双击就能勾上。");
-            folderSummary = checkedFiles.Count > 0 ? "共 " + checkedFiles.Count + " 个" : string.Empty;
+                rows.Add(new FileRow { Kind = pathKind, Path = path, Name = FolderTitle(path), Detail = SafeDirectory(path) });
+            SetBrowseItems(null, rows, "还没有勾选" + ItemNoun + "。" + (kind == MediaAddKind.Folders
+                ? "从左侧选位置，点文件夹前的勾选框就能勾上。" : "从左侧选位置，点勾选框或双击就能勾上。"));
+            folderSummary = TotalChecked > 0 ? "共 " + TotalChecked + " 个" : string.Empty;
             placeList.Invalidate();
             RefreshState();
         }
@@ -657,7 +730,7 @@ namespace AppManager.Controls
 
         internal void GoUp()
         {
-            if (showingChecked || checking) return;
+            if (showingChecked || showingApps || checking) return;
             string parent = ParentFolder(currentFolder);
             if (parent == null) return;
             string from = currentFolder;
@@ -686,16 +759,62 @@ namespace AppManager.Controls
             catch (ArgumentException) { return path; }
         }
 
+        /// <summary>文件或文件夹显示的名字；整个磁盘没有名字，显示路径本身。</summary>
+        private static string FolderTitle(string path)
+        {
+            string name = SafeFileName(path);
+            return string.IsNullOrEmpty(name) ? path : name;
+        }
+
+        /// <summary>
+        /// 是不是整个磁盘（如 C:\）。只看路径，不访问磁盘。网络共享的根目录（\\服务器\共享）是一个具体的共享文件夹，不算。
+        /// </summary>
+        internal static bool IsDriveRoot(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            string trimmed = path.TrimEnd('\\');
+            return trimmed.Length == 2 && trimmed[1] == ':' && char.IsLetter(trimmed[0]);
+        }
+
+        /// <summary>列出现在已经不存在、或其实不是文件夹的路径（会访问磁盘，只在后台线程调用）。</summary>
+        internal static List<string> UnavailableFolders(IEnumerable<string> paths)
+        {
+            List<string> gone = new List<string>();
+            foreach (string path in paths)
+                if (!Directory.Exists(path)) gone.Add(path);
+            return gone;
+        }
+
         private FileRow ListRow(int index)
         {
             return index < 0 || index >= fileList.Items.Count ? null : fileList.Items[index] as FileRow;
+        }
+
+        /// <summary>这一行有没有勾选框：文件、已安装的软件；添加文件夹时文件夹也有。</summary>
+        private bool IsCheckable(FileRow row)
+        {
+            return row != null && (row.Kind == FileKind.File || row.Kind == FileKind.App
+                || (row.Kind == FileKind.Folder && kind == MediaAddKind.Folders));
+        }
+
+        private bool IsRowChecked(FileRow row)
+        {
+            if (!IsCheckable(row)) return false;
+            return row.Kind == FileKind.App ? checkedAppSet.Contains(row.App) : checkedSet.Contains(row.Path);
+        }
+
+        private void ToggleRow(FileRow row)
+        {
+            if (!IsCheckable(row)) return;
+            if (row.Kind == FileKind.App) ToggleApp(row.App);
+            else ToggleFile(row.Path);
         }
 
         /// <summary>列表里行左侧的勾选框区域（放宽到行首，好点中）。</summary>
         private bool HitsListCheck(int index, Point p)
         {
             FileRow row = ListRow(index);
-            if (row == null || row.Kind != FileKind.File) return false;
+            if (!IsCheckable(row)) return false;
             Rectangle bounds = fileList.GetItemRectangle(index);
             return p.X < bounds.X + Dpi(40);
         }
@@ -708,12 +827,13 @@ namespace AppManager.Controls
             int index = fileList.HitRow(e.Location);
             FileRow row = ListRow(index);
             if (row == null) return;
-            if (row.Kind == FileKind.Folder) { pressedListFolder = index; return; }
-            if (row.Kind == FileKind.File && HitsListCheck(index, e.Location))
+            if (HitsListCheck(index, e.Location))
             {
                 pressedListCheck = true;
-                ToggleFile(row.Path);
+                ToggleRow(row);
+                return;
             }
+            if (row.Kind == FileKind.Folder) pressedListFolder = index;
         }
 
         private void FileList_MouseUp(object sender, MouseEventArgs e)
@@ -730,13 +850,14 @@ namespace AppManager.Controls
         {
             if (e.Button != MouseButtons.Left || pressedListCheck) return;
             FileRow row = ListRow(fileList.HitRow(e.Location));
-            if (row != null && row.Kind == FileKind.File) ToggleFile(row.Path);
+            if (row != null && (row.Kind == FileKind.File || row.Kind == FileKind.App)) ToggleRow(row);
         }
 
         private void PreviewListSelection()
         {
             FileRow row = ListRow(fileList.SelectedIndex);
             if (row != null && row.Kind == FileKind.File) StartPreview(row.Path);
+            else if (row != null && row.Kind == FileKind.App) StartAppPreview(row.App);
         }
 
         /// <summary>中栏里当前选中的文件夹（回车进入它）；没有时返回 null。</summary>
@@ -747,12 +868,11 @@ namespace AppManager.Controls
             return row != null && row.Kind == FileKind.Folder ? row.Path : null;
         }
 
-        /// <summary>中栏里当前选中的文件（空格切换它的勾选）；没有时返回 null。</summary>
-        private string SelectedFile()
+        /// <summary>空格：切换中栏当前选中项的勾选。</summary>
+        private void ToggleSelected()
         {
-            if (imageMode) return grid.SelectedImage;
-            FileRow row = ListRow(fileList.SelectedIndex);
-            return row != null && row.Kind == FileKind.File ? row.Path : null;
+            if (imageMode) { if (grid.SelectedImage != null) ToggleFile(grid.SelectedImage); return; }
+            ToggleRow(ListRow(fileList.SelectedIndex));
         }
 
         // ===== 勾选 =====
@@ -762,9 +882,14 @@ namespace AppManager.Controls
         {
             if (checking || string.IsNullOrEmpty(path)) return;
             if (checkedSet.Contains(path)) RemoveChecked(path);
-            else if (checkedFiles.Count >= PathPickerDialog.MaxCheckedFiles)
+            else if (kind == MediaAddKind.Folders && IsDriveRoot(path))
             {
-                SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个文件。", true);
+                SetNotice("不能添加整个磁盘，请勾选其中的文件夹。", true);
+                return;
+            }
+            else if (TotalChecked >= PathPickerDialog.MaxCheckedFiles)
+            {
+                SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "。", true);
                 return;
             }
             else AddChecked(path);
@@ -772,34 +897,43 @@ namespace AppManager.Controls
             CheckedChanged();
         }
 
-        /// <summary>中栏列出的文件全部勾上；已经全部勾上时全部取消。超过上限的不勾。</summary>
+        /// <summary>中栏列出的项全部勾上；已经全部勾上时全部取消。超过上限的不勾。</summary>
         internal void ToggleAllListed()
         {
             if (checking) return;
-            if (listedFiles.Count == 0)
+            if (listedFiles.Count + listedApps.Count == 0)
             {
-                SetNotice(showingChecked ? "还没有勾选文件。" : "这个文件夹里没有可以勾选的文件。", false);
+                SetNotice(showingChecked ? "还没有勾选" + ItemNoun + "。" : showingApps ? "没有列出可以勾选的软件。" : "这个文件夹里没有可以勾选的" + ItemNoun + "。", false);
                 return;
             }
             bool all = AllListedChecked();
             int changed = 0, over = 0;
+            foreach (AppInfo app in listedApps)
+            {
+                if (all) { RemoveCheckedApp(app); changed++; continue; }
+                if (checkedAppSet.Contains(app)) continue;
+                if (TotalChecked >= PathPickerDialog.MaxCheckedFiles) { over++; continue; }
+                AddCheckedApp(app);
+                changed++;
+            }
             foreach (string file in listedFiles)
             {
                 if (all) { RemoveChecked(file); changed++; continue; }
                 if (checkedSet.Contains(file)) continue;
-                if (checkedFiles.Count >= PathPickerDialog.MaxCheckedFiles) { over++; continue; }
+                if (TotalChecked >= PathPickerDialog.MaxCheckedFiles) { over++; continue; }
                 AddChecked(file);
                 changed++;
             }
             CheckedChanged();
-            if (over > 0) SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个文件，有 " + over + " 个没有勾上。", true);
-            else SetNotice((all ? "已取消勾选这里列出的 " : "已勾选这里列出的 ") + changed + " 个文件；共选 " + checkedFiles.Count + " 个。", false);
+            if (over > 0) SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "，有 " + over + " 个没有勾上。", true);
+            else SetNotice((all ? "已取消勾选这里列出的 " : "已勾选这里列出的 ") + changed + " 个" + ItemNoun + "；共选 " + TotalChecked + " 个。", false);
         }
 
         private bool AllListedChecked()
         {
-            if (listedFiles.Count == 0) return false;
+            if (listedFiles.Count + listedApps.Count == 0) return false;
             foreach (string file in listedFiles) if (!checkedSet.Contains(file)) return false;
+            foreach (AppInfo app in listedApps) if (!checkedAppSet.Contains(app)) return false;
             return true;
         }
 
@@ -858,6 +992,7 @@ namespace AppManager.Controls
         private void FinishDrop(List<string> folders, List<string> files)
         {
             checking = false;
+            if (kind == MediaAddKind.Folders) { FinishDropFolders(folders, files); return; }
             if (files.Count == 0 && folders.Count == 1)
             {
                 Navigate(folders[0]);
@@ -869,16 +1004,38 @@ namespace AppManager.Controls
             {
                 if (!PathPickerDialog.HasExtension(item, extensions)) { skipped++; continue; }
                 if (checkedSet.Contains(item)) continue;
-                if (checkedFiles.Count >= PathPickerDialog.MaxCheckedFiles) { over++; continue; }
+                if (TotalChecked >= PathPickerDialog.MaxCheckedFiles) { over++; continue; }
                 AddChecked(item);
                 added++;
             }
             CheckedChanged();
-            string folderNote = folders.Count > 0 ? "；" + folders.Count + " 个文件夹没有加入（整个文件夹请用「添加文件夹…」）" : string.Empty;
-            if (over > 0) SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个文件，有 " + over + " 个没有加入" + folderNote + "。", true);
+            string folderNote = folders.Count == 0 ? string.Empty : "；" + folders.Count + " 个文件夹没有加入"
+                + (kind == MediaAddKind.Software ? "（这里只添加 .exe 程序）" : "（整个文件夹请用「添加文件夹…」）");
+            if (over > 0) SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "，有 " + over + " 个没有加入" + folderNote + "。", true);
             else if (skipped > 0)
                 SetNotice("已勾选 " + added + " 个；" + skipped + " 项不是" + TypeText() + "文件，已跳过" + folderNote + "。", false);
-            else SetNotice("已勾选拖进来的 " + added + " 个文件" + folderNote + "。左侧「已选的文件」里可以查看。", false);
+            else SetNotice("已勾选拖进来的 " + added + " 个" + ItemNoun + folderNote + "。左侧「已选的" + ItemNoun + "」里可以查看。", false);
+        }
+
+        /// <summary>添加文件夹时拖进来的：文件夹全部勾上（整个磁盘除外），文件跳过并说明。</summary>
+        private void FinishDropFolders(List<string> folders, List<string> files)
+        {
+            int added = 0, roots = 0, over = 0;
+            foreach (string item in folders)
+            {
+                string full = LocalScanScope.NormalizePath(item) ?? item;
+                if (IsDriveRoot(full)) { roots++; continue; }
+                if (checkedSet.Contains(full)) continue;
+                if (TotalChecked >= PathPickerDialog.MaxCheckedFiles) { over++; continue; }
+                AddChecked(full);
+                added++;
+            }
+            CheckedChanged();
+            List<string> notes = new List<string>();
+            if (files.Count > 0) notes.Add(files.Count + " 个文件没有加入（这里只添加文件夹）");
+            if (roots > 0) notes.Add(roots + " 个整盘没有加入");
+            if (over > 0) notes.Add("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个，有 " + over + " 个没有加入");
+            SetNotice("已勾选拖进来的 " + added + " 个文件夹" + (notes.Count > 0 ? "；" + string.Join("；", notes.ToArray()) : string.Empty) + "。", over > 0);
         }
 
         /// <summary>Ctrl+V：剪贴板里有文件时按拖进来处理。剪贴板被别的程序占用时说明原因。</summary>
@@ -912,6 +1069,9 @@ namespace AppManager.Controls
             previewLoading = false;
             previewFailed = false;
             previewError = string.Empty;
+            previewIsIcon = false;
+            previewIsFolder = false;
+            previewApp = null;
             Invalidate(previewFrame);
             RefreshState();
         }
@@ -932,8 +1092,11 @@ namespace AppManager.Controls
             previewPath = path;
             previewLoading = true;
             int gen = previewGen;
-            bool image = PathPickerDialog.HasExtension(path, MediaRules.ImageExt);
-            bool audio = PathPickerDialog.HasExtension(path, MediaRules.AudioExt);
+            bool exe = kind == MediaAddKind.Software;
+            previewIsIcon = exe;
+            int iconPx = Dpi(PreviewIconPx);
+            bool image = !exe && PathPickerDialog.HasExtension(path, MediaRules.ImageExt);
+            bool audio = !exe && PathPickerDialog.HasExtension(path, MediaRules.AudioExt);
             ThreadPool.QueueUserWorkItem(delegate
             {
                 Bitmap bmp = null;
@@ -963,6 +1126,11 @@ namespace AppManager.Controls
                                 if (track.Cover != null) bmp = ScaledCopy(track.Cover, CoverMax);
                             }
                             finally { track.Dispose(); }
+                        }
+                        else if (exe)
+                        {
+                            bmp = ExtractFileIcon(path, iconPx);
+                            AddVersionInfo(info, path);
                         }
                         info.Add(new KeyValuePair<string, string>("大小", LocalScanScope.FormatBytes(file.Length)));
                         info.Add(new KeyValuePair<string, string>("修改时间", file.LastWriteTime.ToString("yyyy-MM-dd HH:mm")));
@@ -995,6 +1163,84 @@ namespace AppManager.Controls
             });
             Invalidate(previewFrame);
             RefreshState();
+        }
+
+        /// <summary>
+        /// 添加文件夹时右栏显示当前所在的文件夹：后台数这一层有多少子文件夹和文件（最多数 MaxCounted 项），
+        /// 整个磁盘只显示信息、不能勾选。
+        /// </summary>
+        private void StartFolderPreview(string folder)
+        {
+            ClearPreview();
+            previewPath = folder;
+            previewIsFolder = true;
+            previewLoading = true;
+            int gen = previewGen;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                List<KeyValuePair<string, string>> info = new List<KeyValuePair<string, string>>();
+                string failure = null;
+                try
+                {
+                    DirectoryInfo dir = new DirectoryInfo(folder);
+                    if (!dir.Exists) failure = "文件夹不存在或当前不可访问。";
+                    else
+                    {
+                        int dirs = 0, files = 0;
+                        bool more = false;
+                        foreach (FileSystemInfo entry in dir.EnumerateFileSystemInfos())
+                        {
+                            if (gen != Volatile.Read(ref previewGen)) return;   // 换了文件夹或页面已关闭
+                            if (dirs + files >= MaxCounted) { more = true; break; }
+                            if ((entry.Attributes & FileAttributes.Directory) != 0) dirs++;
+                            else files++;
+                        }
+                        info.Add(new KeyValuePair<string, string>("内容", dirs + " 个文件夹、" + files + " 个文件"
+                            + (more ? "（只数了前 " + MaxCounted + " 项）" : "（只算这一层）")));
+                        info.Add(new KeyValuePair<string, string>("修改时间", dir.LastWriteTime.ToString("yyyy-MM-dd HH:mm")));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (!(ex is IOException || ex is UnauthorizedAccessException || ex is ArgumentException
+                        || ex is NotSupportedException || ex is System.Security.SecurityException))
+                        Paths.LogError(ex);
+                    failure = "无法读取这个文件夹：" + ex.Message;
+                }
+                string parent = ParentFolder(folder);
+                if (parent != null) info.Add(new KeyValuePair<string, string>("位置", parent));
+                Post(delegate
+                {
+                    if (gen != previewGen) return;
+                    previewLoading = false;
+                    previewFailed = failure != null;
+                    previewError = failure ?? string.Empty;
+                    previewInfo.Clear();
+                    previewInfo.AddRange(info);
+                    Invalidate(previewFrame);
+                    RefreshState();
+                });
+            });
+            Invalidate(previewFrame);
+            RefreshState();
+        }
+
+        /// <summary>右栏的勾选按钮：勾上或取消正在预览的那一项。</summary>
+        private void TogglePreviewed()
+        {
+            if (previewApp != null) ToggleApp(previewApp);
+            else if (previewPath != null) ToggleFile(previewPath);
+        }
+
+        private bool IsPreviewChecked()
+        {
+            return previewApp != null ? checkedAppSet.Contains(previewApp) : previewPath != null && checkedSet.Contains(previewPath);
+        }
+
+        private string CheckButtonText(bool isChecked)
+        {
+            if (isChecked) return "取消勾选";
+            return kind == MediaAddKind.Folders ? "勾选这个文件夹" : kind == MediaAddKind.Software ? "勾选这个软件" : "勾选这个文件";
         }
 
         /// <summary>按长边上限复制一份（音乐封面可能很大）；只在后台线程调用，失败返回 null。</summary>
@@ -1044,31 +1290,42 @@ namespace AppManager.Controls
             return PathPickerDialog.DescribeExtensions(extensions);
         }
 
-        /// <summary>没有提示时状态行的内容：还没勾选时说明怎么选；勾了以后是数量、来自几个文件夹和前几个文件名。</summary>
+        /// <summary>没有提示时状态行的内容：还没勾选时说明怎么选；勾了以后是数量、（文件）来自几个文件夹和前几个名字。</summary>
         private string Summary()
         {
-            if (checkedFiles.Count == 0)
+            int total = TotalChecked;
+            if (total == 0)
+            {
+                if (kind == MediaAddKind.Folders)
+                    return "点文件夹前的勾选框勾选，单击文件夹进入下一级；右侧的按钮可以勾选当前所在的文件夹。";
+                if (kind == MediaAddKind.Software)
+                    return "在「已安装的软件」里勾选，或者到下面的位置里找 .exe 勾选；单击在右侧查看，双击或点勾选框勾选。";
                 return "单击文件在右侧预览，点勾选框或双击勾选要添加的" + (typeName.Length > 0 ? typeName : "文件")
                     + "；可以在几个文件夹里一起选，Ctrl+A 全选当前文件夹。";
+            }
             List<string> names = new List<string>();
-            for (int i = 0; i < checkedFiles.Count && i < 3; i++) names.Add(SafeFileName(checkedFiles[i]));
-            return "已选 " + checkedFiles.Count + " 个（来自 " + checkedFolderCount + " 个文件夹）：" + string.Join("、", names.ToArray())
-                + (checkedFiles.Count > 3 ? " 等" : string.Empty) + "。左侧「已选的文件」可以查看和取消。";
+            for (int i = 0; i < checkedApps.Count && names.Count < 3; i++) names.Add(checkedApps[i].Name);
+            for (int i = 0; i < checkedFiles.Count && names.Count < 3; i++) names.Add(FolderTitle(checkedFiles[i]));
+            string count = kind == MediaAddKind.Files ? "已选 " + total + " 个（来自 " + checkedFolderCount + " 个文件夹）"
+                : "已选 " + total + " 个" + ItemNoun;
+            return count + "：" + string.Join("、", names.ToArray()) + (total > 3 ? " 等" : string.Empty)
+                + "。左侧「已选的" + ItemNoun + "」可以查看和取消。";
         }
 
         private void RefreshState()
         {
-            bool ready = !checking && (checkedFiles.Count > 0 || pathBox.Text.Trim().Length > 0);
-            confirmButton.Text = checking ? "正在检查…" : checkedFiles.Count > 0 ? "添加 " + checkedFiles.Count + " 个" : "添加";
+            int total = TotalChecked;
+            bool ready = !checking && (total > 0 || pathBox.Text.Trim().Length > 0);
+            confirmButton.Text = checking ? "正在检查…" : total > 0 ? "添加 " + total + " 个" : "添加";
             confirmButton.Enabled = ready;
             confirmButton.Accent = ready;
-            upButton.Enabled = !checking && !showingChecked && ParentFolder(currentFolder) != null;
-            allButton.Enabled = !checking && listedFiles.Count > 0;
+            upButton.Enabled = !checking && !showingChecked && !showingApps && ParentFolder(currentFolder) != null;
+            allButton.Enabled = !checking && listedFiles.Count + listedApps.Count > 0;
             allButton.Text = AllListedChecked() ? "取消全选" : "全选";
-            bool previewChecked = previewPath != null && checkedSet.Contains(previewPath);
-            checkButton.Enabled = !checking && previewPath != null;
+            bool rootFolder = previewIsFolder && IsDriveRoot(previewPath);
+            checkButton.Enabled = !checking && (previewApp != null || previewPath != null) && !rootFolder;
             checkButton.Accent = false;
-            checkButton.Text = previewChecked ? "取消勾选" : "勾选这个文件";
+            checkButton.Text = rootFolder ? "整个磁盘不能添加" : CheckButtonText(IsPreviewChecked());
             Invalidate(statusRect);
             Invalidate(BrowseHeaderRect());
             Invalidate(previewFrame);
@@ -1097,12 +1354,13 @@ namespace AppManager.Controls
                 if (cleaned == null) { SetNotice(reason ?? "路径格式不正确。", true); return; }
             }
             else if (!finish) return;
-            else if (checkedFiles.Count == 0) { SetNotice("请先勾选要添加的文件。", true); return; }
+            else if (TotalChecked == 0) { SetNotice("请先勾选要添加的" + ItemNoun + "。", true); return; }
             checking = true;
             notice = null;
             RefreshState();
             int version = ++checkVersion;
             string[] wanted = extensions;
+            MediaAddKind mode = kind;
             List<string> chosen = finish ? new List<string>(checkedFiles) : new List<string>();
             ThreadPool.QueueUserWorkItem(delegate
             {
@@ -1111,7 +1369,12 @@ namespace AppManager.Controls
                 List<string> gone;
                 try
                 {
-                    if (cleaned != null)
+                    if (cleaned != null && mode == MediaAddKind.Folders)
+                    {
+                        typed = PathPickerDialog.CheckPath(PathPickerMode.Folder, cleaned, null, false, null, null);
+                        folder = typed.Error == null;
+                    }
+                    else if (cleaned != null)
                     {
                         string full = Path.GetFullPath(cleaned);
                         if (Directory.Exists(full))
@@ -1121,7 +1384,7 @@ namespace AppManager.Controls
                         }
                         else typed = PathPickerDialog.CheckPath(PathPickerMode.OpenFile, cleaned, wanted, false, null, null);
                     }
-                    gone = PathPickerDialog.UnavailableFiles(chosen);
+                    gone = mode == MediaAddKind.Folders ? UnavailableFolders(chosen) : PathPickerDialog.UnavailableFiles(chosen);
                 }
                 catch (Exception ex)
                 {
@@ -1142,16 +1405,19 @@ namespace AppManager.Controls
             if (typed != null)
             {
                 if (typed.Error != null) { SetNotice(typed.Error, true); return; }
+                // 添加文件夹时点「添加」：输入的文件夹直接勾上，和勾选的一起加入；回车或别的用途是打开它
+                bool addTypedFolder = folder && finish && kind == MediaAddKind.Folders;
+                if (addTypedFolder && IsDriveRoot(typed.Path)) { SetNotice("不能添加整个磁盘，请输入其中的文件夹。", true); return; }
                 SetPathText(string.Empty);
-                if (folder)
+                if (folder && !addTypedFolder)
                 {
                     Navigate(typed.Path);
-                    SetNotice(finish ? "已打开输入的文件夹；勾选好文件后再点「添加」。" : "已打开输入的文件夹。", false);
+                    SetNotice(finish ? "已打开输入的文件夹；勾选好后再点「添加」。" : "已打开输入的文件夹。", false);
                     return;
                 }
-                if (!checkedSet.Contains(typed.Path) && checkedFiles.Count >= PathPickerDialog.MaxCheckedFiles)
+                if (!checkedSet.Contains(typed.Path) && TotalChecked >= PathPickerDialog.MaxCheckedFiles)
                 {
-                    SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个文件，输入的文件没有加入。", true);
+                    SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "，输入的没有加入。", true);
                     return;
                 }
                 AddChecked(typed.Path);
@@ -1174,13 +1440,15 @@ namespace AppManager.Controls
             {
                 foreach (string path in gone) RemoveChecked(path);
                 CheckedChanged();
-                SetNotice(gone.Count + " 个已选的文件已不存在或不是文件（" + SafeFileName(gone[0]) + (gone.Count > 1 ? " 等" : string.Empty)
-                    + "），已取消勾选" + (checkedFiles.Count > 0 ? "；确认剩下的 " + checkedFiles.Count + " 个请再点一次「添加」。" : "。"), true);
+                SetNotice(gone.Count + " 个已选的" + ItemNoun + "已不存在或" + (kind == MediaAddKind.Folders ? "不是文件夹" : "不是文件")
+                    + "（" + FolderTitle(gone[0]) + (gone.Count > 1 ? " 等" : string.Empty)
+                    + "），已取消勾选" + (TotalChecked > 0 ? "；确认剩下的 " + TotalChecked + " 个请再点一次「添加」。" : "。"), true);
                 return;
             }
             if (!finish) { RefreshState(); return; }
-            if (checkedFiles.Count == 0) { SetNotice("请先勾选要添加的文件。", true); return; }
-            string remember = !showingChecked && currentFolder != null ? currentFolder : SafeDirectory(checkedFiles[checkedFiles.Count - 1]);
+            if (TotalChecked == 0) { SetNotice("请先勾选要添加的" + ItemNoun + "。", true); return; }
+            string remember = !showingChecked && !showingApps && currentFolder != null ? currentFolder
+                : checkedFiles.Count > 0 ? SafeDirectory(checkedFiles[checkedFiles.Count - 1]) : null;
             if (remember != null) lastFolders[typeName] = remember;
             RefreshState();
             List<string> result = new List<string>(checkedFiles);
@@ -1214,22 +1482,30 @@ namespace AppManager.Controls
             started = true;
             RefreshLayout();
             LoadDrivesAsync();
-            LoadFolder();
+            if (kind == MediaAddKind.Software) ShowInstalled();
+            else LoadFolder();
         }
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            bool inBox = pathBox.Focused;
+            bool inBox = pathBox.Focused || SearchFocused;
             if (keyData == Keys.Escape) { RequestCancel(); return true; }
+            if (keyData == Keys.Down && SearchFocused && fileList.Items.Count > 0)
+            {
+                fileList.Focus();
+                if (fileList.SelectedIndex < 0) fileList.SelectedIndex = 0;
+                return true;
+            }
             if (keyData == Keys.Enter)
             {
                 // 自绘按钮只认空格：回车时焦点在哪个按钮上就等同点哪个，在左栏就打开选中的位置，
                 // 在输入框里只处理输入的路径，在中栏选中的是文件夹就进入它；只有焦点在中栏文件或「添加」上才是添加
                 if (cancelButton.Focused || backButton.Focused) RequestCancel();
-                else if (inBox) Check(false);
+                else if (SearchFocused) FocusBrowseList();
+                else if (pathBox.Focused) Check(false);
                 else if (upButton.Focused) GoUp();
                 else if (allButton.Focused) ToggleAllListed();
-                else if (checkButton.Focused) { if (previewPath != null) ToggleFile(previewPath); }
+                else if (checkButton.Focused) TogglePreviewed();
                 else if (placeList.Focused) OpenPlace(PlaceAt(placeList.SelectedIndex));
                 else
                 {
@@ -1246,8 +1522,7 @@ namespace AppManager.Controls
                 if (keyData == (Keys.Control | Keys.V) && PasteFiles()) return true;
                 if (keyData == Keys.Space && (grid.Focused || fileList.Focused))
                 {
-                    string file = SelectedFile();
-                    if (file != null) ToggleFile(file);
+                    ToggleSelected();
                     return true;
                 }
             }
@@ -1281,6 +1556,7 @@ namespace AppManager.Controls
                 loadGen++;
                 previewGen++;
                 if (previewImage != null) { previewImage.Dispose(); previewImage = null; }
+                DisposeSoftware();
                 // 网格和列表只有一个加进了页面：另一个不会随页面释放
                 grid.Dispose();
                 fileList.Dispose();
@@ -1346,6 +1622,7 @@ namespace AppManager.Controls
             placeList.Bounds = new Rectangle(placeFrame.X + Dpi(4), placeFrame.Y + Dpi(4), Math.Max(0, placeFrame.Width - Dpi(8)), Math.Max(0, placeFrame.Height - Dpi(8)));
             upButton.Bounds = new Rectangle(browseFrame.X + Dpi(8), browseFrame.Y + Dpi(8), Dpi(92), Dpi(28));
             allButton.Bounds = new Rectangle(Math.Max(upButton.Right, browseFrame.Right - Dpi(8) - Dpi(96)), browseFrame.Y + Dpi(8), Dpi(96), Dpi(28));
+            LayoutSoftwareHeader();
             Rectangle content = new Rectangle(browseFrame.X + Dpi(4), browseFrame.Y + Dpi(46), Math.Max(0, browseFrame.Width - Dpi(8)), Math.Max(0, browseFrame.Height - Dpi(50)));
             if (imageMode) grid.Bounds = content;
             else
@@ -1380,8 +1657,7 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             TextRenderer.DrawText(g, pageTitle, Theme.PageTitleFont, titleRect, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
-            TextRenderer.DrawText(g, "左侧选位置，单击文件夹进入；单击文件在右侧预览，点勾选框或双击勾选。也可以把文件拖进来，或在下方粘贴路径。",
-                Theme.CaptionFont, hintRect, Theme.TextSecondary,
+            TextRenderer.DrawText(g, hintText, Theme.CaptionFont, hintRect, Theme.TextSecondary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
 
             PaintFrame(g, placeFrame);
@@ -1390,7 +1666,7 @@ namespace AppManager.Controls
             PaintPreview(g, previewFrame);
 
             Color statusColor = notice != null ? (noticeIsError ? Theme.DeleteRed : Theme.WarningText)
-                : checkedFiles.Count > 0 ? Theme.AccentText : Theme.TextSecondary;
+                : TotalChecked > 0 ? Theme.AccentText : Theme.TextSecondary;
             TextRenderer.DrawText(g, StatusText, Theme.CaptionFont, statusRect, statusColor,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
 
@@ -1412,13 +1688,14 @@ namespace AppManager.Controls
         {
             Rectangle browse = browseFrame;
             if (browse.Width <= 0 || browse.Height <= 0) return;
+            if (showingApps) { PaintInstalledHeader(g); return; }
             int left = upButton.Right + Dpi(10);
             int right = allButton.Left - Dpi(10);
             int summaryWidth = string.IsNullOrEmpty(folderSummary) ? 0
                 : Math.Min(Dpi(220), TextRenderer.MeasureText(folderSummary, Theme.CaptionFont).Width + Dpi(4));
             Rectangle summary = new Rectangle(right - summaryWidth, browse.Y + Dpi(8), summaryWidth, Dpi(28));
             Rectangle path = new Rectangle(left, browse.Y + Dpi(8), Math.Max(0, summary.X - left - Dpi(10)), Dpi(28));
-            string heading = showingChecked ? "已选的文件" : currentFolder ?? "未选择位置";
+            string heading = showingChecked ? "已选的" + ItemNoun : currentFolder ?? "未选择位置";
             TextRenderer.DrawText(g, heading, Theme.FontOf(9.5F, FontStyle.Bold), path, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.PathEllipsis | TextFormatFlags.SingleLine
                 | TextFormatFlags.NoPrefix);
@@ -1447,14 +1724,16 @@ namespace AppManager.Controls
                     {
                         GraphicsState state = g.Save();
                         g.SetClip(clip);
-                        DrawContain(g, previewImage, media);
+                        if (previewIsIcon) DrawIconCentered(g, previewImage, media);
+                        else DrawContain(g, previewImage, media);
                         g.Restore(state);
                     }
                     else
                     {
                         int size = Dpi(40);
-                        Color color = previewFailed ? Theme.DeleteRed : Theme.TextTertiary;
-                        Draw.DrawGlyph(g, GlyphFor(previewPath), new Rectangle(media.X + (media.Width - size) / 2, media.Y + (media.Height - size) / 2, size, size), color);
+                        Color color = previewFailed ? Theme.DeleteRed : previewIsFolder ? Color.FromArgb(232, 160, 40) : Theme.TextTertiary;
+                        string glyph = previewIsFolder ? GlyphFolder : previewApp != null ? GlyphApps : GlyphFor(previewPath);
+                        Draw.DrawGlyph(g, glyph, new Rectangle(media.X + (media.Width - size) / 2, media.Y + (media.Height - size) / 2, size, size), color);
                     }
                 }
 
@@ -1462,18 +1741,22 @@ namespace AppManager.Controls
             int textW = mediaW;
             int y = media.Bottom + Dpi(12);
             int bottom = checkButton.Top - Dpi(8);
-            if (previewPath == null)
+            if (previewPath == null && previewApp == null)
             {
-                TextRenderer.DrawText(g, "单击中间的文件，这里会显示预览和文件信息。", Theme.CaptionFont,
+                string placeholder = kind == MediaAddKind.Folders ? "进入一个文件夹，这里会显示它的信息。"
+                    : kind == MediaAddKind.Software ? "单击中间的软件或程序，这里会显示图标和信息。"
+                    : "单击中间的文件，这里会显示预览和文件信息。";
+                TextRenderer.DrawText(g, placeholder, Theme.CaptionFont,
                     new Rectangle(textX, y, textW, Math.Max(0, bottom - y)), Theme.TextTertiary,
                     TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.NoPrefix);
                 return;
             }
             Rectangle name = new Rectangle(textX, y, textW, Dpi(44));
-            TextRenderer.DrawText(g, SafeFileName(previewPath), Theme.FontOf(10F, FontStyle.Bold), name, Theme.TextPrimary,
+            string title = previewApp != null ? previewApp.Name : FolderTitle(previewPath);
+            TextRenderer.DrawText(g, title, Theme.FontOf(10F, FontStyle.Bold), name, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.Top | TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
             y = name.Bottom + Dpi(4);
-            if (checkedSet.Contains(previewPath))
+            if (IsPreviewChecked())
             {
                 TextRenderer.DrawText(g, "已勾选", Theme.FontOf(9F, FontStyle.Bold), new Rectangle(textX, y, textW, Dpi(20)), Theme.AccentText,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
@@ -1513,6 +1796,18 @@ namespace AppManager.Controls
             g.InterpolationMode = old;
         }
 
+        /// <summary>程序图标：不放大（放大发糊），只在放不下时缩小，居中。</summary>
+        private static void DrawIconCentered(Graphics g, Bitmap icon, Rectangle target)
+        {
+            if (icon == null || icon.Width <= 0 || icon.Height <= 0) return;
+            float scale = Math.Min(1F, Math.Min(target.Width / (float)icon.Width, target.Height / (float)icon.Height));
+            float w = icon.Width * scale, h = icon.Height * scale;
+            InterpolationMode old = g.InterpolationMode;
+            g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+            g.DrawImage(icon, new RectangleF(target.X + (target.Width - w) / 2F, target.Y + (target.Height - h) / 2F, w, h));
+            g.InterpolationMode = old;
+        }
+
         private static string GlyphFor(string path)
         {
             if (string.IsNullOrEmpty(path)) return GlyphFile;
@@ -1542,7 +1837,8 @@ namespace AppManager.Controls
                 }
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 bool isFile = item.Kind == FileKind.File;
-                bool isChecked = isFile && checkedSet.Contains(item.Path);
+                bool checkable = IsCheckable(item);
+                bool isChecked = IsRowChecked(item);
                 bool selected = e.Index == fileList.SelectedIndex;
                 bool hover = e.Index == fileList.HoverIndex;
                 if (selected || hover || isChecked)
@@ -1550,11 +1846,12 @@ namespace AppManager.Controls
                         Draw.FillRoundedRect(g, b, new Rectangle(row.X + Dpi(2), row.Y + 1, row.Width - Dpi(4), row.Height - 2), Dpi(6));
                 int x = row.X + Dpi(12);
                 int box = Dpi(18);
-                if (isFile) Draw.DrawCheckBox(g, new Rectangle(x, row.Y + (row.Height - box) / 2, box, box), isChecked, !checking, DpiHelper.ForControl(this));
+                if (checkable) Draw.DrawCheckBox(g, new Rectangle(x, row.Y + (row.Height - box) / 2, box, box), isChecked, !checking, DpiHelper.ForControl(this));
                 x += box + Dpi(12);
-                int iconSize = Dpi(18);
+                int iconSize = Dpi(item.Kind == FileKind.App ? AppIconPx : 18);
                 Rectangle icon = new Rectangle(x, row.Y + (row.Height - iconSize) / 2, iconSize, iconSize);
-                Draw.DrawGlyph(g, isFile ? GlyphFor(item.Path) : GlyphFolder, icon, isFile ? Theme.IconColor : Color.FromArgb(232, 160, 40));
+                if (item.Kind == FileKind.App) DrawAppIcon(g, item.App, icon);
+                else Draw.DrawGlyph(g, isFile ? GlyphFor(item.Path) : GlyphFolder, icon, isFile ? Theme.IconColor : Color.FromArgb(232, 160, 40));
                 int textX = icon.Right + Dpi(10);
                 int right = row.Right - Dpi(12);
                 if (item.Detail == null && isFile)

@@ -6156,44 +6156,7 @@ namespace AppManager
             mw.Show(this);
         }
 
-        /// <summary>添加软件（.exe）：只登记不搬运。</summary>
-        private void PickSoftware()
-        {
-            // 优先从已安装的软件里勾选加入当前分类；便携程序等不在列表里的 exe 再用文件浏览器选择
-            if (PickFromAppList()) return;
-            List<string> picked = PathPickerDialog.PickMany(new PathPickerOptions
-            {
-                Title = "添加软件到「" + currentCategory + "」",
-                ConfirmText = "添加",
-                Extensions = new string[] { ".exe" }
-            });
-            if (picked == null) return;
-            List<string> files = new List<string>();
-            foreach (string file in picked) if (IsSoftwareFile(file)) files.Add(file);
-            AddPaths(files.ToArray(), currentCategory);
-        }
-
-        /// <summary>
-        /// 弹出已安装软件列表供勾选，加入当前分类。返回 true 表示用户操作完毕（勾选添加或取消），
-        /// false 表示用户点了「浏览其它程序…」，回退到文件浏览器选择 exe。
-        /// </summary>
-        private bool PickFromAppList()
-        {
-            string category = currentCategory;
-            List<AppInfo> picked;
-            bool browse;
-            // 在「系统工具」分类里添加时，要找的多半就是系统自带工具：默认一并列出
-            using (SoftwarePickerDialog dialog = new SoftwarePickerDialog(category, PickableSoftware(allApps, category),
-                category == "系统工具"))
-            {
-                ConfirmDialog.ShowModal(dialog);   // 模态 + 遮罩层
-                browse = dialog.BrowseRequested;
-                picked = dialog.Picked;
-            }
-            if (browse) return false;   // 点了「浏览其它程序…」才回退文件浏览器；勾选添加或取消都算操作完毕
-            AddPickedSoftware(picked, category);
-            return true;
-        }
+        // 添加软件：PickSoftware 见 MainForm.AddPage.cs（已安装的软件和 .exe 在同一个添加页里勾选）
 
         /// <summary>
         /// 把勾选的已安装软件加入分类：与拖到侧栏「加入分类」是同一操作，原分类不变，不重复登记程序文件。
@@ -6245,21 +6208,8 @@ namespace AppManager
             return candidates;
         }
 
-        // 资源页面多选文件加入当前分类：PickFiles / CloseAddPage 见 MainForm.AddPage.cs
+        // 资源页面添加文件、文件夹：PickFiles / PickFolder / CloseAddPage 见 MainForm.AddPage.cs
 
-
-        /// <summary>选择文件夹加入当前分类。</summary>
-        private void PickFolder()
-        {
-            string path = PathPickerDialog.Pick(new PathPickerOptions
-            {
-                Title = "添加文件夹到「" + currentCategory + "」",
-                Mode = PathPickerMode.Folder,
-                ConfirmText = "添加"
-            });
-            // 集合视图内：入库后自动加入当前集合
-            if (path != null) AddPaths(new string[] { path }, currentCategory, ActiveCollectionKey);
-        }
 
         private void AddPaths(string[] paths, string category, string collectionKey = null)
         {

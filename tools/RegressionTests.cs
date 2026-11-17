@@ -191,6 +191,7 @@ namespace AppManager
                 Run("path picker checks paths, asks before creating or replacing and keeps failed validation in the window", PathPickerFlow);
                 Run("cover picker lists thumbnails, previews, blocks unreadable images, opens typed folders and remembers the last cover", CoverPickerFlow);
                 Run("add page lists by type, checks across folders, previews, takes drops and typed paths and drops vanished files", MediaAddPageFlow);
+                Run("add page for folders and software: checks folders, blocks drives, lists installed software with .exe files", MediaAddPageFolderAndSoftware);
                 Run("add page opens inside the main window, stays on top, follows resizes and restores the main content", MediaAddPageInMainWindow);
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
@@ -5965,14 +5966,26 @@ namespace AppManager
                 && SoftwarePickerDialog.Describe(settings) == "系统组件" && SoftwarePickerDialog.Describe(control) == "系统组件"
                 && SoftwarePickerDialog.Describe(null) == "", "packaged description wrong");
 
+            Check(SoftwarePickerDialog.Where(installed) == "D:\\APP\\ApiFox\\Apifox.exe" && SoftwarePickerDialog.Where(calc) == "应用商店应用"
+                && SoftwarePickerDialog.Where(null) == "", "software location wrong: " + SoftwarePickerDialog.Where(installed));
+
             // 关掉「显示系统工具」时已勾选的系统工具一并取消，不会把看不见的条目加进分类；被搜索筛掉的勾选保留
-            using (SoftwarePickerDialog dialog = new SoftwarePickerDialog("开发工具", new List<AppInfo> { installed, cmd, excel }, true))
+            using (Form host = new Form())
             {
-                typeof(SoftwarePickerDialog).GetMethod("ToggleAllVisible", Private).Invoke(dialog, null);
-                ((Controls.ToggleSwitch)typeof(SoftwarePickerDialog).GetField("systemToggle", Private).GetValue(dialog)).Checked = false;
-                ((Controls.SearchField)typeof(SoftwarePickerDialog).GetField("search", Private).GetValue(dialog)).Text = "Excel";
-                typeof(SoftwarePickerDialog).GetMethod("Confirm", Private).Invoke(dialog, null);
-                Check(names(dialog.Picked) == "Apifox|Excel", "hidden system tool was added or a searched-out selection was dropped: " + names(dialog.Picked));
+                host.ShowInTaskbar = false;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-3000, -3000);
+                host.ClientSize = new Size(1100, 700);
+                Controls.MediaAddPage page = Controls.MediaAddPage.ForSoftware("测试", new List<AppInfo> { installed, cmd, excel }, true, null);
+                page.Dock = DockStyle.Fill;
+                host.Controls.Add(page);
+                host.Show();
+                Check(page.ShowingInstalled && page.ListedApps.Count == 3, "the add-software page did not start with installed software");
+                page.ToggleAllListed();
+                ((Controls.ToggleSwitch)typeof(Controls.MediaAddPage).GetField("systemToggle", Private).GetValue(page)).Checked = false;
+                ((Controls.SearchField)typeof(Controls.MediaAddPage).GetField("appSearch", Private).GetValue(page)).Text = "Excel";
+                Check(page.ListedApps.Count == 1 && names(page.CheckedApps) == "Apifox|Excel",
+                    "hidden system tool stayed checked or a searched-out selection was dropped: " + names(page.CheckedApps));
             }
 
             string path = Path.Combine(Paths.DataDir, "scan.cache.xml");
@@ -6862,93 +6875,36 @@ namespace AppManager
                     Check(picker.DialogResult == DialogResult.OK && picker.ResultPath == existing, "confirming the replacement did not return the file");
                 }
 
-                // 多选：只允许打开模式；跨文件夹勾选、取消勾选；拖入时跳过类型不符的；确认时已删除的取消勾选并留在窗口；输入框里的路径一并加入
-                bool rejectedMode = false;
-                try { new PathPickerDialog(new PathPickerOptions { Mode = PathPickerMode.Folder, AllowMultiple = true }).Dispose(); }
-                catch (ArgumentException) { rejectedMode = true; }
-                Check(rejectedMode, "multiple selection was allowed outside open-file mode");
+                // 添加页确定前用：已删除的文件和其实是文件夹的路径都算不可用；类型说明过长时缩短
                 string sub = Path.Combine(dir, "多选子目录");
                 Directory.CreateDirectory(sub);
-                string first = Path.Combine(dir, "a.db"), second = Path.Combine(sub, "b.db"), doomed = Path.Combine(sub, "c.db");
-                foreach (string file in new string[] { first, second, doomed }) File.WriteAllText(file, "db");
+                string first = Path.Combine(dir, "a.db");
+                File.WriteAllText(first, "db");
                 Check(PathPickerDialog.UnavailableFiles(new string[] { first, sub, Path.Combine(dir, "没有.db") }).Count == 2,
                     "a folder or a missing file was treated as an available file");
-                using (PathPickerDialog picker = new PathPickerDialog(new PathPickerOptions
+                Check(PathPickerDialog.DescribeExtensions(new string[] { ".a", ".b" }) == ".a / .b"
+                    && PathPickerDialog.DescribeExtensions(MediaRules.ImageExt).EndsWith("等 " + MediaRules.ImageExt.Length + " 种"),
+                    "long extension lists were not shortened");
+
+                // 添加页一次最多勾选 MaxCheckedFiles 项：拖入超出的不加入并说明，再勾也勾不上
+                using (Form host = new Form())
                 {
-                    Title = "测试", Mode = PathPickerMode.OpenFile, AllowMultiple = true, ConfirmText = "添加", InitialFolder = dir, Extensions = db
-                }))
-                {
-                    picker.Opacity = 0;
-                    picker.Show();
-                    ListBox list = (ListBox)field(picker, "list");
-                    PumpUntil(delegate { return list.Items.Cast<object>().Any(r => r.ToString() == "a.db"); }, 15000);
-                    Label notice = (Label)field(picker, "noticeLabel");
-                    Control button = (Control)field(picker, "confirmButton");
-                    Check(!button.Enabled && notice.Text.Contains("勾选"), "confirm was enabled before anything was checked: " + notice.Text);
-                    picker.ToggleFile(first);
-                    picker.ToggleFile(doomed);
-                    picker.ToggleFile(second);
-                    picker.ToggleFile(second);
-                    Check(button.Enabled && notice.Text.Contains("已选 2 个") && notice.Text.Contains("a.db"), "checking and unchecking files: " + notice.Text);
-                    picker.DropMany(new string[] { second, other, first });
-                    Check(notice.Text.Contains("已勾选 1 个") && notice.Text.Contains("1 项") && notice.Text.Contains("跳过"),
-                        "dropping did not add matching files and skip the rest: " + notice.Text);
-                    // 勾选的文件画成勾选框
-                    int fileRow = list.Items.Cast<object>().ToList().FindIndex(r => r.ToString() == "a.db");
-                    using (Bitmap canvas = new Bitmap(600, 60))
-                    using (Graphics g = Graphics.FromImage(canvas))
-                        typeof(PathPickerDialog).GetMethod("DrawRow", Private).Invoke(picker, new object[] { list,
-                            new DrawItemEventArgs(g, list.Font, new Rectangle(0, 0, 600, 40), fileRow, DrawItemState.None) });
-                    // 快速点两下：勾上又取消（双击的第二下 Clicks == 2 同样切换），双击本身不会确定
-                    list.TopIndex = fileRow;
-                    Rectangle cell = list.GetItemRectangle(fileRow);
-                    MouseEventArgs press = new MouseEventArgs(MouseButtons.Left, 1, cell.Right - 20, cell.Top + cell.Height / 2, 0);
-                    MouseEventArgs repress = new MouseEventArgs(MouseButtons.Left, 2, press.X, press.Y, 0);
-                    typeof(PathPickerDialog).GetMethod("List_MouseDown", Private).Invoke(picker, new object[] { list, press });
-                    Check(!((List<string>)field(picker, "checkedFiles")).Contains(first), "a click did not uncheck the file");
-                    typeof(PathPickerDialog).GetMethod("List_MouseDown", Private).Invoke(picker, new object[] { list, repress });
-                    typeof(PathPickerDialog).GetMethod("List_MouseDoubleClick", Private).Invoke(picker, new object[] { list, repress });
-                    Check(picker.Visible && !(bool)field(picker, "checking") && ((List<string>)field(picker, "checkedFiles")).Contains(first),
-                        "a quick double click submitted the batch or left the file unchecked");
-                    File.Delete(doomed);
-                    confirm(picker);
-                    Check(picker.Visible && picker.ResultPaths == null && notice.Text.Contains("c.db") && notice.Text.Contains("剩下的 2 个"),
-                        "a deleted file was returned or the picker closed: " + notice.Text);
-                    ((TextBox)field(picker, "pathBox")).Text = existing;
-                    confirm(picker);
-                    Check(picker.DialogResult == DialogResult.OK && picker.ResultPaths != null
-                        // a.db 在上面的双击测试里取消后重新勾上，排到了 b.db 后面
-                        && picker.ResultPaths.SequenceEqual(new string[] { second, first, existing }) && picker.ResultPath == second,
-                        "checked and typed files were not returned in order: " + (picker.ResultPaths == null ? "null" : string.Join(" | ", picker.ResultPaths)));
-                }
-                using (PathPickerDialog picker = new PathPickerDialog(new PathPickerOptions
-                {
-                    Title = "测试", Mode = PathPickerMode.OpenFile, AllowMultiple = true, InitialFolder = dir, Extensions = db
-                }))
-                {
-                    picker.Opacity = 0;
-                    picker.Show();
-                    // Ctrl+A：勾上文件夹里列出的全部文件，再按一次全部取消
-                    ListBox list = (ListBox)field(picker, "list");
-                    PumpUntil(delegate { return list.Items.Cast<object>().Any(r => r.ToString() == "a.db"); }, 15000);
-                    int omittedHere;
-                    string listError;
-                    int listed = PathPickerDialog.ListFiles(dir, db, out omittedHere, out listError).Count;
-                    picker.ToggleFolderFiles(dir);
-                    Check(listed >= 3 && ((List<string>)field(picker, "checkedFiles")).Count == listed, "select-all did not check every listed file");
-                    picker.ToggleFolderFiles(dir);
-                    Check(((List<string>)field(picker, "checkedFiles")).Count == 0, "a second select-all did not clear the folder");
-                    Check(PathPickerDialog.DescribeExtensions(new string[] { ".a", ".b" }) == ".a / .b"
-                        && PathPickerDialog.DescribeExtensions(MediaRules.ImageExt).EndsWith("等 " + MediaRules.ImageExt.Length + " 种"),
-                        "long extension lists were not shortened");
+                    host.ShowInTaskbar = false;
+                    host.StartPosition = FormStartPosition.Manual;
+                    host.Location = new Point(-3000, -3000);
+                    host.ClientSize = new Size(1100, 700);
+                    Controls.MediaAddPage page = new Controls.MediaAddPage("测试", "文件", db, dir);
+                    page.Dock = DockStyle.Fill;
+                    host.Controls.Add(page);
+                    host.Show();
                     string[] overLimit = new string[PathPickerDialog.MaxCheckedFiles + 1];
                     for (int i = 0; i < overLimit.Length; i++) overLimit[i] = Path.Combine(dir, "上限", i + ".db");
-                    picker.DropMany(overLimit);
-                    Label notice = (Label)field(picker, "noticeLabel");
-                    Check(((List<string>)field(picker, "checkedFiles")).Count == PathPickerDialog.MaxCheckedFiles && notice.Text.Contains("最多"),
-                        "the checked-file limit was not enforced: " + notice.Text);
-                    picker.ToggleFile(Path.Combine(dir, "再加一个.db"));
-                    Check(((List<string>)field(picker, "checkedFiles")).Count == PathPickerDialog.MaxCheckedFiles, "toggling passed the limit");
+                    page.DropMany(overLimit);
+                    PumpUntil(delegate { return !page.Checking; }, 15000);
+                    Check(page.CheckedFiles.Count == PathPickerDialog.MaxCheckedFiles && page.StatusText.Contains("最多"),
+                        "the checked-file limit was not enforced: " + page.StatusText);
+                    page.ToggleFile(Path.Combine(dir, "再加一个.db"));
+                    Check(page.CheckedFiles.Count == PathPickerDialog.MaxCheckedFiles, "toggling passed the limit");
                 }
             }
             finally { File.SetAttributes(locked, FileAttributes.Normal); }
@@ -7346,6 +7302,161 @@ namespace AppManager
             }
         }
 
+        private static void MediaAddPageFolderAndSoftware()
+        {
+            Type pageType = typeof(AppManager.Controls.MediaAddPage);
+            Func<object, string, object> field = delegate(object o, string name) { return o.GetType().GetField(name, Private).GetValue(o); };
+            Func<Form> newHost = delegate
+            {
+                Form f = new Form();
+                f.ShowInTaskbar = false;
+                f.StartPosition = FormStartPosition.Manual;
+                f.Location = new Point(-3000, -3000);
+                f.ClientSize = new Size(1100, 700);
+                return f;
+            };
+
+            Check(AppManager.Controls.MediaAddPage.IsDriveRoot("C:\\") && AppManager.Controls.MediaAddPage.IsDriveRoot("D:")
+                && !AppManager.Controls.MediaAddPage.IsDriveRoot("C:\\Users") && !AppManager.Controls.MediaAddPage.IsDriveRoot(null)
+                && !AppManager.Controls.MediaAddPage.IsDriveRoot("\\\\nas\\photos") && !AppManager.Controls.MediaAddPage.IsDriveRoot("\\\\nas\\photos\\"),
+                "drive root detection is wrong");
+
+            // 添加文件夹：中栏只列文件夹，可勾选多个；右栏是当前所在的文件夹；整盘不能加；确定时已不在的取消勾选
+            string dir = Path.Combine(root, "add-folders");
+            string first = Path.Combine(dir, "甲"), second = Path.Combine(dir, "乙"), dropped = Path.Combine(root, "add-folders-drop");
+            Directory.CreateDirectory(first);
+            Directory.CreateDirectory(second);
+            Directory.CreateDirectory(dropped);
+            Directory.CreateDirectory(Path.Combine(first, "里面"));
+            string loose = Path.Combine(dir, "散文件.txt");
+            File.WriteAllText(loose, "x");
+            using (Form host = newHost())
+            {
+                AppManager.Controls.MediaAddPage page = AppManager.Controls.MediaAddPage.ForFolders("测试", dir);
+                List<string> confirmed = null;
+                page.Confirmed += delegate(List<string> list) { confirmed = list; };
+                page.Dock = DockStyle.Fill;
+                host.Controls.Add(page);
+                host.Show();
+                ListBox rows = (ListBox)field(page, "fileList");
+                PumpUntil(delegate { return !page.Loading && !page.PreviewLoading && rows.Items.Count == 2; }, 15000);
+                Check(rows.Items.Count == 2 && page.ListedFiles.Count == 2, "folder mode listed files or missed folders: " + rows.Items.Count);
+                Check(page.PreviewPath == dir && page.PreviewText.Contains("2 个文件夹、1 个文件"), "current folder preview is wrong: " + page.PreviewText);
+                host.Refresh();
+
+                // 点勾选框只勾选不进入；点名字进入
+                string row0 = page.ListedFiles[0];
+                Rectangle r0 = rows.GetItemRectangle(0);
+                MouseEventArgs onBox = new MouseEventArgs(MouseButtons.Left, 1, r0.X + 14, r0.Y + r0.Height / 2, 0);
+                pageType.GetMethod("FileList_MouseDown", Private).Invoke(page, new object[] { rows, onBox });
+                pageType.GetMethod("FileList_MouseUp", Private).Invoke(page, new object[] { rows, onBox });
+                Check(page.CheckedFiles.Count == 1 && page.CheckedFiles[0] == row0 && page.CurrentFolder == dir, "the folder check box navigated or did not check");
+                MouseEventArgs onName = new MouseEventArgs(MouseButtons.Left, 1, r0.X + 200, r0.Y + r0.Height / 2, 0);
+                pageType.GetMethod("FileList_MouseDown", Private).Invoke(page, new object[] { rows, onName });
+                pageType.GetMethod("FileList_MouseUp", Private).Invoke(page, new object[] { rows, onName });
+                PumpUntil(delegate { return page.CurrentFolder == row0 && !page.Loading && !page.PreviewLoading; }, 15000);
+                Check(page.CurrentFolder == row0 && page.PreviewPath == row0, "clicking a folder name did not open it");
+
+                // 右栏按钮勾选当前所在的文件夹（再按取消）
+                page.GoUp();
+                PumpUntil(delegate { return page.CurrentFolder == dir && !page.Loading && !page.PreviewLoading; }, 15000);
+                pageType.GetMethod("TogglePreviewed", Private).Invoke(page, null);
+                Check(page.CheckedFiles.Contains(dir) && page.CheckedFiles.Count == 2, "the current folder was not checked from the preview");
+                pageType.GetMethod("TogglePreviewed", Private).Invoke(page, null);
+                Check(!page.CheckedFiles.Contains(dir), "the preview button did not uncheck the current folder");
+
+                // 整个磁盘不能加
+                page.ToggleFile(Path.GetPathRoot(dir));
+                Check(page.CheckedFiles.Count == 1 && page.StatusText.Contains("整个磁盘"), "a whole drive was checked: " + page.StatusText);
+
+                // 拖进文件夹和文件：文件夹勾上，文件跳过
+                page.DropMany(new string[] { dropped, loose });
+                PumpUntil(delegate { return !page.Checking; }, 15000);
+                Check(page.CheckedFiles.Contains(dropped) && page.CheckedFiles.Count == 2 && page.StatusText.Contains("1 个文件没有加入"),
+                    "dropping into the folder page is wrong: " + page.StatusText);
+
+                // 「已选的文件夹」里第二行是上级文件夹
+                page.ShowChecked();
+                Check(rows.Items.Count == 2 && page.ListedFiles.Count == 2, "the checked folders view is wrong");
+                host.Refresh();
+
+                // 输入文件夹路径后点「添加」：直接加入；已经不在的取消勾选并说明
+                Directory.Delete(dropped);
+                ((TextBox)field(page, "pathBox")).Text = second;
+                page.Confirm();
+                PumpUntil(delegate { return !page.Checking; }, 15000);
+                Check(confirmed == null && page.CheckedFiles.Contains(second) && !page.CheckedFiles.Contains(dropped) && page.StatusText.Contains("已不存在"),
+                    "typed folder or vanished folder handling is wrong: " + page.StatusText);
+                page.Confirm();
+                PumpUntil(delegate { return confirmed != null; }, 15000);
+                Check(confirmed != null && confirmed.Count == 2 && confirmed[0] == row0 && confirmed[1] == second,
+                    "checked folders were not returned in order: " + (confirmed == null ? "null" : string.Join("|", confirmed.ToArray())));
+            }
+
+            // 添加软件：先列已安装的软件；搜索、全选、预览；也能到位置里勾 .exe；两边一起交出
+            string exeDir = Path.Combine(root, "add-software");
+            Directory.CreateDirectory(exeDir);
+            string tool = Path.Combine(exeDir, "便携工具.exe");
+            File.WriteAllText(tool, "MZ");
+            File.WriteAllText(Path.Combine(exeDir, "说明.txt"), "x");
+            AppInfo alpha = new AppInfo { Key = "lnk:add-alpha", Name = "Alpha", TargetPath = Path.Combine(exeDir, "alpha.exe"), Category = "开发工具" };
+            AppInfo beta = new AppInfo { Key = "lnk:add-beta", Name = "Beta", TargetPath = Path.Combine(exeDir, "beta.exe") };
+            using (Form host = newHost())
+            {
+                AppManager.Controls.MediaAddPage page = AppManager.Controls.MediaAddPage.ForSoftware("测试", new List<AppInfo> { alpha, beta }, false, exeDir);
+                List<string> confirmed = null;
+                List<AppInfo> confirmedApps = null;
+                page.Confirmed += delegate(List<string> list) { confirmed = list; confirmedApps = page.CheckedApps; };
+                page.Dock = DockStyle.Fill;
+                host.Controls.Add(page);
+                host.Show();
+                Check(page.ShowingInstalled && page.ListedApps.Count == 2, "the add-software page did not list installed software");
+                // 列已安装的软件时没有「上一级」：退格不会跳到别的文件夹
+                page.GoUp();
+                Check(page.ShowingInstalled && page.ListedApps.Count == 2, "going up left the installed software list");
+                Controls.SearchField search = (Controls.SearchField)field(page, "appSearch");
+                search.Text = "Beta";
+                Check(page.ListedApps.Count == 1 && page.ListedApps[0] == beta, "searching installed software is wrong");
+                search.Text = string.Empty;
+                page.ToggleAllListed();
+                Check(page.CheckedApps.Count == 2 && page.StatusText.Contains("2 个软件"), "select-all installed software is wrong: " + page.StatusText);
+                page.ToggleApp(alpha);
+                PumpUntil(delegate { return page.AppIconCount == 2; }, 15000);
+                host.Refresh();
+                page.StartAppPreview(beta);
+                PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
+                Check(page.PreviewApp == beta && page.PreviewText.Contains("所在分类：未分类") && page.PreviewText.Contains("位置：" + beta.TargetPath),
+                    "installed software preview is wrong: " + page.PreviewText);
+                host.Refresh();
+
+                // 便携程序：到位置里只列 .exe，勾上后和已安装的一起交出
+                page.Navigate(exeDir);
+                PumpUntil(delegate { return !page.Loading; }, 15000);
+                Check(!page.ShowingInstalled && page.ListedFiles.Count == 1 && page.ListedFiles[0] == tool && page.ListedApps.Count == 0,
+                    "browsing for programs listed other files or kept the installed list");
+                // 文件夹里的全选只勾这里的程序，不连带刚才列过的已安装软件
+                page.ToggleAllListed();
+                Check(page.CheckedFiles.Count == 1 && page.CheckedApps.Count == 1, "select-all in a folder also checked installed software");
+                page.ToggleFile(tool);
+                // 拖进文件夹和程序：程序勾上；提示不指向软件页没有的「添加文件夹…」
+                page.DropMany(new string[] { exeDir, tool });
+                PumpUntil(delegate { return !page.Checking; }, 15000);
+                Check(page.CheckedFiles.Contains(tool) && page.StatusText.Contains("1 个文件夹没有加入") && !page.StatusText.Contains("添加文件夹")
+                    && page.StatusText.Contains("已选的软件"), "the drop notice on the software page is wrong: " + page.StatusText);
+                page.StartPreview(tool);
+                PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
+                Check(page.PreviewText.Contains("大小："), "program preview is wrong: " + page.PreviewText);
+                host.Refresh();
+                page.ShowChecked();
+                Check(page.ListedApps.Count == 1 && page.ListedFiles.Count == 1, "the checked software view is wrong");
+                host.Refresh();
+                page.Confirm();
+                PumpUntil(delegate { return confirmed != null; }, 15000);
+                Check(confirmed != null && confirmed.Count == 1 && confirmed[0] == tool && confirmedApps.Count == 1 && confirmedApps[0] == beta,
+                    "installed software and programs were not handed over together");
+            }
+        }
+
         private static void MediaAddPageInMainWindow()
         {
             AppConfig config = RenameConfig("add-page-main");
@@ -7419,6 +7530,18 @@ namespace AppManager
                 Invoke(form, "CloseSettings");
                 Application.DoEvents();
                 Check(sidebar.Visible && collection.Visible && grid.Visible, "main content did not return after settings");
+
+                // 添加文件夹、添加软件也在主窗口里打开，关闭后主内容区恢复
+                Invoke(form, "PickFolder");
+                page = (Controls.MediaAddPage)field("addPage");
+                Check(page != null && !page.ShowingInstalled && !sidebar.Visible, "the add-folder page did not open in the main window");
+                Invoke(form, "CloseAddPage");
+                Invoke(form, "PickSoftware");
+                page = (Controls.MediaAddPage)field("addPage");
+                Check(page != null && page.ShowingInstalled && !sidebar.Visible, "the add-software page did not open in the main window");
+                Invoke(form, "CloseAddPage");
+                Application.DoEvents();
+                Check(field("addPage") == null && page.IsDisposed && sidebar.Visible && grid.Visible, "main content did not return after the add pages");
             }
         }
 
