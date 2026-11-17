@@ -428,7 +428,7 @@ namespace AppManager
             string oldKey = editing == null ? null : CollectionKeys.GetKey(editing);
             string oldParent = editing == null ? null : editing.ParentCollection ?? string.Empty;
             if (editing != null && CollectionKeys.IsDescendantOrSelf(oldKey, parentCollection))
-                return "不能把集合放进它自己或它的子文件夹里。";
+                return "不能把集合放进它自己或它的子集合里。";
             if (SiblingNameTaken(cfg, root, parentCollection, name, editing))
                 return "这个位置已经有「" + name + "」了，请换一个名称。";
             bool moved = editing != null && !string.Equals(oldParent, parentCollection, StringComparison.Ordinal);

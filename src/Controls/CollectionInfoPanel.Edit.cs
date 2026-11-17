@@ -443,7 +443,7 @@ namespace AppManager.Controls
         private void PaintEditor(Graphics g)
         {
             PaintBackButton(g);
-            string title = creating ? (editParentKey.Length == 0 ? "新建集合" : "新建子文件夹") : "编辑集合";
+            string title = creating ? (editParentKey.Length == 0 ? "新建集合" : "新建子集合") : "编辑集合";
             TextRenderer.DrawText(g, title, Theme.PageTitleFont, titleRect, Theme.TextPrimary,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis
                 | TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix);
@@ -487,7 +487,7 @@ namespace AppManager.Controls
 
         private string EditorHint()
         {
-            if (!creating) return "改了名称或位置，里面的子文件夹和资源会跟着一起走。Enter 保存，Esc 取消。";
+            if (!creating) return "改了名称或位置，里面的子集合和资源会跟着一起走。Enter 保存，Esc 取消。";
             if (joinCount > 0) return "创建后会把选中的 " + joinCount + " 项资源放进这个集合。Enter 创建，Esc 取消。";
             return "起个名字就能创建，封面和简介以后也能再改。Enter 创建，Ctrl+Enter 创建后接着建下一个。";
         }

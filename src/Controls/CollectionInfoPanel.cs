@@ -135,7 +135,7 @@ namespace AppManager.Controls
                 focusX, focusY, coverBmp, memberImages);
         }
 
-        /// <summary>注入集合信息、直接成员数与直接子文件夹数；旧封面与成员缩略图由本控件释放。</summary>
+        /// <summary>注入集合信息、直接成员数与直接子集合数；旧封面与成员缩略图由本控件释放。</summary>
         public void SetInfo(string parentCategory, string collectionName, string desc, int itemCount,
             int childFolders, string collectionCoverPath, float focusX, float focusY, Bitmap coverBmp,
             List<string> memberImages)
@@ -722,7 +722,7 @@ namespace AppManager.Controls
                 | TextFormatFlags.EndEllipsis);
 
             string meta = (parent.Length == 0 ? string.Empty : parent + " · ") + count + " 项资源 · "
-                + childFolderCount + " 个子文件夹";
+                + childFolderCount + " 个子集合";
             using (SolidBrush sb = new SolidBrush(Theme.TextSecondary))
                 Draw.DrawStringCenter(g, meta, Theme.CaptionFont, sb, metaDisplayRect);
 

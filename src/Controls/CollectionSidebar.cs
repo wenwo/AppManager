@@ -733,7 +733,7 @@ namespace AppManager.Controls
             }
             Draw.DrawIcon(g, UiIconKind.Add,
                 new Rectangle(footRect.X + 7, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor);
-            Draw.DrawStringLeft(g, createSubfolder ? "新建子文件夹" : "新建集合", Theme.ButtonFont, textBrush,
+            Draw.DrawStringLeft(g, createSubfolder ? "新建子集合" : "新建集合", Theme.ButtonFont, textBrush,
                 new Rectangle(footRect.X + 32, footRect.Y, footRect.Width - 36, footRect.Height));
         }
 

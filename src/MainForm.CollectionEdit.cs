@@ -35,7 +35,7 @@ namespace AppManager
             string parentError;
             if (!ResolveCollectionCreationParent(parentCollectionKey, out parent, out root, out parentError))
             {
-                MessageDialog.Show(this, parentError, "新建文件夹", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(this, parentError, "新建集合", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -343,7 +343,7 @@ namespace AppManager
 
         /// <summary>
         /// 编辑页点位置栏：弹出当前分类的集合树（逐级级联），选中即换位置。
-        /// 编辑已有集合时，它自己和它的子文件夹不能选。
+        /// 编辑已有集合时，它自己和它的子集合不能选。
         /// </summary>
         private void OnCollectionPickLocation(Rectangle fieldScreen)
         {
@@ -367,7 +367,7 @@ namespace AppManager
             mw.Show(this);
         }
 
-        /// <summary>位置菜单的一级：没有子文件夹的直接可选；有子文件夹的悬停展开下一级（展开时才构建）。</summary>
+        /// <summary>位置菜单的一级：没有子集合的直接可选；有子集合的悬停展开下一级（展开时才构建）。</summary>
         private List<MenuWindow.MenuItem> BuildLocationMenu(CollectionIndex index, string parentKey,
             string selected, string blockedKey)
         {

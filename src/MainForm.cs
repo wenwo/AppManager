@@ -2603,7 +2603,7 @@ namespace AppManager
         }
 
         /// <summary>
-        /// 网格空白处右键（仅资源页面）：集合内只提供一个「新建子文件夹」入口；
+        /// 网格空白处右键（仅资源页面）：集合内只提供一个「新建子集合」入口；
         /// 集合外保留磁盘文件夹、文本文档和一级集合入口。
         /// </summary>
         private void OnGridBlankRightClicked(Point screen)
@@ -2620,7 +2620,7 @@ namespace AppManager
                 string activeCollection = ActiveCollectionKey;
                 if (!string.IsNullOrEmpty(activeCollection))
                 {
-                    items.Add(MkMenu("新建子文件夹…", delegate { CreateCollectionUnder(activeCollection, null); }));
+                    items.Add(MkMenu("新建子集合…", delegate { CreateCollectionUnder(activeCollection, null); }));
                     items.Add(MkMenu("新建文本文档", delegate { CreateManagedEntry(false, activeCollection); }));
                 }
                 else
@@ -3206,7 +3206,7 @@ namespace AppManager
                 bool all = string.Equals(currentCategory,
                     contentMode == SidebarControl.ContentMode.Website ? "全部资源" : "全部软件", StringComparison.Ordinal);
                 search.Placeholder = currentCollection != null
-                    ? "在当前文件夹中搜索…"
+                    ? "在当前集合中搜索…"
                     : (all ? (contentMode == SidebarControl.ContentMode.Website ? "搜索资源…" : "搜索应用…")
                         : "在「" + currentCategory + "」中搜索…");
             }
@@ -3807,12 +3807,12 @@ namespace AppManager
             parent = FindCollectionByKey(parentCollectionKey);
             if (parent == null)
             {
-                error = "当前文件夹已不存在，请返回后重试。";
+                error = "当前集合已不存在，请返回后重试。";
                 return false;
             }
             if (!string.Equals(parent.Parent, currentCategory, StringComparison.Ordinal))
             {
-                error = "当前文件夹不再属于该资源分类，请返回后重试。";
+                error = "当前集合不再属于该资源分类，请返回后重试。";
                 return false;
             }
             root = parent.Parent;
@@ -3825,10 +3825,10 @@ namespace AppManager
             ResourceCollection c = FindCollectionByKey(key);
             if (c == null) return;
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
-            items.Add(MkMenu("新建子文件夹…", delegate { CreateCollectionUnder(key, null); }));
+            items.Add(MkMenu("新建子集合…", delegate { CreateCollectionUnder(key, null); }));
             if (!string.IsNullOrEmpty(c.ParentCollection) && !CollectionMoveEditing)
             {
-                items.Add(MkMenu("从母集合移出", delegate
+                items.Add(MkMenu("移到最外层", delegate
                 {
                     CollectionMoveRequest request = new CollectionMoveRequest();
                     request.SourceKey = key;
@@ -3949,7 +3949,7 @@ namespace AppManager
             HashSet<string> keys = new HashSet<string>(StringComparer.Ordinal);
             for (int i = 0; i < subtree.Count; i++) keys.Add(CollectionKeys.GetKey(subtree[i]));
             int affected = CollectionOps.CountAffectedMembers(config, subtree);
-            string childText = subtree.Count > 1 ? "及其 " + (subtree.Count - 1) + " 个子文件夹" : string.Empty;
+            string childText = subtree.Count > 1 ? "及其 " + (subtree.Count - 1) + " 个子集合" : string.Empty;
             if (!ConfirmDialog.Show("删除集合",
                 "删除集合「" + c.Name + "」" + childText + "？\n将移除 " + affected + " 项资源的集合归属；不会删除磁盘文件。\n\n确认删除？")) return;
             List<string> covers = new List<string>();
@@ -3996,7 +3996,7 @@ namespace AppManager
 
         /// <summary>
         /// 条目右键「加入集合…」级联子项：按集合树逐级列出当前分类下的文件夹；
-        /// 集合内容页内新建时在当前集合下创建子文件夹。
+        /// 集合内容页内新建时在当前集合下创建子集合。
         /// </summary>
         private List<MenuWindow.MenuItem> BuildJoinCollectionItems(List<AppInfo> targets)
         {
@@ -4009,7 +4009,7 @@ namespace AppManager
             if (items.Count > 0) items.Add(MkSep());
             string activeCollection = ActiveCollectionKey;
             if (!string.IsNullOrEmpty(activeCollection))
-                items.Add(MkMenu("新建子文件夹并加入…", delegate { CreateCollectionUnder(activeCollection, targets); }));
+                items.Add(MkMenu("新建子集合并加入…", delegate { CreateCollectionUnder(activeCollection, targets); }));
             else
                 items.Add(MkMenu("新建集合…", delegate { OnCreateCollection(targets); }));
             return items;
