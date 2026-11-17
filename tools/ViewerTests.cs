@@ -76,6 +76,7 @@ namespace AppManager
                 Run("music queue scrollbar drags, hides and keeps filtered row hit zones", MusicQueueScrollbar);
                 Run("long music title stays inside its scrolling region", MusicTitleClipping);
                 Run("music probe rejects short voice audio, accepts a normal song and surfaces corrupt files", MusicProbeContent);
+                Run("music tags with download-site watermarks fall back to file name and defaults", MusicJunkTags);
                 Run("markdown renders common syntax and keeps unsupported text", MarkdownRendering);
                 Run("markdown hostile nesting and unclosed markers stay bounded and cancellable", MarkdownHostile);
                 Run("markdown/text view switch renders live edits", MarkdownViewSwitch);
@@ -275,6 +276,107 @@ namespace AppManager
                     "fake mp3 was treated as music: " + corrupt.Status);
             }
         }
+        private static void MusicJunkTags()
+        {
+            // 酷我下载的歌曲：歌名、歌手、专辑都被写成 kuwo
+            MusicTrackInfo info = MusicMetadata.Read(WriteTaggedMp3("孤独的王-海来阿木.mp3", "kuwo", " KuWo ", "kuwo", null));
+            Check(info.Title == "孤独的王-海来阿木", "watermark title not replaced: " + info.Title);
+            Check(info.Artist == "未知艺术家" && info.Album == "本地音乐", "watermark artist/album kept: " + info.Artist + " / " + info.Album);
+            // 正常标签保持不变；只有歌手是水印时只替换歌手
+            info = MusicMetadata.Read(WriteTaggedMp3("normal-tag.mp3", "真实歌名", "kugou", "真实专辑", null));
+            Check(info.Title == "真实歌名" && info.Artist == "未知艺术家" && info.Album == "真实专辑",
+                "partial watermark handled wrongly: " + info.Title + " / " + info.Artist + " / " + info.Album);
+            // 歌名里只是包含 kuwo 字样不算水印
+            info = MusicMetadata.Read(WriteTaggedMp3("contains.mp3", "kuwo remix", "歌手", "专辑", null));
+            Check(info.Title == "kuwo remix", "title containing watermark word was replaced: " + info.Title);
+            // 叫 Unknown 的真实歌名、专辑不算水印
+            info = MusicMetadata.Read(WriteTaggedMp3("01.mp3", "Unknown", "Null", "Unknown", null));
+            Check(info.Title == "Unknown" && info.Artist == "Null" && info.Album == "Unknown",
+                "generic words treated as watermark: " + info.Title + " / " + info.Artist + " / " + info.Album);
+            // ID3v2 是水印时不改用 30 字节、可能截断的 ID3v1 歌名，直接用文件名
+            info = MusicMetadata.Read(WriteTaggedMp3("v1.mp3", "kuwo", "kuwo", "kuwo", "Truncated V1 Title Truncated V1"));
+            Check(info.Title == "v1", "ID3v1 title replaced file name after watermark: " + info.Title);
+            // 只有 ID3v1 且是水印，同样退回文件名
+            string v1Only = WriteTaggedMp3("v1-only.mp3", null, null, null, "kuwo");
+            info = MusicMetadata.Read(v1Only);
+            Check(info.Title == "v1-only", "ID3v1 watermark kept: " + info.Title);
+            // FLAC：水印回退、真实值保留
+            info = MusicMetadata.Read(WriteTaggedFlac("flac-junk.flac", "TITLE=kuwo", "ARTIST=Kugou", "ALBUM=真实专辑"));
+            Check(info.Title == "flac-junk" && info.Artist == "未知艺术家" && info.Album == "真实专辑",
+                "FLAC watermark handled wrongly: " + info.Title + " / " + info.Artist + " / " + info.Album);
+            // 没有标签的文件
+            string bare = Path.Combine(root, "bare.mp3");
+            File.WriteAllBytes(bare, new byte[200]);
+            info = MusicMetadata.Read(bare);
+            Check(info.Title == "bare" && info.Artist == "未知艺术家" && info.Album == "本地音乐", "untagged defaults changed");
+        }
+
+        private static string WriteTaggedFlac(string name, params string[] comments)
+        {
+            List<byte> block = new List<byte>();
+            byte[] vendor = Encoding.UTF8.GetBytes("test");
+            block.AddRange(BitConverter.GetBytes(vendor.Length));
+            block.AddRange(vendor);
+            block.AddRange(BitConverter.GetBytes(comments.Length));
+            foreach (string comment in comments)
+            {
+                byte[] value = Encoding.UTF8.GetBytes(comment);
+                block.AddRange(BitConverter.GetBytes(value.Length));
+                block.AddRange(value);
+            }
+            List<byte> file = new List<byte>(Encoding.ASCII.GetBytes("fLaC"));
+            int length = block.Count;
+            // 最后一个元数据块，类型 4 = VORBIS_COMMENT，长度为 24 位大端
+            file.AddRange(new byte[] { 0x80 | 4, (byte)(length >> 16), (byte)(length >> 8), (byte)length });
+            file.AddRange(block);
+            string path = Path.Combine(root, name);
+            File.WriteAllBytes(path, file.ToArray());
+            return path;
+        }
+
+        private static string WriteTaggedMp3(string name, string title, string artist, string album, string v1Title)
+        {
+            List<byte> file = new List<byte>();
+            if (title != null)
+            {
+                // ID3v2.4：编码字节 3（UTF-8）在 2.4 中合法，帧长度用同步安全整数
+                List<byte> frames = new List<byte>();
+                AddId3Frame(frames, "TIT2", title);
+                AddId3Frame(frames, "TPE1", artist);
+                AddId3Frame(frames, "TALB", album);
+                file.AddRange(Encoding.ASCII.GetBytes("ID3"));
+                file.AddRange(new byte[] { 4, 0, 0 });
+                file.AddRange(SyncSafeBytes(frames.Count));
+                file.AddRange(frames);
+            }
+            file.AddRange(new byte[256]);
+            if (v1Title != null)
+            {
+                byte[] v1 = new byte[128];
+                Encoding.ASCII.GetBytes("TAG").CopyTo(v1, 0);
+                byte[] v1Bytes = Encoding.ASCII.GetBytes(v1Title);
+                Array.Copy(v1Bytes, 0, v1, 3, Math.Min(30, v1Bytes.Length));
+                file.AddRange(v1);
+            }
+            string path = Path.Combine(root, name);
+            File.WriteAllBytes(path, file.ToArray());
+            return path;
+        }
+
+        private static void AddId3Frame(List<byte> frames, string id, string text)
+        {
+            byte[] value = Encoding.UTF8.GetBytes(text);
+            frames.AddRange(Encoding.ASCII.GetBytes(id));
+            frames.AddRange(SyncSafeBytes(value.Length + 1));
+            frames.AddRange(new byte[] { 0, 0, 3 });
+            frames.AddRange(value);
+        }
+
+        private static byte[] SyncSafeBytes(int size)
+        {
+            return new byte[] { (byte)((size >> 21) & 127), (byte)((size >> 14) & 127), (byte)((size >> 7) & 127), (byte)(size & 127) };
+        }
+
         private static bool PumpUntil(Func<bool> done, int milliseconds)
         {
             Stopwatch watch = Stopwatch.StartNew();

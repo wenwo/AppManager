@@ -36,6 +36,14 @@ namespace AppManager
         private const long MaxCoverPixels = 16L * 1024 * 1024;
         internal const int MaxLyricsChars = 1024 * 1024;
 
+        /// <summary>下载平台写进标签的水印，不当作真实的歌名/歌手/专辑；只收平台名，避免误伤叫 Unknown 之类的真实歌名。</summary>
+        private static readonly HashSet<string> JunkTags = new HashSet<string>(new string[]
+        {
+            "kuwo", "kuwo.cn", "www.kuwo.cn", "酷我", "酷我音乐",
+            "kugou", "kugou.com", "www.kugou.com", "酷狗", "酷狗音乐",
+            "qqmusic", "qq音乐", "y.qq.com", "music.163.com", "网易云音乐", "migu", "咪咕音乐"
+        }, StringComparer.OrdinalIgnoreCase);
+
         public static MusicTrackInfo Read(string path)
         {
             MusicTrackInfo info = new MusicTrackInfo();
@@ -50,7 +58,12 @@ namespace AppManager
                 string lyricPath = Path.ChangeExtension(path, ".lrc");
                 if (File.Exists(lyricPath)) info.Lyrics = ReadText(lyricPath);
             }
-            catch { info.Dispose(); }
+            catch
+            {
+                info.Dispose();
+                // 读到一半出错时，已读入的水印或空值也要回退
+                Fallback(info, path);
+            }
             return info;
         }
 
@@ -295,9 +308,14 @@ namespace AppManager
 
         private static void Fallback(MusicTrackInfo info, string path)
         {
-            if (string.IsNullOrEmpty(info.Title)) info.Title = Path.GetFileNameWithoutExtension(path);
-            if (string.IsNullOrEmpty(info.Artist)) info.Artist = "未知艺术家";
-            if (string.IsNullOrEmpty(info.Album)) info.Album = "本地音乐";
+            if (IsJunkTag(info.Title)) info.Title = Path.GetFileNameWithoutExtension(path);
+            if (IsJunkTag(info.Artist)) info.Artist = "未知艺术家";
+            if (IsJunkTag(info.Album)) info.Album = "本地音乐";
+        }
+
+        private static bool IsJunkTag(string value)
+        {
+            return string.IsNullOrEmpty(value) || JunkTags.Contains(value.Trim());
         }
 
         private static Encoding Id3Encoding(byte value)
