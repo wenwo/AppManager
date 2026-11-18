@@ -4106,6 +4106,9 @@ namespace AppManager
                     try { submit.Invoke(info, new object[] { false }); }
                     finally { db.Execute("ROLLBACK"); }
                 }
+                // 「保存失败」的提示是排进消息队列的：在这里让它显示并关掉。留到后面，它会叠在下一个确认框上面，
+                // 而确认框的点击只认最先打开的那个，上面这个没人关，用例就一直卡住。
+                Check(AnswerMessageDialog("保存失败", 2, delegate { Application.DoEvents(); }), "a failed create did not tell the user");
                 Check(info.IsCreating && nameBox().Text == "G封面" && CollectionOps.FindByKey(config, rootA + "/G封面") == null,
                     "a failed create closed the page or saved the collection");
                 Check((Directory.Exists(coverDir) ? Directory.GetFiles(coverDir).Length : 0) == coversBefore,
