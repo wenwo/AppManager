@@ -560,8 +560,8 @@ namespace AppManager.Controls
             if (QueueMaxFirst <= 0) return;
             Rectangle thumb = QueueScrollThumbRect();
             if (thumb.Width <= 0 || thumb.Height <= 0) return;
-            int alpha = (queueScrollHot || queueScrollDragging) ? 150 : 80;
-            using (SolidBrush brush = new SolidBrush(Color.FromArgb(alpha, 60, 60, 67)))
+            bool thumbHot = queueScrollHot || queueScrollDragging;   // 指针在滚动条上或正在拖动：滑块加深
+            using (SolidBrush brush = new SolidBrush(thumbHot ? Theme.ScrollThumbHot : Theme.ScrollThumb))
                 Draw.FillRoundedRect(g, brush, thumb, QueueScrollBarW / 2);
         }
 

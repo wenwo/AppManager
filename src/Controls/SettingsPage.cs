@@ -805,8 +805,8 @@ namespace AppManager.Controls
             // 滚动条（仅内容超出视口时显示，细条风格，与侧栏一致）
             if (MaxScroll > 0)
             {
-                int alpha = (scrollbarHot || scrollDragging) ? 150 : 80;
-                using (SolidBrush tb = new SolidBrush(Color.FromArgb(alpha, 60, 60, 67)))
+                bool thumbHot = scrollbarHot || scrollDragging;   // 指针在滚动条上或正在拖动：滑块加深
+                using (SolidBrush tb = new SolidBrush(thumbHot ? Theme.ScrollThumbHot : Theme.ScrollThumb))
                     Draw.FillRoundedRect(g, tb, ScrollThumbRect(), Dpi(ScrollBarW) / 2);
             }
         }

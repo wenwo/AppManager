@@ -608,7 +608,7 @@ namespace AppManager
                 Control status = (Control)typeof(MainForm).GetField("statusLabel", Private).GetValue(form);
                 Check(status.Text.Contains("已跳过 1 个"), "partial skip not reported: " + status.Text);
                 Invoke(form, "AddItemsToCategory", new List<AppInfo> { archive }, "视频");
-                Check(!inCategory(archive, "视频") && status.Text.StartsWith("未加入"), "mismatched-only add not refused: " + status.Text);
+                Check(!inCategory(archive, "视频") && status.Text.StartsWith("未添加"), "mismatched-only add not refused: " + status.Text);
 
                 // 「移动到分类」菜单可用性与导入一致：文件夹可移入类型分类，压缩包不能进照片
                 Check((bool)canMove.Invoke(null, new object[] { new List<AppInfo> { folderItem }, "视频" }), "folder refused by move menu");

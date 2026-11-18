@@ -50,6 +50,7 @@ namespace AppManager
         public static readonly Color DangerText = Color.FromArgb(207, 48, 42);
         public static readonly Color DangerBg = Color.FromArgb(255, 235, 233);
         public static readonly Color NeutralTint = Color.FromArgb(110, 116, 125);   // 图标块的中性灰（停用项、恢复前留底等）
+        public static readonly Color FolderTint = Color.FromArgb(232, 160, 40);     // 文件夹图标的黄色：各个选文件的列表、缩略图网格共用
         public static readonly Color ToggleGreen = Color.FromArgb(52, 199, 89);
         public static readonly Color ToggleOn = Accent;
         public static readonly Color SegmentBg = Color.FromArgb(233, 236, 241);

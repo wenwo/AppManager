@@ -399,7 +399,7 @@ namespace AppManager
                     int iconSize = Dpi(18);
                     Rectangle icon = new Rectangle(row.X + Dpi(12), row.Y + (row.Height - iconSize) / 2, iconSize, iconSize);
                     Color iconColor = !item.Enabled ? Theme.TextTertiary : chosen ? Theme.Accent
-                        : item.Kind == PlaceKind.Drive ? Theme.IconColor : Color.FromArgb(232, 160, 40);
+                        : item.Kind == PlaceKind.Drive ? Theme.IconColor : Theme.FolderTint;
                     Draw.DrawGlyph(g, item.Glyph, icon, iconColor);
                     using (SolidBrush brush = new SolidBrush(!item.Enabled ? Theme.TextTertiary : chosen ? Theme.AccentText : Theme.TextPrimary))
                         Draw.DrawStringLeft(g, item.Title, chosen ? Theme.FontOf(9.5F, FontStyle.Bold) : Theme.BodyFont, brush,

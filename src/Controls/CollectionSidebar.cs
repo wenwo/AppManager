@@ -714,8 +714,8 @@ namespace AppManager.Controls
             int thumbH = Math.Max(18, (int)((long)ViewportHeight * ViewportHeight / (items.Count * RowH)));
             int travel = track.Height - thumbH;
             int y = travel > 0 ? track.Y + (int)((long)scrollOffset * travel / MaxScroll) : track.Y;
-            int alpha = (scrollbarHot || scrollDragging) ? 150 : 80;
-            using (SolidBrush b = new SolidBrush(Color.FromArgb(alpha, 60, 60, 67)))
+            bool thumbHot = scrollbarHot || scrollDragging;   // 指针在滚动条上或正在拖动：滑块加深
+            using (SolidBrush b = new SolidBrush(thumbHot ? Theme.ScrollThumbHot : Theme.ScrollThumb))
                 Draw.FillRoundedRect(g, b, new Rectangle(track.X, y, ScrollBarW, thumbH), ScrollBarW / 2);
         }
 

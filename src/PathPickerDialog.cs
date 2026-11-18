@@ -1012,7 +1012,7 @@ namespace AppManager
                 DrawChevron(g, new Rectangle(icon.X - Dpi(ChevronWidth + 2), row.Y, Dpi(ChevronWidth), row.Height), item.Expanded);
             string glyph = item.Kind == RowKind.File ? GlyphFile : item.Kind == RowKind.Drive ? GlyphDrive : GlyphFolder;
             Color iconColor = !item.Enabled ? Theme.TextTertiary : chosen ? Theme.Accent
-                : item.Kind == RowKind.File ? Theme.TextSecondary : Color.FromArgb(232, 160, 40);
+                : item.Kind == RowKind.File ? Theme.TextSecondary : Theme.FolderTint;
             Draw.DrawGlyph(g, glyph, icon, iconColor);
 
             int textX = icon.Right + Dpi(10);

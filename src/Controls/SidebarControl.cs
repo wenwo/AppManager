@@ -222,8 +222,8 @@ namespace AppManager.Controls
             if (MaxScroll > 0)
             {
                 Rectangle thumb = ScrollThumbRect();
-                int alpha = (scrollbarHot || scrollDragging) ? 150 : 80;
-                using (SolidBrush tb = new SolidBrush(Color.FromArgb(alpha, 60, 60, 67)))
+                bool thumbHot = scrollbarHot || scrollDragging;   // 指针在滚动条上或正在拖动：滑块加深
+                using (SolidBrush tb = new SolidBrush(thumbHot ? Theme.ScrollThumbHot : Theme.ScrollThumb))
                     Draw.FillRoundedRect(g, tb, thumb, ScrollBarW / 2);
             }
 

@@ -310,7 +310,7 @@ namespace AppManager.Controls
                     using (SolidBrush bg = new SolidBrush(isHover ? Theme.RowHover : Theme.SearchBg)) g.FillPath(bg, clip);
                     int size = tile.Width * 2 / 5;
                     Draw.DrawGlyph(g, GlyphFolder, new Rectangle(tile.X + (tile.Width - size) / 2, tile.Y + (tile.Height - size) / 2, size, size),
-                        Color.FromArgb(232, 160, 40));
+                        Theme.FolderTint);
                 }
                 else if (thumbs.TryGetValue(index, out thumb) && thumb != null)
                 {

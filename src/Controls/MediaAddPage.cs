@@ -555,7 +555,7 @@ namespace AppManager.Controls
                     int iconSize = Dpi(18);
                     Rectangle icon = new Rectangle(row.X + Dpi(12), row.Y + (row.Height - iconSize) / 2, iconSize, iconSize);
                     Color iconColor = !item.Enabled ? Theme.TextTertiary : chosen || item.Kind == PlaceKind.Checked || item.Kind == PlaceKind.Installed ? Theme.Accent
-                        : item.Kind == PlaceKind.Drive ? Theme.IconColor : Color.FromArgb(232, 160, 40);
+                        : item.Kind == PlaceKind.Drive ? Theme.IconColor : Theme.FolderTint;
                     Draw.DrawGlyph(g, item.Glyph, icon, iconColor);
                     using (SolidBrush brush = new SolidBrush(!item.Enabled ? Theme.TextTertiary : chosen ? Theme.AccentText : Theme.TextPrimary))
                         Draw.DrawStringLeft(g, item.Title, chosen ? Theme.FontOf(9.5F, FontStyle.Bold) : Theme.BodyFont, brush,
@@ -1731,7 +1731,7 @@ namespace AppManager.Controls
                     else
                     {
                         int size = Dpi(40);
-                        Color color = previewFailed ? Theme.DeleteRed : previewIsFolder ? Color.FromArgb(232, 160, 40) : Theme.TextTertiary;
+                        Color color = previewFailed ? Theme.DeleteRed : previewIsFolder ? Theme.FolderTint : Theme.TextTertiary;
                         string glyph = previewIsFolder ? GlyphFolder : previewApp != null ? GlyphApps : GlyphFor(previewPath);
                         Draw.DrawGlyph(g, glyph, new Rectangle(media.X + (media.Width - size) / 2, media.Y + (media.Height - size) / 2, size, size), color);
                     }
@@ -1851,7 +1851,7 @@ namespace AppManager.Controls
                 int iconSize = Dpi(item.Kind == FileKind.App ? AppIconPx : 18);
                 Rectangle icon = new Rectangle(x, row.Y + (row.Height - iconSize) / 2, iconSize, iconSize);
                 if (item.Kind == FileKind.App) DrawAppIcon(g, item.App, icon);
-                else Draw.DrawGlyph(g, isFile ? GlyphFor(item.Path) : GlyphFolder, icon, isFile ? Theme.IconColor : Color.FromArgb(232, 160, 40));
+                else Draw.DrawGlyph(g, isFile ? GlyphFor(item.Path) : GlyphFolder, icon, isFile ? Theme.IconColor : Theme.FolderTint);
                 int textX = icon.Right + Dpi(10);
                 int right = row.Right - Dpi(12);
                 if (item.Detail == null && isFile)
