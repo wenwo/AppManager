@@ -91,7 +91,6 @@ namespace AppManager.Controls
             public bool Checked;           // 开关行、存储位置行的开关状态
             public string ButtonText;      // 按钮行右侧按钮文字
             public bool Enabled = true;    // 为假时置灰且不响应点击
-            public bool Child;             // 依附上一行的子项：不画图标块，文字与上一行对齐
             public bool Warning;           // 说明文字用警示色
             public bool FirstInCard;
             public bool LastInCard;
@@ -136,7 +135,6 @@ namespace AppManager.Controls
         private SettingsSection section = SettingsSection.General;
         private bool showHidden;
         private bool autoScan;
-        private bool autoOrganizeDesktop;
         private bool closeToTray;
         private string defaultStoreRoot = string.Empty;
         private RescanState rescanState = RescanState.Idle;
@@ -165,7 +163,6 @@ namespace AppManager.Controls
         public event EventHandler BackRequested;
         public event EventHandler ShowHiddenChanged;
         public event EventHandler AutoScanChanged;
-        public event EventHandler AutoOrganizeDesktopChanged;
         public event EventHandler CloseToTrayChanged;
         public event EventHandler RescanRequested;
         public event EventHandler SelfTestRequested;
@@ -194,7 +191,7 @@ namespace AppManager.Controls
             AddNav(SettingsSection.Scan, GlyphSync, "扫描与收纳");
             AddNav(SettingsSection.Storage, GlyphDrive, "资源存储位置");
             AddNav(SettingsSection.Backup, GlyphHistory, "布局备份");
-            AddNav(SettingsSection.DesktopBackup, "", "桌面备份清单");
+            AddNav(SettingsSection.DesktopBackup, "", "桌面收纳");
             AddNav(SettingsSection.ImportHistory, "", "导入记录");
             AddNav(SettingsSection.Data, GlyphRepair, "操作记录与数据");
             AddNav(SettingsSection.Diagnostics, GlyphTest, "诊断");
@@ -237,7 +234,6 @@ namespace AppManager.Controls
 
         public bool ShowHidden { get { return showHidden; } }
         public bool AutoScan { get { return autoScan; } }
-        public bool AutoOrganizeDesktop { get { return autoOrganizeDesktop; } }
         public bool CloseToTray { get { return closeToTray; } }
         public SettingsSection Section { get { return section; } }
 
@@ -262,12 +258,11 @@ namespace AppManager.Controls
         /// 回填页面状态（开关与存储位置列表）；不触发变更事件，也不改变所选目录和滚动位置。
         /// locations 为配置里的有序位置（含已停用），为空时页面显示 defaultStoreRoot 作为默认位置。
         /// </summary>
-        public void Bind(bool showHidden, bool autoScan, bool autoOrganizeDesktop, bool closeToTray,
+        public void Bind(bool showHidden, bool autoScan, bool closeToTray,
             IList<ResourceStoreLocation> locations, string defaultStoreRoot)
         {
             this.showHidden = showHidden;
             this.autoScan = autoScan;
-            this.autoOrganizeDesktop = autoOrganizeDesktop;
             this.closeToTray = closeToTray;
             storeLocations.Clear();
             if (locations != null)
@@ -440,7 +435,7 @@ namespace AppManager.Controls
                     });
                     break;
                 case SettingsSection.Scan:
-                    SetPane("扫描与收纳", "自动发现新装软件和桌面变化，也可以随时手动重新扫描。");
+                    SetPane("扫描与收纳", "自动发现应用与桌面变化。新快捷方式的自动收纳已移至「桌面收纳」。");
                     y = AddCard(left, width, y, ScanRows());
                     break;
                 case SettingsSection.Storage:
@@ -452,13 +447,13 @@ namespace AppManager.Controls
                     y = AddCard(left, width, y, StoreRows());
                     break;
                 case SettingsSection.Backup:
-                    SetPane("布局备份", "把分类、顺序、常用、隐藏与桌面收纳整体存一份，之后可以随时恢复。");
+                    SetPane("布局备份", "本机布局快照包含桌面收纳；导入、导出的 .ambak 包只含记录与设置，不含文件本身。");
                     break;
                 case SettingsSection.Data:
                     SetPane("操作记录与数据", "程序对分类、集合和设置的每次改动都记在这里；最新的一次可以撤销。");
                     break;
                 case SettingsSection.DesktopBackup:
-                    SetPane("桌面备份清单", "整理桌面时收走的条目都记在这里。「还原」把它移回桌面（副本条目则清理备份副本）；「移除」只删清单记录，不动文件。");
+                    SetPane("桌面收纳", "搬家会移动原件，副本保留原件。清单中的「移除」只删除记录，不动文件。");
                     break;
                 case SettingsSection.ImportHistory:
                     SetPane("导入记录", "这里记着最近的导入；原件还没清理完的，可以在这里处理。");
@@ -576,18 +571,6 @@ namespace AppManager.Controls
 
         private Row[] ScanRows()
         {
-            // 「自动收纳」由自动扫描的监听触发：作为它的子项显示，扫描关闭时置灰并说明原因
-            Row organize = ToggleRow(null, TintGreen, "自动收纳桌面新快捷方式",
-                autoScan ? "桌面出现新快捷方式时自动收进「快捷中心」；关闭则只更新列表，不移动文件。"
-                         : "需要先开启上面的自动扫描。",
-                autoOrganizeDesktop, delegate
-                {
-                    autoOrganizeDesktop = !autoOrganizeDesktop;
-                    Rebuild();
-                    Raise(AutoOrganizeDesktopChanged);
-                });
-            organize.Child = true;
-            organize.Enabled = autoScan;
             return new Row[]
             {
                 ToggleRow(GlyphSync, TintGreen, "自动扫描应用与桌面变化", "新装软件或桌面有变化时自动更新列表。", autoScan, delegate
@@ -596,7 +579,6 @@ namespace AppManager.Controls
                     Rebuild();
                     Raise(AutoScanChanged);
                 }),
-                organize,
                 RescanRow()
             };
         }
@@ -884,16 +866,12 @@ namespace AppManager.Controls
                     g.DrawLine(sep, textX, b.Bottom - 1, b.Right - Dpi(CardPad), b.Bottom - 1);
             }
 
-            // 图标块：浅色底 + 同色相图标；子项不画，置灰行用灰色。「添加」的加号用线条画，不依赖图标字体
-            if (!r.Child)
-            {
-                Color tint = r.Enabled ? r.Tint : TintGray;
-                Rectangle tile = new Rectangle(b.Left + Dpi(16), b.Top + (b.Height - Dpi(IconTile)) / 2, Dpi(IconTile), Dpi(IconTile));
-                using (SolidBrush tb = new SolidBrush(Mix(tint, Theme.Card, 0.87f)))
-                    Draw.FillRoundedRect(g, tb, tile, Dpi(9));
-                if (r.Kind == RowKind.Add) Draw.DrawIcon(g, UiIconKind.Add, tile, tint, DpiHelper.ForControl(this));
-                else Draw.DrawGlyph(g, r.Glyph, Rectangle.Inflate(tile, -Dpi(9), -Dpi(9)), tint);
-            }
+            Color tint = r.Enabled ? r.Tint : TintGray;
+            Rectangle tile = new Rectangle(b.Left + Dpi(16), b.Top + (b.Height - Dpi(IconTile)) / 2, Dpi(IconTile), Dpi(IconTile));
+            using (SolidBrush tb = new SolidBrush(Mix(tint, Theme.Card, 0.87f)))
+                Draw.FillRoundedRect(g, tb, tile, Dpi(9));
+            if (r.Kind == RowKind.Add) Draw.DrawIcon(g, UiIconKind.Add, tile, tint, DpiHelper.ForControl(this));
+            else Draw.DrawGlyph(g, r.Glyph, Rectangle.Inflate(tile, -Dpi(9), -Dpi(9)), tint);
 
             int textRight = PaintTrailing(g, r, index);
             int textW = Math.Max(0, textRight - textX);

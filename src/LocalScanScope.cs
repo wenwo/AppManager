@@ -145,36 +145,18 @@ namespace AppManager
         internal static List<LocalScanScopeShortcut> Shortcuts(LocalScanScopeKind kind)
         {
             List<LocalScanScopeShortcut> result = new List<LocalScanScopeShortcut>();
-            string profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-            string primary, fallback, label;
+            string typeName;
             switch (kind)
             {
-                case LocalScanScopeKind.Photos:
-                    primary = Environment.GetFolderPath(Environment.SpecialFolder.MyPictures);
-                    fallback = "Pictures";
-                    label = "图片";
-                    break;
-                case LocalScanScopeKind.Videos:
-                    primary = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
-                    fallback = "Videos";
-                    label = "视频";
-                    break;
-                case LocalScanScopeKind.Music:
-                    primary = Environment.GetFolderPath(Environment.SpecialFolder.MyMusic);
-                    fallback = "Music";
-                    label = "音乐";
-                    break;
+                case LocalScanScopeKind.Photos: typeName = "照片"; break;
+                case LocalScanScopeKind.Videos: typeName = "视频"; break;
+                case LocalScanScopeKind.Music: typeName = "音乐"; break;
                 default:
                     throw new ArgumentOutOfRangeException("kind");
             }
-            if (string.IsNullOrWhiteSpace(primary) && !string.IsNullOrWhiteSpace(profile))
-                primary = Path.Combine(profile, fallback);
-            AddShortcut(result, label, primary, true);
-            AddShortcut(result, "桌面", Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), false);
-            string downloads = Scanner.KnownFolderPath(DownloadsFolder);
-            if (string.IsNullOrWhiteSpace(downloads) && !string.IsNullOrWhiteSpace(profile))
-                downloads = Path.Combine(profile, "Downloads");
-            AddShortcut(result, "下载", downloads, false);
+            foreach (FilePickerPlace place in FilePickerPlaces.Build(null, null, typeName, false))
+                AddShortcut(result, place.Label, place.Path, place.Kind == FilePickerPlaceKind.Pictures
+                    || place.Kind == FilePickerPlaceKind.Music || place.Kind == FilePickerPlaceKind.Videos);
             return result;
         }
 

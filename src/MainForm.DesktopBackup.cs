@@ -8,8 +8,7 @@ using AppManager.Controls;
 namespace AppManager
 {
     /// <summary>
-    /// 桌面备份清单：嵌在设置页右侧（左侧目录「桌面备份清单」），不另弹窗口。
-    /// 面板只展示清单并发出请求；这里负责确认、在后台还原或移除、保存配置，以及把结果写回面板。
+    /// 桌面收纳设置与清单操作。
     /// </summary>
     public partial class MainForm
     {
@@ -19,10 +18,25 @@ namespace AppManager
         {
             DesktopBackupPanel panel = new DesktopBackupPanel();
             panel.RefreshRequested += RefreshDesktopBackupPanel;
+            panel.OptionsChanged += SaveDesktopOptions;
+            panel.OrganizeRequested += DoOrganize;
+            panel.UpdateRequested += DoUpdateBackup;
             panel.RestoreRequested += RestoreDesktopEntry;
             panel.RemoveRequested += RemoveDesktopEntry;
             panel.RestoreAllRequested += RestoreAllDesktopEntries;
             return panel;
+        }
+
+        private void SaveDesktopOptions(DesktopOrganizeOptions options, bool automatic)
+        {
+            if (!DesktopWorkBlocked(desktopBackupPanel) && (options.Shortcuts || options.Files || options.Folders))
+            {
+                DesktopOrganizeOptions previous = new DesktopOrganizeOptions(config);
+                bool oldAuto = config.AutoOrganizeDesktop;
+                options.ApplyTo(config, automatic);
+                if (!config.Save("desktop.options")) previous.ApplyTo(config, oldAuto);
+            }
+            desktopBackupPanel.Bind(config);
         }
 
         /// <summary>把当前配置里的清单交给面板（面板显示出来、配置重新加载或操作结束后调用）。</summary>
@@ -30,7 +44,7 @@ namespace AppManager
         {
             if (desktopBackupPanel == null || desktopBackupPanel.IsDisposed) return;
             // 后台正在整理或还原时，清单正被工作线程修改：这时不去读它，操作结束后会再刷新一次
-            if (desktopOperationRunning) return;
+            if (desktopOperationRunning || pendingAutoStash != 0) return;
             desktopBackupPanel.SetItems(new List<DesktopBackupEntry>(config.DesktopBackup));
         }
 
@@ -42,6 +56,7 @@ namespace AppManager
         {
             if (!DesktopWorkRunning()) return false;
             panel.SetStatus("整理桌面或还原正在进行，完成后再操作清单。", true);
+            if (!settingsOpen) ShowNotice("桌面收纳正在进行，请稍后再试。");
             return true;
         }
 
@@ -66,9 +81,9 @@ namespace AppManager
         private void RestoreDesktopEntry(DesktopBackupEntry e)
         {
             DesktopBackupPanel panel = desktopBackupPanel;
-            if (panel == null || panel.Busy || !config.DesktopBackup.Contains(e)) return;
-            if (DesktopWorkBlocked(panel)) return;
-            if (!ConfirmDialog.Show("还原条目", "把「" + Path.GetFileName(e.CurrentPath) + "」还原到桌面？", "还原", "取消")) return;
+            if (panel == null || panel.Busy || DesktopWorkBlocked(panel) || !config.DesktopBackup.Contains(e)) return;
+            if (!ConfirmDialog.Show("还原条目", "还原「" + Path.GetFileName(e.CurrentPath) + "」？\n" +
+                (e.IsCopy ? "原件相同时仅将备份副本放入回收站；原件缺失则移回，内容不同时保留副本。" : "会把收纳的条目移回桌面。"), "还原", "取消")) return;
             if (!BeginDesktopPanelWork(panel)) return;   // 确认框开着时可能有别的桌面操作开始了：再查一次
             AppConfig cfg = config;
             DesktopOrganizer worker = organizer;
@@ -104,7 +119,7 @@ namespace AppManager
                     else if (error != null && saveError == null)
                         MessageDialog.Show(this, error, "还原", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     else if (saveError == null)
-                        panel.SetStatus("已把「" + Path.GetFileName(e.CurrentPath) + "」还原到桌面。", false);
+                        panel.SetStatus("已处理「" + Path.GetFileName(e.CurrentPath) + "」的还原记录。", false);
                 });
             });
         }
@@ -113,8 +128,7 @@ namespace AppManager
         private void RemoveDesktopEntry(DesktopBackupEntry e)
         {
             DesktopBackupPanel panel = desktopBackupPanel;
-            if (panel == null || panel.Busy || !config.DesktopBackup.Contains(e)) return;
-            if (DesktopWorkBlocked(panel)) return;
+            if (panel == null || panel.Busy || DesktopWorkBlocked(panel) || !config.DesktopBackup.Contains(e)) return;
             if (!ConfirmDialog.Show("移除清单项", "从清单移除这条记录？\n不会删除备份文件。", "移除", "取消")) return;
             if (!BeginDesktopPanelWork(panel)) return;   // 确认框开着时可能有别的桌面操作开始了：再查一次
             AppConfig cfg = config;
@@ -147,9 +161,9 @@ namespace AppManager
         private void RestoreAllDesktopEntries()
         {
             DesktopBackupPanel panel = desktopBackupPanel;
-            if (panel == null || panel.Busy || config.DesktopBackup.Count == 0) return;
-            if (DesktopWorkBlocked(panel)) return;
-            if (!ConfirmDialog.Show("全部还原", "把清单中的 " + config.DesktopBackup.Count + " 个条目全部还原到桌面？", "全部还原", "取消")) return;
+            if (panel == null || panel.Busy || DesktopWorkBlocked(panel) || config.DesktopBackup.Count == 0) return;
+            int total = config.DesktopBackup.Count;
+            if (!ConfirmDialog.Show("全部还原", "还原清单中的 " + total + " 项？\n搬家项移回桌面；副本项核对原件后清理，原件缺失则移回。内容不同时保留副本和记录。", "全部还原", "取消")) return;
             if (!BeginDesktopPanelWork(panel)) return;   // 确认框开着时可能有别的桌面操作开始了：再查一次
             AppConfig cfg = config;
             DesktopOrganizer worker = organizer;
@@ -171,7 +185,7 @@ namespace AppManager
                     if (failure != null)
                         MessageDialog.Show(this, "还原失败：" + failure.Message, "全部还原", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     else if (saveError == null)
-                        panel.SetStatus("已还原 " + n + " 个条目到桌面。", false);   // 成功只在面板顶上说一声，不弹窗
+                        panel.SetStatus("已处理 " + n + " 项。" + (n < total ? "未还原的记录已保留，可重试。" : ""), n < total);
                 });
             });
         }

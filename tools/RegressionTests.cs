@@ -45,6 +45,7 @@ namespace AppManager
                 Run("auto stash quiet period starts when the whole restore batch ends", RestoreSuppressionStartsAtEnd);
                 Run("collection thumbnails do not stay loading when the completion post is lost", CollectionThumbsLostPost);
                 Run("desktop copy mode keeps same-name files and rolls back failed save", DesktopCopySafety);
+                Run("desktop organizer settings match runtime eligibility and preserve preferences", DesktopOptionsPanel);
                 Run("auto stash reuses a matching backup instead of adding a suffix", AutoStashReusesMatchingBackup);
                 Run("self shortcuts are identified by target instead of display name", SelfShortcutTarget);
                 Run("copy: complete tree and file contents", CopyComplete);
@@ -191,6 +192,7 @@ namespace AppManager
                 Run("review fixes: long text boxes open safely, keyboard restore, left-click only, radio tab stop, MTA fallback", ReviewFollowUps);
                 Run("operation history names actions and explains each change in plain words", OperationHistoryRules);
                 Run("database panel lists operations, pages details and undoes only the latest one", DatabaseFormFlow);
+                Run("file pickers share common places and order", FilePickerPlacesRules);
                 Run("path picker checks paths, asks before creating or replacing and keeps failed validation in the window", PathPickerFlow);
                 Run("cover picker lists thumbnails, previews, blocks unreadable images, opens typed folders and remembers the last cover", CoverPickerFlow);
                 Run("add page lists by type, checks across folders, previews, takes drops and typed paths and drops vanished files", MediaAddPageFlow);
@@ -2072,7 +2074,7 @@ namespace AppManager
             string source = Path.Combine(sourceDir, "same.txt");
             File.WriteAllText(source, "new");
             File.WriteAllText(Path.Combine(destDir, "same.txt"), "old");
-            int moved = (int)backup.Invoke(organizer, new object[] { source, destDir, "same.txt", false, false });
+            int moved = (int)backup.Invoke(organizer, new object[] { source, destDir, "same.txt", false, false, true });
             Check(moved == 1 && File.Exists(source) && File.ReadAllText(source) == "new", "copy mode removed the source");
             Check(File.ReadAllText(Path.Combine(destDir, "same.txt")) == "old", "copy mode overwrote an existing file");
             Check(config.DesktopBackup.Count == 1 && config.DesktopBackup[0].IsCopy
@@ -2085,7 +2087,7 @@ namespace AppManager
                 db.Execute("CREATE TRIGGER fail_desktop_backup BEFORE INSERT ON records WHEN NEW.section='DesktopBackup' BEGIN SELECT RAISE(ABORT,'test failure'); END");
             try
             {
-                int failed = (int)backup.Invoke(organizer, new object[] { source2, destDir, "rollback.txt", false, false });
+                int failed = (int)backup.Invoke(organizer, new object[] { source2, destDir, "rollback.txt", false, false, true });
                 Check(failed == 0, "save failure was reported as success");
             }
             finally
@@ -2942,6 +2944,41 @@ namespace AppManager
             public bool ScrollByWheel(int delta) { Wheel += delta; return true; }
         }
 
+        private static void DesktopOptionsPanel()
+        {
+            AppConfig cfg = new AppConfig { AutoOrganizeDesktop = true, OrganizeFile = false, OrganizeDir = false };
+            using (Controls.DesktopBackupPanel panel = new Controls.DesktopBackupPanel())
+            {
+                Controls.ToggleSwitch toggle = (Controls.ToggleSwitch)panel.GetType().GetField("automatic", Private).GetValue(panel);
+                Label reason = (Label)panel.GetType().GetField("reason", Private).GetValue(panel);
+                Controls.CheckRow shortcuts = (Controls.CheckRow)panel.GetType().GetField("shortcuts", Private).GetValue(panel);
+                int changes = 0;
+                panel.OptionsChanged += delegate(DesktopOrganizeOptions options, bool automatic) { changes++; options.ApplyTo(cfg, automatic); };
+                foreach (bool scan in new bool[] { false, true })
+                foreach (bool copy in new bool[] { true, false })
+                foreach (bool links in new bool[] { false, true })
+                {
+                    cfg.AutoScan = scan; cfg.OrganizeCopy = copy; cfg.OrganizeShortcut = links; cfg.OrganizeFile = !links;
+                    panel.Bind(cfg);
+                    bool expected = scan && !copy && links;
+                    Check(toggle.Enabled == expected && toggle.Checked && DesktopOrganizeOptions.AutoEnabled(cfg) == expected,
+                        "organizer UI disagrees with watcher or lost preference");
+                    Check(reason.Text.Contains(!scan ? "自动扫描" : copy ? "副本" : !links ? "快捷方式" : "已开启"), "missing dependency reason");
+                    Check(shortcuts.Enabled == !links, "last scope can be unchecked");
+                }
+                Check(changes == 0, "rebinding saved organizer preferences");
+                DesktopOrganizeOptions snapshot = new DesktopOrganizeOptions(cfg);
+                ((RadioButton)panel.GetType().GetField("copy", Private).GetValue(panel)).Checked = true;
+                Check(cfg.OrganizeCopy && changes == 1 && !toggle.Enabled && !snapshot.Copy && snapshot.ScopeText == "快捷方式", "mode snapshot or change event mismatch");
+                ((RadioButton)panel.GetType().GetField("move", Private).GetValue(panel)).Checked = true;
+                Check(toggle.Enabled && toggle.Checked && changes == 2, "auto preference did not recover");
+                toggle.Checked = false;
+                Check(!DesktopOrganizeOptions.AutoEnabled(cfg) && changes == 3, "auto off not honored");
+                panel.SetBusy(true);
+                Check(!toggle.Enabled && !shortcuts.Enabled, "busy panel still accepts edits");
+            }
+        }
+
         private static void SettingsPageRows()
         {
             const string HiddenRow = "显示隐藏项", TrayRow = "关闭时隐藏到托盘", ScanRow = "自动扫描应用与桌面变化", OrganizeRow = "自动收纳桌面新快捷方式";
@@ -2957,12 +2994,11 @@ namespace AppManager
                 host.ClientSize = new Size(1000, 560);
                 page.SetBounds(0, 0, 1000, 1400);   // 足够高：先在不滚动的状态下验证点击
                 host.Controls.Add(page);
-                int hiddenEvents = 0, trayEvents = 0, scanEvents = 0, organizeEvents = 0, rescanEvents = 0, testEvents = 0, addEvents = 0, backEvents = 0;
+                int hiddenEvents = 0, trayEvents = 0, scanEvents = 0, rescanEvents = 0, testEvents = 0, addEvents = 0, backEvents = 0;
                 List<string> storeEvents = new List<string>();
                 page.ShowHiddenChanged += delegate { hiddenEvents++; };
                 page.CloseToTrayChanged += delegate { trayEvents++; };
                 page.AutoScanChanged += delegate { scanEvents++; };
-                page.AutoOrganizeDesktopChanged += delegate { organizeEvents++; };
                 page.RescanRequested += delegate { rescanEvents++; };
                 page.SelfTestRequested += delegate { testEvents++; };
                 page.StorageAddRequested += delegate { addEvents++; };
@@ -2979,8 +3015,8 @@ namespace AppManager
                 try
                 {
                     Application.DoEvents();
-                    page.Bind(false, true, false, true, three, DefaultStore);
-                    Check(hiddenEvents + scanEvents + organizeEvents + storeEvents.Count == 0, "binding raised change events");
+                    page.Bind(false, true, true, three, DefaultStore);
+                    Check(hiddenEvents + scanEvents + storeEvents.Count == 0, "binding raised change events");
 
                     // 默认显示「常规」；目录切换只显示所选目录的行，嵌入面板只在自己的目录下可见。
                     Check(page.Section == Controls.SettingsPage.SettingsSection.General && SettingsRowIndex(page, HiddenRow) >= 0
@@ -3017,7 +3053,7 @@ namespace AppManager
                         SetDpi(host, dpi, host.Bounds);
                         for (int pass = 0; pass < 2; pass++)
                         {
-                            Rectangle row = (Rectangle)SettingsRowField(page, OrganizeRow, "Bounds");
+                            Rectangle row = (Rectangle)SettingsRowField(page, ScanRow, "Bounds");
                             Check(row.Height == DpiHelper.Scale(64, dpi), "row height not scaled at " + dpi + " DPI: " + row);
                             Check(back.Size == new Size(DpiHelper.Scale(74, dpi), DpiHelper.Scale(30, dpi)),
                                 "back button size wrong at " + dpi + " DPI (pass " + pass + "): " + back.Size);
@@ -3053,22 +3089,12 @@ namespace AppManager
                             "nav column is not filled edge to edge: " + shot.GetPixel(4, 0));
                     }
 
-                    // 「自动收纳」依赖自动扫描：扫描关闭时置灰、点击无效、保留原值；重新开启后恢复。
                     page.SelectSection(Controls.SettingsPage.SettingsSection.Scan);
-                    Check((bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row disabled while auto scan is on");
+                    Check(SettingsRowIndex(page, OrganizeRow) < 0, "duplicate auto organizer setting");
                     ClickSettingsRow(page, ScanRow, MouseButtons.Left);
                     Check(!page.AutoScan && scanEvents == 1, "auto scan row did not switch off");
-                    Check(!(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "organize row stayed enabled without auto scan");
-                    Check(((string)SettingsRowField(page, OrganizeRow, "Subtitle")).Contains("自动扫描"), "disabled organize row does not explain the dependency");
-                    ClickSettingsRow(page, OrganizeRow, MouseButtons.Left);
-                    Check(!page.AutoOrganizeDesktop && organizeEvents == 0, "disabled organize row still toggled");
-                    Rectangle organize = (Rectangle)SettingsRowField(page, OrganizeRow, "Bounds");
-                    hover = SettingsClient(page, SettingsRowPoint(page, OrganizeRow));
-                    typeof(Control).GetMethod("OnMouseMove", Private).Invoke(page, new object[] { new MouseEventArgs(MouseButtons.None, 0, hover.X, hover.Y, 0) });
-                    Check(SettingsPixel(page, new Point(organize.Left + 6, organize.Top + organize.Height / 2)) == Theme.Card.ToArgb(), "disabled row is highlighted on hover");
                     ClickSettingsRow(page, ScanRow, MouseButtons.Left);
-                    ClickSettingsRow(page, OrganizeRow, MouseButtons.Left);
-                    Check(page.AutoScan && page.AutoOrganizeDesktop && scanEvents == 2 && organizeEvents == 1, "organize row did not recover after enabling auto scan");
+                    Check(page.AutoScan && scanEvents == 2, "auto scan row did not switch on");
 
                     // 立即执行的行：进行中不重复触发，结束后给出结果并可再次触发。
                     ClickSettingsRow(page, RescanRow, MouseButtons.Left);
@@ -3126,25 +3152,24 @@ namespace AppManager
                         "moving past the ends of the list was requested");
                     ClickSettingsRow(page, AddRow, MouseButtons.Left);
                     Check(addEvents == 1, "add location row did not request a folder");
-                    Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "location actions raised unrelated events");
+                    Check(hiddenEvents == 1 && scanEvents == 2, "location actions raised unrelated events");
 
                     // 只有一个位置：没有排序按钮。全部停用：页说明改为警示。没有显式位置：显示默认位置，仍可添加。
                     FieldInfo noteWarning = typeof(Controls.SettingsPage).GetField("paneNoteWarning", Private);
                     Check(!(bool)noteWarning.GetValue(page), "storage note is a warning while locations are enabled");
-                    page.Bind(true, false, true, true, new List<ResourceStoreLocation> { new ResourceStoreLocation(StoreA, false) }, DefaultStore);
+                    page.Bind(true, false, true, new List<ResourceStoreLocation> { new ResourceStoreLocation(StoreA, false) }, DefaultStore);
                     Check(page.Section == Controls.SettingsPage.SettingsSection.Storage, "rebinding changed the selected section");
                     Check(!ClickSettingsZone(page, StoreA, "MoveUp") && !ClickSettingsZone(page, StoreA, "MoveDown"), "a single location offers reordering");
                     Check((bool)noteWarning.GetValue(page), "all-disabled locations are not flagged");
-                    page.Bind(true, false, true, true, null, DefaultStore);
+                    page.Bind(true, false, true, null, DefaultStore);
                     Check(SettingsRowIndex(page, DefaultStore) >= 0 && SettingsRowIndex(page, AddRow) >= 0, "empty location list does not show the default location");
                     ClickSettingsRow(page, DefaultStore, MouseButtons.Left);
                     Check(storeEvents.Count == 4 && addEvents == 1, "the default location row is clickable");
                     page.SelectSection(Controls.SettingsPage.SettingsSection.Scan);
-                    Check(page.AutoOrganizeDesktop && !(bool)SettingsRowField(page, OrganizeRow, "Enabled"), "binding with auto scan off lost the organize value or left it enabled");
-                    Check(hiddenEvents == 1 && scanEvents == 2 && organizeEvents == 1, "rebinding raised change events");
+                    Check(!page.AutoScan && hiddenEvents == 1 && scanEvents == 2, "rebinding changed auto scan or raised change events");
 
                     // 滚动：页面变矮后内容可滚动；高分辨率滚轮的小增量累计后与一次整格等效；滚出视口的行不响应点击。
-                    page.Bind(false, true, false, true, three, DefaultStore);
+                    page.Bind(false, true, true, three, DefaultStore);
                     page.SelectSection(Controls.SettingsPage.SettingsSection.Storage);
                     Check((int)scroll.GetValue(page) == 0, "tall page scrolled without need");
                     page.Height = DpiHelper.Scale(300, 96);
@@ -7331,6 +7356,27 @@ namespace AppManager
 
         // 窗口的完整链路：默认不列系统记录；最新的业务操作可撤销；明细和更早的记录分页读取；撤销后数据库确实退回。
         /// <summary>路径选择窗口：后台路径检查的各种结果，以及窗口里「再点一次才新建/替换」、业务校验不通过时留在窗口里的流程。</summary>
+        private static void FilePickerPlacesRules()
+        {
+            string last = Path.Combine(root, "picker-last");
+            string current = Path.Combine(root, "picker-current");
+            Directory.CreateDirectory(last);
+            Directory.CreateDirectory(current);
+            List<FilePickerPlace> places = FilePickerPlaces.Build(last, current, "音乐", true);
+            Check(places.Count >= 2 && places[0].Kind == FilePickerPlaceKind.LastUsed
+                && places[1].Kind == FilePickerPlaceKind.Current, "last/current places are not first");
+            for (int i = 0; i < places.Count; i++)
+                for (int j = i + 1; j < places.Count; j++)
+                    Check(!string.Equals(places[i].Path, places[j].Path, StringComparison.OrdinalIgnoreCase), "duplicate common place path");
+
+            List<FilePickerPlace> shared = FilePickerPlaces.Build(null, null, "音乐", false);
+            List<LocalScanScopeShortcut> scan = LocalScanScope.Shortcuts(LocalScanScopeKind.Music);
+            Check(shared.Count == scan.Count, "scan scope did not use the shared place list");
+            for (int i = 0; i < shared.Count && i < scan.Count; i++)
+                Check(shared[i].Label == scan[i].Label && string.Equals(shared[i].Path, scan[i].Path, StringComparison.OrdinalIgnoreCase),
+                    "scan scope common place differs at " + i);
+        }
+
         private static void PathPickerFlow()
         {
             string dir = Path.Combine(root, "path-picker");
@@ -7465,6 +7511,21 @@ namespace AppManager
                 // 添加页确定前用：已删除的文件和其实是文件夹的路径都算不可用；类型说明过长时缩短
                 string sub = Path.Combine(dir, "多选子目录");
                 Directory.CreateDirectory(sub);
+                using (PathPickerDialog picker = new PathPickerDialog(new PathPickerOptions
+                {
+                    Title = "测试", Mode = PathPickerMode.OpenFile, ConfirmText = "打开", InitialFolder = dir, Extensions = db
+                }))
+                {
+                    picker.Opacity = 0;
+                    picker.Show();
+                    picker.DropPath(sub, false);
+                    ListBox droppedList = (ListBox)field(picker, "list");
+                    Check(droppedList.Items.Cast<object>().Any(delegate(object value)
+                    {
+                        FieldInfo pathField = value.GetType().GetField("Path", Private);
+                        return pathField != null && string.Equals((string)pathField.GetValue(value), sub, StringComparison.OrdinalIgnoreCase);
+                    }), "dropping a folder did not create an enterable root row");
+                }
                 string first = Path.Combine(dir, "a.db");
                 File.WriteAllText(first, "db");
                 Check(PathPickerDialog.UnavailableFiles(new string[] { first, sub, Path.Combine(dir, "没有.db") }).Count == 2,

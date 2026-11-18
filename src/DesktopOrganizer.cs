@@ -6,6 +6,58 @@ using System.Runtime.InteropServices;
 
 namespace AppManager
 {
+    internal struct DesktopOrganizeOptions
+    {
+        internal readonly bool Copy, Shortcuts, Files, Folders;
+
+        internal DesktopOrganizeOptions(bool copy, bool shortcuts, bool files, bool folders)
+        {
+            Copy = copy;
+            Shortcuts = shortcuts;
+            Files = files;
+            Folders = folders;
+        }
+
+        internal DesktopOrganizeOptions(AppConfig config)
+            : this(config.OrganizeCopy, config.OrganizeShortcut, config.OrganizeFile, config.OrganizeDir) { }
+
+        internal void ApplyTo(AppConfig config, bool automatic)
+        {
+            config.OrganizeCopy = Copy;
+            config.OrganizeShortcut = Shortcuts;
+            config.OrganizeFile = Files;
+            config.OrganizeDir = Folders;
+            config.AutoOrganizeDesktop = automatic;
+        }
+
+        internal string ModeText { get { return Copy ? "副本" : "搬家"; } }
+
+        internal string ScopeText
+        {
+            get
+            {
+                List<string> names = new List<string>();
+                if (Shortcuts) names.Add("快捷方式");
+                if (Files) names.Add("文件");
+                if (Folders) names.Add("文件夹");
+                return string.Join("、", names.ToArray());
+            }
+        }
+
+        internal string AutoDisabledReason(bool scan)
+        {
+            if (!scan) return "需要先在「扫描与收纳」开启自动扫描。";
+            if (Copy) return "副本模式下不自动收纳。";
+            if (!Shortcuts) return "需要在收纳范围中勾选「快捷方式」。";
+            return null;
+        }
+
+        internal static bool AutoEnabled(AppConfig config)
+        {
+            return config.AutoOrganizeDesktop && new DesktopOrganizeOptions(config).AutoDisabledReason(config.AutoScan) == null;
+        }
+    }
+
     /// <summary>
     /// 桌面一键收纳/还原：递归扫描桌面（最多 2 层），按「收纳范围」（快捷方式/文件/文件夹）
     /// 与「收纳模式」（搬家=移动 / 副本=拷贝）处理，并清理桌面、保留「应用中心」入口。
@@ -280,9 +332,14 @@ namespace AppManager
         /// </summary>
         public int TidyDesktop(string exePath)
         {
+            return TidyDesktop(exePath, new DesktopOrganizeOptions(config));
+        }
+
+        internal int TidyDesktop(string exePath, DesktopOrganizeOptions options)
+        {
             lock (OperationLock)
             {
-                int count = Organize();
+                int count = Organize(options);
                 EnsureLauncherShortcutOnDesktop(exePath);
                 return count;
             }
@@ -340,7 +397,7 @@ namespace AppManager
         }
 
         /// <summary>收纳桌面条目（按配置的范围与模式）；返回收纳条目数。配置读取失败时拒绝执行。</summary>
-        public int Organize()
+        internal int Organize(DesktopOrganizeOptions options)
         {
             lock (OperationLock)
             {
@@ -363,14 +420,13 @@ namespace AppManager
                 foreach (string desk in desktops)
                 {
                     if (!Directory.Exists(desk)) continue;
-                    count += ScanAndMove(desk, 0);
+                    count += ScanAndMove(desk, options);
                 }
                 return count;
             }
         }
-        private int ScanAndMove(string dir, int depth)
+        private int ScanAndMove(string dir, DesktopOrganizeOptions options)
         {
-            if (depth > 2) return 0;
             int count = 0;
 
             string[] files;
@@ -382,13 +438,13 @@ namespace AppManager
                 if (IsSkippable(name, f)) continue;
                 if (IsShortcutFile(f))
                 {
-                    if (!config.OrganizeShortcut || !IsSoftwareShortcut(f)) continue;
-                    count += BackupItem(f, ShortcutDestDir, name, false, true);
+                    if (!options.Shortcuts || !IsSoftwareShortcut(f)) continue;
+                    count += BackupItem(f, ShortcutDestDir, name, false, true, options.Copy);
                 }
                 else
                 {
-                    if (!config.OrganizeFile) continue;
-                    count += BackupItem(f, FileDestDir, name, false, false);
+                    if (!options.Files) continue;
+                    count += BackupItem(f, FileDestDir, name, false, false, options.Copy);
                 }
             }
 
@@ -399,8 +455,8 @@ namespace AppManager
             {
                 string name = Path.GetFileName(s);
                 if (IsSkippable(name, s) || IsReparsePoint(s)) continue;
-                if (config.OrganizeDir)
-                    count += BackupItem(s, FolderDestDir, name, true, false);   // 整目录收纳
+                if (options.Folders)
+                    count += BackupItem(s, FolderDestDir, name, true, false, options.Copy);   // 整目录收纳
                 // 未勾选“收纳文件夹”时不得进入桌面文件夹内部抽取文件，否则会破坏用户目录结构。
             }
             return count;
@@ -410,7 +466,7 @@ namespace AppManager
         /// 备份单个桌面条目：搬家=移动（默认），副本=拷贝（保留原件）。
         /// 同名目标始终另存新名字；只有源确实已移除才登记为搬家，保存失败则撤回本次搬运。
         /// </summary>
-        private int BackupItem(string source, string destDir, string name, bool isDir, bool isShortcut)
+        private int BackupItem(string source, string destDir, string name, bool isDir, bool isShortcut, bool copy)
         {
             string dest = null;
             bool sourceRemoved = false;
@@ -421,7 +477,7 @@ namespace AppManager
                 bool destExists = isDir ? Directory.Exists(dest) : File.Exists(dest);
                 if (destExists) dest = UniquePath(destDir, name, isDir);
 
-                if (config.OrganizeCopy)
+                if (copy)
                 {
                     if (isDir) CopyDir(source, dest);
                     else File.Copy(source, dest, false);
@@ -431,7 +487,7 @@ namespace AppManager
                     sourceRemoved = isDir ? MoveDirectory(source, dest) : MoveFile(source, dest);
                 }
 
-                Record(source, dest, isDir, isShortcut, config.OrganizeCopy || !sourceRemoved);
+                Record(source, dest, isDir, isShortcut, copy || !sourceRemoved);
                 if (!config.Save("physical.desktop.organize"))
                 {
                     DesktopBackupEntry added = config.DesktopBackup.Count == 0 ? null : config.DesktopBackup[config.DesktopBackup.Count - 1];

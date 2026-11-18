@@ -123,7 +123,7 @@ namespace AppManager
         private readonly HashSet<string> coverFailed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private bool selfTestRunning;   // 设置页自测防重入
-        private bool importBackupRunning;   // 备份包解析/校验防重入
+        private int pendingAutoStash;
         private bool desktopOperationRunning;
         private bool moveIntoFolderRunning;
         private FormWindowState preTrayWindowState = FormWindowState.Normal;   // 收托盘前的窗口状态（用于恢复最大化）
@@ -1129,11 +1129,7 @@ namespace AppManager
                 config.Save();
                 if (config.AutoScan) StartAutoScan();
                 else StopAutoScan();
-            };
-            settingsPage.AutoOrganizeDesktopChanged += delegate
-            {
-                config.AutoOrganizeDesktop = settingsPage.AutoOrganizeDesktop;
-                config.Save();
+                desktopBackupPanel.Bind(config);
             };
             settingsPage.CloseToTrayChanged += delegate { SetCloseToTray(settingsPage.CloseToTray); };
             settingsPage.StorageAddRequested += delegate { AddStoreLocationFromSettings(); };
@@ -1165,11 +1161,13 @@ namespace AppManager
             // 布局备份、操作记录直接嵌在设置页右侧：恢复或撤销成功后重载配置，设置页保持打开
             layoutBackupPanel = new LayoutBackupPanel();
             layoutBackupPanel.Restored += delegate { ReloadAfterRestore(); };
+            layoutBackupPanel.ExportRequested += ExportBackup;
+            layoutBackupPanel.ImportRequested += ImportBackup;
             settingsPage.HostPanel(SettingsPage.SettingsSection.Backup, layoutBackupPanel);
             databasePanel = new DatabasePanel(config.Database);
             databasePanel.DataChanged += delegate { ReloadAfterRestore(); };
             settingsPage.HostPanel(SettingsPage.SettingsSection.Data, databasePanel);
-            // 桌面备份清单、导入记录原来是两个大弹窗，现在同样嵌在设置页右侧
+            // 桌面收纳、导入记录原来是两个大弹窗，现在同样嵌在设置页右侧
             desktopBackupPanel = CreateDesktopBackupPanel();
             settingsPage.HostPanel(SettingsPage.SettingsSection.DesktopBackup, desktopBackupPanel);
             importHistoryPanel = CreateImportHistoryPanel();
@@ -1783,27 +1781,34 @@ namespace AppManager
         {
             if (config == null || !config.AutoScan || autoScan == null) return;
             List<string> fresh = autoScan.TakeNewDesktopFiles();
-            if (fresh.Count > 0 && config.AutoOrganizeDesktop && !config.OrganizeCopy && config.OrganizeShortcut)
+            if (fresh.Count > 0 && DesktopOrganizeOptions.AutoEnabled(config))
             {
                 // 先登记「这些删除是我们自己造成的」，避免搬运后再白扫一遍
                 autoScan.IgnoreDeletions(fresh);
                 // 收纳要等桌面操作锁：整理/还原跨盘搬大文件夹时可能持锁数分钟，
                 // 放在界面线程会把窗口卡死，所以在后台执行，完成后再静默重扫。
                 AppConfig cfg = config;
+                pendingAutoStash++;
                 ThreadPool.QueueUserWorkItem(delegate
                 {
                     string saveError = null;
                     AppConfig.BeginSaveBatch();
                     try
                     {
-                        int failed;
-                        DesktopOrganizer.AutoStashShortcuts(cfg, fresh, out failed);
+                        DesktopOrganizer.RunExclusive(delegate
+                        {
+                            int failed;
+                            if (ReferenceEquals(config, cfg) && DesktopOrganizeOptions.AutoEnabled(cfg))
+                                DesktopOrganizer.AutoStashShortcuts(cfg, fresh, out failed);
+                        });
                     }
                     catch (Exception ex) { Paths.LogError(ex); }
                     finally { saveError = AppConfig.EndSaveBatch(); }
                     RunOnUi(delegate
                     {
+                        pendingAutoStash--;
                         ReportBatchSaveFailure(cfg, saveError);
+                        RefreshDesktopBackupPanel();
                         StartScan(false, true);
                     });
                 });
@@ -6568,57 +6573,11 @@ namespace AppManager
         private void OnOrganize(object sender, EventArgs e)
         {
             List<MenuWindow.MenuItem> items = new List<MenuWindow.MenuItem>();
-            items.Add(MkMenu("一键收纳桌面（" + (config.OrganizeCopy ? "副本" : "搬家") + "）", delegate { DoOrganize(); }));
-            if (organizer.HasBackup())
-            {
-                items.Add(MkMenu("备份清单（" + config.DesktopBackup.Count + " 项）…", delegate { OpenSettingsSection(SettingsPage.SettingsSection.DesktopBackup); }));
-                items.Add(MkMenu("更新备份", delegate { DoUpdateBackup(); }));
-                items.Add(MkMenu("全部还原", delegate { DoRestore(); }));
-            }
-            items.Add(MkSep());
-            MenuWindow.MenuItem copyMode = MkMenu("副本模式（保留桌面原件）", delegate { ToggleOrganizeCopy(); });
-            copyMode.Checked = config.OrganizeCopy;
-            MenuWindow.MenuItem scopeShortcut = MkMenu("收纳范围：快捷方式", delegate { ToggleOrganizeScope(0); });
-            scopeShortcut.Checked = config.OrganizeShortcut;
-            MenuWindow.MenuItem scopeFile = MkMenu("收纳范围：文件", delegate { ToggleOrganizeScope(1); });
-            scopeFile.Checked = config.OrganizeFile;
-            MenuWindow.MenuItem scopeDir = MkMenu("收纳范围：文件夹", delegate { ToggleOrganizeScope(2); });
-            scopeDir.Checked = config.OrganizeDir;
-            items.Add(copyMode);
-            items.Add(scopeShortcut);
-            items.Add(scopeFile);
-            items.Add(scopeDir);
-            items.Add(MkSep());
-            items.Add(MkMenu("导出备份包…", delegate { ExportBackup(); }));
-            items.Add(MkMenu("导入备份包…", delegate { ImportBackup(); }));
-            MenuWindow mw = new MenuWindow(items, 250);
+            items.Add(MkMenu("立即整理", DoOrganize));
+            items.Add(MkMenu("桌面收纳设置…", delegate { OpenSettingsSection(SettingsPage.SettingsSection.DesktopBackup); }));
+            MenuWindow mw = new MenuWindow(items, 184);
             mw.Location = FixLocation(organizeBtn.PointToScreen(new Point(0, organizeBtn.Height)), mw.Size);
             mw.Show(this);
-        }
-
-        /// <summary>切换收纳模式（搬家 ⇄ 副本）。</summary>
-        private void ToggleOrganizeCopy()
-        {
-            config.OrganizeCopy = !config.OrganizeCopy;
-            config.Save();
-        }
-
-        /// <summary>切换收纳范围（快捷方式/文件/文件夹），至少保留一项。</summary>
-        private void ToggleOrganizeScope(int which)
-        {
-            if (which == 0) config.OrganizeShortcut = !config.OrganizeShortcut;
-            else if (which == 1) config.OrganizeFile = !config.OrganizeFile;
-            else config.OrganizeDir = !config.OrganizeDir;
-
-            if (!config.OrganizeShortcut && !config.OrganizeFile && !config.OrganizeDir)
-            {
-                if (which == 0) config.OrganizeShortcut = true;
-                else if (which == 1) config.OrganizeFile = true;
-                else config.OrganizeDir = true;
-                MessageDialog.Show("至少保留一项收纳范围。", "整理桌面",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            config.Save();
         }
 
         private void DoUpdateBackup()
@@ -6630,26 +6589,30 @@ namespace AppManager
 
         private void DoOrganize()
         {
-            bool copy = config.OrganizeCopy;
-            if (!ConfirmDialog.Show("整理桌面", "按「" + (copy ? "副本" : "搬家") + "」模式收纳桌面上符合条件的项目？\n" +
-                "收纳记录会在完成后保存。", "开始整理", "取消")) return;
-            RunDesktopOperation("正在整理桌面…", delegate { return organizer.TidyDesktop(Application.ExecutablePath); },
-                delegate(int n) { return "已收纳 " + n + " 个桌面条目（" + (copy ? "副本模式" : "搬家模式") + "）。"; });
-        }
-
-        private void DoRestore()
-        {
-            if (!ConfirmDialog.Show("还原桌面", "把清单中的 " + config.DesktopBackup.Count + " 个条目移回桌面？\n" +
-                "副本项会清理备份副本。", "还原", "取消")) return;
-            RunDesktopOperation("正在还原桌面…", delegate { return organizer.RestoreAll(); },
-                delegate(int n) { return "已还原 " + n + " 个条目到桌面。"; });
+            DesktopOrganizeOptions options = new DesktopOrganizeOptions(config);
+            if (options.ScopeText.Length == 0)
+            {
+                OpenSettingsSection(SettingsPage.SettingsSection.DesktopBackup);
+                desktopBackupPanel.SetStatus("请至少选择一项收纳范围。", true);
+                return;
+            }
+            using (MessageForm confirm = new MessageForm("整理桌面", "方式：" + options.ModeText
+                + (options.Copy ? "（保留桌面原件）" : "（移动桌面原件）") + "\r\n范围：" + options.ScopeText,
+                new string[] { "开始整理", "修改设置", "取消" }, new DialogResult[] { DialogResult.OK, DialogResult.Retry, DialogResult.Cancel }, 0, DialogResult.Cancel))
+            {
+                ConfirmDialog.ShowModal(confirm, this);
+                if (confirm.Result == DialogResult.Retry) OpenSettingsSection(SettingsPage.SettingsSection.DesktopBackup);
+                if (confirm.Result != DialogResult.OK) return;
+            }
+            DesktopOrganizer worker = organizer;
+            RunDesktopOperation("正在整理桌面…", delegate { return worker.TidyDesktop(Application.ExecutablePath, options); },
+                delegate(int n) { return "已收纳 " + n + " 个桌面条目（" + options.ModeText + "）。"; });
         }
 
         private void RunDesktopOperation(string status, Func<int> operation, Func<int, string> successText)
         {
-            if (desktopOperationRunning) return;
-            desktopOperationRunning = true;
-            organizeBtn.Enabled = false;
+            if (!BeginDesktopPanelWork(desktopBackupPanel)) return;
+            desktopBackupPanel.SetStatus(status, false);
             ShowStatusBar(status, 0, 0);
             if (autoScan != null) autoScan.Pause();   // 整理过程中大量文件变动只登记，结束后合并一次重扫
             AppConfig cfg = config;
@@ -6664,12 +6627,13 @@ namespace AppManager
                 finally { saveError = AppConfig.EndSaveBatch(); }
                 RunOnUi(delegate
                 {
-                    desktopOperationRunning = false;
-                    organizeBtn.Enabled = true;
+                    EndDesktopPanelWork(desktopBackupPanel);
                     if (autoScan != null) autoScan.Resume();
                     HideStatusBar();
                     RefreshDesktopBackupPanel();   // 设置页里的桌面备份清单开着时，换上整理或还原之后的清单
                     ReportBatchSaveFailure(cfg, saveError);
+                    if (saveError != null || failure != null)
+                        desktopBackupPanel.SetStatus("操作未完成：" + (saveError ?? failure.Message), true);
                     if (failure != null)
                     {
                         MessageDialog.Show("操作失败：" + failure.Message, "整理桌面",
@@ -6677,7 +6641,11 @@ namespace AppManager
                         return;
                     }
                     ReloadLibrary();
-                    ShowNotice(successText(count));   // 成功只在底部提示条说一声，不弹窗打断
+                    if (saveError == null)
+                    {
+                        desktopBackupPanel.SetStatus(successText(count), false);
+                        if (!settingsOpen) ShowNotice(successText(count));
+                    }
                 });
             });
         }
@@ -6685,7 +6653,7 @@ namespace AppManager
         /// <summary>整理/还原/自动收纳/布局恢复是否仍在后台搬动文件。</summary>
         private bool DesktopWorkRunning()
         {
-            return desktopOperationRunning || DesktopOrganizer.IsOperationRunning;
+            return desktopOperationRunning || pendingAutoStash != 0 || DesktopOrganizer.IsOperationRunning;
         }
 
         /// <summary>
@@ -6764,6 +6732,7 @@ namespace AppManager
         /// <summary>导出备份包（.ambak，仅记录与设置，不含物理文件）。</summary>
         private void ExportBackup()
         {
+            if (layoutBackupPanel.Busy) return;
             string path = PathPickerDialog.Pick(new PathPickerOptions
             {
                 Title = "导出备份包",
@@ -6773,23 +6742,50 @@ namespace AppManager
                 FileName = "AppManagerBackup_" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".ambak",
                 Extensions = new string[] { ".ambak" }
             });
-            if (path == null) return;
-            try
+            if (path == null || !BeginPackage("正在导出备份包…")) return;
+            AppConfig current = config;
+            RunPackageStep(delegate { return current.ExportTo(path) ? null : "导出失败：请检查目标路径和可用空间。"; },
+                delegate { EndPackage("已导出备份包：" + path, false); });
+        }
+
+        private bool BeginPackage(string status)
+        {
+            if (layoutBackupPanel.Busy) return false;
+            if (DesktopWorkRunning())
             {
-                if (!config.ExportTo(path)) throw new IOException("备份包未能写入，请检查目标路径和磁盘空间。");
-                ShowNotice("已导出备份包：" + path);   // 成功只在底部提示条说一声，不弹窗打断
+                layoutBackupPanel.SetStatus("桌面收纳正在进行，请稍后再试。", true);
+                return false;
             }
-            catch (Exception ex)
+            if (autoScan != null) autoScan.Pause();
+            layoutBackupPanel.SetPackageBusy(true, status, false);
+            return true;
+        }
+
+        private void EndPackage(string status, bool warning)
+        {
+            layoutBackupPanel.SetPackageBusy(false, status, warning);
+            if (autoScan != null) autoScan.Resume();
+        }
+
+        private void RunPackageStep(Func<string> work, Action success)
+        {
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                MessageDialog.Show("导出失败：" + ex.Message, "导出备份包",
-                    MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+                string error;
+                try { error = DesktopOrganizer.RunExclusive(work); }
+                catch (Exception ex) { Paths.LogError(ex); error = "备份包操作失败：" + ex.Message; }
+                RunOnUi(delegate
+                {
+                    if (error != null) EndPackage(error, true);
+                    else success();
+                });
+            });
         }
 
         /// <summary>导入备份包（.ambak）：后台校验通过并确认后整库覆盖；覆盖前自动备份当前配置。</summary>
         private void ImportBackup()
         {
-            if (importBackupRunning) return;
+            if (layoutBackupPanel.Busy) return;
             string filePath = PathPickerDialog.Pick(new PathPickerOptions
             {
                 Title = "导入备份包",
@@ -6798,9 +6794,8 @@ namespace AppManager
                 ConfirmText = "下一步",
                 Extensions = new string[] { ".ambak" }
             });
-            if (filePath == null) return;
-            importBackupRunning = true;
-            ShowStatusBar("正在校验备份包…", 0, 0);
+            if (filePath == null || !BeginPackage("正在校验备份包…")) return;
+            AppConfig current = config;
             AppConfig localPaths = new AppConfig
             {
                 ManageRootPath = config.ManageRootPath,
@@ -6809,71 +6804,36 @@ namespace AppManager
                 ResourceStorePath = config.ResourceStorePath
             };
             CopyResourceStoreLocations(config, localPaths);
-            ThreadPool.QueueUserWorkItem(delegate
+            AppConfig imported = null;
+            int droppedDesktop = 0;
+            RunPackageStep(delegate
             {
-                AppConfig imported = null;
-                string validation = null;
-                int droppedDesktop = 0;
-                Exception failure = null;
-                try
+                imported = AppConfig.ImportFrom(filePath);
+                if (imported == null) return "备份包无效或已损坏，未导入。";
+                string error = imported.PrepareAmbakImport(localPaths, out droppedDesktop);
+                return error == null ? null : "未导入：" + error;
+            }, delegate
+            {
+                if (!ConfirmDialog.Show("导入备份包",
+                    "导入将整库覆盖当前配置（分类、收录条目、网址、排序、桌面备份清单）。\n" +
+                    "存储位置会保留本机设置。" +
+                    (droppedDesktop > 0 ? "\n有 " + droppedDesktop + " 条桌面收纳记录不属于当前收纳目录，将被忽略。" : "") +
+                    "\n导入前会自动备份当前配置。", "导入", "取消"))
                 {
-                    imported = AppConfig.ImportFrom(filePath);
-                    if (imported != null)
-                        validation = imported.PrepareAmbakImport(localPaths, out droppedDesktop);
+                    EndPackage("已取消导入，当前配置未更改。", false);
+                    return;
                 }
-                catch (Exception ex)
+                string bak = null;
+                int migratedFiles = 0;
+                layoutBackupPanel.SetStatus("正在备份当前配置并导入…", false);
+                RunPackageStep(delegate
                 {
-                    failure = ex;
-                    Paths.LogError(ex);
-                }
-                RunOnUi(delegate
+                    bak = current.BackupSnapshot();
+                    if (bak == null) return "无法备份当前配置，已中止导入。";
+                    migratedFiles = imported.MigrateSoftwareFilesToResources().Count;
+                    return imported.Save("import.ambak") ? null : "导入未保存：" + imported.DatabaseError;
+                }, delegate
                 {
-                    importBackupRunning = false;
-                    HideStatusBar();
-                    if (failure != null)
-                    {
-                        MessageDialog.Show(this, "导入失败：" + failure.Message, "导入备份包",
-                            MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        return;
-                    }
-                    if (imported == null)
-                    {
-                        MessageDialog.Show("备份包无效或已损坏，已中止导入。", "导入备份包",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-                    if (validation != null)
-                    {
-                        MessageDialog.Show("备份包内容不安全或名称无效，已中止导入：\n" + validation, "导入备份包",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-                    if (!ConfirmDialog.Show("导入备份包",
-                        "导入将整库覆盖当前配置（分类、收录条目、网址、排序、桌面备份清单）。\n" +
-                        "存储位置会保留本机设置。" +
-                        (droppedDesktop > 0 ? "\n有 " + droppedDesktop + " 条桌面收纳记录不属于当前收纳目录，将被忽略。" : "") +
-                        "\n导入前会自动备份当前配置。", "导入", "取消")) return;
-
-                    // 校验期间设置可能已变化，保存前再取一次当前存储位置。
-                    imported.ManageRootPath = config.ManageRootPath;
-                    imported.FolderStorePath = config.FolderStorePath;
-                    imported.FileStorePath = config.FileStorePath;
-                    imported.ResourceStorePath = config.ResourceStorePath;
-                    CopyResourceStoreLocations(config, imported);
-                    string bak = config.BackupSnapshot();
-                    if (bak == null)
-                    {
-                        MessageDialog.Show("无法备份当前配置，已中止导入。", "导入备份包",
-                            MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-                    // 旧备份包可能带回软件页面里的文件条目：随导入同一事务迁到资源页面，失败一起回滚
-                    int migratedFiles = imported.MigrateSoftwareFilesToResources().Count;
-                    if (!imported.Save("import.ambak"))
-                    {
-                        MessageDialog.Show(this, "导入未保存：" + imported.DatabaseError, "导入备份包", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
                     config = imported;
                     BindDatabaseErrors();
                     InvalidateAddedIndex();   // 整库覆盖：旧索引对应旧 config，必须重建
@@ -6885,9 +6845,12 @@ namespace AppManager
                     RestoreViewToggle(GetCategoryGridMode(currentCategory));
                     grid.GridMode = GetCategoryGridMode(currentCategory);
                     SyncHeaderStrip();
-                    addBtn.Visible = CanEditCategory(currentCategory);
+                    addBtn.Visible = !settingsOpen && CanEditCategory(currentCategory);
                     LayoutControls();
                     ReloadLibrary();
+                    BindSettingsPage();
+                    EndPackage("备份包已导入。", false);
+                    StartAutoScan();
                     MessageDialog.Show("导入完成，已还原至备份包状态。"
                         + (migratedFiles > 0 ? "\n软件页面只收录软件：备份包中 " + migratedFiles + " 个文件/文件夹已放到资源页面（磁盘位置不变）。" : "")
                         + "\n原配置已备份至：\n" + bak, "导入备份包",
@@ -7048,8 +7011,9 @@ namespace AppManager
         /// <summary>把当前配置回填到设置页（开关 + 有序存储位置列表）。</summary>
         private void BindSettingsPage()
         {
-            settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
+            settingsPage.Bind(config.ShowHidden, config.AutoScan,
                 config.CloseToTray, ResourceStore.EditableLocations(config), ResourceStore.Normalize(DefaultResourceStoreRoot()));
+            if (desktopBackupPanel != null) desktopBackupPanel.Bind(config);
             if (databasePanel != null) databasePanel.SetDatabase(config.Database);   // 配置整体重载后换成新的数据库对象
             RefreshDesktopBackupPanel();   // 清单在配置里：配置重载或刚收纳过之后同步到面板
         }

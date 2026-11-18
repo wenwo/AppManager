@@ -65,8 +65,11 @@ namespace AppManager
         private const string GlyphFolder = "\uE8B7";
         private const string GlyphDrive = "\uEDA2";
         private const string GlyphFile = "\uE8A5";
+        private const string GlyphPictures = "\uEB9F";
+        private const string GlyphMusic = "\uE8D6";
+        private const string GlyphVideo = "\uE71D";
+        private const string GlyphDownload = "\uE896";
 
-        private static readonly Guid DownloadsFolder = new Guid("374DE290-123F-4565-9164-39C4925E467B");
         /// <summary>本次运行里上一次选定的文件夹：再次打开时列在「常用位置」并预先展开。</summary>
         private static string lastFolder;
 
@@ -83,6 +86,7 @@ namespace AppManager
             internal bool Warning;
             internal bool Expandable;
             internal bool Expanded;
+            internal string Glyph;
 
             public override string ToString() { return Title; }
         }
@@ -101,6 +105,7 @@ namespace AppManager
         {
             internal string Label;
             internal string Path;
+            internal FilePickerPlaceKind Kind;
         }
 
         private readonly PathPickerOptions options;
@@ -258,25 +263,8 @@ namespace AppManager
 
         private void BuildPlaces()
         {
-            AddPlace("上次使用", lastFolder);
-            if (options.InitialFolder != null) AddPlace("当前位置", options.InitialFolder);
-            AddPlace("桌面", Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
-            AddPlace("文档", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
-            string downloads = null;
-            try { downloads = Scanner.KnownFolderPath(DownloadsFolder); } catch (Exception ex) { Paths.LogError(ex); }
-            AddPlace("下载", downloads);
-        }
-
-        private void AddPlace(string label, string path)
-        {
-            string full = LocalScanScope.NormalizePath(path);
-            if (string.IsNullOrEmpty(full)) return;
-            foreach (Place place in places)
-                if (string.Equals(place.Path, full, StringComparison.OrdinalIgnoreCase)) return;
-            // 只看本机盘符：断开的网络映射盘查目录是否存在会卡住界面
-            if (!IsQuickLocal(full)) return;
-            try { if (!Directory.Exists(full)) return; } catch { return; }
-            places.Add(new Place { Label = label, Path = full });
+            foreach (FilePickerPlace item in FilePickerPlaces.Build(lastFolder, options.InitialFolder, null, true))
+                places.Add(new Place { Label = item.Label, Path = item.Path, Kind = item.Kind });
         }
 
         /// <summary>起始文件夹：调用方指定的、上次使用的、「文档」，取第一个列出来的。</summary>
@@ -350,12 +338,37 @@ namespace AppManager
             if (keyData == Keys.Escape) { DialogResult = DialogResult.Cancel; Close(); return true; }
             if (keyData == Keys.Enter)
             {
+                if (list.Focused)
+                {
+                    Row row = RowAt(list.SelectedIndex);
+                    if (row != null && row.Expandable && options.Mode != PathPickerMode.Folder)
+                    {
+                        ToggleExpand(list.SelectedIndex);
+                        return true;
+                    }
+                }
                 // 自绘按钮不是系统默认按钮：焦点在「取消」上回车就取消，其余情况等同主按钮
                 if (cancelButton.Focused) { DialogResult = DialogResult.Cancel; Close(); }
                 else Confirm();
                 return true;
             }
+            if (keyData == Keys.Back && !pathBox.Focused) { CollapseSelection(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void CollapseSelection()
+        {
+            Row current = RowAt(list.SelectedIndex);
+            if (current == null) return;
+            if (current.Expanded) { ToggleExpand(list.SelectedIndex); return; }
+            for (int index = list.SelectedIndex - 1; index >= 0; index--)
+            {
+                Row parent = RowAt(index);
+                if (parent == null || !parent.Expandable || parent.Depth >= current.Depth) continue;
+                ToggleExpand(index);
+                list.SelectedIndex = index;
+                return;
+            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -370,7 +383,7 @@ namespace AppManager
             e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
         }
 
-        /// <summary>拖进来的第一项写进输入框；保存模式拖进文件夹时保留原来的文件名。</summary>
+        /// <summary>拖进来的文件写进输入框；拖进文件夹按用途进入、展开或替换保存位置。</summary>
         protected override void OnDragDrop(DragEventArgs e)
         {
             base.OnDragDrop(e);
@@ -382,15 +395,53 @@ namespace AppManager
                 return;
             }
             if (dropped == null || dropped.Length == 0) return;
-            string path = dropped[0];
+            DropPath(dropped[0], dropped.Length > 1);
+        }
+
+        internal void DropPath(string path, bool more)
+        {
+            if (string.IsNullOrEmpty(path)) return;
             bool folder = false;
             try { folder = Directory.Exists(path); } catch { }
-            if (options.Mode == PathPickerMode.SaveFile && folder) ChooseFolder(path);
+            if (folder)
+            {
+                if (options.Mode == PathPickerMode.SaveFile) ChooseFolder(path);
+                else
+                {
+                    if (options.Mode == PathPickerMode.Folder) SetPathText(path);
+                    else EnterDroppedFolder(path);
+                }
+            }
             else SetPathText(path);
             notice = null;
-            if (dropped.Length > 1) SetNotice("一次只能选一项，已使用第一项：" + path, false);
+            if (more) SetNotice("一次只能选一项，已使用第一项：" + path, false);
             else RefreshNotice();
             list.Invalidate();
+        }
+
+        private void EnterDroppedFolder(string path)
+        {
+            string full = LocalScanScope.NormalizePath(path) ?? path;
+            bool known = false;
+            foreach (Place place in places)
+            {
+                if (!string.Equals(place.Path, full, StringComparison.OrdinalIgnoreCase)) continue;
+                known = true;
+                break;
+            }
+            if (!known) places.Add(new Place { Label = "当前位置", Path = full, Kind = FilePickerPlaceKind.Current });
+            expanded.Add(full);
+            LoadContents(full);
+            RefreshRows();
+            for (int i = 0; i < list.Items.Count; i++)
+            {
+                Row row = RowAt(i);
+                if (row != null && string.Equals(row.Path, full, StringComparison.OrdinalIgnoreCase))
+                {
+                    list.SelectedIndex = i;
+                    break;
+                }
+            }
         }
 
         // ===== 目录读取 =====
@@ -544,7 +595,7 @@ namespace AppManager
                 rows.Add(new Row { Kind = RowKind.Header, Title = "常用位置", Enabled = false });
                 foreach (Place place in places)
                 {
-                    rows.Add(FolderRow(RowKind.Place, place.Label, place.Path, place.Path, 0));
+                    rows.Add(FolderRow(RowKind.Place, place.Label, place.Path, place.Path, 0, GlyphForPlace(place.Kind)));
                     AddChildren(rows, place.Path, 1);
                 }
             }
@@ -556,7 +607,7 @@ namespace AppManager
                 foreach (LocalScanScopeDrive drive in drives)
                 {
                     string root = LocalScanScope.NormalizePath(drive.Path);
-                    Row row = FolderRow(RowKind.Drive, drive.Title, drive.Detail, root, 0);
+                    Row row = FolderRow(RowKind.Drive, drive.Title, drive.Detail, root, 0, GlyphDrive);
                     row.Enabled = drive.Supported;
                     row.Expandable = drive.Supported;
                     row.Expanded = drive.Supported && expanded.Contains(root);
@@ -567,13 +618,25 @@ namespace AppManager
             return rows;
         }
 
-        private Row FolderRow(RowKind kind, string title, string detail, string path, int depth)
+        private Row FolderRow(RowKind kind, string title, string detail, string path, int depth, string glyph)
         {
             return new Row
             {
                 Kind = kind, Title = title, Detail = detail, Path = path, Depth = depth,
-                Expandable = true, Expanded = expanded.Contains(path)
+                Expandable = true, Expanded = expanded.Contains(path), Glyph = glyph
             };
+        }
+
+        private static string GlyphForPlace(FilePickerPlaceKind kind)
+        {
+            switch (kind)
+            {
+                case FilePickerPlaceKind.Pictures: return GlyphPictures;
+                case FilePickerPlaceKind.Music: return GlyphMusic;
+                case FilePickerPlaceKind.Videos: return GlyphVideo;
+                case FilePickerPlaceKind.Downloads: return GlyphDownload;
+                default: return GlyphFolder;
+            }
         }
 
         private void AddChildren(List<Row> rows, string path, int depth)
@@ -589,7 +652,7 @@ namespace AppManager
                 rows.Add(new Row { Kind = RowKind.Note, Title = "无法读取：" + current.Error, Depth = depth, Enabled = false, Warning = true });
             foreach (string folder in current.Folders)
             {
-                rows.Add(FolderRow(RowKind.Folder, Path.GetFileName(folder), null, folder, depth));
+                rows.Add(FolderRow(RowKind.Folder, Path.GetFileName(folder), null, folder, depth, GlyphFolder));
                 AddChildren(rows, folder, depth + 1);
             }
             foreach (string file in current.Files)
@@ -1010,7 +1073,7 @@ namespace AppManager
             Rectangle icon = new Rectangle(row.X + IconLeft(item), row.Y + (row.Height - iconSize) / 2, iconSize, iconSize);
             if (item.Expandable)
                 DrawChevron(g, new Rectangle(icon.X - Dpi(ChevronWidth + 2), row.Y, Dpi(ChevronWidth), row.Height), item.Expanded);
-            string glyph = item.Kind == RowKind.File ? GlyphFile : item.Kind == RowKind.Drive ? GlyphDrive : GlyphFolder;
+            string glyph = item.Kind == RowKind.File ? GlyphFile : item.Glyph ?? (item.Kind == RowKind.Drive ? GlyphDrive : GlyphFolder);
             Color iconColor = !item.Enabled ? Theme.TextTertiary : chosen ? Theme.Accent
                 : item.Kind == RowKind.File ? Theme.TextSecondary : Theme.FolderTint;
             Draw.DrawGlyph(g, glyph, icon, iconColor);

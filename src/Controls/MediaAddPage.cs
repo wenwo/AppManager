@@ -44,7 +44,6 @@ namespace AppManager.Controls
         private const string GlyphChecked = "";
         private const string GlyphDownload = "";
 
-        private static readonly Guid DownloadsFolder = new Guid("374DE290-123F-4565-9164-39C4925E467B");
         /// <summary>本次运行里每类文件上次添加时所在的文件夹：再次打开时回到这里。</summary>
         private static readonly Dictionary<string, string> lastFolders = new Dictionary<string, string>(StringComparer.Ordinal);
 
@@ -338,40 +337,20 @@ namespace AppManager.Controls
         {
             string last;
             lastFolders.TryGetValue(typeName, out last);
-            AddPlace("上次添加", last, GlyphFolder);
-            switch (typeName)
+            foreach (FilePickerPlace item in FilePickerPlaces.Build(last, null, typeName, false))
+                places.Add(new PlaceRow { Kind = PlaceKind.Place, Title = item.Label, Path = item.Path, Glyph = GlyphForPlace(item.Kind) });
+        }
+
+        private static string GlyphForPlace(FilePickerPlaceKind kind)
+        {
+            switch (kind)
             {
-                case "照片": AddPlace("图片", SafeSpecialFolder(Environment.SpecialFolder.MyPictures), GlyphPicture); break;
-                case "音乐": AddPlace("音乐", SafeSpecialFolder(Environment.SpecialFolder.MyMusic), GlyphAudio); break;
-                case "视频": AddPlace("视频", SafeSpecialFolder(Environment.SpecialFolder.MyVideos), GlyphVideo); break;
-                case "软件":
-                    AddPlace("程序文件夹", SafeSpecialFolder(Environment.SpecialFolder.ProgramFiles), GlyphFolder);
-                    AddPlace("程序文件夹 (x86)", SafeSpecialFolder(Environment.SpecialFolder.ProgramFilesX86), GlyphFolder);
-                    break;
+                case FilePickerPlaceKind.Pictures: return GlyphPicture;
+                case FilePickerPlaceKind.Music: return GlyphAudio;
+                case FilePickerPlaceKind.Videos: return GlyphVideo;
+                case FilePickerPlaceKind.Downloads: return GlyphDownload;
+                default: return GlyphFolder;
             }
-            AddPlace("桌面", SafeSpecialFolder(Environment.SpecialFolder.DesktopDirectory), GlyphFolder);
-            string downloads = null;
-            try { downloads = Scanner.KnownFolderPath(DownloadsFolder); } catch (Exception ex) { Paths.LogError(ex); }
-            AddPlace("下载", downloads, GlyphDownload);
-            AddPlace("文档", SafeSpecialFolder(Environment.SpecialFolder.MyDocuments), GlyphFolder);
-        }
-
-        private static string SafeSpecialFolder(Environment.SpecialFolder folder)
-        {
-            try { return Environment.GetFolderPath(folder); }
-            catch (PlatformNotSupportedException) { return null; }
-        }
-
-        private void AddPlace(string label, string path, string glyph)
-        {
-            string full = LocalScanScope.NormalizePath(path);
-            if (string.IsNullOrEmpty(full)) return;
-            foreach (PlaceRow place in places)
-                if (string.Equals(place.Path, full, StringComparison.OrdinalIgnoreCase)) return;
-            // 只看本机盘符：断开的网络映射盘查目录是否存在会卡住界面
-            if (!CoverPickerDialog.IsQuickLocal(full)) return;
-            try { if (!Directory.Exists(full)) return; } catch { return; }
-            places.Add(new PlaceRow { Kind = PlaceKind.Place, Title = label, Path = full, Glyph = glyph });
         }
 
         /// <summary>起始文件夹：调用方指定的、这类文件上次添加的、对应的系统文件夹，取第一个能用的。</summary>

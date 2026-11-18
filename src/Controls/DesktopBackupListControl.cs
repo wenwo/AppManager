@@ -9,7 +9,7 @@ using AppManager;
 namespace AppManager.Controls
 {
     /// <summary>
-    /// 「桌面备份清单」的卡片列表：每个收纳条目一张卡片（图标、名称、搬家/副本标签、原位置），
+    /// 「桌面收纳」的卡片列表：每个收纳条目一张卡片（图标、名称、搬家/副本标签、原位置），
     /// 指针所在或选中的卡片右侧出现「还原」「移除」。只负责展示和发起请求，确认与执行由窗体处理。
     /// </summary>
     internal sealed class DesktopBackupListControl : ScrollListBase

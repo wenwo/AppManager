@@ -624,6 +624,8 @@ namespace AppManager
 
         private readonly BackupListControl list;
         private readonly RoundButton btnCreate;
+        private readonly RoundButton export = new RoundButton { Text = "导出备份包…" };
+        private readonly RoundButton import = new RoundButton { Text = "导入备份包…" };
         private bool operationRunning;
         private int reloadGeneration;
         private bool reloadRunning;
@@ -638,6 +640,8 @@ namespace AppManager
 
         /// <summary>恢复成功：布局已换成备份里的样子，主窗口需要重新加载配置与列表。</summary>
         public event EventHandler Restored;
+        public event Action ExportRequested;
+        public event Action ImportRequested;
         public event EventHandler BusyChanged;
 
         public LayoutBackupPanel()
@@ -652,6 +656,10 @@ namespace AppManager
             btnCreate.Accent = true;
             btnCreate.Click += delegate { CreateBackup(); };
             Controls.Add(btnCreate);
+            export.Click += delegate { if (!Busy && ExportRequested != null) ExportRequested(); };
+            import.Click += delegate { if (!Busy && ImportRequested != null) ImportRequested(); };
+            Controls.Add(export);
+            Controls.Add(import);
 
             list = new BackupListControl();
             list.RestoreRequested += RestoreBackup;
@@ -674,9 +682,11 @@ namespace AppManager
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            int w = Dpi(116);
-            btnCreate.Bounds = new Rectangle(Math.Max(0, Width - Dpi(Shadow) - w), 0, w, Dpi(ToolbarH));
-            int top = Dpi(ToolbarH) + Dpi(10);
+            int gap = Dpi(Shadow), w = Math.Min(Dpi(116), Math.Max(0, Width - gap * 4) / 3);
+            btnCreate.SetBounds(gap, 0, w, Dpi(ToolbarH));
+            export.SetBounds(btnCreate.Right + gap, 0, w, btnCreate.Height);
+            import.SetBounds(export.Right + gap, 0, w, btnCreate.Height);
+            int top = btnCreate.Bottom + Dpi(32);
             list.Bounds = new Rectangle(0, top, Width, Math.Max(0, Height - top));
             Invalidate();
         }
@@ -698,12 +708,12 @@ namespace AppManager
         {
             base.OnPaint(e);
             if (string.IsNullOrEmpty(status)) return;
-            Rectangle rect = new Rectangle(Dpi(Shadow), 0, Math.Max(0, btnCreate.Left - Dpi(Shadow) - Dpi(12)), Dpi(ToolbarH));
+            Rectangle rect = new Rectangle(Dpi(Shadow), btnCreate.Bottom, Math.Max(0, Width - 2 * Dpi(Shadow)), Dpi(32));
             using (SolidBrush brush = new SolidBrush(statusWarning ? Theme.WarningText : Theme.SuccessText))
                 Draw.DrawStringLeft(e.Graphics, status, Theme.CaptionFont, brush, rect);
         }
 
-        private void SetStatus(string text, bool warning)
+        internal void SetStatus(string text, bool warning)
         {
             status = text ?? string.Empty;
             statusWarning = warning;
@@ -714,6 +724,13 @@ namespace AppManager
         {
             list.ScrollByWheel(delta);
             return true;
+        }
+
+        internal void SetPackageBusy(bool running, string text, bool warning)
+        {
+            operationRunning = running;
+            ShowBusy(running, string.Empty, null);
+            SetStatus(text, warning);
         }
 
         /// <summary>指针停在按钮或提示行上时，滚轮同样滚动列表。</summary>
@@ -947,7 +964,7 @@ namespace AppManager
         {
             bool creating = running && busyId == null;
             UseWaitCursor = running;
-            btnCreate.Enabled = !running;
+            btnCreate.Enabled = export.Enabled = import.Enabled = !running;
             btnCreate.Text = creating ? busyText : CreateText;
             btnCreate.Icon = creating ? (UiIconKind?)null : UiIconKind.Add;
             btnCreate.Accent = !creating;

@@ -98,6 +98,7 @@ namespace AppManager
             { "SetCloseToTray", "修改设置" },
             { "ToggleOrganizeCopy", "修改整理桌面设置" },
             { "ToggleOrganizeScope", "修改整理桌面设置" },
+            { "desktop.options", "修改桌面收纳设置" },
             { "BuildControls", "修改设置" }
         };
 

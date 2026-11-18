@@ -28,8 +28,8 @@ namespace AppManager
         private const string GlyphFolder = "";
         private const string GlyphDrive = "";
         private const string GlyphPictures = "";
+        private const string GlyphDownload = "";
 
-        private static readonly Guid DownloadsFolder = new Guid("374DE290-123F-4565-9164-39C4925E467B");
         /// <summary>本次运行里上一次选封面时所在的文件夹和选中的图片：再次打开时回到这里并选中它。</summary>
         private static string lastFolder;
         private static string lastFile;
@@ -201,31 +201,14 @@ namespace AppManager
 
         private void BuildPlaces()
         {
-            AddPlace("上次使用", lastFolder, GlyphFolder);
-            AddPlace("图片", SafeSpecialFolder(Environment.SpecialFolder.MyPictures), GlyphPictures);
-            AddPlace("桌面", SafeSpecialFolder(Environment.SpecialFolder.DesktopDirectory), GlyphFolder);
-            string downloads = null;
-            try { downloads = Scanner.KnownFolderPath(DownloadsFolder); } catch (Exception ex) { Paths.LogError(ex); }
-            AddPlace("下载", downloads, GlyphFolder);
-            AddPlace("文档", SafeSpecialFolder(Environment.SpecialFolder.MyDocuments), GlyphFolder);
+            foreach (FilePickerPlace item in FilePickerPlaces.Build(lastFolder, null, null, false))
+                places.Add(new PlaceRow { Kind = PlaceKind.Place, Title = item.Label, Path = item.Path, Glyph = GlyphForPlace(item.Kind) });
         }
 
-        private static string SafeSpecialFolder(Environment.SpecialFolder folder)
+        private static string GlyphForPlace(FilePickerPlaceKind kind)
         {
-            try { return Environment.GetFolderPath(folder); }
-            catch (PlatformNotSupportedException) { return null; }
-        }
-
-        private void AddPlace(string label, string path, string glyph)
-        {
-            string full = LocalScanScope.NormalizePath(path);
-            if (string.IsNullOrEmpty(full)) return;
-            foreach (PlaceRow place in places)
-                if (string.Equals(place.Path, full, StringComparison.OrdinalIgnoreCase)) return;
-            // 只看本机盘符：断开的网络映射盘查目录是否存在会卡住界面
-            if (!IsQuickLocal(full)) return;
-            try { if (!Directory.Exists(full)) return; } catch { return; }
-            places.Add(new PlaceRow { Kind = PlaceKind.Place, Title = label, Path = full, Glyph = glyph });
+            return kind == FilePickerPlaceKind.Pictures ? GlyphPictures
+                : kind == FilePickerPlaceKind.Downloads ? GlyphDownload : GlyphFolder;
         }
 
         /// <summary>起始文件夹：调用方指定的、上次使用的、「图片」，取第一个能用的。</summary>

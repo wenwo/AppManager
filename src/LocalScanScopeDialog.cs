@@ -184,6 +184,15 @@ namespace AppManager
             if (keyData == Keys.Escape) { CancelDialog(); return true; }
             if (keyData == Keys.Enter)
             {
+                if (list.Focused)
+                {
+                    LocalScanScopeRow row = RowAt(list.SelectedIndex);
+                    if (row != null && row.Expandable)
+                    {
+                        ToggleExpand(list.SelectedIndex);
+                        return true;
+                    }
+                }
                 // 自绘按钮不是系统默认按钮：焦点在哪个按钮上，回车就执行哪个；
                 // 输入框里有内容时回车是添加路径；其余情况等同「开始扫描」
                 if (addPathButton.Focused || (pathBox.Focused && pathBox.Text.Trim().Length > 0)) AddTypedPath();
@@ -191,7 +200,39 @@ namespace AppManager
                 else StartScan();
                 return true;
             }
+            if (keyData == Keys.Back && !pathBox.Focused) { CollapseSelection(); return true; }
+            if (keyData == (Keys.Control | Keys.A) && !pathBox.Focused) { SelectAll(); return true; }
             return base.ProcessCmdKey(ref msg, keyData);
+        }
+
+        private void CollapseSelection()
+        {
+            LocalScanScopeRow current = RowAt(list.SelectedIndex);
+            if (current == null) return;
+            if (current.Expanded) { ToggleExpand(list.SelectedIndex); return; }
+            for (int index = list.SelectedIndex - 1; index >= 0; index--)
+            {
+                LocalScanScopeRow parent = RowAt(index);
+                if (parent == null || !parent.Expandable || parent.Depth >= current.Depth) continue;
+                ToggleExpand(index);
+                list.SelectedIndex = index;
+                return;
+            }
+        }
+
+        private void SelectAll()
+        {
+            notice = null;
+            List<LocalScanScopeRow> rows = new List<LocalScanScopeRow>();
+            foreach (object value in list.Items)
+            {
+                LocalScanScopeRow row = value as LocalScanScopeRow;
+                if (row != null && row.Enabled && row.Path != null && row.CoveredBy == null) rows.Add(row);
+            }
+            foreach (LocalScanScopeRow row in rows) AddRoot(row.Path, false);
+            RefreshRows(false);
+            SetNotice("已选择当前列表中的所有可用范围。", false);
+            RefreshSummary();
         }
 
         protected override void OnDragEnter(DragEventArgs e)
@@ -216,6 +257,16 @@ namespace AppManager
             int skipped = Math.Max(0, paths.Count - MaxDroppedPaths);
             if (skipped > 0) paths.RemoveRange(MaxDroppedPaths, skipped);
             bool added = AddPaths(paths);
+            if (added && paths.Count == 1)
+            {
+                string normalized = LocalScanScope.NormalizePath(paths[0]);
+                if (IndexOfRoot(selectedRoots, normalized) >= 0)
+                {
+                    expanded.Add(normalized);
+                    LoadChildren(normalized);
+                    RefreshRows(false);
+                }
+            }
             if (skipped > 0 && added)
             {
                 SetNotice("一次最多拖入 " + MaxDroppedPaths + " 个文件夹，其余 " + skipped + " 个没有添加。", true);
