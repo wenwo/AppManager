@@ -5596,6 +5596,9 @@ namespace AppManager
             Check(Controls.DesktopBackupListControl.DisplayName(folder) == "项目", "folder name wrong: " + Controls.DesktopBackupListControl.DisplayName(folder));
             Check(Controls.DesktopBackupListControl.DisplayName(odd).EndsWith("name.txt"), "invalid path characters threw or lost the name");
             Check(Controls.DesktopBackupListControl.OriginText(odd) == "原位置未知", "missing origin not explained");
+            Check(Controls.DesktopBackupListControl.SummaryText(folder) == "搬家 · 原位置  C:\\Users\\me\\Desktop\\项目"
+                && Controls.DesktopBackupListControl.SummaryText(new DesktopBackupEntry { CurrentPath = "D:\\stash\\a.txt", IsCopy = true }) == "副本 · 原位置未知",
+                "summary line does not say move/copy and the origin");
 
             using (Controls.DesktopBackupListControl list = new Controls.DesktopBackupListControl())
             {
@@ -5617,6 +5620,31 @@ namespace AppManager
                 list.SetItems(new DesktopBackupEntry[] { folder });   // 清单变短：选中落到最后一项，不越界
                 down.Invoke(list, new object[] { new KeyEventArgs(Keys.Delete) });
                 Check(removed.Count == 2 && removed[1] == folder, "selection was lost after the list shrank");
+
+                // 行内按钮只在指针所在或键盘选中的那一行露出：左键点过的行，指针移开后不再留着按钮和底色
+                MethodInfo shown = typeof(Controls.DesktopBackupListControl).GetMethod("ActionsShown", Private);
+                MethodInfo mouseDown = typeof(Control).GetMethod("OnMouseDown", Private), mouseUp = typeof(Control).GetMethod("OnMouseUp", Private);
+                Action<Point> click = delegate(Point p)
+                {
+                    mouseDown.Invoke(list, new object[] { new MouseEventArgs(MouseButtons.Left, 1, p.X, p.Y, 0) });
+                    mouseUp.Invoke(list, new object[] { new MouseEventArgs(MouseButtons.Left, 1, p.X, p.Y, 0) });
+                };
+                int restores = 0;
+                list.RestoreRequested += delegate { restores++; };
+                Check((bool)shown.Invoke(list, new object[] { 0 }), "keyboard-selected row hides its buttons");
+                Rectangle restore = list.ActionRect(0, Controls.DesktopBackupListControl.RowAction.Restore);
+                Rectangle remove = list.ActionRect(0, Controls.DesktopBackupListControl.RowAction.Remove);
+                Check(restore.Right < remove.Left && remove.Right < list.Width && restore.Height > 0, "row buttons overlap or leave the row");
+                click(new Point(60, restore.Top + restore.Height / 2));
+                Check(restores == 0 && removed.Count == 2, "clicking the row body triggered a button");
+                typeof(Control).GetMethod("OnMouseLeave", Private).Invoke(list, new object[] { EventArgs.Empty });
+                Check(!(bool)shown.Invoke(list, new object[] { 0 }), "a row clicked with the mouse keeps its buttons after the pointer left");
+                click(new Point(restore.Left + restore.Width / 2, restore.Top + restore.Height / 2));
+                Check(restores == 1, "the restore button on the row under the pointer was ignored");
+                down.Invoke(list, new object[] { new KeyEventArgs(Keys.Down) });
+                typeof(Control).GetMethod("OnMouseLeave", Private).Invoke(list, new object[] { EventArgs.Empty });
+                Check((bool)shown.Invoke(list, new object[] { 0 }), "keyboard use did not mark the selected row again");
+                using (Bitmap bitmap = new Bitmap(list.Width, list.Height)) list.DrawToBitmap(bitmap, list.ClientRectangle);
             }
         }
 
@@ -10555,9 +10583,9 @@ namespace AppManager
                 {
                     SetDpi(form, dpi, new Rectangle(10, 10, DpiHelper.Scale(640, dpi), DpiHelper.Scale(560, dpi)));
                     Rectangle first = list.CardRect(0), second = list.CardRect(1), broken = list.CardRect(2);
-                    Check(first.Height == DpiHelper.Scale(90, dpi), "card height incorrect");
+                    Check(first.Height == DpiHelper.Scale(64, dpi), "row height differs from the settings rows");
                     Check(first.Left >= 0 && first.Right <= list.Width, "card wider than the list");
-                    Check(second.Top == first.Bottom + DpiHelper.Scale(10, dpi), "card gap incorrect");
+                    Check(second.Top == first.Bottom, "rows of one card are not adjacent");
                     Check(broken.Top >= second.Bottom + DpiHelper.Scale(28, dpi), "rollback group has no heading of its own");
                     Rectangle restore = list.ActionRect(0, Controls.BackupListControl.CardAction.Restore);
                     Rectangle more = list.ActionRect(0, Controls.BackupListControl.CardAction.More);
@@ -10618,6 +10646,14 @@ namespace AppManager
             own.ResourceCategoryCount = 4;
             Check(Controls.BackupListControl.Facts(own)[1] == "自建分类 7 个", "resource categories not added to the category count");
             own.ResourceCategoryCount = -1;
+            // 名称下面的一行说明：时间在前，数量依次接在后面；放不下时整项去掉，时间始终保留；不完整的留底先写明只能删除
+            Check(Controls.BackupListControl.SummaryText(own, now, delegate { return true; })
+                == "16 天前 · 2026-10-29 14:18 · 已添加 121 项 · 软件页自建分类 3 个 · 桌面收纳 33 项 · 占用 81 KB", "summary line wrong");
+            Check(Controls.BackupListControl.SummaryText(own, now, delegate(string text) { return !text.Contains("桌面收纳"); })
+                == "16 天前 · 2026-10-29 14:18 · 已添加 121 项 · 软件页自建分类 3 个", "summary line cut in the middle of an item");
+            Check(Controls.BackupListControl.SummaryText(own, now, delegate { return false; }) == "16 天前 · 2026-10-29 14:18", "summary line lost the time");
+            Check(Controls.BackupListControl.SummaryText(broken, now, delegate { return true; })
+                == "可能不完整，只能删除 · 时间未知 · 桌面收纳 0 项 · 占用 0 B", "incomplete rollback not flagged in the summary line");
 
             using (Controls.BackupListControl list = new Controls.BackupListControl())
             {
@@ -10662,10 +10698,14 @@ namespace AppManager
                 // Own backups first, rollbacks after; nothing selected until the user interacts.
                 list.SetItems(new List<LayoutBackupInfo> { broken, rollback, own }, null);
                 Check(list.CardCount == 3 && list.Selected == null, "selection appears before any interaction");
+                // 选中行的底色只在键盘选中或右键出菜单时画：左键点过的行不留底色
+                FieldInfo selectionShown = typeof(Controls.BackupListControl).GetField("selectionShown", Private);
+                Func<bool> marked = delegate { return (bool)selectionShown.GetValue(list); };
+                Check(!marked(), "a row is marked before any interaction");
                 press(Keys.Enter); press(Keys.Delete);
                 Check(restores + deletes == 0, "keys act without a selected backup");
                 press(Keys.Down);
-                Check(list.Selected == own, "own backup is not listed first");
+                Check(list.Selected == own && marked(), "own backup is not listed first or keyboard selection is not marked");
                 press(Keys.Enter); press(Keys.F2);
                 Check(restores == 1 && renames == 1, "own backup: Enter/F2 ignored");
                 press(Keys.Down);
@@ -10681,10 +10721,16 @@ namespace AppManager
 
                 click(buttonAt(0, Controls.BackupListControl.CardAction.Restore), MouseButtons.Left);
                 Check(restores == 3 && list.Selected == own, "inline restore button ignored");
+                Check(!marked(), "a row clicked with the mouse stays marked");
                 click(buttonAt(0, Controls.BackupListControl.CardAction.More), MouseButtons.Left);
                 Check(menus == 1 && menuFromButton, "more button does not open the menu");
                 click(cardBody(2), MouseButtons.Right);
                 Check(menus == 2 && !menuFromButton && list.Selected == rollback, "right click does not open the menu for that card");
+                Check(marked(), "the row a context menu belongs to is not marked");
+                click(cardBody(0), MouseButtons.Left);
+                Check(list.Selected == own && !marked(), "left click after a context menu keeps the mark");
+                press(Keys.PageDown);
+                Check(list.Selected == own && marked(), "using the keyboard does not mark the mouse-selected row");
                 click(buttonAt(1, Controls.BackupListControl.CardAction.Delete), MouseButtons.Left);
                 Check(deletes == 2 && list.Selected == broken, "inline delete button ignored");
                 drag(buttonAt(0, Controls.BackupListControl.CardAction.Restore), cardBody(0), MouseButtons.Left);

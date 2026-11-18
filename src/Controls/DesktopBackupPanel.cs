@@ -14,6 +14,8 @@ namespace AppManager.Controls
     {
         private const int ToolbarH = 34;
         private const int Shadow = 8;   // 与设置页约定：左右各多留 8px 放卡片阴影，按钮和文字向内缩进同样距离
+        private const int CardTop = 4;     // 设置区卡片上方留白（容纳阴影）
+        private const int CardInset = 4;   // 装控件的容器比卡片向内缩的距离（让出卡片的圆角）
 
         private readonly DesktopBackupListControl list = new DesktopBackupListControl();
         private readonly Panel settings = new Panel { BackColor = Theme.Card };
@@ -196,21 +198,23 @@ namespace AppManager.Controls
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            int pad = Dpi(Shadow), inner = Dpi(14), row = Dpi(32);
-            settings.SetBounds(pad, 0, Math.Max(0, Width - pad * 2), Dpi(146));
-            int start = Math.Min(Dpi(190), settings.Width / 3);
+            // 设置区的白卡片由面板自己画（圆角 + 阴影，见 OnPaint）；装控件的容器向内缩一圈，直角落在卡片圆角以内
+            int pad = Dpi(Shadow), inset = Dpi(CardInset), inner = Dpi(14) - inset, row = Dpi(32);
+            Rectangle card = SettingsCard();
+            settings.SetBounds(card.X + inset, card.Y + inset, Math.Max(0, card.Width - inset * 2), Math.Max(0, card.Height - inset * 2));
+            int start = Math.Min(Dpi(190), card.Width / 3) - inset;
             int slot = Math.Min(Dpi(100), Math.Max(0, settings.Width - start - inner) / 3);
-            modeLabel.SetBounds(inner, Dpi(8), Math.Max(0, start - inner), row);
-            move.SetBounds(start, Dpi(8), slot, row);
-            copy.SetBounds(start + slot, Dpi(8), slot, row);
-            scopeLabel.SetBounds(inner, Dpi(47), Math.Max(0, start - inner), row);
-            shortcuts.SetBounds(start, Dpi(47), slot, row);
-            files.SetBounds(start + slot, Dpi(47), slot, row);
-            folders.SetBounds(start + 2 * slot, Dpi(47), slot, row);
-            autoLabel.SetBounds(inner, Dpi(85), Math.Max(0, start - inner), row);
-            automatic.SetBounds(start, Dpi(87), Dpi(46), Dpi(28));
-            reason.SetBounds(inner, Dpi(116), Math.Max(0, settings.Width - 2 * inner), Dpi(24));
-            int bar = settings.Bottom + Dpi(10);
+            modeLabel.SetBounds(inner, Dpi(8) - inset, Math.Max(0, start - inner), row);
+            move.SetBounds(start, Dpi(8) - inset, slot, row);
+            copy.SetBounds(start + slot, Dpi(8) - inset, slot, row);
+            scopeLabel.SetBounds(inner, Dpi(47) - inset, Math.Max(0, start - inner), row);
+            shortcuts.SetBounds(start, Dpi(47) - inset, slot, row);
+            files.SetBounds(start + slot, Dpi(47) - inset, slot, row);
+            folders.SetBounds(start + 2 * slot, Dpi(47) - inset, slot, row);
+            autoLabel.SetBounds(inner, Dpi(85) - inset, Math.Max(0, start - inner), row);
+            automatic.SetBounds(start, Dpi(87) - inset, Dpi(46), Dpi(28));
+            reason.SetBounds(inner, Dpi(116) - inset, Math.Max(0, settings.Width - 2 * inner), Dpi(24));
+            int bar = card.Bottom + Dpi(10);
             organize.SetBounds(pad, bar, Dpi(106), Dpi(ToolbarH));
             update.SetBounds(organize.Right + pad, bar, Dpi(116), Dpi(ToolbarH));
             restoreAll.SetBounds(update.Right + pad, bar, Dpi(96), Dpi(ToolbarH));
@@ -229,9 +233,16 @@ namespace AppManager.Controls
             if (handler != null) handler();
         }
 
+        /// <summary>设置区白卡片的位置：与下面清单的卡片左右对齐，上方留出阴影的位置。</summary>
+        private Rectangle SettingsCard()
+        {
+            return new Rectangle(Dpi(Shadow), Dpi(CardTop), Math.Max(0, Width - Dpi(Shadow) * 2), Dpi(146));
+        }
+
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            Draw.DrawListCard(e.Graphics, SettingsCard(), Dpi(Theme.RadiusCard), 0, Height);
             Rectangle rect = new Rectangle(Dpi(Shadow), organize.Bottom, Math.Max(0, Width - Dpi(Shadow) * 2), Dpi(32));
             bool hasStatus = status.Length > 0;
             Color color = !hasStatus ? Theme.TextSecondary : (statusWarning ? Theme.WarningText : Theme.SuccessText);

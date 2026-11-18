@@ -9,8 +9,8 @@ using AppManager;
 namespace AppManager.Controls
 {
     /// <summary>
-    /// 布局备份窗口的卡片列表：每份备份一张卡片（图标、名称、时间、数量标签），操作按钮直接放在卡片右侧。
-    /// 「我的备份」与「恢复前自动留底」分组显示；整体自绘、按像素滚动，行内按钮由 Zone 统一命中。
+    /// 布局备份页的列表：样式与设置页一致，一组备份装在一张白卡片里，每份备份一行（图标、名称、一行说明），操作按钮在行右侧。
+    /// 自己建的备份在前，「恢复前自动留底」另起一张卡片并带分组标题；整体自绘、按像素滚动，行内按钮由 Zone 统一命中。
     /// 控件只负责展示与发起请求，确认、执行和失败提示由窗体处理。
     /// </summary>
     internal sealed class BackupListControl : Control
@@ -20,10 +20,11 @@ namespace AppManager.Controls
 
         // 尺寸均为 96 DPI 下的逻辑像素，使用处统一经 Dpi() 缩放
         private const int SidePad = 8;         // 卡片左右留白（容纳阴影与滚动条）
+        private const int TopPad = 4;          // 第一张卡片上方留白（容纳阴影）
         private const int SectionH = 28;       // 分组标题高度
         private const int SectionGap = 14;     // 两个分组之间的额外间距
-        private const int CardH = 90;
-        private const int CardGap = 10;
+        private const int RowH = 64;           // 行高，与设置页的行一致
+        private const int RowPad = 18;         // 行内右侧留白，与设置页的卡片一致
         private const int CardRadius = Theme.RadiusCard;
         private const int IconTile = 36;
         private const int ButtonH = 30;
@@ -40,14 +41,15 @@ namespace AppManager.Controls
         private static readonly Color TintGray = Theme.NeutralTint;
         private static readonly Color WarningText = Theme.WarningText;
         private static readonly Color DangerText = Theme.DangerText;
-        private static readonly Color SelectedFill = Theme.SelectedCard;
 
+        /// <summary>一份备份在列表里的一行。</summary>
         private sealed class Card
         {
             public LayoutBackupInfo Info;
             public Rectangle Bounds;     // 内容坐标
             public int TextRight;        // 文字可用的右边界
-            public int GroupTop;         // 分组首张卡片：分组标题的顶部；其余等于卡片顶部
+            public int GroupTop;         // 分组的第一行：分组标题（没有标题则为卡片留白）的顶部；其余等于行的顶部
+            public bool First, Last;     // 是不是所在卡片的第一行、最后一行（决定高亮底色的圆角和分隔线）
         }
 
         private sealed class Header
@@ -68,6 +70,7 @@ namespace AppManager.Controls
         private readonly List<LayoutBackupInfo> items = new List<LayoutBackupInfo>();
         private readonly List<Card> cards = new List<Card>();
         private readonly List<Header> headers = new List<Header>();
+        private readonly List<Rectangle> groups = new List<Rectangle>();   // 每组一张白卡片（内容坐标）
         private readonly List<Zone> zones = new List<Zone>();
 
         private bool layoutDirty = true;
@@ -83,6 +86,8 @@ namespace AppManager.Controls
         private int hoverZone = -1;
         private int pressedZone = -1;
         private int selected = -1;
+        // 选中行是否画出底色：用键盘选中或右键点出菜单时才画；左键点过的行不留底色，只有指针所在的行变浅灰
+        private bool selectionShown;
         private bool loading = true;
         private bool busy;
         private string busyId;
@@ -112,7 +117,7 @@ namespace AppManager.Controls
             base.Dispose(disposing);
         }
 
-        private static Font TitleFont { get { return Theme.FontOf(10F, FontStyle.Bold); } }
+        private static Font TitleFont { get { return Theme.FontOf(10F); } }
 
         // ===== 数据与状态 =====
 
@@ -203,7 +208,7 @@ namespace AppManager.Controls
             return (days / 365) + " 年前";
         }
 
-        /// <summary>卡片第二行：「16 天前 · 2026-10-29 14:18」；时间无法解析时原样显示。</summary>
+        /// <summary>说明行开头的时间：「16 天前 · 2026-10-29 14:18」；时间无法解析时原样显示。</summary>
         internal static string TimeText(LayoutBackupInfo info, DateTime now)
         {
             DateTime at;
@@ -215,7 +220,7 @@ namespace AppManager.Controls
         }
 
         /// <summary>
-        /// 卡片第三行的数量标签：手动添加的条目、自建分类（软件页 + 资源页）、桌面收纳、占用空间。
+        /// 说明行里跟在时间后面的数量：手动添加的条目、自建分类（软件页 + 资源页）、桌面收纳、占用空间。
         /// 旧备份没记资源页的自建分类，只能如实写「软件页自建分类」；恢复前留底没有清单，只显示收纳数量和大小。
         /// </summary>
         internal static List<string> Facts(LayoutBackupInfo info)
@@ -233,6 +238,22 @@ namespace AppManager.Controls
             return facts;
         }
 
+        /// <summary>
+        /// 名称下面的一行说明：时间在前，后面用「·」依次接上各项数量；不完整的留底先写明只能删除。
+        /// fits 判断一段文字在行内放不放得下：放不下时从末尾整项去掉，不把一项截成半句；时间始终保留。
+        /// </summary>
+        internal static string SummaryText(LayoutBackupInfo info, DateTime now, Func<string, bool> fits)
+        {
+            string text = (info.Incomplete ? "可能不完整，只能删除 · " : string.Empty) + TimeText(info, now);
+            foreach (string fact in Facts(info))
+            {
+                string longer = text + " · " + fact;
+                if (!fits(longer)) break;
+                text = longer;
+            }
+            return text;
+        }
+
         // ===== 布局 =====
 
         private int Dpi(int value)
@@ -240,7 +261,7 @@ namespace AppManager.Controls
             return DpiHelper.Scale(value, DpiHelper.ForControl(this));
         }
 
-        /// <summary>按当前宽度和 DPI 重排卡片、分组标题和行内按钮；数据、宽度、DPI 都没变时直接返回。</summary>
+        /// <summary>按当前宽度和 DPI 重排卡片、行、分组标题和行内按钮；数据、宽度、DPI 都没变时直接返回。</summary>
         private void EnsureLayout()
         {
             int dpi = DpiHelper.ForControl(this);
@@ -250,44 +271,65 @@ namespace AppManager.Controls
             layoutDpi = dpi;
             cards.Clear();
             headers.Clear();
+            groups.Clear();
             zones.Clear();
 
             int left = Dpi(SidePad);
             int width = Math.Max(0, Width - Dpi(SidePad) * 2);
-            int y = 0;
-            Header current = null;
+            int y = Dpi(TopPad);
+            int cardTop = y;             // 当前这组卡片的顶部
+            Header current = null;       // 当前这组的标题；自己建的备份紧跟页面上的「本机存档」标题，不再另起标题
             for (int i = 0; i < items.Count; i++)
             {
                 LayoutBackupInfo info = items[i];
+                bool startsGroup = i == 0 || items[i - 1].IsPreRestore != info.IsPreRestore;
                 int groupTop = y;
-                if (current == null || (i > 0 && items[i - 1].IsPreRestore != info.IsPreRestore))
+                if (startsGroup)
                 {
-                    if (current != null) { y += Dpi(SectionGap); groupTop = y; }
-                    current = new Header();
-                    current.Title = info.IsPreRestore ? "恢复前自动留底" : "我的备份";
-                    current.Note = info.IsPreRestore ? "每次恢复前自动保存当时的布局，最多 3 份，存满需先删除旧的" : null;
-                    current.Bounds = new Rectangle(left + Dpi(2), y, Math.Max(0, width - Dpi(4)), Dpi(SectionH));
-                    headers.Add(current);
-                    y += Dpi(SectionH);
+                    if (i == 0) groupTop = 0;
+                    else
+                    {
+                        groups.Add(new Rectangle(left, cardTop, width, y - cardTop));
+                        cards[i - 1].Last = true;
+                        y += Dpi(SectionGap);
+                        groupTop = y;
+                    }
+                    current = null;
+                    if (info.IsPreRestore)
+                    {
+                        current = new Header();
+                        current.Title = "恢复前自动留底";
+                        current.Note = "每次恢复前自动保存当时的布局，最多 3 份，存满需先删除旧的";
+                        current.Bounds = new Rectangle(left + Dpi(2), y, Math.Max(0, width - Dpi(4)), Dpi(SectionH));
+                        headers.Add(current);
+                        y += Dpi(SectionH);
+                    }
+                    cardTop = y;
                 }
-                current.Count++;
+                if (current != null) current.Count++;
 
                 Card card = new Card();
                 card.Info = info;
-                card.Bounds = new Rectangle(left, y, width, Dpi(CardH));
+                card.Bounds = new Rectangle(left, y, width, Dpi(RowH));
                 card.GroupTop = groupTop;
+                card.First = startsGroup;
 
                 // 行内按钮从右向左排：自己建的备份是「恢复 + 更多」，留底是「恢复 + 删除」，不完整的留底只能删除
                 int buttonTop = card.Bounds.Top + (card.Bounds.Height - Dpi(ButtonH)) / 2;
-                int x = card.Bounds.Right - Dpi(16);
+                int x = card.Bounds.Right - Dpi(RowPad);
                 x = AddZone(i, info.IsPreRestore ? CardAction.Delete : CardAction.More, x,
                     Dpi(info.IsPreRestore ? DeleteW : MoreW), buttonTop);
                 if (!info.Incomplete) x = AddZone(i, CardAction.Restore, x - Dpi(8), Dpi(RestoreW), buttonTop);
                 card.TextRight = x - Dpi(16);
                 cards.Add(card);
-                y += Dpi(CardH) + Dpi(CardGap);
+                y += Dpi(RowH);
             }
-            contentHeight = items.Count == 0 ? 0 : y - Dpi(CardGap) + Dpi(8);
+            if (cards.Count > 0)
+            {
+                groups.Add(new Rectangle(left, cardTop, width, y - cardTop));
+                cards[cards.Count - 1].Last = true;
+            }
+            contentHeight = items.Count == 0 ? 0 : y + Dpi(8);
             if (scrollOffset > MaxScroll) scrollOffset = MaxScroll;
         }
 
@@ -426,12 +468,14 @@ namespace AppManager.Controls
             {
                 g.TranslateTransform(0, -scrollOffset);
                 PaintHeaders(g);
+                foreach (Rectangle group in groups)
+                    Draw.DrawListCard(g, group, Dpi(CardRadius), scrollOffset, scrollOffset + Height);
                 DateTime now = DateTime.Now;
                 int top = scrollOffset - Dpi(8), bottom = scrollOffset + Height + Dpi(8);
                 for (int i = 0; i < cards.Count; i++)
                 {
-                    if (cards[i].Bounds.Bottom < top || cards[i].Bounds.Top > bottom) continue;   // 只画视口内的卡片
-                    PaintCard(g, i, now);
+                    if (cards[i].Bounds.Bottom < top || cards[i].Bounds.Top > bottom) continue;   // 只画视口内的行
+                    PaintRow(g, i, now);
                 }
             }
             finally { g.Restore(state); }
@@ -485,22 +529,20 @@ namespace AppManager.Controls
             }
         }
 
-        private void PaintCard(Graphics g, int index, DateTime now)
+        private void PaintRow(Graphics g, int index, DateTime now)
         {
             Card card = cards[index];
             LayoutBackupInfo info = card.Info;
             Rectangle b = card.Bounds;
-            bool isSelected = index == selected;
+            bool marked = index == selected && selectionShown;
             bool hot = index == hoverCard && !busy;
 
-            Draw.DrawShadow(g, b, Dpi(CardRadius), 0.18f);
-            using (SolidBrush fill = new SolidBrush(isSelected ? SelectedFill : Theme.Card))
-                Draw.FillRoundedRect(g, fill, b, Dpi(CardRadius));
-            if (isSelected || hot)
+            // 行底色：指针所在的行浅灰，键盘选中的行稍深；第一行、最后一行的底色跟随卡片圆角
+            if (marked || hot)
             {
-                Color border = isSelected ? Theme.Accent : Mix(Theme.Accent, Theme.ControlBorder, 0.55f);
-                using (Pen pen = new Pen(border, isSelected ? Dpi(15) / 10F : 1F))
-                    Draw.DrawRoundedRect(g, pen, new Rectangle(b.X, b.Y, b.Width - 1, b.Height - 1), Dpi(CardRadius));
+                using (SolidBrush fill = new SolidBrush(marked ? Theme.RowHover : Theme.CardHover))
+                using (GraphicsPath path = Draw.RowPath(b, Dpi(CardRadius), card.First, card.Last))
+                    g.FillPath(fill, path);
             }
 
             // 图标块：自己建的备份用强调色，恢复前留底用灰色，不完整的留底用警示色
@@ -512,45 +554,35 @@ namespace AppManager.Controls
 
             int textX = tile.Right + Dpi(14);
             int textW = Math.Max(0, card.TextRight - textX);
+            // 行分隔线：从文字起始处画到卡片右侧留白
+            if (!card.Last)
+            {
+                using (Pen sep = new Pen(Theme.Separator, 1))
+                    g.DrawLine(sep, textX, b.Bottom - 1, b.Right - Dpi(RowPad), b.Bottom - 1);
+            }
+
+            // 名称与说明作为一个整体在行内垂直居中
+            int titleH = Dpi(22), subH = Dpi(18);
+            int blockTop = b.Top + (b.Height - titleH - subH) / 2;
             using (SolidBrush titleBrush = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, DisplayName(info), TitleFont, titleBrush,
-                    new Rectangle(textX, b.Top + Dpi(12), textW, Dpi(22)));
-            using (SolidBrush timeBrush = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringLeft(g, TimeText(info, now), Theme.CaptionFont, timeBrush,
-                    new Rectangle(textX, b.Top + Dpi(34), textW, Dpi(18)));
-            PaintFacts(g, info, textX, b.Top + Dpi(58), card.TextRight);
+                Draw.DrawStringLeft(g, DisplayName(info), TitleFont, titleBrush, new Rectangle(textX, blockTop, textW, titleH));
+            string summary = SummaryText(info, now, delegate(string text)
+            {
+                return g.MeasureString(text, Theme.CaptionFont).Width <= textW;
+            });
+            using (SolidBrush subBrush = new SolidBrush(info.Incomplete ? WarningText : Theme.TextSecondary))
+                Draw.DrawStringLeft(g, summary, Theme.CaptionFont, subBrush, new Rectangle(textX, blockTop + titleH, textW, subH));
 
             if (busy && busyId != null && string.Equals(busyId, info.Id, StringComparison.OrdinalIgnoreCase))
             {
-                // 正在处理的卡片：按钮位置换成进度文字
+                // 正在处理的那一行：按钮位置换成进度文字
                 using (SolidBrush busyBrush = new SolidBrush(Theme.AccentText))
                     Draw.DrawStringRight(g, busyText, Theme.ButtonFont, busyBrush,
-                        new Rectangle(b.Right - Dpi(16) - Dpi(130), b.Top, Dpi(130), b.Height));
+                        new Rectangle(b.Right - Dpi(RowPad) - Dpi(130), b.Top, Dpi(130), b.Height));
                 return;
             }
             for (int i = 0; i < zones.Count; i++)
                 if (zones[i].Card == index) PaintButton(g, i);
-        }
-
-        /// <summary>数量标签：浅灰圆角小块，从左向右排，放不下的不画；不完整的留底多一个警示标签。</summary>
-        private void PaintFacts(Graphics g, LayoutBackupInfo info, int x, int y, int right)
-        {
-            Font font = Theme.FontOf(8.5F);
-            int h = Dpi(20);
-            List<string> facts = Facts(info);
-            if (info.Incomplete) facts.Insert(0, "可能不完整，只能删除");
-            for (int i = 0; i < facts.Count; i++)
-            {
-                bool warn = info.Incomplete && i == 0;
-                int w = (int)Math.Ceiling(g.MeasureString(facts[i], font).Width) + Dpi(12);
-                if (x + w > right) break;
-                Rectangle chip = new Rectangle(x, y, w, h);
-                using (SolidBrush bg = new SolidBrush(warn ? Mix(WarningText, Theme.Card, 0.88f) : Theme.ChipBg))
-                    Draw.FillRoundedRect(g, bg, chip, h / 2);
-                using (SolidBrush tb = new SolidBrush(warn ? WarningText : Theme.TextSecondary))
-                    Draw.DrawStringCenter(g, facts[i], font, tb, chip);
-                x += w + Dpi(6);
-            }
         }
 
         private void PaintButton(Graphics g, int zoneIndex)
@@ -560,24 +592,15 @@ namespace AppManager.Controls
             bool enabled = !busy;
             bool hot = enabled && zoneIndex == hoverZone && (pressedZone < 0 || pressedZone == zoneIndex);
             bool pressed = hot && pressedZone == zoneIndex;
-            Color fill, border, text;
-            switch (zone.Kind)
+            // 与设置页的行内按钮一致：白底、灰边、黑字，指针移上去边框带一点强调色；只有「删除」悬停时变红
+            Color fill = pressed ? Theme.RowHover : Theme.Card;
+            Color border = hot ? Mix(Theme.Accent, Theme.ControlBorder, 0.5f) : Theme.ControlBorder;
+            Color text = zone.Kind == CardAction.More ? Theme.IconColor : Theme.TextPrimary;
+            if (zone.Kind == CardAction.Delete && hot)
             {
-                case CardAction.Restore:
-                    fill = pressed ? Mix(Theme.Accent, Theme.Card, 0.82f) : (hot ? Mix(Theme.Accent, Theme.Card, 0.91f) : Theme.Card);
-                    border = Mix(Theme.Accent, Theme.Card, hot ? 0.3f : 0.55f);
-                    text = Theme.AccentText;
-                    break;
-                case CardAction.Delete:
-                    fill = pressed ? Mix(Theme.DeleteRed, Theme.Card, 0.84f) : (hot ? Mix(Theme.DeleteRed, Theme.Card, 0.92f) : Theme.Card);
-                    border = hot ? Mix(Theme.DeleteRed, Theme.Card, 0.45f) : Theme.ControlBorder;
-                    text = hot ? DangerText : Theme.TextPrimary;
-                    break;
-                default:
-                    fill = pressed ? Theme.RowHover : (hot ? Theme.CardHover : Theme.Card);
-                    border = hot ? Mix(Theme.Accent, Theme.ControlBorder, 0.5f) : Theme.ControlBorder;
-                    text = Theme.IconColor;
-                    break;
+                fill = Mix(Theme.DeleteRed, Theme.Card, pressed ? 0.84f : 0.92f);
+                border = Mix(Theme.DeleteRed, Theme.Card, 0.45f);
+                text = DangerText;
             }
             if (!enabled)
             {
@@ -729,10 +752,14 @@ namespace AppManager.Controls
             Focus();
             if (e.Button == MouseButtons.Right)
             {
+                // 右键随后弹出菜单，指针会移到菜单上：给这一行留着底色，看得出菜单是哪一份备份的
                 SetSelected(CardAt(e.Location), false);
+                selectionShown = true;
+                Invalidate();
                 return;
             }
             if (e.Button != MouseButtons.Left) return;
+            selectionShown = false;
 
             // 滚动条：命中滑块则抓取拖动；点在轨道空白处则滑块跳到点击处并进入拖动
             if (MaxScroll > 0 && ScrollHitRect().Contains(e.Location))
@@ -875,6 +902,12 @@ namespace AppManager.Controls
                     break;
                 default:
                     return;
+            }
+            // 用键盘操作时把选中的那一行标出来：接下来的回车、删除、F2 都作用在它上面
+            if (!selectionShown)
+            {
+                selectionShown = true;
+                Invalidate();
             }
             e.Handled = true;
         }

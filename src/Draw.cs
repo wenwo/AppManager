@@ -216,6 +216,46 @@ namespace AppManager
             }
         }
 
+        /// <summary>
+        /// 画装着多行的白卡片（浅阴影 + 圆角白底），与设置页的卡片一致。清单很长时卡片远高于视口：
+        /// 只画视口（viewTop ~ viewBottom，与 card 同一坐标系）附近的一段，被截掉的一端圆角落在视口外。
+        /// </summary>
+        public static void DrawListCard(Graphics g, Rectangle card, int radius, int viewTop, int viewBottom)
+        {
+            int margin = radius + 8;
+            int top = Math.Max(card.Top, viewTop - margin), bottom = Math.Min(card.Bottom, viewBottom + margin);
+            if (bottom <= top || card.Width <= 0) return;
+            Rectangle part = new Rectangle(card.X, top, card.Width, bottom - top);
+            DrawShadow(g, part, radius, 0.18f);
+            using (SolidBrush fill = new SolidBrush(Theme.Card)) FillRoundedRect(g, fill, part, radius);
+        }
+
+        /// <summary>卡片内一行的轮廓：卡片的第一行上边两角、最后一行下边两角跟随卡片圆角，其余为直角。</summary>
+        public static GraphicsPath RowPath(Rectangle row, int radius, bool roundTop, bool roundBottom)
+        {
+            GraphicsPath p = new GraphicsPath();
+            int d = radius * 2;
+            if (d < 2 || row.Width < d || row.Height < d)
+            {
+                if (row.Width > 0 && row.Height > 0) p.AddRectangle(row);
+                return p;
+            }
+            if (roundTop)
+            {
+                p.AddArc(row.X, row.Y, d, d, 180, 90);
+                p.AddArc(row.Right - d, row.Y, d, d, 270, 90);
+            }
+            else p.AddLine(row.X, row.Y, row.Right, row.Y);
+            if (roundBottom)
+            {
+                p.AddArc(row.Right - d, row.Bottom - d, d, d, 0, 90);
+                p.AddArc(row.X, row.Bottom - d, d, d, 90, 90);
+            }
+            else p.AddLine(row.Right, row.Bottom, row.X, row.Bottom);
+            p.CloseFigure();
+            return p;
+        }
+
         /// <summary>两色线性混合：amount 为 b 所占比例（0~1）。</summary>
         public static Color Mix(Color a, Color b, float amount)
         {

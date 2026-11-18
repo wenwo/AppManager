@@ -9,8 +9,8 @@ using AppManager;
 namespace AppManager.Controls
 {
     /// <summary>
-    /// 「桌面收纳」的卡片列表：每个收纳条目一张卡片（图标、名称、搬家/副本标签、原位置），
-    /// 指针所在或选中的卡片右侧出现「还原」「移除」。只负责展示和发起请求，确认与执行由窗体处理。
+    /// 「桌面收纳」的清单：样式与设置页一致，所有条目装在一张白卡片里，每个条目一行（图标、名称、搬家/副本 + 原位置），
+    /// 指针所在或键盘选中的那一行右侧出现「还原」「移除」。只负责展示和发起请求，确认与执行由窗体处理。
     /// </summary>
     internal sealed class DesktopBackupListControl : ScrollListBase
     {
@@ -18,9 +18,10 @@ namespace AppManager.Controls
 
         // 尺寸均为 96 DPI 下的逻辑像素，使用处统一经 Dpi() 缩放
         private const int SidePad = 8;         // 卡片左右留白（容纳阴影与滚动条）
-        private const int CardH = 60;
-        private const int CardGap = 8;
-        private const int CardRadius = 10;
+        private const int TopPad = 4;          // 卡片上方留白（容纳阴影）
+        private const int RowH = 64;           // 行高，与设置页的行一致
+        private const int RowPad = 18;         // 行内右侧留白，与设置页的卡片一致
+        private const int CardRadius = Theme.RadiusCard;
         private const int IconTile = 36;
         private const int ButtonH = 30;
         private const int ButtonW = 60;
@@ -33,6 +34,8 @@ namespace AppManager.Controls
         private readonly List<DesktopBackupEntry> items = new List<DesktopBackupEntry>();
         private int hoverCard = -1;
         private int selected = -1;
+        // 选中行是否画出底色和按钮：用键盘选中时才画；左键点过的行不留底色，只有指针所在的行变浅灰
+        private bool selectionShown;
         private int hoverAction = -1;      // 指针所在的行内按钮：0 还原，1 移除，-1 无
         private int pressedCard = -1;
         private int pressedAction = -1;
@@ -48,7 +51,7 @@ namespace AppManager.Controls
             BackColor = Theme.Background;
         }
 
-        private static Font TitleFont { get { return Theme.FontOf(10F, FontStyle.Bold); } }
+        private static Font TitleFont { get { return Theme.FontOf(10F); } }
 
         // ===== 数据与状态 =====
 
@@ -94,37 +97,44 @@ namespace AppManager.Controls
             return string.IsNullOrEmpty(entry.OriginalPath) ? "原位置未知" : "原位置  " + entry.OriginalPath;
         }
 
+        /// <summary>名称下面的一行说明：搬家还是副本，后面接原位置。</summary>
+        internal static string SummaryText(DesktopBackupEntry entry)
+        {
+            return (entry.IsCopy ? "副本" : "搬家") + " · " + OriginText(entry);
+        }
+
         // ===== 布局（内容坐标）=====
 
         private int ContentHeight()
         {
-            return items.Count == 0 ? 0 : items.Count * Dpi(CardH + CardGap) - Dpi(CardGap) + Dpi(8);
+            return items.Count == 0 ? 0 : Dpi(TopPad) + items.Count * Dpi(RowH) + Dpi(8);
         }
 
+        /// <summary>第 index 行的位置；所有行上下相接，合起来就是那张白卡片。</summary>
         private Rectangle CardBounds(int index)
         {
-            return new Rectangle(Dpi(SidePad), Dpi(4) + index * Dpi(CardH + CardGap), Math.Max(0, Width - Dpi(SidePad) * 2), Dpi(CardH));
+            return new Rectangle(Dpi(SidePad), Dpi(TopPad) + index * Dpi(RowH), Math.Max(0, Width - Dpi(SidePad) * 2), Dpi(RowH));
         }
 
         private Rectangle ActionBounds(int index, int action)
         {
             Rectangle card = CardBounds(index);
-            int right = card.Right - Dpi(16) - (action == 0 ? Dpi(ButtonW) + Dpi(8) : 0);
+            int right = card.Right - Dpi(RowPad) - (action == 0 ? Dpi(ButtonW) + Dpi(8) : 0);
             return new Rectangle(right - Dpi(ButtonW), card.Top + (card.Height - Dpi(ButtonH)) / 2, Dpi(ButtonW), Dpi(ButtonH));
         }
 
-        /// <summary>这张卡片当前是否露出行内按钮：指针所在或选中的那张，且没有后台操作。</summary>
+        /// <summary>这一行当前是否露出行内按钮：指针所在或键盘选中的那一行，且没有后台操作。</summary>
         private bool ActionsShown(int index)
         {
-            return !busy && index >= 0 && (index == hoverCard || index == selected);
+            return !busy && index >= 0 && (index == hoverCard || (index == selected && selectionShown));
         }
 
         private int CardAt(Point client)
         {
             if (!ClientRectangle.Contains(client)) return -1;
-            int y = client.Y + ScrollOffset - Dpi(4);
+            int y = client.Y + ScrollOffset - Dpi(TopPad);
             if (y < 0) return -1;
-            int index = y / Dpi(CardH + CardGap);
+            int index = y / Dpi(RowH);
             return index < items.Count && CardBounds(index).Contains(new Point(client.X, client.Y + ScrollOffset)) ? index : -1;
         }
 
@@ -173,7 +183,7 @@ namespace AppManager.Controls
         {
             if (index < 0 || index >= items.Count) return;
             Rectangle card = CardBounds(index);
-            EnsureVisible(card.Top - Dpi(4), card.Bottom + Dpi(8));
+            EnsureVisible(card.Top - Dpi(TopPad), card.Bottom + Dpi(8));
             if (index == selected) return;
             selected = index;
             Invalidate();
@@ -200,88 +210,74 @@ namespace AppManager.Controls
             try
             {
                 g.TranslateTransform(0, -ScrollOffset);
-                int first = Math.Max(0, (ScrollOffset - Dpi(4)) / Dpi(CardH + CardGap));
+                Draw.DrawListCard(g, new Rectangle(Dpi(SidePad), Dpi(TopPad), Math.Max(0, Width - Dpi(SidePad) * 2), items.Count * Dpi(RowH)),
+                    Dpi(CardRadius), ScrollOffset, ScrollOffset + Height);
+                int first = Math.Max(0, (ScrollOffset - Dpi(TopPad)) / Dpi(RowH));
                 for (int i = first; i < items.Count; i++)
                 {
-                    Rectangle card = CardBounds(i);
-                    if (card.Top > ScrollOffset + Height) break;   // 只画视口内的卡片
-                    PaintCard(g, i, card);
+                    Rectangle row = CardBounds(i);
+                    if (row.Top > ScrollOffset + Height) break;   // 只画视口内的行
+                    PaintRow(g, i, row);
                 }
             }
             finally { g.Restore(state); }
             PaintScrollBar(g);
         }
 
-        private void PaintCard(Graphics g, int index, Rectangle b)
+        private void PaintRow(Graphics g, int index, Rectangle b)
         {
             DesktopBackupEntry entry = items[index];
-            bool isSelected = index == selected;
+            bool marked = index == selected && selectionShown;
             bool hot = index == hoverCard && !busy;
+            bool last = index == items.Count - 1;
 
-            Draw.DrawShadow(g, b, Dpi(CardRadius), 0.18f);
-            using (SolidBrush fill = new SolidBrush(isSelected ? Theme.SelectedCard : Theme.Card))
-                Draw.FillRoundedRect(g, fill, b, Dpi(CardRadius));
-            if (isSelected || hot)
+            // 行底色：指针所在的行浅灰，键盘选中的行稍深；第一行、最后一行的底色跟随卡片圆角
+            if (marked || hot)
             {
-                Color border = isSelected ? Theme.Accent : Draw.Mix(Theme.Accent, Theme.ControlBorder, 0.55f);
-                using (Pen pen = new Pen(border, isSelected ? Dpi(15) / 10F : 1F))
-                    Draw.DrawRoundedRect(g, pen, new Rectangle(b.X, b.Y, b.Width - 1, b.Height - 1), Dpi(CardRadius));
+                using (SolidBrush fill = new SolidBrush(marked ? Theme.RowHover : Theme.CardHover))
+                using (GraphicsPath path = Draw.RowPath(b, Dpi(CardRadius), index == 0, last))
+                    g.FillPath(fill, path);
             }
 
-            Rectangle tile = new Rectangle(b.Left + Dpi(14), b.Top + (b.Height - Dpi(IconTile)) / 2, Dpi(IconTile), Dpi(IconTile));
+            Rectangle tile = new Rectangle(b.Left + Dpi(16), b.Top + (b.Height - Dpi(IconTile)) / 2, Dpi(IconTile), Dpi(IconTile));
             using (SolidBrush tb = new SolidBrush(Draw.Mix(Theme.Accent, Theme.Card, 0.87f)))
                 Draw.FillRoundedRect(g, tb, tile, Dpi(9));
             Draw.DrawGlyph(g, entry.IsDir ? GlyphFolder : (entry.IsShortcut ? GlyphLink : GlyphFile),
                 Rectangle.Inflate(tile, -Dpi(9), -Dpi(9)), Theme.Accent);
 
-            int textX = tile.Right + Dpi(12);
-            int textRight = ActionsShown(index) ? ActionBounds(index, 0).Left - Dpi(12) : b.Right - Dpi(16);
-
-            // 第一行：名称 + 搬家/副本标签（标签紧跟名称，名称过长时省略）
-            string tag = entry.IsCopy ? "副本" : "搬家";
-            Font tagFont = Theme.FontOf(8.5F);
-            int tagW = (int)Math.Ceiling(g.MeasureString(tag, tagFont).Width) + Dpi(12);
-            string name = DisplayName(entry);
-            int nameMax = Math.Max(0, textRight - textX - tagW - Dpi(8));
-            int nameW = Math.Min(nameMax, (int)Math.Ceiling(g.MeasureString(name, TitleFont).Width) + Dpi(2));
-            using (SolidBrush nameBrush = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, name, TitleFont, nameBrush, new Rectangle(textX, b.Top + Dpi(9), nameW, Dpi(22)));
-            Rectangle chip = new Rectangle(textX + nameW + Dpi(8), b.Top + Dpi(10), tagW, Dpi(20));
-            if (chip.Right <= textRight)
+            int textX = tile.Right + Dpi(14);
+            // 行分隔线：从文字起始处画到卡片右侧留白
+            if (!last)
             {
-                using (SolidBrush chipBack = new SolidBrush(Theme.ChipBg)) Draw.FillRoundedRect(g, chipBack, chip, chip.Height / 2);
-                using (SolidBrush chipText = new SolidBrush(Theme.TextSecondary)) Draw.DrawStringCenter(g, tag, tagFont, chipText, chip);
+                using (Pen sep = new Pen(Theme.Separator, 1))
+                    g.DrawLine(sep, textX, b.Bottom - 1, b.Right - Dpi(RowPad), b.Bottom - 1);
             }
-            using (SolidBrush originBrush = new SolidBrush(Theme.TextTertiary))
-                Draw.DrawStringLeft(g, OriginText(entry), Theme.CaptionFont, originBrush,
-                    new Rectangle(textX, b.Top + Dpi(32), Math.Max(0, textRight - textX), Dpi(18)));
+
+            // 名称与说明作为一个整体在行内垂直居中；露出按钮的那一行，文字让出按钮的位置
+            int textRight = ActionsShown(index) ? ActionBounds(index, 0).Left - Dpi(16) : b.Right - Dpi(RowPad);
+            int textW = Math.Max(0, textRight - textX);
+            int titleH = Dpi(22), subH = Dpi(18);
+            int blockTop = b.Top + (b.Height - titleH - subH) / 2;
+            using (SolidBrush nameBrush = new SolidBrush(Theme.TextPrimary))
+                Draw.DrawStringLeft(g, DisplayName(entry), TitleFont, nameBrush, new Rectangle(textX, blockTop, textW, titleH));
+            using (SolidBrush subBrush = new SolidBrush(Theme.TextSecondary))
+                Draw.DrawStringLeft(g, SummaryText(entry), Theme.CaptionFont, subBrush, new Rectangle(textX, blockTop + titleH, textW, subH));
 
             if (!ActionsShown(index)) return;
             for (int action = 0; action < 2; action++) PaintButton(g, index, action);
         }
 
+        /// <summary>行内按钮与设置页的一致：白底、灰边、黑字，指针移上去边框带一点强调色。</summary>
         private void PaintButton(Graphics g, int index, int action)
         {
             Rectangle r = ActionBounds(index, action);
             bool hot = index == hoverCard && action == hoverAction && (pressedAction < 0 || (pressedCard == index && pressedAction == action));
             bool pressed = hot && pressedCard == index && pressedAction == action;
-            Color fill, border, text;
-            if (action == 0)
-            {
-                fill = pressed ? Draw.Mix(Theme.Accent, Theme.Card, 0.82f) : (hot ? Draw.Mix(Theme.Accent, Theme.Card, 0.91f) : Theme.Card);
-                border = Draw.Mix(Theme.Accent, Theme.Card, hot ? 0.3f : 0.55f);
-                text = Theme.AccentText;
-            }
-            else
-            {
-                fill = pressed ? Theme.RowHover : (hot ? Theme.CardHover : Theme.Card);
-                border = hot ? Draw.Mix(Theme.Accent, Theme.ControlBorder, 0.5f) : Theme.ControlBorder;
-                text = Theme.TextPrimary;
-            }
-            using (SolidBrush fb = new SolidBrush(fill)) Draw.FillRoundedRect(g, fb, r, Dpi(6));
+            Color border = hot ? Draw.Mix(Theme.Accent, Theme.ControlBorder, 0.5f) : Theme.ControlBorder;
+            using (SolidBrush fb = new SolidBrush(pressed ? Theme.RowHover : Theme.Card)) Draw.FillRoundedRect(g, fb, r, Dpi(6));
             using (Pen pen = new Pen(border, 1F))
                 Draw.DrawRoundedRect(g, pen, new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), Dpi(6));
-            using (SolidBrush tb = new SolidBrush(text))
+            using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
                 Draw.DrawStringCenter(g, action == 0 ? "还原" : "移除", Theme.ButtonFont, tb, r);
         }
 
@@ -319,8 +315,10 @@ namespace AppManager.Controls
             Focus();
             if (ScrollMouseDown(e) || e.Button != MouseButtons.Left) return;
             int card = CardAt(e.Location);
-            // 先判断按钮再改选中：按钮只在指针所在或已选中的卡片上露出
-            pressedAction = ActionAt(e.Location, card);
+            // 左键点过的行不留选中底色；按钮只在指针所在的行露出，先把指针所在行记准再判断按钮
+            selectionShown = false;
+            hoverCard = card;
+            hoverAction = pressedAction = ActionAt(e.Location, card);
             pressedCard = pressedAction >= 0 ? card : -1;
             SetSelected(card);
             Invalidate();
@@ -391,6 +389,12 @@ namespace AppManager.Controls
                     if (!enterRepeat) enterArmed = !busy && selected >= 0;
                     break;
                 default: return;
+            }
+            // 用键盘操作时把选中的那一行标出来：接下来的回车、删除都作用在它上面
+            if (!selectionShown)
+            {
+                selectionShown = true;
+                Invalidate();
             }
             e.Handled = true;
         }
