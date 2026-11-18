@@ -10581,8 +10581,14 @@ namespace AppManager
             Check(Controls.BackupListControl.DisplayName(own) == own.Name
                 && Controls.BackupListControl.DisplayName(rollback) == "恢复前留底 11-02 20:15"
                 && Controls.BackupListControl.DisplayName(broken) == "恢复前留底 x", "card title wrong");
-            Check(string.Join("|", Controls.BackupListControl.Facts(own)) == "收纳 33|自定义 121|分类 3|81 KB"
-                && string.Join("|", Controls.BackupListControl.Facts(rollback)) == "收纳 2|大小未统计", "fact chips wrong");
+            // 旧备份没记资源页自建分类：只如实显示软件页的；新备份把两边加起来
+            Check(string.Join("|", Controls.BackupListControl.Facts(own)) == "已添加 121 项|软件页自建分类 3 个|桌面收纳 33 项|占用 81 KB"
+                && string.Join("|", Controls.BackupListControl.Facts(rollback)) == "桌面收纳 2 项|大小未统计", "fact chips wrong");
+            own.ResourceCategoryCount = 0;
+            Check(string.Join("|", Controls.BackupListControl.Facts(own)) == "已添加 121 项|自建分类 3 个|桌面收纳 33 项|占用 81 KB", "zero resource categories not counted as known");
+            own.ResourceCategoryCount = 4;
+            Check(Controls.BackupListControl.Facts(own)[1] == "自建分类 7 个", "resource categories not added to the category count");
+            own.ResourceCategoryCount = -1;
 
             using (Controls.BackupListControl list = new Controls.BackupListControl())
             {

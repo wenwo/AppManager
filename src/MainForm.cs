@@ -6753,7 +6753,7 @@ namespace AppManager
             if (layoutBackupPanel.Busy) return false;
             if (DesktopWorkRunning())
             {
-                layoutBackupPanel.SetStatus("桌面收纳正在进行，请稍后再试。", true);
+                layoutBackupPanel.SetPackageStatus("桌面收纳正在进行，请稍后再试。", true);
                 return false;
             }
             if (autoScan != null) autoScan.Pause();
@@ -6825,7 +6825,7 @@ namespace AppManager
                 }
                 string bak = null;
                 int migratedFiles = 0;
-                layoutBackupPanel.SetStatus("正在备份当前配置并导入…", false);
+                layoutBackupPanel.SetPackageStatus("正在备份当前配置并导入…", false);
                 RunPackageStep(delegate
                 {
                     bak = current.BackupSnapshot();

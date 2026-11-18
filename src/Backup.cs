@@ -19,6 +19,8 @@ namespace AppManager
         public int StashCount;
         public int CustomCount;
         public int CategoryCount;
+        /// <summary>资源页自建分类数；旧备份的 meta.xml 没有记录时为 -1。</summary>
+        public int ResourceCategoryCount = -1;
         public long SizeBytes;
         public bool IsPreRestore;
         public bool Incomplete;
@@ -140,6 +142,7 @@ namespace AppManager
                 if (int.TryParse(Attr(root, "stash"), out n)) info.StashCount = n;
                 if (int.TryParse(Attr(root, "custom"), out n)) info.CustomCount = n;
                 if (int.TryParse(Attr(root, "categories"), out n)) info.CategoryCount = n;
+                if (int.TryParse(Attr(root, "resourceCategories"), out n) && n >= 0) info.ResourceCategoryCount = n;
             }
             catch (Exception ex)
             {
@@ -232,6 +235,7 @@ namespace AppManager
                 w.WriteAttributeString("stash", cfg.DesktopBackup.Count.ToString());
                 w.WriteAttributeString("custom", cfg.AddedItems.Count.ToString());
                 w.WriteAttributeString("categories", cfg.CustomCategories.Count.ToString());
+                w.WriteAttributeString("resourceCategories", cfg.ResourceCategories.Count.ToString());
                 w.WriteEndElement();
             }
         }
@@ -577,6 +581,8 @@ namespace AppManager
                     w.WriteAttributeString("stash", info.StashCount.ToString());
                     w.WriteAttributeString("custom", info.CustomCount.ToString());
                     w.WriteAttributeString("categories", info.CategoryCount.ToString());
+                    if (info.ResourceCategoryCount >= 0)
+                        w.WriteAttributeString("resourceCategories", info.ResourceCategoryCount.ToString());
                     w.WriteEndElement();
                 }
                 if (File.Exists(metaFile)) File.Delete(metaFile);
@@ -611,21 +617,36 @@ namespace AppManager
     }
 
     /// <summary>
-    /// 布局备份面板：嵌在设置页右侧（不再另开窗口）。上方一行是结果提示和「新建备份」，下面是卡片列表；
-    /// 恢复、覆盖、重命名、删除都在卡片上发起，会改动数据的操作先确认。结果直接写在面板的提示行里，不另弹提示框。
-    /// 恢复成功后触发 Restored，由主窗口重新加载；操作进行中 Busy 为真，设置页据此挡住返回和切换。
+    /// 布局备份面板：嵌在设置页右侧（不再另开窗口），分上下两块。
+    /// 上块「本机存档」：标题、一句说明、「新建备份」，下面是结果提示行和备份卡片列表；
+    /// 恢复、覆盖、重命名、删除都在卡片上发起，会改动数据的操作先确认。
+    /// 下块「换电脑用」：一张固定在底部的卡片，说明 .ambak 备份包并放导出、导入两个按钮，备份包的进度和结果写在卡片里。
+    /// 结果直接写在面板上，不另弹提示框。恢复成功后触发 Restored，由主窗口重新加载；
+    /// 操作进行中 Busy 为真，设置页据此挡住返回和切换。
     /// </summary>
     internal sealed class LayoutBackupPanel : Control, ISettingsPanel
     {
         private const string CreateText = "新建备份";
+        private const string LocalTitle = "本机存档";
+        private const string LocalNote = "存在这台电脑上，连桌面收纳的文件一起存；弄乱了点「恢复」就能回到当时。";
+        private const string PackageTitle = "换电脑用";
+        private const string PackageLine = "导出成一个 .ambak 文件，拿到另一台电脑上导入，分类和设置就跟过去了。";
+        private const string PackageNote = "只带分类和设置，不带文件本身；导入会替换现在的分类和设置，替换前自动备份。";
         private const int MenuWidth = 176;
         private const int ToolbarH = 34;
+        private const int ButtonW = 116;
+        private const int HeaderH = 50;        // 「本机存档」标题 + 说明
+        private const int StatusH = 28;        // 本机存档操作的结果提示行
+        private const int PackageTitleH = 34;  // 「换电脑用」标题
+        private const int PackageCardH = 78;
         private const int Shadow = 8;   // 与设置页约定：左右各多留 8px 放卡片阴影，按钮和文字向内缩进同样距离
 
         private readonly BackupListControl list;
         private readonly RoundButton btnCreate;
-        private readonly RoundButton export = new RoundButton { Text = "导出备份包…" };
-        private readonly RoundButton import = new RoundButton { Text = "导入备份包…" };
+        private readonly RoundButton export = new RoundButton { Text = "导出到文件…" };
+        private readonly RoundButton import = new RoundButton { Text = "从文件导入…" };
+        private string packageStatus = string.Empty;   // 备份包的进度或结果；为空时卡片第二行显示说明
+        private bool packageWarning;
         private bool operationRunning;
         private int reloadGeneration;
         private bool reloadRunning;
@@ -653,7 +674,6 @@ namespace AppManager
             btnCreate = new RoundButton();
             btnCreate.Text = CreateText;
             btnCreate.Icon = UiIconKind.Add;
-            btnCreate.Accent = true;
             btnCreate.Click += delegate { CreateBackup(); };
             Controls.Add(btnCreate);
             export.Click += delegate { if (!Busy && ExportRequested != null) ExportRequested(); };
@@ -682,13 +702,27 @@ namespace AppManager
         protected override void OnResize(EventArgs e)
         {
             base.OnResize(e);
-            int gap = Dpi(Shadow), w = Math.Min(Dpi(116), Math.Max(0, Width - gap * 4) / 3);
-            btnCreate.SetBounds(gap, 0, w, Dpi(ToolbarH));
-            export.SetBounds(btnCreate.Right + gap, 0, w, btnCreate.Height);
-            import.SetBounds(export.Right + gap, 0, w, btnCreate.Height);
-            int top = btnCreate.Bottom + Dpi(32);
-            list.Bounds = new Rectangle(0, top, Width, Math.Max(0, Height - top));
+            int gap = Dpi(Shadow), w = Math.Min(Dpi(ButtonW), Math.Max(0, Width - gap * 2) / 3), h = Dpi(ToolbarH);
+            btnCreate.SetBounds(Math.Max(gap, Width - gap - w), (Dpi(HeaderH) - h) / 2, w, h);
+            Rectangle card = PackageCardRect();
+            int buttonTop = card.Top + (card.Height - h) / 2;
+            import.SetBounds(Math.Max(card.Left, card.Right - Dpi(16) - w), buttonTop, w, h);
+            export.SetBounds(Math.Max(card.Left, import.Left - Dpi(8) - w), buttonTop, w, h);
+            int top = Dpi(HeaderH + StatusH);
+            list.Bounds = new Rectangle(0, top, Width, Math.Max(0, PackageTop() - Dpi(8) - top));
             Invalidate();
+        }
+
+        /// <summary>「换电脑用」一块的顶部：固定在面板底部，留出卡片阴影。</summary>
+        private int PackageTop()
+        {
+            return Math.Max(Dpi(HeaderH + StatusH), Height - Dpi(PackageTitleH + PackageCardH + Shadow));
+        }
+
+        private Rectangle PackageCardRect()
+        {
+            int gap = Dpi(Shadow);
+            return new Rectangle(gap, PackageTop() + Dpi(PackageTitleH), Math.Max(0, Width - gap * 2), Dpi(PackageCardH));
         }
 
         /// <summary>每次显示时重新读取列表：备份目录可能在别处被改动过。</summary>
@@ -707,16 +741,53 @@ namespace AppManager
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            if (string.IsNullOrEmpty(status)) return;
-            Rectangle rect = new Rectangle(Dpi(Shadow), btnCreate.Bottom, Math.Max(0, Width - 2 * Dpi(Shadow)), Dpi(32));
-            using (SolidBrush brush = new SolidBrush(statusWarning ? Theme.WarningText : Theme.SuccessText))
-                Draw.DrawStringLeft(e.Graphics, status, Theme.CaptionFont, brush, rect);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            int gap = Dpi(Shadow);
+            int textW = Math.Max(0, btnCreate.Left - gap * 3);
+            using (SolidBrush primary = new SolidBrush(Theme.TextPrimary))
+            using (SolidBrush secondary = new SolidBrush(Theme.TextSecondary))
+            {
+                // 上块：本机存档
+                Draw.DrawStringLeft(g, LocalTitle, Theme.SectionTitleFont, primary, new Rectangle(gap, Dpi(2), textW, Dpi(24)));
+                Draw.DrawStringLeft(g, LocalNote, Theme.CaptionFont, secondary, new Rectangle(gap, Dpi(26), textW, Dpi(20)));
+                if (status.Length > 0)
+                    using (SolidBrush brush = new SolidBrush(statusWarning ? Theme.WarningText : Theme.SuccessText))
+                        Draw.DrawStringLeft(g, status, Theme.CaptionFont, brush,
+                            new Rectangle(gap, Dpi(HeaderH), Math.Max(0, Width - gap * 2), Dpi(StatusH)));
+
+                // 下块：换电脑用
+                int top = PackageTop();
+                Draw.DrawStringLeft(g, PackageTitle, Theme.SectionTitleFont, primary,
+                    new Rectangle(gap, top + Dpi(4), Math.Max(0, Width - gap * 2), Dpi(PackageTitleH - 8)));
+                Rectangle card = PackageCardRect();
+                if (card.Width <= 0) return;
+                int radius = Dpi(Theme.RadiusCard);
+                Draw.DrawShadow(g, card, radius, 0.18f);
+                using (SolidBrush fill = new SolidBrush(Theme.Card)) Draw.FillRoundedRect(g, fill, card, radius);
+                int left = card.Left + Dpi(16), right = export.Left - Dpi(16);
+                if (right <= left) return;
+                Draw.DrawStringLeft(g, PackageLine, Theme.BodyFont, primary, new Rectangle(left, card.Top + Dpi(16), right - left, Dpi(22)));
+                Rectangle second = new Rectangle(left, card.Top + Dpi(40), right - left, Dpi(20));
+                if (packageStatus.Length == 0) Draw.DrawStringLeft(g, PackageNote, Theme.CaptionFont, secondary, second);
+                else
+                    using (SolidBrush brush = new SolidBrush(packageWarning ? Theme.WarningText : Theme.SuccessText))
+                        Draw.DrawStringLeft(g, packageStatus, Theme.CaptionFont, brush, second);
+            }
         }
 
         internal void SetStatus(string text, bool warning)
         {
             status = text ?? string.Empty;
             statusWarning = warning;
+            Invalidate();
+        }
+
+        /// <summary>备份包（导出、导入）的进度和结果：写在「换电脑用」卡片的第二行，为空时恢复成说明文字。</summary>
+        internal void SetPackageStatus(string text, bool warning)
+        {
+            packageStatus = text ?? string.Empty;
+            packageWarning = warning;
             Invalidate();
         }
 
@@ -730,7 +801,8 @@ namespace AppManager
         {
             operationRunning = running;
             ShowBusy(running, string.Empty, null);
-            SetStatus(text, warning);
+            SetStatus(string.Empty, false);   // 上块的旧结果与备份包无关，不再留着
+            SetPackageStatus(text, warning);
         }
 
         /// <summary>指针停在按钮或提示行上时，滚轮同样滚动列表。</summary>
@@ -967,7 +1039,6 @@ namespace AppManager
             btnCreate.Enabled = export.Enabled = import.Enabled = !running;
             btnCreate.Text = creating ? busyText : CreateText;
             btnCreate.Icon = creating ? (UiIconKind?)null : UiIconKind.Add;
-            btnCreate.Accent = !creating;
             if (running) list.SetBusy(busyId, busyText);
             else
             {
@@ -983,6 +1054,7 @@ namespace AppManager
             if (Busy) return;
             operationRunning = true;
             SetStatus(string.Empty, false);
+            SetPackageStatus(string.Empty, false);
             ShowBusy(true, busyId, busyText);
             ThreadPool.QueueUserWorkItem(delegate
             {

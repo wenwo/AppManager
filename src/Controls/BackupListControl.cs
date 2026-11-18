@@ -24,7 +24,7 @@ namespace AppManager.Controls
         private const int SectionGap = 14;     // 两个分组之间的额外间距
         private const int CardH = 90;
         private const int CardGap = 10;
-        private const int CardRadius = 10;
+        private const int CardRadius = Theme.RadiusCard;
         private const int IconTile = 36;
         private const int ButtonH = 30;
         private const int RestoreW = 64;
@@ -214,17 +214,22 @@ namespace AppManager.Controls
             return relative.Length == 0 ? absolute : relative + " · " + absolute;
         }
 
-        /// <summary>卡片第三行的数量标签。恢复前留底没有清单，只显示收纳数量和大小。</summary>
+        /// <summary>
+        /// 卡片第三行的数量标签：手动添加的条目、自建分类（软件页 + 资源页）、桌面收纳、占用空间。
+        /// 旧备份没记资源页的自建分类，只能如实写「软件页自建分类」；恢复前留底没有清单，只显示收纳数量和大小。
+        /// </summary>
         internal static List<string> Facts(LayoutBackupInfo info)
         {
             List<string> facts = new List<string>();
-            facts.Add("收纳 " + info.StashCount);
             if (!info.IsPreRestore)
             {
-                facts.Add("自定义 " + info.CustomCount);
-                facts.Add("分类 " + info.CategoryCount);
+                facts.Add("已添加 " + info.CustomCount + " 项");
+                facts.Add(info.ResourceCategoryCount >= 0
+                    ? "自建分类 " + (info.CategoryCount + info.ResourceCategoryCount) + " 个"
+                    : "软件页自建分类 " + info.CategoryCount + " 个");
             }
-            facts.Add(info.SizeText);
+            facts.Add("桌面收纳 " + info.StashCount + " 项");
+            facts.Add(info.SizeBytes < 0 ? info.SizeText : "占用 " + info.SizeText);
             return facts;
         }
 
@@ -453,7 +458,7 @@ namespace AppManager.Controls
             {
                 "新建一份备份，把现在的分类、排列和桌面收纳存下来；",
                 "以后弄乱了，可以整体恢复到这一刻。",
-                "点右上角的「新建备份」开始。"
+                "点上方的「新建备份」开始。"
             };
             Draw.DrawEmptyState(g, new Rectangle(0, 0, Width, Height), GlyphBackup, "还没有备份", lines, DpiHelper.ForControl(this));
         }
@@ -502,7 +507,7 @@ namespace AppManager.Controls
             Color tint = info.Incomplete ? WarningText : (info.IsPreRestore ? TintGray : Theme.Accent);
             Rectangle tile = new Rectangle(b.Left + Dpi(16), b.Top + (b.Height - Dpi(IconTile)) / 2, Dpi(IconTile), Dpi(IconTile));
             using (SolidBrush tb = new SolidBrush(Mix(tint, Theme.Card, 0.87f)))
-                Draw.FillRoundedRect(g, tb, tile, Dpi(9));
+                Draw.FillRoundedRect(g, tb, tile, Dpi(Theme.RadiusCard));
             Draw.DrawGlyph(g, info.IsPreRestore ? GlyphUndo : GlyphBackup, Rectangle.Inflate(tile, -Dpi(9), -Dpi(9)), tint);
 
             int textX = tile.Right + Dpi(14);

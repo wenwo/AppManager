@@ -447,7 +447,7 @@ namespace AppManager.Controls
                     y = AddCard(left, width, y, StoreRows());
                     break;
                 case SettingsSection.Backup:
-                    SetPane("布局备份", "本机布局快照包含桌面收纳；导入、导出的 .ambak 包只含记录与设置，不含文件本身。");
+                    SetPane("布局备份", "把现在的分类、排列和设置存一份：弄乱了可以一键回到当时，也能带到别的电脑上用。");
                     break;
                 case SettingsSection.Data:
                     SetPane("操作记录与数据", "程序对分类、集合和设置的每次改动都记在这里；最新的一次可以撤销。");

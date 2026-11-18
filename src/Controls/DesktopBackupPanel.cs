@@ -27,7 +27,7 @@ namespace AppManager.Controls
         private readonly CheckRow files = new CheckRow { Text = "文件" };
         private readonly CheckRow folders = new CheckRow { Text = "文件夹" };
         private readonly ToggleSwitch automatic = new ToggleSwitch { AccessibleName = "自动收纳桌面新快捷方式", AccessibleRole = AccessibleRole.CheckButton, TabStop = true };
-        private readonly RoundButton organize = new RoundButton { Text = "立即整理", Icon = UiIconKind.Organize, Accent = true };
+        private readonly RoundButton organize = new RoundButton { Text = "立即整理", Icon = UiIconKind.Organize };
         private readonly RoundButton update = new RoundButton { Text = "更新备份清单" };
         private bool binding, scan;
         private readonly RoundButton restoreAll = new RoundButton();
