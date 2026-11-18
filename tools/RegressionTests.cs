@@ -7375,6 +7375,10 @@ namespace AppManager
             for (int i = 0; i < shared.Count && i < scan.Count; i++)
                 Check(shared[i].Label == scan[i].Label && string.Equals(shared[i].Path, scan[i].Path, StringComparison.OrdinalIgnoreCase),
                     "scan scope common place differs at " + i);
+
+            List<FilePickerPlace> cover = FilePickerPlaces.Build(null, null, "照片", false);
+            Check(cover.Any(delegate(FilePickerPlace item) { return item.Kind == FilePickerPlaceKind.Pictures; }),
+                "cover picker common places did not include pictures");
         }
 
         private static void PathPickerFlow()

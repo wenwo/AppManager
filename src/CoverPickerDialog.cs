@@ -201,7 +201,7 @@ namespace AppManager
 
         private void BuildPlaces()
         {
-            foreach (FilePickerPlace item in FilePickerPlaces.Build(lastFolder, null, null, false))
+            foreach (FilePickerPlace item in FilePickerPlaces.Build(lastFolder, null, "照片", false))
                 places.Add(new PlaceRow { Kind = PlaceKind.Place, Title = item.Label, Path = item.Path, Glyph = GlyphForPlace(item.Kind) });
         }
 
