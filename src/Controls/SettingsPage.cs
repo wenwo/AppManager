@@ -891,7 +891,7 @@ namespace AppManager.Controls
                 Rectangle tile = new Rectangle(b.Left + Dpi(16), b.Top + (b.Height - Dpi(IconTile)) / 2, Dpi(IconTile), Dpi(IconTile));
                 using (SolidBrush tb = new SolidBrush(Mix(tint, Theme.Card, 0.87f)))
                     Draw.FillRoundedRect(g, tb, tile, Dpi(9));
-                if (r.Kind == RowKind.Add) Draw.DrawIcon(g, UiIconKind.Add, tile, tint);
+                if (r.Kind == RowKind.Add) Draw.DrawIcon(g, UiIconKind.Add, tile, tint, DpiHelper.ForControl(this));
                 else Draw.DrawGlyph(g, r.Glyph, Rectangle.Inflate(tile, -Dpi(9), -Dpi(9)), tint);
             }
 

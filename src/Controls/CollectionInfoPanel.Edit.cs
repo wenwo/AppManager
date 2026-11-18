@@ -547,7 +547,7 @@ namespace AppManager.Controls
         private void PaintLocationField(Graphics g)
         {
             Color fill = pressBtn == 9 ? Theme.SegmentBg : (hoverBtn == 9 ? Theme.RowHover : Theme.SearchBg);
-            using (SolidBrush b = new SolidBrush(fill)) Draw.FillRoundedRect(g, b, locationRect, 10);
+            using (SolidBrush b = new SolidBrush(fill)) Draw.FillRoundedRect(g, b, locationRect, Dpi(Theme.RadiusControl));
             int arrowW = Dpi(28);
             Rectangle text = new Rectangle(locationRect.X + Dpi(12), locationRect.Y,
                 Math.Max(0, locationRect.Width - Dpi(12) - arrowW), locationRect.Height);

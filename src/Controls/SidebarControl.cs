@@ -168,13 +168,13 @@ namespace AppManager.Controls
             // ===== 顶部分段控件（软件 | 资源）：位于顶栏行2 =====
             Rectangle segRect = SegRect;
             using (SolidBrush bg = new SolidBrush(Theme.SegmentBg))
-                Draw.FillRoundedRect(g, bg, segRect, 7);
+                Draw.FillRoundedRect(g, bg, segRect, Dpi(Theme.RadiusCard));
             int segW = segRect.Width / 2;
             Rectangle activeRect = (mode == ContentMode.Software)
                 ? new Rectangle(segRect.X, segRect.Y, segW, segRect.Height)
                 : new Rectangle(segRect.X + segW, segRect.Y, segRect.Width - segW, segRect.Height);
             using (SolidBrush active = new SolidBrush(Color.White))
-                Draw.FillRoundedRect(g, active, activeRect, 6);
+                Draw.FillRoundedRect(g, active, activeRect, Dpi(Theme.RadiusControl));
             string[] labels = { "软件", "资源" };
             for (int i = 0; i < 2; i++)
             {
@@ -235,12 +235,12 @@ namespace AppManager.Controls
             if (hoverFooter == 0)
             {
                 using (SolidBrush b = new SolidBrush(Theme.CardHover))
-                    Draw.FillRoundedRect(g, b, footRect, 8);
+                    Draw.FillRoundedRect(g, b, footRect, Dpi(Theme.RadiusControl));
             }
             using (SolidBrush txt = new SolidBrush(Theme.TextPrimary))
             {
                 Draw.DrawIcon(g, UiIconKind.Add,
-                    new Rectangle(footRect.X + 9, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor);
+                    new Rectangle(footRect.X + 9, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor, DpiHelper.ForControl(this));
                 Draw.DrawStringLeft(g, "新建分类", Theme.ButtonFont, txt,
                     new Rectangle(footRect.X + 34, footRect.Y, footRect.Width - 40, footRect.Height));
             }
@@ -268,10 +268,10 @@ namespace AppManager.Controls
             if (hoverCollapse)
             {
                 using (SolidBrush hover = new SolidBrush(Theme.CardHover))
-                    Draw.FillRoundedRect(g, hover, CollapseRect, 6);
+                    Draw.FillRoundedRect(g, hover, CollapseRect, Dpi(Theme.RadiusControl));
             }
             Draw.DrawIcon(g, collapsed ? UiIconKind.PanelLeftOpen : UiIconKind.PanelLeftClose,
-                CollapseRect, Theme.IconColor);
+                CollapseRect, Theme.IconColor, DpiHelper.ForControl(this));
         }
 
         private void ToggleCollapsed()
@@ -312,17 +312,17 @@ namespace AppManager.Controls
             if (it.Active)
             {
                 using (SolidBrush b = new SolidBrush(Theme.SelectionBg))
-                    Draw.FillRoundedRect(g, b, r, 6);
+                    Draw.FillRoundedRect(g, b, r, Dpi(Theme.RadiusControl));
             }
             else if (index == hoverIndex)
             {
                 using (SolidBrush b = new SolidBrush(Theme.RowHover))
-                    Draw.FillRoundedRect(g, b, r, 6);
+                    Draw.FillRoundedRect(g, b, r, Dpi(Theme.RadiusControl));
             }
             if ((index == dragIndex || index == externalDragIndex) && it.DropTarget)
             {
                 using (Pen p = new Pen(Theme.Accent, 2))
-                    Draw.DrawRoundedRect(g, p, r, 6);
+                    Draw.DrawRoundedRect(g, p, r, Dpi(Theme.RadiusControl));
             }
             Color tc = it.Active ? Theme.AccentText : Theme.TextPrimary;
             CategoryIcons.DrawIcon(g, it.Icon,

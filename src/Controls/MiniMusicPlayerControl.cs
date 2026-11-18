@@ -198,8 +198,8 @@ namespace AppManager.Controls
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle card = new Rectangle(0, 0, Math.Max(0, Width - 1), Math.Max(0, Height - 1));
-            using (Brush brush = new SolidBrush(Theme.SegmentBg)) Draw.FillRoundedRect(g, brush, card, 9);
-            using (Pen pen = new Pen(Theme.ControlBorder, 1F)) Draw.DrawRoundedRect(g, pen, card, 9);
+            using (Brush brush = new SolidBrush(Theme.SegmentBg)) Draw.FillRoundedRect(g, brush, card, Dpi(Theme.RadiusControl));
+            using (Pen pen = new Pen(Theme.ControlBorder, 1F)) Draw.DrawRoundedRect(g, pen, card, Dpi(Theme.RadiusControl));
             LayoutPlayer();
             DrawHover(g, collectionRect, 0);
             DrawHover(g, previousRect, 1);
@@ -217,7 +217,7 @@ namespace AppManager.Controls
             DrawPreviousNext(g, nextRect, true);
             if (titleRect.Width > 0) TextRenderer.DrawText(g, title, Theme.CaptionFont, titleRect,
                 Theme.TextPrimary, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-            Draw.DrawIcon(g, UiIconKind.List, new Rectangle(collectionRect.X + Dpi(5), (Height - Dpi(20)) / 2, Dpi(20), Dpi(20)), Theme.IconColor);
+            Draw.DrawIcon(g, UiIconKind.List, new Rectangle(collectionRect.X + Dpi(5), (Height - Dpi(20)) / 2, Dpi(20), Dpi(20)), Theme.IconColor, DpiHelper.ForControl(this));
             if (!seekRect.IsEmpty)
             {
                 TextFormatFlags timeFlags = TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
@@ -270,7 +270,7 @@ namespace AppManager.Controls
         private void DrawHover(Graphics g, Rectangle rect, int id)
         {
             if (hover != id) return;
-            using (Brush brush = new SolidBrush(Theme.RowHover)) Draw.FillRoundedRect(g, brush, rect, 7);
+            using (Brush brush = new SolidBrush(Theme.RowHover)) Draw.FillRoundedRect(g, brush, rect, Dpi(Theme.RadiusControl));
         }
 
         private void DrawPreviousNext(Graphics g, Rectangle rect, bool next)

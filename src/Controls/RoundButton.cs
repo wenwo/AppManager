@@ -86,7 +86,7 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             Rectangle r = ClientRectangle;
             r.Inflate(-1, -1);
-            int radius = DpiHelper.Scale(6, DpiHelper.ForControl(this));
+            int radius = DpiHelper.Scale(Theme.RadiusControl, DpiHelper.ForControl(this));
             // 带下拉箭头时，文字和图标在箭头左边的区域里居中
             Rectangle content = r;
             if (_dropDown) content.Width = Math.Max(0, content.Width - DpiHelper.Scale(14, DpiHelper.ForControl(this)));
@@ -150,13 +150,16 @@ namespace AppManager.Controls
 
         private void PaintIconAndText(Graphics g, Rectangle r, Brush br, Color tc)
         {
+            // 图标格和它到文字的间距按 DPI 换算：字随缩放变大，图标也跟着变大，不再是字大图标小
+            int dpi = DpiHelper.ForControl(this);
+            int icon = DpiHelper.Scale(18, dpi), step = DpiHelper.Scale(22, dpi);
             Size textSize = TextRenderer.MeasureText(Text, Font);
-            int contentWidth = textSize.Width + 22;
-            int startX = r.X + Math.Max(8, (r.Width - contentWidth) / 2);
-            Rectangle iconRect = new Rectangle(startX, r.Y + (r.Height - 18) / 2, 18, 18);
-            Draw.DrawIcon(g, _icon.Value, iconRect, tc);
-            Rectangle textRect = new Rectangle(startX + 22, r.Y,
-                Math.Max(0, r.Right - startX - 26), r.Height);
+            int contentWidth = textSize.Width + step;
+            int startX = r.X + Math.Max(DpiHelper.Scale(8, dpi), (r.Width - contentWidth) / 2);
+            Rectangle iconRect = new Rectangle(startX, r.Y + (r.Height - icon) / 2, icon, icon);
+            Draw.DrawIcon(g, _icon.Value, iconRect, tc, dpi);
+            Rectangle textRect = new Rectangle(startX + step, r.Y,
+                Math.Max(0, r.Right - startX - step - DpiHelper.Scale(4, dpi)), r.Height);
             Draw.DrawStringLeft(g, Text, Font, br, textRect);
         }
 

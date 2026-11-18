@@ -566,11 +566,11 @@ namespace AppManager.Controls
                 bool focused = p.Controls.Count > 0 && p.Controls[0].Focused;
                 bool bad = invalid != null && invalid();
                 using (SolidBrush b = new SolidBrush(focused ? Color.White : Theme.SearchBg))
-                    Draw.FillRoundedRect(g, b, r, 10);
+                    Draw.FillRoundedRect(g, b, r, DpiHelper.Scale(Theme.RadiusControl, DpiHelper.ForControl(p)));
                 if (focused || bad)
                 {
                     using (Pen pen = new Pen(bad ? Theme.DangerText : Theme.Accent, 1.5F))
-                        Draw.DrawRoundedRect(g, pen, r, 10);
+                        Draw.DrawRoundedRect(g, pen, r, DpiHelper.Scale(Theme.RadiusControl, DpiHelper.ForControl(p)));
                 }
             };
             return p;
@@ -857,11 +857,11 @@ namespace AppManager.Controls
                     : (hoverBtn == id ? Theme.CardHover : Theme.Card);
             }
             using (SolidBrush b = new SolidBrush(fill))
-                Draw.FillRoundedRect(g, b, r, 6);
+                Draw.FillRoundedRect(g, b, r, Dpi(Theme.RadiusControl));
             if (!primary)
             {
                 using (Pen p = new Pen(Theme.ControlBorder, 1F))
-                    Draw.DrawRoundedRect(g, p, r, 6);
+                    Draw.DrawRoundedRect(g, p, r, Dpi(Theme.RadiusControl));
             }
             Color tc = primary ? Color.White : (enabled ? Theme.TextPrimary : Theme.TextTertiary);
             using (SolidBrush tb = new SolidBrush(tc))

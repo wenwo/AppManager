@@ -40,7 +40,7 @@ namespace AppManager.Controls
         private int PadX { get { return Dpi(10); } }
         private int FooterH { get { return Dpi(44); } }
         private int CoverGap { get { return Dpi(8); } }
-        private int Radius { get { return Dpi(8); } }
+        private int Radius { get { return Dpi(Theme.RadiusControl); } }
         private int ScrollBarW { get { return Dpi(4); } }
         private int ScrollHitW { get { return Dpi(12); } }
 
@@ -506,10 +506,10 @@ namespace AppManager.Controls
             if (hoverCollapse)
             {
                 using (SolidBrush hover = new SolidBrush(Theme.CardHover))
-                    Draw.FillRoundedRect(g, hover, CollapseRect, 6);
+                    Draw.FillRoundedRect(g, hover, CollapseRect, Dpi(Theme.RadiusControl));
             }
             Draw.DrawIcon(g, collapsed ? UiIconKind.PanelLeftOpen : UiIconKind.PanelLeftClose,
-                CollapseRect, Theme.IconColor);
+                CollapseRect, Theme.IconColor, DpiHelper.ForControl(this));
         }
 
         private void ToggleCollapsed()
@@ -538,7 +538,7 @@ namespace AppManager.Controls
             if (item.HasChildren)
             {
                 if (index == arrowHoverIndex)
-                    Draw.FillRoundedRect(g, hoverBrush, arrow, 4);
+                    Draw.FillRoundedRect(g, hoverBrush, arrow, Dpi(Theme.RadiusChip));
                 DrawTreeChevron(g, arrow, item.Expanded, active ? Theme.AccentText : Theme.TextSecondary);
             }
 
@@ -662,7 +662,7 @@ namespace AppManager.Controls
         /// <summary>「全部」图标：浅底圆角 + 2x2 网格点，选中时强调色。</summary>
         private void PaintAllGlyph(Graphics g, Rectangle r, bool active)
         {
-            Draw.FillRoundedRect(g, cardBrush, r, 7);
+            Draw.FillRoundedRect(g, cardBrush, r, Dpi(Theme.RadiusControl));
             SolidBrush b = active ? accentBrush : subBrush;
             int s = 6, gap = 3;
             int left = r.X + (r.Width - (s * 2 + gap)) / 2;
@@ -732,7 +732,7 @@ namespace AppManager.Controls
                     Draw.FillRoundedRect(g, b, footRect, Radius);
             }
             Draw.DrawIcon(g, UiIconKind.Add,
-                new Rectangle(footRect.X + 7, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor);
+                new Rectangle(footRect.X + 7, footRect.Y + (footRect.Height - 18) / 2, 18, 18), Theme.IconColor, DpiHelper.ForControl(this));
             Draw.DrawStringLeft(g, createSubfolder ? "新建子集合" : "新建集合", Theme.ButtonFont, textBrush,
                 new Rectangle(footRect.X + 32, footRect.Y, footRect.Width - 36, footRect.Height));
         }

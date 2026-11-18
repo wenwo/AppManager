@@ -1022,7 +1022,7 @@ namespace AppManager.Controls
                 if (hover)
                 {
                     shadowRect.Offset(0, -1);
-                    Draw.DrawShadow(g, shadowRect, Theme.CornerRadius - 4, 0.22f);
+                    Draw.DrawShadow(g, shadowRect, Dpi(Theme.RadiusCard), 0.22f);
                 }
 
                 g.TranslateTransform(shadowRect.X, shadowRect.Y);
@@ -1440,7 +1440,7 @@ namespace AppManager.Controls
         {
             if (gridItemPath == null)
                 gridItemPath = Draw.RoundedPath(
-                    new Rectangle(0, 0, GridItemWidth, GridItemHeight), Theme.CornerRadius - 4);
+                    new Rectangle(0, 0, GridItemWidth, GridItemHeight), Dpi(Theme.RadiusCard));
         }
 
         protected override void OnMouseMove(MouseEventArgs e)

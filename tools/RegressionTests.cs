@@ -197,6 +197,7 @@ namespace AppManager
                 Run("add page for folders and software: checks folders, blocks drives, lists installed software with .exe files", MediaAddPageFolderAndSoftware);
                 Run("add page opens inside the main window, stays on top, follows resizes and restores the main content", MediaAddPageInMainWindow);
                 Run("embedded pages: cover page inside the main window keeps the edit, desktop backup list is a busy-aware settings section", EmbeddedPages);
+                Run("line icons scale with the display DPI, stay centred and ignore the size of their box", IconsScaleWithDpi);
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
                 Run("exporting change details writes a temp file first: a failure keeps the old file and leaves no partial file", ExportChangesAtomic);
@@ -6094,6 +6095,47 @@ namespace AppManager
                 Invoke(form, "CloseSettings");
                 Check(!settings.Visible, "settings stayed open");
             }
+        }
+
+        // 线条图标随显示缩放变大（以前写死像素，125% 以上图标比字小一圈）：192 DPI 下墨迹约为 96 DPI 的两倍，
+        // 大小只跟 DPI 有关、与传入的定位框大小无关，并且始终画在定位框正中。
+        private static void IconsScaleWithDpi()
+        {
+            const int canvas = 120;
+            Func<UiIconKind, int, int, Rectangle> ink = delegate(UiIconKind kind, int dpi, int box)
+            {
+                using (Bitmap bitmap = new Bitmap(canvas, canvas))
+                {
+                    using (Graphics g = Graphics.FromImage(bitmap))
+                    {
+                        g.Clear(Color.White);
+                        Draw.DrawIcon(g, kind, new Rectangle((canvas - box) / 2, (canvas - box) / 2, box, box), Color.Black, dpi);
+                    }
+                    int left = canvas, top = canvas, right = -1, bottom = -1;
+                    for (int y = 0; y < canvas; y++)
+                        for (int x = 0; x < canvas; x++)
+                            if (bitmap.GetPixel(x, y).R < 128)
+                            {
+                                left = Math.Min(left, x); top = Math.Min(top, y);
+                                right = Math.Max(right, x); bottom = Math.Max(bottom, y);
+                            }
+                    return right < 0 ? Rectangle.Empty : Rectangle.FromLTRB(left, top, right + 1, bottom + 1);
+                }
+            };
+            foreach (UiIconKind kind in new UiIconKind[] { UiIconKind.Add, UiIconKind.Organize, UiIconKind.Search, UiIconKind.PanelLeftClose })
+            {
+                Rectangle normal = ink(kind, 96, 18), doubled = ink(kind, 192, 18), bigBox = ink(kind, 96, 60), low = ink(kind, 72, 18);
+                Check(normal.Width >= 9 && normal.Width <= 18 && normal.Height >= 9 && normal.Height <= 19, kind + ": unexpected size at 96 DPI: " + normal);
+                Check(Math.Abs(doubled.Width - normal.Width * 2) <= 3 && Math.Abs(doubled.Height - normal.Height * 2) <= 3,
+                    kind + ": did not double at 192 DPI: " + normal.Size + " -> " + doubled.Size);
+                Check(Math.Abs(bigBox.Width - normal.Width) <= 1 && Math.Abs(bigBox.Height - normal.Height) <= 1,
+                    kind + ": grew with its positioning box: " + bigBox.Size);
+                Check(low.Size == normal.Size, kind + ": shrank below the 96 DPI size");   // 低于 96 的值按 96 画
+                foreach (Rectangle r in new Rectangle[] { normal, doubled, bigBox })
+                    Check(Math.Abs(r.Left + r.Right - canvas) <= 3 && Math.Abs(r.Top + r.Bottom - canvas) <= 3, kind + ": not centred: " + r);
+            }
+            // 圆角规格只有三档，且从大到小
+            Check(Theme.RadiusCard > Theme.RadiusControl && Theme.RadiusControl > Theme.RadiusChip && Theme.RadiusChip > 0, "radius tokens out of order");
         }
 
         private static void ReviewFollowUps()

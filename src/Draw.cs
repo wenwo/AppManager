@@ -22,10 +22,16 @@ namespace AppManager
     /// </summary>
     internal static class Draw
     {
-        public static void DrawIcon(Graphics g, UiIconKind kind, Rectangle rect, Color color)
+        /// <summary>
+        /// 在 rect 的中心画一个线条图标。图标的大小和线宽按 dpi 换算（设计尺寸约 14～16 像素见方），
+        /// 与 rect 的大小无关：rect 只用来定位，所以同一个图标放在大小不同的按钮里看起来一样大，
+        /// 显示缩放变大时图标跟着文字一起变大（以前写死像素，125% 以上图标比字小一圈）。
+        /// </summary>
+        public static void DrawIcon(Graphics g, UiIconKind kind, Rectangle rect, Color color, int dpi)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            using (Pen pen = new Pen(color, 1.8F))
+            float s = Math.Max(96, dpi) / 96F;
+            using (Pen pen = new Pen(color, 1.8F * s))
             {
                 pen.StartCap = LineCap.Round;
                 pen.EndCap = LineCap.Round;
@@ -35,36 +41,45 @@ namespace AppManager
                 switch (kind)
                 {
                     case UiIconKind.Add:
-                        g.DrawLine(pen, cx - 5F, cy, cx + 5F, cy);
-                        g.DrawLine(pen, cx, cy - 5F, cx, cy + 5F);
+                        g.DrawLine(pen, cx - 5F * s, cy, cx + 5F * s, cy);
+                        g.DrawLine(pen, cx, cy - 5F * s, cx, cy + 5F * s);
                         break;
                     case UiIconKind.Organize:
-                        g.DrawRectangle(pen, cx - 7F, cy - 7F, 5F, 5F);
-                        g.DrawRectangle(pen, cx + 2F, cy - 7F, 5F, 5F);
-                        g.DrawRectangle(pen, cx - 7F, cy + 2F, 5F, 5F);
-                        g.DrawRectangle(pen, cx + 2F, cy + 2F, 5F, 5F);
+                        g.DrawRectangle(pen, cx - 7F * s, cy - 7F * s, 5F * s, 5F * s);
+                        g.DrawRectangle(pen, cx + 2F * s, cy - 7F * s, 5F * s, 5F * s);
+                        g.DrawRectangle(pen, cx - 7F * s, cy + 2F * s, 5F * s, 5F * s);
+                        g.DrawRectangle(pen, cx + 2F * s, cy + 2F * s, 5F * s, 5F * s);
                         break;
                     case UiIconKind.Back:
-                        g.DrawLine(pen, cx + 3F, cy - 5F, cx - 3F, cy);
-                        g.DrawLine(pen, cx - 3F, cy, cx + 3F, cy + 5F);
+                        g.DrawLine(pen, cx + 3F * s, cy - 5F * s, cx - 3F * s, cy);
+                        g.DrawLine(pen, cx - 3F * s, cy, cx + 3F * s, cy + 5F * s);
                         break;
                     case UiIconKind.Search:
-                        g.DrawEllipse(pen, cx - 6F, cy - 6F, 10F, 10F);
-                        g.DrawLine(pen, cx + 3F, cy + 3F, cx + 7F, cy + 7F);
+                        g.DrawEllipse(pen, cx - 6F * s, cy - 6F * s, 10F * s, 10F * s);
+                        g.DrawLine(pen, cx + 3F * s, cy + 3F * s, cx + 7F * s, cy + 7F * s);
                         break;
                     case UiIconKind.List:
                         for (int row = -1; row <= 1; row++)
                         {
-                            float y = cy + row * 5F;
-                            g.DrawLine(pen, cx - 6F, y, cx - 5F, y);
-                            g.DrawLine(pen, cx - 1F, y, cx + 6F, y);
+                            float y = cy + row * 5F * s;
+                            g.DrawLine(pen, cx - 6F * s, y, cx - 5F * s, y);
+                            g.DrawLine(pen, cx - 1F * s, y, cx + 6F * s, y);
                         }
                         break;
                     case UiIconKind.PanelLeftClose:
                     case UiIconKind.PanelLeftOpen:
-                        Rectangle panel = new Rectangle((int)(cx - 7F), (int)(cy - 8F), 14, 16);
-                        DrawRoundedRect(g, pen, panel, 3);
-                        g.DrawLine(pen, panel.X + 4, panel.Y + 4, panel.X + 4, panel.Bottom - 4);
+                        RectangleF panel = new RectangleF(cx - 7F * s, cy - 8F * s, 14F * s, 16F * s);
+                        float corner = 3F * s;
+                        using (GraphicsPath outline = new GraphicsPath())
+                        {
+                            outline.AddArc(panel.X, panel.Y, corner * 2, corner * 2, 180, 90);
+                            outline.AddArc(panel.Right - corner * 2, panel.Y, corner * 2, corner * 2, 270, 90);
+                            outline.AddArc(panel.Right - corner * 2, panel.Bottom - corner * 2, corner * 2, corner * 2, 0, 90);
+                            outline.AddArc(panel.X, panel.Bottom - corner * 2, corner * 2, corner * 2, 90, 90);
+                            outline.CloseFigure();
+                            g.DrawPath(pen, outline);
+                        }
+                        g.DrawLine(pen, panel.X + 4F * s, panel.Y + 4F * s, panel.X + 4F * s, panel.Bottom - 4F * s);
                         break;
                 }
             }
@@ -273,7 +288,7 @@ namespace AppManager
                 DrawRoundedRect(g, p, new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), radius);
             int iconSize = Math.Min(DpiHelper.Scale(18, dpi), Math.Max(8, r.Height - 8));
             Rectangle icon = new Rectangle(r.X + DpiHelper.Scale(8, dpi), r.Y + (r.Height - iconSize) / 2, iconSize, iconSize);
-            DrawIcon(g, UiIconKind.Back, icon, Theme.TextPrimary);
+            DrawIcon(g, UiIconKind.Back, icon, Theme.TextPrimary, dpi);
             using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
                 DrawStringLeft(g, "返回", Theme.ButtonFont, tb,
                     new Rectangle(icon.Right + DpiHelper.Scale(4, dpi), r.Y, Math.Max(0, r.Right - icon.Right - DpiHelper.Scale(6, dpi)), r.Height));

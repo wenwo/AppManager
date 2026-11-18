@@ -50,6 +50,11 @@ namespace AppManager.Controls
             set { _iconColor = value; Invalidate(); }
         }
 
+        /// <summary>当前显示缩放相对 96 DPI 的倍数：图标外形、线宽、悬停底的内缩和圆角都按它换算，与字号保持同样的比例。</summary>
+        private float Zoom { get { return Math.Max(96, DpiHelper.ForControl(this)) / 96F; } }
+
+        private int S(int value) { return DpiHelper.Scale(value, DpiHelper.ForControl(this)); }
+
         public IconButton()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
@@ -85,10 +90,10 @@ namespace AppManager.Controls
             if (_hover || _pressed)
             {
                 Rectangle r = ClientRectangle;
-                r.Inflate(-4, -2);
+                r.Inflate(-S(4), -S(2));
                 Color fill = _pressed ? Color.FromArgb(44, 0, 0, 0) : Color.FromArgb(22, 0, 0, 0);
                 using (SolidBrush b = new SolidBrush(fill))
-                    Draw.FillRoundedRect(g, b, r, 6);
+                    Draw.FillRoundedRect(g, b, r, S(Theme.RadiusControl));
             }
             if (_kind == IconKind.None) return;
             Color stroke = _iconColor ?? GlyphColor;
@@ -101,7 +106,8 @@ namespace AppManager.Controls
 
             float cx = Width / 2F;
             float cy = Height / 2F;
-            using (Pen pen = new Pen(stroke, StrokeWidth))
+            float box = IconBox * Zoom;
+            using (Pen pen = new Pen(stroke, StrokeWidth * Zoom))
             {
                 pen.StartCap = LineCap.Round;
                 pen.EndCap = LineCap.Round;
@@ -109,16 +115,16 @@ namespace AppManager.Controls
                 switch (_kind)
                 {
                     case IconKind.Minimize:
-                        g.DrawLine(pen, cx - IconBox / 2F, cy, cx + IconBox / 2F, cy);
+                        g.DrawLine(pen, cx - box / 2F, cy, cx + box / 2F, cy);
                         break;
                     case IconKind.Maximize:
-                        DrawRoundRect(g, pen, cx - IconBox / 2F, cy - IconBox / 2F, IconBox, IconBox);
+                        DrawRoundRect(g, pen, cx - box / 2F, cy - box / 2F, box, box);
                         break;
                     case IconKind.Restore:
                         DrawRestore(g, pen, cx, cy);
                         break;
                     case IconKind.Close:
-                        float h = IconBox / 2F;
+                        float h = box / 2F;
                         g.DrawLine(pen, cx - h, cy - h, cx + h, cy + h);
                         g.DrawLine(pen, cx + h, cy - h, cx - h, cy + h);
                         break;
@@ -147,7 +153,7 @@ namespace AppManager.Controls
                 {
                     // 墨迹中心移到原点 → 等比缩放到 GearBox → 移到按钮中心：
                     // 齿轮外形不再随字体/字号漂移，与自绘图标的 13px 外形精确对齐
-                    float scale = GearBox / Math.Max(b.Width, b.Height);
+                    float scale = GearBox * Zoom / Math.Max(b.Width, b.Height);
                     using (Matrix m = new Matrix())
                     {
                         m.Translate(-(b.X + b.Width / 2F), -(b.Y + b.Height / 2F));
@@ -159,7 +165,7 @@ namespace AppManager.Controls
                 Color strokeC = _iconColor ?? GlyphColor;
                 using (SolidBrush br = new SolidBrush(strokeC))
                     g.FillPath(br, path);
-                using (Pen pen = new Pen(strokeC, GlyphStroke))
+                using (Pen pen = new Pen(strokeC, GlyphStroke * Zoom))
                 {
                     pen.LineJoin = LineJoin.Round;
                     pen.StartCap = LineCap.Round;
@@ -172,8 +178,8 @@ namespace AppManager.Controls
         /// <summary>还原图标：后层方框只画左上两条边，前层方框完整绘制。</summary>
         private void DrawRestore(Graphics g, Pen pen, float cx, float cy)
         {
-            const float size = IconBox - 3F;
-            const float offset = 3F;
+            float size = (IconBox - 3F) * Zoom;
+            float offset = 3F * Zoom;
             float backLeft = cx - size / 2F - offset / 2F;
             float backTop = cy - size / 2F - offset / 2F;
             float frontLeft = cx - size / 2F + offset / 2F;
@@ -181,7 +187,7 @@ namespace AppManager.Controls
 
             using (GraphicsPath path = new GraphicsPath())
             {
-                float r = IconRadius;
+                float r = IconRadius * Zoom;
                 // 后层：左下角向上到左上圆角，再向右延伸
                 path.AddLine(backLeft, backTop + size, backLeft, backTop + r);
                 path.AddArc(backLeft, backTop, r * 2, r * 2, 180, 90);
@@ -193,7 +199,7 @@ namespace AppManager.Controls
 
         private void DrawRoundRect(Graphics g, Pen pen, float x, float y, float w, float h)
         {
-            float r = IconRadius * 2;
+            float r = IconRadius * Zoom * 2;
             using (GraphicsPath path = new GraphicsPath())
             {
                 path.AddArc(x, y, r, r, 180, 90);

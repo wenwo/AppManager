@@ -71,6 +71,12 @@ namespace AppManager
         // 模态遮罩：弹窗外区域压暗程度（0~1），参考 Fluent ContentDialog 浅色主题的遮罩强度
         public const double ModalScrimOpacity = 0.32;
 
+        // 圆角规格（96 DPI 下的设计值，使用处用 DpiHelper.Scale 按当前 DPI 换算）。界面上的圆角只用这三档：
+        // 新写的控件不要再写死别的数值，也不要漏掉换算（不换算的圆角在高缩放下会显得偏方）。
+        public const int RadiusCard = 8;      // 卡片、列表和面板的外框、分段开关的底
+        public const int RadiusControl = 6;   // 按钮、输入框、搜索框、行高亮、悬停底色
+        public const int RadiusChip = 4;      // 小标签、勾选框、行内的小悬停块
+
         // 尺寸
         public const int CornerRadius = 12;
         public const int IconSize = 56;

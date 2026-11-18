@@ -915,12 +915,12 @@ namespace AppManager
                     if (active || index == hover)
                     {
                         using (SolidBrush background = new SolidBrush(active ? Theme.SelectionBg : Theme.RowHover))
-                            Draw.FillRoundedRect(graphics, background, cell, 8);
+                            Draw.FillRoundedRect(graphics, background, cell, DpiHelper.Scale(Theme.RadiusCard, DpiHelper.ForControl(form)));
                     }
                     if (active)
                     {
                         using (Pen border = new Pen(Theme.Accent, 1.5F))
-                            Draw.DrawRoundedRect(graphics, border, cell, 8);
+                            Draw.DrawRoundedRect(graphics, border, cell, DpiHelper.Scale(Theme.RadiusCard, DpiHelper.ForControl(form)));
                     }
                     CategoryIcons.DrawIcon(graphics, CategoryIcons.PickerKinds[index],
                         new Rectangle(cell.X + S(9), cell.Y + S(9), S(20), S(20)),
@@ -1150,11 +1150,11 @@ namespace AppManager
                 g.SmoothingMode = SmoothingMode.AntiAlias;
                 Rectangle r = new Rectangle(0, 0, field.Width - 1, field.Height - 1);
                 Color bg = box.Focused ? Color.White : Theme.SearchBg;
-                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, 10);
+                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, DpiHelper.Scale(Theme.RadiusControl, DpiHelper.ForControl(field)));
                 if (box.Focused)
                 {
                     using (Pen p = new Pen(Theme.Accent, 1.5F))
-                        Draw.DrawRoundedRect(g, p, r, 10);
+                        Draw.DrawRoundedRect(g, p, r, DpiHelper.Scale(Theme.RadiusControl, DpiHelper.ForControl(field)));
                 }
             };
             box.Location = new Point(12, (bounds.Height - box.PreferredHeight) / 2);
