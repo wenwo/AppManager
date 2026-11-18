@@ -29,7 +29,8 @@ namespace AppManager.Controls
         public enum RescanState { Idle, Running, Done, Failed }
 
         /// <summary>左侧目录的各页。</summary>
-        public enum SettingsSection { General, Scan, Storage, Backup, Data, Diagnostics }
+        // 新目录加在末尾，已有成员的取值不变；左侧显示顺序由构造函数里 AddNav 的顺序决定
+        public enum SettingsSection { General, Scan, Storage, Backup, Data, Diagnostics, DesktopBackup, ImportHistory }
 
         // 尺寸均为 96 DPI 下的逻辑像素，使用处统一经 Dpi() 缩放
         private const int NavW = 220;          // 左侧目录宽度
@@ -193,6 +194,8 @@ namespace AppManager.Controls
             AddNav(SettingsSection.Scan, GlyphSync, "扫描与收纳");
             AddNav(SettingsSection.Storage, GlyphDrive, "资源存储位置");
             AddNav(SettingsSection.Backup, GlyphHistory, "布局备份");
+            AddNav(SettingsSection.DesktopBackup, "", "桌面备份清单");
+            AddNav(SettingsSection.ImportHistory, "", "导入记录");
             AddNav(SettingsSection.Data, GlyphRepair, "操作记录与数据");
             AddNav(SettingsSection.Diagnostics, GlyphTest, "诊断");
         }
@@ -454,6 +457,12 @@ namespace AppManager.Controls
                 case SettingsSection.Data:
                     SetPane("操作记录与数据", "程序对分类、集合和设置的每次改动都记在这里；最新的一次可以撤销。");
                     break;
+                case SettingsSection.DesktopBackup:
+                    SetPane("桌面备份清单", "整理桌面时收走的条目都记在这里。「还原」把它移回桌面（副本条目则清理备份副本）；「移除」只删清单记录，不动文件。");
+                    break;
+                case SettingsSection.ImportHistory:
+                    SetPane("导入记录", "这里记着最近的导入；原件还没清理完的，可以在这里处理。");
+                    break;
                 default:
                     SetPane("诊断", "检查程序的核心功能是否正常。");
                     y = AddCard(left, width, y, new Row[] { SelfTestRow() });
@@ -481,7 +490,9 @@ namespace AppManager.Controls
                 bool show = pair.Key == section;
                 if (show)
                 {
-                    int w = pair.Key == SettingsSection.Data ? Math.Max(width, Width - left - Dpi(PanePad)) : width;
+                    // 左右分栏的面板（操作记录、导入记录）用满右侧宽度，其余限制在内容列宽内
+                    bool wide = pair.Key == SettingsSection.Data || pair.Key == SettingsSection.ImportHistory;
+                    int w = wide ? Math.Max(width, Width - left - Dpi(PanePad)) : width;
                     pair.Value.Bounds = new Rectangle(left - Dpi(PanelShadow), viewport.Top,
                         w + Dpi(PanelShadow) * 2, Math.Max(0, viewport.Height - Dpi(24)));
                 }

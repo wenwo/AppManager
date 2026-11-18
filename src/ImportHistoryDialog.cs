@@ -21,8 +21,21 @@ namespace AppManager
     /// 「导入记录」窗口：左边是每次导入的记录，右边是选中那次的数字汇总和逐个文件明细。
     /// 窗口只读取并展示日志；用户确认清理原件后把批次放进 RetryBatch，删源仍由主窗口的导入队列执行。
     /// </summary>
-    internal sealed class ImportHistoryDialog : BufferedDialogForm
+    /// <remarks>
+    /// 平时嵌在设置页右侧当「导入记录」目录的内容（TopLevel 设为 false 后交给 SettingsPage.HostPanel）：
+    /// 这时页标题和说明由设置页画，没有「关闭」按钮，Esc 交给设置页返回，清理原件通过 RetryRequested 通知主窗口，
+    /// 每次切到这个目录都重新读取。独立显示（回归测试）时仍是一个带标题和「关闭」的窗口。
+    /// </remarks>
+    internal sealed class ImportHistoryDialog : BufferedDialogForm, Controls.ISettingsPanel
     {
+        /// <summary>嵌在设置页里时，用户确认要清理原件：把批次交给主窗口的导入队列。</summary>
+        internal event Action<ImportBatch> RetryRequested;
+
+        // 嵌入面板接口：这里没有不能中断的操作；滚轮交给指针下的两个列表自己滚动
+        public bool Busy { get { return false; } }
+        public event EventHandler BusyChanged { add { } remove { } }
+        public bool ScrollByWheel(int delta) { return false; }
+
         /// <summary>明细每次列出的行数。文件很多时不一次塞进列表：有问题的排在前面，其余点「显示更多」逐页追加。</summary>
         internal const int PageRows = 1000;
         /// <summary>明细末尾的「显示更多」行；列表里除它以外都是 Row。</summary>
@@ -299,7 +312,37 @@ namespace AppManager
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            if (closed) return;
+            Reload();   // 嵌入时 OnVisibleChanged 还会在每次切到这个目录时再读；多读一次没有副作用，只认最后一次的结果
+        }
+
+        protected override void OnVisibleChanged(EventArgs e)
+        {
+            base.OnVisibleChanged(e);
+            if (Embedded)
+            {
+                close.Visible = false;
+                if (Visible && IsHandleCreated) Reload();
+            }
+        }
+
+        private int loadGeneration;   // 只认最后一次读取的结果
+
+        /// <summary>重新读取导入日志（嵌入设置页时每次切到这个目录、以及清理原件结束后调用）。</summary>
+        internal void Reload()
+        {
+            if (closed || IsDisposed || !IsHandleCreated) return;
+            int generation = ++loadGeneration;
+            current = null;
+            batchList.Items.Clear();
+            itemList.Items.Clear();
+            notice.Text = string.Empty;
+            footer.Text = string.Empty;
+            retry.Visible = false;
+            headerSummary = string.Empty;
+            placeholder = "正在读取导入记录…";
+            ApplyVisibility();
+            LayoutContent();
+            Invalidate();
             string directory = journal;
             // 日志可能很多、很大：后台读取并整理，界面只接收结果。
             ThreadPool.QueueUserWorkItem(delegate
@@ -321,7 +364,10 @@ namespace AppManager
                 catch (Exception ex) { failed = true; Paths.LogError(ex); }
                 try
                 {
-                    BeginInvoke((Action)delegate { if (!closed && !IsDisposed) ShowLoaded(loaded, unreadable, failed); });
+                    BeginInvoke((Action)delegate
+                    {
+                        if (!closed && !IsDisposed && generation == loadGeneration) ShowLoaded(loaded, unreadable, failed);
+                    });
                 }
                 catch (InvalidOperationException) { }   // 窗口已关闭
             });
@@ -340,7 +386,7 @@ namespace AppManager
             {
                 batchList.Items.AddRange(loaded.ToArray());
                 batchList.SelectedIndex = 0;   // 触发 ShowRecord
-                batchList.Focus();
+                if (!Embedded) batchList.Focus();   // 嵌在设置页里时不抢焦点（后台刷新也会走到这里）
             }
             Invalidate();
         }
@@ -414,6 +460,16 @@ namespace AppManager
             if (MessageDialog.Show(this, DeleteConfirmText(batch), "导入记录", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
                 MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
             batch.DeleteAuthorized = true;
+            if (Embedded)
+            {
+                // 嵌在设置页里：不关闭，交给主窗口的导入队列去删；结束后主窗口会让这里重新读取
+                retry.Visible = false;
+                footer.Text = "已开始清理原件，完成后这里会自动刷新。";
+                LayoutContent();
+                Action<ImportBatch> handler = RetryRequested;
+                if (handler != null) handler(batch);
+                return;
+            }
             RetryBatch = batch;
             Close();
         }
@@ -458,8 +514,10 @@ namespace AppManager
             layingOut = true;
             try
             {
-                int width = ClientSize.Width, height = ClientSize.Height, pad = Dpi(24);
-                int top = Dpi(82), bottom = Math.Max(top + 1, height - Dpi(72));
+                // 嵌在设置页里：标题和说明由设置页画，这里顶上只留一行数量汇总，左右只留放阴影的窄边，底下一行是说明和按钮
+                bool embedded = Embedded;
+                int width = ClientSize.Width, height = ClientSize.Height, pad = Dpi(embedded ? 8 : 24);
+                int top = Dpi(embedded ? 40 : 82), bottom = Math.Max(top + 1, height - Dpi(embedded ? 46 : 72));
                 leftFrame = Rectangle.FromLTRB(pad, top, pad + Dpi(288), bottom);
                 rightFrame = Rectangle.FromLTRB(leftFrame.Right + Dpi(12), top, Math.Max(leftFrame.Right + Dpi(13), width - pad), bottom);
                 batchList.Bounds = Rectangle.Inflate(leftFrame, -Dpi(4), -Dpi(4));
@@ -482,10 +540,12 @@ namespace AppManager
                 itemList.Bounds = Rectangle.FromLTRB(rightFrame.X + Dpi(4), y, rightFrame.Right - Dpi(4),
                     Math.Max(y + 1, rightFrame.Bottom - Dpi(4)));
 
-                int buttonTop = height - Dpi(56);
+                int buttonTop = height - Dpi(embedded ? 34 : 56);
                 close.Bounds = new Rectangle(width - pad - Dpi(90), buttonTop, Dpi(90), Dpi(34));
-                retry.Bounds = new Rectangle(close.Left - Dpi(12) - Dpi(196), buttonTop, Dpi(196), Dpi(34));
-                int footerRight = retry.Visible ? retry.Left : close.Left;
+                // 嵌入时没有「关闭」：清理按钮直接靠右
+                int retryRight = embedded ? width - pad : close.Left - Dpi(12);
+                retry.Bounds = new Rectangle(retryRight - Dpi(196), buttonTop, Dpi(196), Dpi(34));
+                int footerRight = retry.Visible ? retry.Left : retryRight;
                 footer.Bounds = new Rectangle(pad, buttonTop, Math.Max(1, footerRight - Dpi(12) - pad), Dpi(34));
             }
             finally { layingOut = false; }
@@ -494,12 +554,15 @@ namespace AppManager
         protected override void OnDpiScaleChanged()
         {
             base.OnDpiScaleChanged();
-            Rectangle work = Screen.FromControl(this).WorkingArea;
-            Size = new Size(Math.Min(Width, work.Width), Math.Min(Height, work.Height));
-            // 窗体按 DPI 放大时左上角不动，大窗口会明显偏向右下：重新对准宿主窗口中央，且不超出屏幕工作区
-            Rectangle host = Owner != null ? Owner.Bounds : work;
-            Location = new Point(Math.Max(work.Left, Math.Min(host.X + (host.Width - Width) / 2, work.Right - Width)),
-                Math.Max(work.Top, Math.Min(host.Y + (host.Height - Height) / 2, work.Bottom - Height)));
+            if (!Embedded)   // 嵌在设置页里时，位置和大小由设置页决定
+            {
+                Rectangle work = Screen.FromControl(this).WorkingArea;
+                Size = new Size(Math.Min(Width, work.Width), Math.Min(Height, work.Height));
+                // 窗体按 DPI 放大时左上角不动，大窗口会明显偏向右下：重新对准宿主窗口中央，且不超出屏幕工作区
+                Rectangle host = Owner != null ? Owner.Bounds : work;
+                Location = new Point(Math.Max(work.Left, Math.Min(host.X + (host.Width - Width) / 2, work.Right - Width)),
+                    Math.Max(work.Top, Math.Min(host.Y + (host.Height - Height) / 2, work.Bottom - Height)));
+            }
             batchList.ItemHeight = Dpi(BatchRowHeight);   // 行高不随窗体缩放自动变化
             LayoutContent();
             FillRows();                                   // 明细行高按新的 DPI 重新计算
@@ -524,11 +587,21 @@ namespace AppManager
             using (SolidBrush secondary = new SolidBrush(Theme.TextSecondary))
             using (SolidBrush tertiary = new SolidBrush(Theme.TextTertiary))
             {
-                Draw.DrawStringLeft(g, "导入记录", Theme.DialogTitleFont, primary, new Rectangle(pad, Dpi(18), Dpi(300), Dpi(28)));
-                Draw.DrawStringLeft(g, "这里记着最近的导入；原件还没清理完的，可以在这里处理。", Theme.CaptionFont, secondary,
-                    new Rectangle(pad, Dpi(48), ClientSize.Width - pad * 2, Dpi(22)));
-                Draw.DrawStringRight(g, headerSummary, Theme.CaptionFont, secondary,
-                    new Rectangle(ClientSize.Width - pad - Dpi(420), Dpi(20), Dpi(420), Dpi(24)));
+                if (Embedded)
+                {
+                    // 设置页已经画了页标题和说明：这里只在顶上一行写数量汇总（与「操作记录」同一位置）
+                    pad = Dpi(8);
+                    Draw.DrawStringLeft(g, headerSummary, Theme.CaptionFont, secondary,
+                        new Rectangle(pad, 0, Math.Max(1, ClientSize.Width - pad * 2), Dpi(34)));
+                }
+                else
+                {
+                    Draw.DrawStringLeft(g, "导入记录", Theme.DialogTitleFont, primary, new Rectangle(pad, Dpi(18), Dpi(300), Dpi(28)));
+                    Draw.DrawStringLeft(g, "这里记着最近的导入；原件还没清理完的，可以在这里处理。", Theme.CaptionFont, secondary,
+                        new Rectangle(pad, Dpi(48), ClientSize.Width - pad * 2, Dpi(22)));
+                    Draw.DrawStringRight(g, headerSummary, Theme.CaptionFont, secondary,
+                        new Rectangle(ClientSize.Width - pad - Dpi(420), Dpi(20), Dpi(420), Dpi(24)));
+                }
 
                 if (placeholder != null)
                 {
@@ -786,12 +859,18 @@ namespace AppManager
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
-            if (keyData == Keys.Escape) { Close(); return true; }
+            // 嵌在设置页里时 Esc 不归这里管：交给主窗口，按设置页的规则返回
+            if (keyData == Keys.Escape)
+            {
+                if (Embedded) return base.ProcessCmdKey(ref msg, keyData);
+                Close();
+                return true;
+            }
             if (keyData == Keys.Enter)
             {
                 // 自绘按钮不是系统默认按钮：焦点在哪个按钮上，回车就执行哪个；清理原件必须明确选中按钮。
                 if (retry.Focused) RequestRetry();
-                else if (close.Focused) Close();
+                else if (close.Focused && !Embedded) Close();
                 else if (itemList.Focused && itemList.SelectedIndex >= 0 && !(itemList.SelectedItem is Row)) ShowMoreRows();
                 return true;
             }

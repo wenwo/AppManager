@@ -77,6 +77,7 @@ namespace AppManager
         private SettingsPage settingsPage; // 设置页（独立页面，覆盖主内容区）
         private LayoutBackupPanel layoutBackupPanel;   // 设置页右侧「布局备份」
         private DatabasePanel databasePanel;           // 设置页右侧「操作记录与数据」
+        private ImportHistoryDialog importHistoryPanel; // 设置页右侧「导入记录」（嵌入的面板，见 MainForm.Import.cs）
         private bool settingsOpen;         // 是否处于设置页
         private MediaAddPage addPage;      // 资源分类的「添加文件」页（和设置页一样盖在标题行以下，关闭即释放）
         private bool settingsRescan;       // 设置页「重新扫描」发起的扫描尚未结束（结束时回传结果）
@@ -631,6 +632,9 @@ namespace AppManager
             // 添加页打开时：光标在缩略图网格上由网格滚动，其余（原生列表）交给指针下的控件
             if (addPage != null && addPage.RectangleToScreen(addPage.ClientRectangle).Contains(screen))
                 return addPage.HandleWheel(screen, delta);
+            // 选封面页打开时：滚轮属于页面里指针下的控件，不能被它下面的侧栏吞掉
+            if (coverPage != null && coverPage.RectangleToScreen(coverPage.ClientRectangle).Contains(screen))
+                return false;
             bool sidebarVisible = sidebar != null && sidebar.Visible;
             bool colVisible = collectionSidebar != null && collectionSidebar.Visible;
             if (!sidebarVisible && !colVisible) return false;
@@ -1165,6 +1169,11 @@ namespace AppManager
             databasePanel = new DatabasePanel(config.Database);
             databasePanel.DataChanged += delegate { ReloadAfterRestore(); };
             settingsPage.HostPanel(SettingsPage.SettingsSection.Data, databasePanel);
+            // 桌面备份清单、导入记录原来是两个大弹窗，现在同样嵌在设置页右侧
+            desktopBackupPanel = CreateDesktopBackupPanel();
+            settingsPage.HostPanel(SettingsPage.SettingsSection.DesktopBackup, desktopBackupPanel);
+            importHistoryPanel = CreateImportHistoryPanel();
+            settingsPage.HostPanel(SettingsPage.SettingsSection.ImportHistory, importHistoryPanel);
             Controls.Add(settingsPage);
             settingsPage.Visible = false;   // 默认隐藏，仅点「设置」后显示
 
@@ -1312,6 +1321,7 @@ namespace AppManager
                 addPage.Bounds = new Rectangle(0, Dpi(Theme.TitleRowHeight), ClientSize.Width, Math.Max(0, ClientSize.Height - Dpi(Theme.TitleRowHeight)));
                 addPage.RefreshLayout();
             }
+            LayoutCoverPage();
 
             // 底部状态条覆盖内容区留白，不压缩列表高度，也不推动原有底栏
             statusBar.Location = new Point(contentX, ClientSize.Height - footerH);
@@ -1823,7 +1833,7 @@ namespace AppManager
                 loadingLabel.BringToFront();
                 // 设置页打开时扫描进度不应压住页面（从设置页「重新扫描」触发）
                 if (settingsOpen) settingsPage.BringToFront();
-                if (addPage != null) addPage.BringToFront();
+                KeepOverlayPageOnTop();
             }
             // 扫描进行中再次请求：只登记一次补扫，避免多个扫描线程同时回写列表
             if (scanRunning)
@@ -2173,7 +2183,7 @@ namespace AppManager
         /// <summary>内容区显隐：集合信息页/查看器/设置页优先，其余情况展示网格并置前。</summary>
         private void SyncContentVisibility()
         {
-            if (settingsOpen || addPage != null) return;
+            if (settingsOpen || OverlayPageOpen) return;
             bool showGrid = !(collectionInfo != null && collectionInfo.Visible)
                 && !imageViewer.Visible && !textViewer.Visible && !archiveViewer.Visible && !videoPlayer.Visible && !musicPlayer.Visible;
             if (showGrid)
@@ -3916,13 +3926,7 @@ namespace AppManager
             return v;
         }
 
-        /// <summary>信息页「更换封面」：选择图片并回传路径（保存后才写入配置）。</summary>
-        private void OnCollectionPickCover()
-        {
-            // 专用的选封面窗口：按缩略图挑图、按封面比例预览；只列内置解码器能打开的图片
-            string path = CoverPickerDialog.Pick();
-            if (path != null) collectionInfo.SetEditCoverPath(path, path);
-        }
+        // 信息页「更换封面」：OnCollectionPickCover 见 MainForm.CoverPage.cs（选封面页嵌在主窗口里，不另弹窗口）
 
         /// <summary>信息页「恢复自动」：按首个图片成员重新生成预览（无图片成员时回退版式化封面）。</summary>
         private void OnCollectionAutoCover()
@@ -6228,7 +6232,7 @@ namespace AppManager
             statusProgress.Value = Math.Min(value, statusProgress.Maximum);
             statusDetail.Text = string.Empty;
             statusBar.BringToFront();
-            if (addPage != null) addPage.BringToFront();   // 状态条在内容区底部，不能盖住添加页的按钮
+            KeepOverlayPageOnTop();   // 状态条在内容区底部，不能盖住添加页、选封面页的按钮
             LayoutControls();
         }
 
@@ -6567,7 +6571,7 @@ namespace AppManager
             items.Add(MkMenu("一键收纳桌面（" + (config.OrganizeCopy ? "副本" : "搬家") + "）", delegate { DoOrganize(); }));
             if (organizer.HasBackup())
             {
-                items.Add(MkMenu("备份清单（" + config.DesktopBackup.Count + " 项）…", delegate { ShowBackupListDialog(); }));
+                items.Add(MkMenu("备份清单（" + config.DesktopBackup.Count + " 项）…", delegate { OpenSettingsSection(SettingsPage.SettingsSection.DesktopBackup); }));
                 items.Add(MkMenu("更新备份", delegate { DoUpdateBackup(); }));
                 items.Add(MkMenu("全部还原", delegate { DoRestore(); }));
             }
@@ -6692,190 +6696,6 @@ namespace AppManager
             if (error == null) return;
             if (ReferenceEquals(cfg, config)) cfg.ReportSaveFailure(error);
             else Paths.LogError(new IOException("后台操作保存失败（配置已重新加载）：" + error));
-        }
-
-        /// <summary>桌面备份清单：列出条目，支持单条还原/移除、全部还原。</summary>
-        private void ShowBackupListDialog()
-        {
-            using (Form f = new BufferedDialogForm())
-            {
-                f.FormBorderStyle = FormBorderStyle.None;
-                f.StartPosition = FormStartPosition.CenterParent;
-                f.ClientSize = new Size(640, 560);
-                f.BackColor = Theme.Background;
-                f.ShowInTaskbar = false;
-                f.Text = "桌面备份清单";
-                f.KeyPreview = true;
-                ApplyRoundedCorners(f);
-
-                Label title = new Label();
-                title.Text = f.Text;
-                title.Font = Theme.DialogTitleFont;
-                title.ForeColor = Theme.TextPrimary;
-                title.BackColor = Color.Transparent;
-                title.AutoSize = false;
-                title.SetBounds(24, 18, 300, 28);
-                f.Controls.Add(title);
-
-                Label desc = new Label();
-                desc.Font = Theme.CaptionFont;
-                desc.ForeColor = Theme.TextSecondary;
-                desc.BackColor = Color.Transparent;
-                desc.AutoSize = false;
-                desc.AutoEllipsis = true;
-                desc.SetBounds(24, 52, f.ClientSize.Width - 48, 20);
-                f.Controls.Add(desc);
-
-                IconButton close = new IconButton();
-                close.Kind = IconKind.Close;
-                close.Bounds = new Rectangle(f.ClientSize.Width - 14 - 34, 18, 34, 30);
-                close.Click += delegate { f.Close(); };
-                f.Controls.Add(close);
-
-                RoundButton restoreAll = new RoundButton();
-                restoreAll.Text = "全部还原";
-                restoreAll.Bounds = new Rectangle(close.Left - 8 - 96, 16, 96, 34);
-                f.Controls.Add(restoreAll);
-
-                // 列表比标题左右各宽 8px：卡片自带 8px 留白放阴影，卡片边缘正好与标题对齐
-                DesktopBackupListControl list = new DesktopBackupListControl();
-                list.Bounds = new Rectangle(16, 84, f.ClientSize.Width - 32, f.ClientSize.Height - 84 - 16);
-                list.AccessibleName = "桌面备份清单";
-                f.Controls.Add(list);
-                f.ActiveControl = list;
-                // 焦点不在列表上（例如停在按钮上）时，滚轮同样滚动列表
-                f.MouseWheel += delegate(object sender, MouseEventArgs e) { list.ScrollByWheel(e.Delta); };
-                f.KeyDown += delegate(object sender, KeyEventArgs e)
-                {
-                    if (e.KeyCode != Keys.Escape) return;
-                    e.Handled = true;
-                    f.Close();
-                };
-
-                bool busy = false;
-                Action<bool> setBusy = null;
-
-                Action refresh = delegate
-                {
-                    list.SetItems(config.DesktopBackup);
-                    desc.Text = "共 " + config.DesktopBackup.Count + " 项。「还原」把搬家的条目移回桌面、清理副本条目的备份副本；「移除」只删清单记录，不动文件。";
-                    restoreAll.Enabled = !busy && config.DesktopBackup.Count > 0;
-                };
-                refresh();
-
-                list.RestoreRequested += delegate(DesktopBackupEntry e)
-                {
-                    if (busy || !config.DesktopBackup.Contains(e)) return;
-                    if (!ConfirmDialog.Show("还原条目", "把「" + Path.GetFileName(e.CurrentPath) + "」还原到桌面？", "还原", "取消")) return;
-                    setBusy(true);
-                    AppConfig cfg = config;
-                    DesktopOrganizer worker = organizer;
-                    ThreadPool.QueueUserWorkItem(delegate
-                    {
-                        bool restored = false;
-                        string error = null;
-                        string restoreError = null;
-                        Exception failure = null;
-                        string saveError = null;
-                        AppConfig.BeginSaveBatch();
-                        try
-                        {
-                            restored = worker.RestoreOne(e);
-                            if (!restored) restoreError = worker.LastRestoreError;
-                            if (restored && !worker.RemoveEntry(e, out error))
-                                error = "文件已还原，但清单记录未能保存：" + (error ?? cfg.DatabaseError);
-                        }
-                        catch (Exception ex) { failure = ex; Paths.LogError(ex); }
-                        finally { saveError = AppConfig.EndSaveBatch(); }
-                        RunOnUi(delegate
-                        {
-                            setBusy(false);
-                            // 保存失败统一回滚并只提示一次（附带本操作的具体说明），不再另弹第二个框。
-                            if (saveError != null) ReportBatchSaveFailure(cfg, error ?? saveError);
-                            ReloadLibrary();
-                            refresh();
-                            if (failure != null)
-                                MessageDialog.Show(this, "还原失败：" + failure.Message, "还原", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            else if (!restored)
-                                MessageDialog.Show(this, "还原失败：" + (restoreError ?? "未知原因") + "\n已保留该清单项。", "还原",
-                                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                            else if (error != null && saveError == null)
-                                MessageDialog.Show(this, error, "还原", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        });
-                    });
-                };
-
-                list.RemoveRequested += delegate(DesktopBackupEntry e)
-                {
-                    if (busy || !config.DesktopBackup.Contains(e)) return;
-                    if (!ConfirmDialog.Show("移除清单项", "从清单移除这条记录？\n不会删除备份文件。", "移除", "取消")) return;
-                    setBusy(true);
-                    AppConfig cfg = config;
-                    DesktopOrganizer worker = organizer;
-                    ThreadPool.QueueUserWorkItem(delegate
-                    {
-                        string error = null;
-                        Exception failure = null;
-                        string saveError = null;
-                        AppConfig.BeginSaveBatch();
-                        try { worker.RemoveEntry(e, out error); }
-                        catch (Exception ex) { failure = ex; Paths.LogError(ex); }
-                        finally { saveError = AppConfig.EndSaveBatch(); }
-                        RunOnUi(delegate
-                        {
-                            setBusy(false);
-                            if (saveError != null) ReportBatchSaveFailure(cfg, "清单项未能移除：" + (error ?? saveError));
-                            refresh();
-                            if (failure != null)
-                                MessageDialog.Show(this, "移除失败：" + failure.Message, "移除清单项", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            else if (error != null && saveError == null)
-                                MessageDialog.Show(this, "移除失败：" + error, "移除清单项", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        });
-                    });
-                };
-
-                restoreAll.Click += delegate
-                {
-                    if (busy || config.DesktopBackup.Count == 0) return;
-                    if (!ConfirmDialog.Show("全部还原", "把清单中的 " + config.DesktopBackup.Count + " 个条目全部还原到桌面？", "全部还原", "取消")) return;
-                    setBusy(true);
-                    AppConfig cfg = config;
-                    DesktopOrganizer worker = organizer;
-                    ThreadPool.QueueUserWorkItem(delegate
-                    {
-                        int n = 0;
-                        Exception failure = null;
-                        string saveError = null;
-                        AppConfig.BeginSaveBatch();
-                        try { n = worker.RestoreAll(); }
-                        catch (Exception ex) { failure = ex; Paths.LogError(ex); }
-                        finally { saveError = AppConfig.EndSaveBatch(); }
-                        RunOnUi(delegate
-                        {
-                            setBusy(false);
-                            ReportBatchSaveFailure(cfg, saveError);
-                            ReloadLibrary();
-                            refresh();
-                            if (failure != null)
-                                MessageDialog.Show(this, "还原失败：" + failure.Message, "全部还原", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            else
-                                MessageDialog.Show(this, "已还原 " + n + " 个条目到桌面。", "全部还原",
-                                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        });
-                    });
-                };
-
-                setBusy = delegate(bool value)
-                {
-                    busy = value;
-                    list.SetBusy(value);
-                    restoreAll.Enabled = !value && config.DesktopBackup.Count > 0;
-                    close.Enabled = !value;
-                };
-                f.FormClosing += delegate(object sender, FormClosingEventArgs e) { if (busy) e.Cancel = true; };
-
-                ConfirmDialog.ShowModal(f);   // 模态 + 遮罩层
-            }
         }
 
         /// <summary>布局恢复后：重载配置、重建扫描器与列表，并把设置页状态同步到恢复后的值。</summary>
@@ -7156,6 +6976,7 @@ namespace AppManager
         {
             if (settingsOpen) return;
             DiscardAddPage();   // 托盘菜单「设置」：放弃正在进行的添加；主内容区马上又要隐藏，不必先恢复
+            DiscardCoverPage();   // 同样放弃正在进行的选封面
             settingsOpen = true;
             HideImageViewer();   // 查看器/播放器属于列表区域，进入设置页前先退出
             HideTextViewer();
@@ -7174,6 +6995,16 @@ namespace AppManager
             settingsPage.BringToFront();
             LayoutControls();
             Invalidate();
+        }
+
+        /// <summary>
+        /// 进入设置页并直接切到指定目录（「备份清单…」「导入记录…」等菜单入口用）。
+        /// 设置页里有面板正忙（备份、恢复、还原还在进行）时目录不切换，留在当前目录。
+        /// </summary>
+        private void OpenSettingsSection(SettingsPage.SettingsSection section)
+        {
+            OpenSettings();
+            settingsPage.SelectSection(section);
         }
 
         /// <summary>退出设置页：按当前内容模式与分类恢复主内容区控件。</summary>
@@ -7219,6 +7050,7 @@ namespace AppManager
             settingsPage.Bind(config.ShowHidden, config.AutoScan, config.AutoOrganizeDesktop,
                 config.CloseToTray, ResourceStore.EditableLocations(config), ResourceStore.Normalize(DefaultResourceStoreRoot()));
             if (databasePanel != null) databasePanel.SetDatabase(config.Database);   // 配置整体重载后换成新的数据库对象
+            RefreshDesktopBackupPanel();   // 清单在配置里：配置重载或刚收纳过之后同步到面板
         }
 
         /// <summary>
@@ -7414,7 +7246,7 @@ namespace AppManager
             using (SolidBrush b = new SolidBrush(Theme.Background))
                 g.FillRectangle(b, ClientRectangle);
             if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
-            if (addPage != null) return;   // 添加页铺满标题行以下，标题行只留底色
+            if (OverlayPageOpen) return;   // 添加页、选封面页铺满标题行以下，标题行只留底色
             // 设置页铺满标题行以下的整个窗口：标题行与右侧同底色，只把设置页左侧目录的底色和分隔线向上延伸到窗口顶边
             if (settingsOpen)
             {
@@ -7448,7 +7280,7 @@ namespace AppManager
         protected override void OnPaint(PaintEventArgs e)
         {
             // 设置页打开时标题由页面自身绘制，标题行不再重复绘制应用名
-            if (settingsOpen || addPage != null) return;
+            if (settingsOpen || OverlayPageOpen) return;
             Graphics g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             // 标题：顶栏行1（标题行）
@@ -7575,6 +7407,13 @@ namespace AppManager
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            // 选封面页打开时，按键先由页面自己处理（Esc、回车、退格）；到这里的只剩主窗口的快捷键，
+            // 它们作用的是被页面盖住的内容（搜索框、粘贴封面、粘贴导入……），一律不响应。
+            if (coverPage != null)
+            {
+                if (keyData == Keys.Escape) { coverPage.Close(); return true; }
+                return base.ProcessCmdKey(ref msg, keyData);
+            }
             if (keyData == Keys.Escape && collectionSidebar != null && collectionSidebar.IsInternalDragActive)
             {
                 collectionSidebar.CancelInternalDrag();

@@ -196,6 +196,7 @@ namespace AppManager
                 Run("add page lists by type, checks across folders, previews, takes drops and typed paths and drops vanished files", MediaAddPageFlow);
                 Run("add page for folders and software: checks folders, blocks drives, lists installed software with .exe files", MediaAddPageFolderAndSoftware);
                 Run("add page opens inside the main window, stays on top, follows resizes and restores the main content", MediaAddPageInMainWindow);
+                Run("embedded pages: cover page inside the main window keeps the edit, desktop backup list is a busy-aware settings section", EmbeddedPages);
                 Run("retrospective fixes: repair records visible, batch adds skip scrollbar sync, Alt+F4 on yes/no, drag across duplicate rows, backup list waits and stays busy",
                     RetrospectiveFixes);
                 Run("exporting change details writes a temp file first: a failure keeps the old file and leaves no partial file", ExportChangesAtomic);
@@ -5968,6 +5969,133 @@ namespace AppManager
             }
         }
 
+        // 三个大弹窗改成窗口内页面：选封面页嵌在主窗口里（编辑页留在下面、选完带着封面回来）；
+        // 桌面备份清单是设置页里的一个目录，忙碌时挡住返回和目录切换。
+        private static void EmbeddedPages()
+        {
+            AppConfig config = RenameConfig("embedded-pages");
+            config.AutoScan = false;
+            string key = CollectionKeys.Make("照片", "E旅行");
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "E旅行", Description = "原简介" });
+            string imageDir = Path.Combine(root, "embedded-pages-images");
+            Directory.CreateDirectory(imageDir);
+            string image = Path.Combine(imageDir, "cover.png");
+            using (Bitmap bitmap = new Bitmap(64, 40)) bitmap.Save(image, System.Drawing.Imaging.ImageFormat.Png);
+            AppInfo item = AddEntry(config, "照片", Path.Combine(config.ResourceStorePath, "照片", "embedded-photo.png"), false, true, "embedded photo");
+            Check(config.Save(), "embedded pages fixture save failed");
+
+            using (MainForm form = ResourceForm(config, "照片", item))
+            {
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.ClientSize = new Size(1000, 680);
+                form.Show();
+                Application.DoEvents();
+
+                Type formType = typeof(MainForm), panelType = typeof(Controls.CollectionInfoPanel);
+                Controls.CollectionInfoPanel info = (Controls.CollectionInfoPanel)formType.GetField("collectionInfo", Private).GetValue(form);
+                Control sidebar = (Control)formType.GetField("sidebar", Private).GetValue(form);
+                Controls.SettingsPage settings = (Controls.SettingsPage)formType.GetField("settingsPage", Private).GetValue(form);
+                FieldInfo coverField = formType.GetField("coverPage", Private);
+                FieldInfo editCover = panelType.GetField("editCoverPath", Private);
+                MethodInfo keys = formType.GetMethod("ProcessCmdKey", Private);
+                Func<CoverPickerDialog> openCover = delegate
+                {
+                    Invoke(form, "OnCollectionPickCover");
+                    Application.DoEvents();
+                    return (CoverPickerDialog)coverField.GetValue(form);
+                };
+
+                formType.GetField("currentCollection", Private).SetValue(form, null);
+                formType.GetField("collectionEntered", Private).SetValue(form, true);
+                Invoke(form, "RefreshGrid");
+
+                // 不在编辑页时点不开
+                Check(openCover() == null, "the cover page opened outside the edit page");
+
+                Invoke(form, "OnCollectionSelected", key);
+                Check(info.Visible && !info.IsEditing, "fixture did not show the collection info page");
+                panelType.GetMethod("RequestEdit", Private).Invoke(info, null);
+                TextBox desc = (TextBox)panelType.GetField("descBox", Private).GetValue(info);
+                desc.Text = "改到一半";
+                Check(info.IsEditing && info.HasUnsavedEdit, "fixture did not enter the edit page");
+                string coverBefore = (string)editCover.GetValue(info);
+
+                // 1. 打开：嵌在主窗口里、铺满标题行以下、在最上面；编辑页原样留着，侧栏收起（它的标题在标题行里，页面盖不到）
+                CoverPickerDialog page = openCover();
+                Check(page != null && !page.TopLevel && page.Parent == form && page.Visible, "the cover page did not open inside the main window");
+                Check(page.Left == 0 && page.Top > 0 && page.Width == form.ClientSize.Width && page.Bottom == form.ClientSize.Height,
+                    "the cover page does not fill the area below the title row: " + page.Bounds);
+                Check(form.Controls.GetChildIndex(page) == 0 && !sidebar.Visible, "the cover page is not on top or the sidebar title still shows");
+                Check(info.IsEditing && desc.Text == "改到一半", "opening the cover page ended the edit");
+                Check(!(bool)formType.GetProperty("CanImportHere", Private).GetValue(form, null), "drops and pastes still import while the cover page is open");
+
+                // 后台刷新、状态条不能把别的控件顶到页面上面，也不能结束编辑；窗口缩放时页面跟着铺满
+                Invoke(form, "RefreshGrid");
+                Invoke(form, "ShowStatusBar", "测试", 0, 0);
+                Application.DoEvents();
+                Check(form.Controls.GetChildIndex(page) == 0 && info.IsEditing && desc.Text == "改到一半", "a refresh surfaced controls over the cover page or ended the edit");
+                Invoke(form, "HideStatusBar");
+                Size resized = new Size(form.MinimumSize.Width + 40, form.MinimumSize.Height + 40);
+                form.ClientSize = resized;
+                Application.DoEvents();
+                Check(page.Width == resized.Width && page.Bottom == resized.Height, "the cover page did not follow the window size: " + page.Bounds);
+                Check(ReferenceEquals(openCover(), page), "a second cover page was opened");
+
+                // 2. Esc 取消：页面关闭并释放，编辑页和已填内容都在，封面没变，侧栏恢复
+                keys.Invoke(form, new object[] { new Message(), Keys.Escape });
+                Application.DoEvents();
+                Check(coverField.GetValue(form) == null && page.IsDisposed, "escape did not close the cover page");
+                Check(info.IsEditing && desc.Text == "改到一半" && (string)editCover.GetValue(info) == coverBefore && sidebar.Visible,
+                    "cancelling the cover page changed the edit page");
+
+                // 3. 选定：结果交回编辑页（保存时才写入配置）
+                page = openCover();
+                page.ResultPath = image;
+                page.DialogResult = DialogResult.OK;
+                page.Close();
+                Application.DoEvents();
+                Check(coverField.GetValue(form) == null && info.IsEditing && desc.Text == "改到一半", "picking a cover closed the edit page");
+                Check(string.Equals((string)editCover.GetValue(info), image, StringComparison.OrdinalIgnoreCase), "the picked cover did not reach the edit page");
+                Check(string.IsNullOrEmpty(CollectionOps.FindByKey(config, key).Cover), "the cover was written before saving");
+
+                // 4. 进入设置页：放弃正在进行的选封面
+                page = openCover();
+                Check(page != null, "the cover page did not reopen");
+                Invoke(form, "OpenSettings");
+                Application.DoEvents();
+                Check(coverField.GetValue(form) == null && page.IsDisposed && settings.Visible, "opening settings left the cover page behind");
+
+                // 5. 桌面备份清单是设置页里的目录：空清单不能全部还原；忙碌时不能切目录、不能离开设置页
+                Invoke(form, "OpenSettingsSection", Controls.SettingsPage.SettingsSection.DesktopBackup);
+                Controls.DesktopBackupPanel backup = (Controls.DesktopBackupPanel)formType.GetField("desktopBackupPanel", Private).GetValue(form);
+                Control restoreAll = (Control)typeof(Controls.DesktopBackupPanel).GetField("restoreAll", Private).GetValue(backup);
+                Check(settings.Section == Controls.SettingsPage.SettingsSection.DesktopBackup && backup.Visible && backup.Parent == settings,
+                    "the desktop backup list did not open as a section of the settings page");
+                Check(!restoreAll.Enabled, "restore-all is offered for an empty list");
+                config.DesktopBackup.Add(new DesktopBackupEntry { CurrentPath = "D:\\stash\\a.lnk", OriginalPath = "C:\\Desktop\\a.lnk" });
+                try
+                {
+                    Invoke(form, "RefreshDesktopBackupPanel");
+                    Check(restoreAll.Enabled, "restore-all stayed disabled with an entry in the list");
+                    int busyEvents = 0;
+                    backup.BusyChanged += delegate { busyEvents++; };
+                    backup.SetBusy(true);
+                    Check(backup.Busy && settings.Busy && !restoreAll.Enabled && busyEvents == 1, "the busy state did not reach the settings page");
+                    Check(!settings.SelectSection(Controls.SettingsPage.SettingsSection.General), "the section changed while the list was busy");
+                    Invoke(form, "CloseSettings");
+                    Check(settings.Visible, "settings closed while the list was busy");
+                    backup.SetBusy(false);
+                    backup.SetBusy(false);   // 重复设置不重复通知
+                    Check(!backup.Busy && restoreAll.Enabled && busyEvents == 2, "leaving the busy state was not reported once");
+                }
+                finally { config.DesktopBackup.Clear(); }
+                Invoke(form, "CloseSettings");
+                Check(!settings.Visible, "settings stayed open");
+            }
+        }
+
         private static void ReviewFollowUps()
         {
             // 1. 文本框一打开就放不下：句柄创建时不能重建句柄（曾抛「创建窗口句柄时出错」），显示后才切换滚动条
@@ -8109,11 +8237,15 @@ namespace AppManager
             };
             using (MainForm form = new MainForm(config))
             {
-                Invoke(form, "BuildControls");
-                IntPtr handle = form.Handle;
+                // 导入记录现在嵌在设置页里：窗口要真的显示出来，面板才会显示并读取（放在屏幕外）
+                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
+                form.ShowInTaskbar = false;
+                form.StartPosition = FormStartPosition.Manual;
+                form.Location = new Point(-3000, -3000);
+                form.Show();
+                Application.DoEvents();
                 typeof(MainForm).GetField("contentMode", Private).SetValue(form, Controls.SidebarControl.ContentMode.Website);
                 typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "文档");
-                typeof(MainForm).GetField("scanRunning", Private).SetValue(form, true);
                 MethodInfo queue = typeof(MainForm).GetMethod("QueueImport", Private, null, new[]
                 {
                     typeof(string[]), typeof(ImportOperation), typeof(string), typeof(string), typeof(bool), typeof(uint),
@@ -8146,43 +8278,44 @@ namespace AppManager
                 FileImport.Save(saved);
                 File.Delete(Path.ChangeExtension(xml, ".complete"));
 
-                // 打开导入记录、选中这条记录，再按 clean 决定点清理还是直接关闭；检查结果先记下来，出了窗口再断言
+                // 打开导入记录（现在是设置页里的一个目录，不再弹窗口）、选中这条记录，再按 clean 决定点清理还是直接返回
                 bool found = false, offered = false;
+                ImportHistoryDialog panel = (ImportHistoryDialog)typeof(MainForm).GetField("importHistoryPanel", Private).GetValue(form);
+                ListBox batches = (ListBox)typeof(ImportHistoryDialog).GetField("batchList", Private).GetValue(panel);
+                Control retryButton = (Control)typeof(ImportHistoryDialog).GetField("retry", Private).GetValue(panel);
+                Controls.SettingsPage settings = (Controls.SettingsPage)typeof(MainForm).GetField("settingsPage", Private).GetValue(form);
                 Action<bool> open = delegate(bool clean)
                 {
                     found = false;
                     offered = false;
-                    Stopwatch waited = Stopwatch.StartNew();
-                    using (System.Windows.Forms.Timer probe = new System.Windows.Forms.Timer { Interval = 10 })
-                    {
-                        probe.Tick += delegate
+                    Invoke(form, "ShowImportHistory");
+                    Check(settings.Visible && settings.Section == Controls.SettingsPage.SettingsSection.ImportHistory
+                        && panel.Visible && !panel.TopLevel && panel.Parent == settings,
+                        "import history did not open as a section of the settings page");
+                    PumpUntil(delegate { return batches.Items.Count > 0; }, 15000);
+                    for (int i = 0; i < batches.Items.Count; i++)
+                        if (((ImportHistoryDialog.Record)batches.Items[i]).Batch.Id == saved.Id)
                         {
-                            ImportHistoryDialog dialog = null;
-                            foreach (Form opened in Application.OpenForms)
-                                if (opened is ImportHistoryDialog) dialog = (ImportHistoryDialog)opened;
-                            if (dialog == null || !dialog.Visible) return;
-                            ListBox batches = (ListBox)typeof(ImportHistoryDialog).GetField("batchList", Private).GetValue(dialog);
-                            if (batches.Items.Count == 0 && waited.ElapsedMilliseconds < 15000) return;
-                            probe.Stop();
-                            dialog.Opacity = 0;
-                            try
-                            {
-                                for (int i = 0; i < batches.Items.Count; i++)
-                                    if (((ImportHistoryDialog.Record)batches.Items[i]).Batch.Id == saved.Id)
-                                    {
-                                        batches.SelectedIndex = i;
-                                        found = true;
-                                    }
-                                offered = found && ((Control)typeof(ImportHistoryDialog).GetField("retry", Private).GetValue(dialog)).Visible;
-                                if (clean && offered)
-                                    AnswerMessageDialog("导入记录", 1, delegate { typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(dialog, null); });
-                            }
-                            finally { if (dialog.Visible) dialog.Close(); }
-                        };
-                        probe.Start();
-                        Invoke(form, "ShowImportHistory");
+                            batches.SelectedIndex = i;
+                            found = true;
+                        }
+                    offered = found && retryButton.Visible;
+                    if (clean && offered)
+                    {
+                        AnswerMessageDialog("导入记录", 1, delegate { typeof(ImportHistoryDialog).GetMethod("RequestRetry", Private).Invoke(panel, null); });
+                        Check(panel.Visible && !panel.IsDisposed && !retryButton.Visible, "requesting cleanup closed the embedded panel or left the button");
                     }
                     PumpUntil(() => !(bool)running.GetValue(form));
+                    if (clean)
+                    {
+                        // 清理结束后面板自己重新读取：这条记录的清理按钮不再出现
+                        PumpUntil(delegate { return batches.Items.Count > 0 && !retryButton.Visible; }, 15000);
+                        for (int i = 0; i < batches.Items.Count; i++)
+                            if (((ImportHistoryDialog.Record)batches.Items[i]).Batch.Id == saved.Id) batches.SelectedIndex = i;
+                        Check(!retryButton.Visible, "the panel still offers cleanup after it finished");
+                    }
+                    Invoke(form, "CloseSettings");
+                    Check(!settings.Visible, "settings page stayed open");
                 };
 
                 open(false);

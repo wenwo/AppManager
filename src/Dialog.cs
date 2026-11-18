@@ -471,6 +471,7 @@ namespace AppManager
     public class DpiAwareForm : Form
     {
         private const int WM_DPICHANGED = 0x02E0;
+        private const int WM_DPICHANGED_AFTERPARENT = 0x02E3;
         private int currentDpi = 96;
         private bool dpiInitialized;
 
@@ -505,7 +506,9 @@ namespace AppManager
             currentDpi = DeviceDpi;
             try { int actualDpi = (int)GetDpiForWindow(Handle); if (actualDpi > 0) currentDpi = actualDpi; }
             catch (EntryPointNotFoundException) { }
-            if (currentDpi != 96)
+            // 嵌在别的窗口里当页面用时（TopLevel 为 false）：位置和大小由宿主决定，里面的控件由页面自己按 DPI 排版，
+            // 这里不再整体缩放，否则宿主刚定好的大小会被再放大一次。
+            if (currentDpi != 96 && TopLevel)
             {
                 DpiChangeInProgress = true;
                 try { Scale(new SizeF(currentDpi / 96f, currentDpi / 96f)); }
@@ -516,8 +519,11 @@ namespace AppManager
 
         protected virtual void OnDpiScaleChanged()
         {
-            if (FormBorderStyle == FormBorderStyle.None) MainForm.ApplyRoundedCorners(this);
+            if (TopLevel && FormBorderStyle == FormBorderStyle.None) MainForm.ApplyRoundedCorners(this);
         }
+
+        /// <summary>是否作为页面嵌在别的窗口里（不是独立弹出的窗口）。</summary>
+        protected bool Embedded { get { return !TopLevel; } }
 
         protected override void OnDpiChanged(DpiChangedEventArgs e)
         {
@@ -527,6 +533,21 @@ namespace AppManager
 
         protected override void WndProc(ref Message m)
         {
+            if (m.Msg == WM_DPICHANGED_AFTERPARENT && !TopLevel)
+            {
+                // 嵌入的页面收不到 WM_DPICHANGED：宿主窗口换了显示缩放之后，在这里跟上新的 DPI 并重新排版
+                base.WndProc(ref m);
+                int parentDpi = 0;
+                try { parentDpi = (int)GetDpiForWindow(Handle); }
+                catch (EntryPointNotFoundException) { }
+                if (dpiInitialized && parentDpi > 0 && parentDpi != currentDpi)
+                {
+                    currentDpi = parentDpi;
+                    OnDpiScaleChanged();
+                    Invalidate(true);
+                }
+                return;
+            }
             if (m.Msg != WM_DPICHANGED) { base.WndProc(ref m); return; }
             int newDpi = (int)(m.WParam.ToInt64() & 0xFFFF);
             if (newDpi <= 0 || m.LParam == IntPtr.Zero) return;
@@ -593,7 +614,8 @@ namespace AppManager
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
-            if (FormBorderStyle != FormBorderStyle.None || ClientSize.Width < 2 || ClientSize.Height < 2) return;
+            // 嵌在别的窗口里当页面用时不画外框：它不是浮在遮罩上的独立窗口
+            if (!TopLevel || FormBorderStyle != FormBorderStyle.None || ClientSize.Width < 2 || ClientSize.Height < 2) return;
             Graphics g = e.Graphics;
             SmoothingMode old = g.SmoothingMode;
             g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -732,9 +754,12 @@ namespace AppManager
         {
             Form active = Form.ActiveForm;
             if (active != null && active != self && !(active is MenuWindow)) return active;
+            // 从嵌入的页面里弹出来的提示框：宿主是它所在的顶层窗口，不是页面自己
+            if (preferred != null && !preferred.IsDisposed && !preferred.TopLevel) preferred = preferred.TopLevelControl as Form;
             if (preferred != null && preferred != self && !preferred.IsDisposed && preferred.Visible) return preferred;
+            // 嵌在主窗口里当页面用的窗体（TopLevel 为 false）也在这个列表里，它们不能当弹窗的宿主
             foreach (Form open in Application.OpenForms)
-                if (open != null && open != self && open.Visible && !(open is MenuWindow)) return open;
+                if (open != null && open != self && open.TopLevel && open.Visible && !(open is MenuWindow)) return open;
             return null;
         }
     }

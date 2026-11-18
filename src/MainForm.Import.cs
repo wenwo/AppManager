@@ -40,7 +40,7 @@ namespace AppManager
 
         private bool CanImportHere
         {
-            get { return !importExitPending && !settingsOpen && addPage == null && !imageViewer.Visible && !textViewer.Visible && !archiveViewer.Visible && !videoPlayer.Visible
+            get { return !importExitPending && !settingsOpen && !OverlayPageOpen && !imageViewer.Visible && !textViewer.Visible && !archiveViewer.Visible && !videoPlayer.Visible
                 && !musicPlayer.Visible && !collectionInfo.IsEditing; }
         }
 
@@ -942,26 +942,43 @@ namespace AppManager
             return batch.Items.Any(i => AwaitsSourceDelete(batch, i));
         }
 
+        /// <summary>「导入记录…」：导入记录嵌在设置页里（左侧目录「导入记录」），这里直接跳过去，不另弹窗口。</summary>
         private void ShowImportHistory()
         {
-            ImportBatch batch;
-            using (ImportHistoryDialog dialog = new ImportHistoryDialog(ImportJournal, delegate { return importRunning; }))
-            {
-                ConfirmDialog.ShowModal(dialog);   // 模态 + 遮罩层
-                batch = dialog.RetryBatch;
-            }
+            OpenSettingsSection(SettingsPage.SettingsSection.ImportHistory);
+        }
+
+        /// <summary>设置页右侧的「导入记录」面板：读日志、展示；清理原件由下面的 RetryImportCleanup 交给导入队列执行。</summary>
+        private ImportHistoryDialog CreateImportHistoryPanel()
+        {
+            ImportHistoryDialog panel = new ImportHistoryDialog(ImportJournal, delegate { return importRunning; });
+            panel.TopLevel = false;   // 作为面板嵌进设置页，不是独立窗口
+            panel.RetryRequested += RetryImportCleanup;
+            return panel;
+        }
+
+        /// <summary>用户在导入记录里确认清理原件：排进导入队列删除已入库项的源文件，结束后（成功或失败）让面板重新读取。</summary>
+        private void RetryImportCleanup(ImportBatch batch)
+        {
             if (batch == null) return;
             CancellationToken cancel = importCancel.Token;
             EnqueueImport(delegate
             {
-                // 数据库已被恢复/条目已删除时，不按过期日志删源。
-                bool registered = (bool)Invoke(new Func<bool>(delegate
+                try
                 {
-                    return batch.Items.Where(i => !i.Reference && (i.State == FileImport.Copied || i.State == FileImport.DeleteFailed))
-                        .All(i => IsBatchTargetRegistered(batch, i.Target));
-                }));
-                if (!registered) throw new IOException("入库记录已变化，保留源文件。");
-                FileImport.DeleteSources(batch, cancel); FileImport.Finish(batch); RunOnUi(delegate { FinishImport(batch); });
+                    // 数据库已被恢复/条目已删除时，不按过期日志删源。
+                    bool registered = (bool)Invoke(new Func<bool>(delegate
+                    {
+                        return batch.Items.Where(i => !i.Reference && (i.State == FileImport.Copied || i.State == FileImport.DeleteFailed))
+                            .All(i => IsBatchTargetRegistered(batch, i.Target));
+                    }));
+                    if (!registered) throw new IOException("入库记录已变化，保留源文件。");
+                    FileImport.DeleteSources(batch, cancel); FileImport.Finish(batch); RunOnUi(delegate { FinishImport(batch); });
+                }
+                finally
+                {
+                    RunOnUi(delegate { if (importHistoryPanel != null && !importHistoryPanel.IsDisposed) importHistoryPanel.Reload(); });
+                }
             });
         }
 

@@ -34,11 +34,12 @@ namespace AppManager
         private static string lastFolder;
         private static string lastFile;
 
-        // 96 DPI 设计坐标，绘制和布局时换算
-        private readonly Rectangle placeFrame = new Rectangle(24, 80, 196, 412);
-        private readonly Rectangle browseFrame = new Rectangle(232, 80, 624, 412);
-        private readonly Rectangle previewFrame = new Rectangle(24, 504, 832, 72);
-        private readonly Rectangle pathFrame = new Rectangle(24, 588, 600, 34);
+        // 96 DPI 设计坐标，绘制和布局时换算。四个外框随页面大小重新计算（见 LayoutPage）：
+        // 嵌在主窗口里时页面跟着主窗口缩放，独立显示时是 880×640。
+        private Rectangle placeFrame = new Rectangle(24, 88, 196, 404);
+        private Rectangle browseFrame = new Rectangle(232, 88, 624, 404);
+        private Rectangle previewFrame = new Rectangle(24, 504, 832, 72);
+        private Rectangle pathFrame = new Rectangle(24, 588, 600, 34);
 
         private enum PlaceKind { Header, Note, Place, Drive }
 
@@ -56,6 +57,9 @@ namespace AppManager
         private readonly List<PlaceRow> places = new List<PlaceRow>();
         private readonly SoftwarePickerDialog.PickerList placeList = new SoftwarePickerDialog.PickerList();
         private readonly CoverImageGrid grid = new CoverImageGrid();
+        private readonly RoundButton backButton = new RoundButton();
+        private readonly Label titleLabel = new Label();
+        private readonly Label hint = new Label();
         private readonly RoundButton upButton = new RoundButton();
         private readonly TextBox pathBox = new TextBox();
         private readonly RoundButton confirmButton = new RoundButton();
@@ -90,17 +94,11 @@ namespace AppManager
         [DllImport("user32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, string lParam);
 
-        /// <summary>以模态方式显示（带遮罩），返回选定的图片路径；取消返回 null。</summary>
-        internal static string Pick()
-        {
-            using (CoverPickerDialog dialog = new CoverPickerDialog(null))
-            {
-                ConfirmDialog.ShowModal(dialog);
-                return dialog.DialogResult == DialogResult.OK ? dialog.ResultPath : null;
-            }
-        }
-
-        /// <summary>initialFolder 为空时打开上次选封面的文件夹，再没有就打开「图片」。</summary>
+        /// <summary>
+        /// 选封面页。主窗口把它嵌在标题行以下显示（和添加页、设置页一样不另弹窗口，见 MainForm.CoverPage.cs）：
+        /// 点「使用此封面」或「返回 / 取消」后页面自己关闭，结果在 DialogResult 和 ResultPath 里。
+        /// initialFolder 为空时打开上次选封面的文件夹，再没有就打开「图片」。
+        /// </summary>
         internal CoverPickerDialog(string initialFolder)
         {
             FormBorderStyle = FormBorderStyle.None;
@@ -111,23 +109,29 @@ namespace AppManager
             AllowDrop = true;
             Text = DialogTitle;
 
-            Label titleLabel = new Label();
+            // 页头与添加页一致：左上角「返回」，右边是页标题，下面一行说明
+            backButton.Text = "返回";
+            backButton.Icon = UiIconKind.Back;
+            backButton.SetBounds(24, 16, 74, 30);
+            backButton.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
+            Controls.Add(backButton);
+
             titleLabel.Text = DialogTitle;
-            titleLabel.Font = Theme.DialogTitleFont;
+            titleLabel.Font = Theme.PageTitleFont;
             titleLabel.ForeColor = Theme.TextPrimary;
             titleLabel.AutoSize = false;
             titleLabel.UseMnemonic = false;
-            titleLabel.SetBounds(24, 18, 832, 28);
+            titleLabel.TextAlign = ContentAlignment.MiddleLeft;
+            titleLabel.SetBounds(114, 14, 742, 34);
             Controls.Add(titleLabel);
 
-            Label hint = new Label();
             hint.Text = "左侧选位置，单击文件夹进入；单击图片看封面效果，双击直接使用。也可以粘贴路径或把图片拖进来。";
             hint.Font = Theme.CaptionFont;
             hint.ForeColor = Theme.TextSecondary;
             hint.AutoSize = false;
             hint.AutoEllipsis = true;
             hint.UseMnemonic = false;
-            hint.SetBounds(24, 48, 832, 22);
+            hint.SetBounds(24, 56, 832, 22);
             Controls.Add(hint);
 
             placeList.DrawMode = DrawMode.OwnerDrawVariable;
@@ -183,6 +187,7 @@ namespace AppManager
             cancelButton.Click += delegate { DialogResult = DialogResult.Cancel; Close(); };
             Controls.Add(cancelButton);
 
+            LayoutPage();
             BuildPlaces();
             currentFolder = StartFolder(initialFolder);
             if (currentFolder != null && lastFile != null
@@ -760,9 +765,45 @@ namespace AppManager
         protected override void OnDpiScaleChanged()
         {
             base.OnDpiScaleChanged();
-            LayoutPathBox();
+            LayoutPage();
             RefreshPlaces();   // 行高不随窗体缩放自动变化，重新加入条目才会重新测量
             Invalidate(true);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            if (!DpiChangeInProgress) LayoutPage();
+        }
+
+        /// <summary>
+        /// 按页面当前大小排版：左侧位置栏宽度固定，浏览区占其余宽度和高度，预览条、路径输入和按钮贴在底部。
+        /// 先算出 96 DPI 设计坐标下的四个外框，再把控件摆到换算后的像素位置。
+        /// </summary>
+        private void LayoutPage()
+        {
+            if (placeList == null || grid == null) return;
+            int dpi = Math.Max(96, CurrentDpi);
+            int w = Math.Max(640, ClientSize.Width * 96 / dpi), h = Math.Max(440, ClientSize.Height * 96 / dpi);
+            const int pad = 24, top = 88, placesWidth = 196, gap = 12, previewHeight = 72, rowHeight = 34, bottomPad = 18;
+            int pathTop = h - bottomPad - rowHeight;
+            int previewTop = pathTop - gap - previewHeight;
+            int framesHeight = previewTop - gap - top;
+            placeFrame = new Rectangle(pad, top, placesWidth, framesHeight);
+            browseFrame = new Rectangle(pad + placesWidth + gap, top, w - pad * 2 - placesWidth - gap, framesHeight);
+            previewFrame = new Rectangle(pad, previewTop, w - pad * 2, previewHeight);
+            pathFrame = new Rectangle(pad, pathTop, w - pad * 2 - 120 - 90 - 12 - 10, rowHeight);
+
+            backButton.Bounds = Scaled(new Rectangle(pad, 16, 74, 30));
+            titleLabel.Bounds = Scaled(new Rectangle(pad + 74 + 16, 14, Math.Max(1, w - pad * 2 - 90), 34));
+            hint.Bounds = Scaled(new Rectangle(pad, 56, w - pad * 2, 22));
+            placeList.Bounds = Scaled(new Rectangle(placeFrame.X + 4, placeFrame.Y + 4, placeFrame.Width - 8, placeFrame.Height - 8));
+            upButton.Bounds = Scaled(new Rectangle(browseFrame.X + 8, browseFrame.Y + 8, 92, 28));
+            grid.Bounds = Scaled(new Rectangle(browseFrame.X + 4, browseFrame.Y + 46, browseFrame.Width - 8, browseFrame.Height - 50));
+            confirmButton.Bounds = Scaled(new Rectangle(pathFrame.Right + 12, pathTop, 120, rowHeight));
+            cancelButton.Bounds = Scaled(new Rectangle(pathFrame.Right + 12 + 120 + 10, pathTop, 90, rowHeight));
+            LayoutPathBox();
+            Invalidate();
         }
 
         /// <summary>单行输入框的高度由字体决定，不随窗体缩放：按当前 DPI 重新放到外框中间。</summary>
