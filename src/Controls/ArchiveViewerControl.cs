@@ -696,11 +696,7 @@ namespace AppManager.Controls
 
         private void DrawTopBar(Graphics g)
         {
-            Draw.DrawIcon(g, UiIconKind.Back,
-                new Rectangle(backRect.X + Dpi(6), backRect.Y + (backRect.Height - Dpi(20)) / 2, Dpi(20), Dpi(20)), Theme.IconColor);
-            TextRenderer.DrawText(g, "返回", Theme.ButtonFont,
-                new Rectangle(backRect.X + Dpi(24), backRect.Y, backRect.Width - Dpi(24), backRect.Height),
-                Theme.TextPrimary, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            Draw.DrawBackButton(g, backRect, false, false, DpiHelper.ForControl(this));
             TextFormatFlags flags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine
                 | TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis;
             int sep = SeparatorWidth();

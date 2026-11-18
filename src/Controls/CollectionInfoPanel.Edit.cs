@@ -502,15 +502,7 @@ namespace AppManager.Controls
 
         private void PaintBackButton(Graphics g)
         {
-            Color fill = pressBtn == 12 ? Theme.SegmentBg : (hoverBtn == 12 ? Theme.CardHover : Theme.Card);
-            using (SolidBrush b = new SolidBrush(fill)) Draw.FillRoundedRect(g, b, backRect, Dpi(6));
-            using (Pen p = new Pen(Theme.ControlBorder, 1F)) Draw.DrawRoundedRect(g, p, backRect, Dpi(6));
-            int iconSize = Dpi(18);
-            Rectangle icon = new Rectangle(backRect.X + Dpi(8), backRect.Y + (backRect.Height - iconSize) / 2, iconSize, iconSize);
-            Draw.DrawIcon(g, UiIconKind.Back, icon, Theme.TextPrimary);
-            using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringLeft(g, "返回", Theme.ButtonFont, tb,
-                    new Rectangle(icon.Right + Dpi(4), backRect.Y, Math.Max(0, backRect.Right - icon.Right - Dpi(6)), backRect.Height));
+            Draw.DrawBackButton(g, backRect, hoverBtn == 12, pressBtn == 12, DpiHelper.ForControl(this));
         }
 
         /// <summary>封面预览：粘贴图 / 已选图按取景焦点画整图（可拖动），整图未到时先画已有封面，都没有画占位。</summary>

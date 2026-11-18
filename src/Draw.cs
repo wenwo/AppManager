@@ -260,6 +260,26 @@ namespace AppManager
         }
 
         /// <summary>
+        /// 自绘的「返回」按钮：白底描边的圆角框 + 左箭头 + 文字，和设置页、添加页用的 RoundButton 返回键同一个样子。
+        /// 查看器、播放器、集合编辑页这些自己画顶栏的地方共用，避免各画各的（有的带框、有的只是文字）。
+        /// </summary>
+        public static void DrawBackButton(Graphics g, Rectangle r, bool hot, bool pressed, int dpi)
+        {
+            if (r.Width <= 0 || r.Height <= 0) return;
+            int radius = DpiHelper.Scale(6, dpi);
+            Color fill = pressed ? Theme.SegmentBg : (hot ? Theme.CardHover : Theme.Card);
+            using (SolidBrush b = new SolidBrush(fill)) FillRoundedRect(g, b, r, radius);
+            using (Pen p = new Pen(hot ? Mix(Theme.ControlBorder, Theme.Accent, 0.2F) : Theme.ControlBorder, 1F))
+                DrawRoundedRect(g, p, new Rectangle(r.X, r.Y, r.Width - 1, r.Height - 1), radius);
+            int iconSize = Math.Min(DpiHelper.Scale(18, dpi), Math.Max(8, r.Height - 8));
+            Rectangle icon = new Rectangle(r.X + DpiHelper.Scale(8, dpi), r.Y + (r.Height - iconSize) / 2, iconSize, iconSize);
+            DrawIcon(g, UiIconKind.Back, icon, Theme.TextPrimary);
+            using (SolidBrush tb = new SolidBrush(Theme.TextPrimary))
+                DrawStringLeft(g, "返回", Theme.ButtonFont, tb,
+                    new Rectangle(icon.Right + DpiHelper.Scale(4, dpi), r.Y, Math.Max(0, r.Right - icon.Right - DpiHelper.Scale(6, dpi)), r.Height));
+        }
+
+        /// <summary>
         /// 统一的空状态：居中的浅色图标块 + 一行标题 + 若干行说明，说清「这里是空的」和「接下来可以做什么」。
         /// 主列表、布局备份、操作记录、导入记录、桌面备份清单共用。glyph 是系统图标字体里的字形，取不到时只是不画图标；
         /// 区域太矮放不下图标块时，退回只画一行标题。

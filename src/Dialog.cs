@@ -1244,7 +1244,7 @@ namespace AppManager
             private readonly Panel body = new Panel { AutoScroll = true, BackColor = Theme.Card, Name = "PropertyContent" };
             private readonly TextBox categoryValue = DetailBox("CategoryValue");
             private readonly TextBox pathValue = DetailBox("TargetPathValue");
-            private readonly RoundButton done = ConfirmDialog.MakeBtn("完成", true);
+            private readonly RoundButton done = ConfirmDialog.MakeBtn("关闭", true);   // 只读窗口统一用「关闭」
             private readonly System.Windows.Forms.Timer poll = new System.Windows.Forms.Timer { Interval = 40 };
             private readonly string title;
             private List<string[]> rows;
@@ -1264,7 +1264,7 @@ namespace AppManager
                 try { if (app.Icon != null) icon = new Bitmap(app.Icon); } catch { }
                 FormBorderStyle = FormBorderStyle.None;
                 StartPosition = FormStartPosition.CenterParent;
-                ClientSize = new Size(DlgW, 440);
+                ClientSize = new Size(DlgW, 452);
                 BackColor = Theme.Card;
                 ShowInTaskbar = false;
                 body.Controls.Add(categoryValue);
@@ -1299,8 +1299,11 @@ namespace AppManager
 
             private static TextBox DetailBox(string name)
             {
-                return new TextBox { Name = name, ReadOnly = true, Multiline = true, BorderStyle = BorderStyle.None,
-                    ScrollBars = ScrollBars.Vertical, Font = Theme.BodyFont, ForeColor = Theme.TextPrimary, BackColor = Theme.Card };
+                TextBox box = new TextBox { Name = name, ReadOnly = true, Multiline = true, BorderStyle = BorderStyle.None,
+                    Font = Theme.BodyFont, ForeColor = Theme.TextPrimary, BackColor = Theme.Card };
+                // 放得下就不带滚动条（原来一直挂着一根灰掉的系统滚动条）；内容超过两行才出现
+                InputDialog.ScrollBarsWhenNeeded(box);
+                return box;
             }
 
             protected override void OnDpiScaleChanged()
@@ -1323,7 +1326,7 @@ namespace AppManager
                 layingOut = true;
                 try
                 {
-                    body.Bounds = new Rectangle(0, Dpi(42), ClientSize.Width, Math.Max(1, ClientSize.Height - Dpi(108)));
+                    body.Bounds = new Rectangle(0, Dpi(54), ClientSize.Width, Math.Max(1, ClientSize.Height - Dpi(120)));
                     done.Bounds = new Rectangle(ClientSize.Width - Dpi(Pad + 96), ClientSize.Height - Dpi(54), Dpi(96), Dpi(32));
                     rowTops = new int[rows.Count];
                     int bottom = 40;
@@ -1351,8 +1354,9 @@ namespace AppManager
             protected override void OnPaint(PaintEventArgs e)
             {
                 base.OnPaint(e);
-                using (SolidBrush brush = new SolidBrush(Theme.TextSecondary))
-                    Draw.DrawStringLeft(e.Graphics, "属性", Theme.CaptionFont, brush, new Rectangle(Dpi(Pad), Dpi(14), Dpi(DlgW - Pad * 2), Dpi(20)));
+                // 标题与确认框、输入框同一规格：13 号粗体，距顶 18
+                using (SolidBrush brush = new SolidBrush(Theme.TextPrimary))
+                    Draw.DrawStringLeft(e.Graphics, "属性", Theme.DialogTitleFont, brush, new Rectangle(Dpi(Pad), Dpi(18), Dpi(DlgW - Pad * 2), Dpi(30)));
             }
 
             private void PaintContent(object sender, PaintEventArgs e)
@@ -1373,7 +1377,7 @@ namespace AppManager
                 }
                 int rightX = Pad + PreviewW + 16, rightW = DlgW - rightX - Pad;
                 using (SolidBrush brush = new SolidBrush(Theme.TextPrimary))
-                    Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, brush, new Rectangle(Dpi(rightX), Dpi(4), Dpi(rightW), Dpi(24)));
+                    Draw.DrawStringLeft(g, title, Theme.FontOf(11F, FontStyle.Bold), brush, new Rectangle(Dpi(rightX), Dpi(4), Dpi(rightW), Dpi(24)));
                 if (loading) using (SolidBrush brush = new SolidBrush(Theme.TextSecondary))
                     Draw.DrawStringLeft(g, "正在读取文件信息…", Theme.CaptionFont, brush, new Rectangle(Dpi(rightX), Dpi(40), Dpi(rightW), Dpi(RowH)));
                 for (int i = 0; i < rows.Count; i++)

@@ -150,7 +150,8 @@ namespace AppManager
             status.TextAlign = ContentAlignment.MiddleLeft;
             Controls.Add(status);
 
-            maintain.Text = "数据库维护 ▾";
+            maintain.Text = "数据库维护";
+            maintain.DropDown = true;   // 点了弹菜单：带下拉箭头（原来是在文字里写「▾」）
             maintain.Click += delegate { if (!running) ShowMaintainMenu(); };
             Controls.Add(maintain);
 

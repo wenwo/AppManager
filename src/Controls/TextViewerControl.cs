@@ -24,7 +24,6 @@ namespace AppManager.Controls
         private readonly PreviewLoader<TextPreview> loader;
         private readonly RoundButton externalButton;
         private readonly RoundButton saveButton;
-        private readonly Font textFont;
         private readonly System.Windows.Forms.Timer renderTimer;
         private int renderGeneration;
         private CancellationTokenSource renderCancellation;
@@ -110,10 +109,10 @@ namespace AppManager.Controls
             textBox.WordWrap = false;
             textBox.AcceptsTab = true;
             textBox.ScrollBars = RichTextBoxScrollBars.Both;
-            textBox.BackColor = Color.White;
-            textBox.ForeColor = Color.FromArgb(35, 35, 38);
-            textFont = new Font(FontFamily.GenericMonospace, 10F, FontStyle.Regular);
-            textBox.Font = textFont;
+            textBox.BackColor = Theme.Card;
+            textBox.ForeColor = Theme.TextPrimary;
+            // 正文用主题字体（缓存实例，不在这里释放）：系统等宽字体显示中文是点阵宋体，和程序其它地方差得太远
+            textBox.Font = Theme.FontOf(10F);
             textBox.Visible = false;
             textBox.TextChanged += delegate { OnTextEdited(); };
             Controls.Add(textBox);
@@ -531,8 +530,9 @@ namespace AppManager.Controls
             else markdownTabRect = plainTabRect = Rectangle.Empty;
             saveButton.Bounds = new Rectangle(Math.Max(0, right - Dpi(72)), buttonY, Dpi(72), buttonH);
             Rectangle area = TextArea;
-            textBox.Bounds = new Rectangle(area.X + Dpi(1), area.Y + Dpi(1),
-                Math.Max(0, area.Width - Dpi(2)), Math.Max(0, area.Height - Dpi(2)));
+            // 编辑框缩在白色圆角卡片里：左、上留出阅读边距，右、下只留一点，让滚动条贴着卡片边
+            textBox.Bounds = new Rectangle(area.X + Dpi(14), area.Y + Dpi(10),
+                Math.Max(0, area.Width - Dpi(14) - Dpi(4)), Math.Max(0, area.Height - Dpi(10) - Dpi(6)));
             // Markdown 预览留出阅读边距，背景由 DrawCanvas 补白
             markdownBox.Bounds = new Rectangle(area.X + Dpi(20), area.Y + Dpi(12),
                 Math.Max(0, area.Width - Dpi(24)), Math.Max(0, area.Height - Dpi(16)));
@@ -573,9 +573,10 @@ namespace AppManager.Controls
         {
             Rectangle area = TextArea;
             if (area.Width <= 0 || area.Height <= 0) return;
-            if (markdownBox.Visible)
-                using (SolidBrush b = new SolidBrush(markdownBox.BackColor)) g.FillRectangle(b, area);
-            using (Pen p = new Pen(Theme.Separator, 1)) g.DrawRectangle(p, area);
+            // 白色圆角卡片 + 细描边：与图片查看器的画布、各页面里的卡片同一种边框；编辑框和预览都缩在里面
+            using (SolidBrush fill = new SolidBrush(Theme.Card)) Draw.FillRoundedRect(g, fill, area, Dpi(8));
+            using (Pen p = new Pen(Theme.ControlBorder, 1))
+                Draw.DrawRoundedRect(g, p, new Rectangle(area.X, area.Y, area.Width - 1, area.Height - 1), Dpi(8));
             if (loadFailed)
             {
                 using (SolidBrush b = new SolidBrush(Theme.TextSecondary))
@@ -590,12 +591,7 @@ namespace AppManager.Controls
 
         private void DrawTopBar(Graphics g)
         {
-            DrawButtonBackground(g, backRect, false);
-            Draw.DrawIcon(g, UiIconKind.Back,
-                new Rectangle(backRect.X + Dpi(6), backRect.Y + (backRect.Height - Dpi(20)) / 2, Dpi(20), Dpi(20)), Theme.IconColor);
-            TextRenderer.DrawText(g, "返回", Theme.ButtonFont,
-                new Rectangle(backRect.X + Dpi(24), backRect.Y, backRect.Width - Dpi(24), backRect.Height),
-                Theme.TextPrimary, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            Draw.DrawBackButton(g, backRect, false, false, DpiHelper.ForControl(this));
             DrawViewSwitch(g);
         }
 
@@ -734,7 +730,6 @@ namespace AppManager.Controls
                 renderTimer.Dispose();
                 if (textBox != null) textBox.Dispose();
                 if (markdownBox != null) markdownBox.Dispose();
-                textFont.Dispose();
                 CancelResizeRender();
             }
             base.Dispose(disposing);

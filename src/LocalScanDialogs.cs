@@ -62,7 +62,7 @@ namespace AppManager
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.CenterParent;
             ClientSize = new Size(520, 196);
-            BackColor = Theme.Background;
+            BackColor = Theme.Card;   // 只有文字和进度条、没有内嵌卡片的小窗口用白底，和确认框、提示框一致
             ShowInTaskbar = false;
             Text = title;
 
@@ -94,7 +94,7 @@ namespace AppManager
             detailLabel.SetBounds(24, 80, 472, 20);
             Controls.Add(detailLabel);
 
-            progress.BackColor = Theme.Background;
+            progress.BackColor = Theme.Card;
             progress.SetBounds(24, 110, 472, 10);
             progress.Marquee = true;
             Controls.Add(progress);

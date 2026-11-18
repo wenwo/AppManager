@@ -304,7 +304,7 @@ namespace AppManager.Controls
         {
             int width = Math.Max(320, ClientSize.Width);
             int height = Math.Max(300, ClientSize.Height);
-            backRect = new Rectangle(16, 8, 86, 34);
+            backRect = new Rectangle(16, 8, Math.Max(86, DpiHelper.Scale(76, DpiHelper.ForControl(this))), 34);   // 宽度随缩放：字变大后「返回」不被截断
             playerCard = new Rectangle(16, height - 118, width - 32, 102);
             mainCard = new Rectangle(16, 48, width - 32, Math.Max(150, playerCard.Top - 60));
             int leftWidth = Math.Max(230, (int)(mainCard.Width * 0.40));
@@ -353,10 +353,7 @@ namespace AppManager.Controls
 
         private void DrawHeader(Graphics g)
         {
-            DrawButtonBackground(g, backRect, 3, 8);
-            Draw.DrawIcon(g, UiIconKind.Back, new Rectangle(backRect.X + 8, backRect.Y + 7, 20, 20), Theme.IconColor);
-            TextRenderer.DrawText(g, "返回", Theme.ButtonFont, new Rectangle(backRect.X + 30, backRect.Y, 48, backRect.Height),
-                Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
+            Draw.DrawBackButton(g, backRect, hover == 3, pressed == 3, DpiHelper.ForControl(this));
             if (!queueVisible || !queueSearch.Visible || showHeaderCount)
                 TextRenderer.DrawText(g, "正在播放", Theme.SectionTitleFont, new Rectangle(116, 8, 180, 34),
                     Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);

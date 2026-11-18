@@ -659,7 +659,7 @@ namespace AppManager.Controls
         private void LayoutChrome()
         {
             // 顶栏：左侧返回，右侧为音量提示位（文件名/序号在底部信息栏）
-            backRect = new Rectangle(ChromePad, 6, 76, TopBarH - 12);
+            backRect = new Rectangle(ChromePad, 6, DpiHelper.Scale(76, DpiHelper.ForControl(this)), TopBarH - 12);   // 宽度随缩放：字变大后「返回」不被截断
             hintRect = new Rectangle(Math.Max(0, Width - ChromePad - 180), 0, 180, TopBarH);
 
             // 底部信息栏：平铺底栏，高度与侧边栏「新建」底栏一致
@@ -708,13 +708,8 @@ namespace AppManager.Controls
 
         private void DrawTopBar(Graphics g)
         {
-            // 返回：chevron + 文案，悬停/按下给浅色圆角底
-            DrawButtonBg(g, 3, backRect);
-            Draw.DrawIcon(g, UiIconKind.Back,
-                new Rectangle(backRect.X + 6, backRect.Y + (backRect.Height - 20) / 2, 20, 20), Theme.IconColor);
-            Rectangle textR = new Rectangle(backRect.X + 24, backRect.Y, backRect.Width - 24, backRect.Height);
-            TextRenderer.DrawText(g, "返回", Theme.ButtonFont, textR, Theme.TextPrimary,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            // 返回：与设置页、添加页同款的带框按钮
+            Draw.DrawBackButton(g, backRect, hover == 3, press == 3, DpiHelper.ForControl(this));
 
             // 音量提示：原悬浮条上方的提示条会被视频宿主窗口遮挡，改在顶栏右侧短暂显示
             if (!muted && DateTime.UtcNow >= volUntil) return;

@@ -486,7 +486,7 @@ namespace AppManager.Controls
         private void LayoutChrome()
         {
             // 顶栏：仅左侧返回（文件名/序号在底部信息栏）
-            backRect = new Rectangle(ChromePad, 6, 76, TopBarH - 12);
+            backRect = new Rectangle(ChromePad, 6, DpiHelper.Scale(76, DpiHelper.ForControl(this)), TopBarH - 12);   // 宽度随缩放：字变大后「返回」不被截断
 
             // 底部信息栏：平铺底栏，高度与侧边栏「新建」底栏一致
             int infoTop = Height - InfoBarH;
@@ -534,13 +534,8 @@ namespace AppManager.Controls
 
         private void DrawTopBar(Graphics g)
         {
-            // 返回：chevron + 文案，悬停/按下给浅色圆角底
-            DrawButtonBg(g, 5, backRect);
-            Draw.DrawIcon(g, UiIconKind.Back,
-                new Rectangle(backRect.X + 6, backRect.Y + (backRect.Height - 20) / 2, 20, 20), Theme.IconColor);
-            Rectangle textR = new Rectangle(backRect.X + 24, backRect.Y, backRect.Width - 24, backRect.Height);
-            TextRenderer.DrawText(g, "返回", Theme.ButtonFont, textR, Theme.TextPrimary,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+            // 返回：与设置页、添加页同款的带框按钮
+            Draw.DrawBackButton(g, backRect, hover == 5, press == 5, DpiHelper.ForControl(this));
         }
 
         /// <summary>底部信息栏：平铺底栏 + 顶部分隔线，左侧文件名、右侧当前/总数，与侧边栏底栏同风格。</summary>

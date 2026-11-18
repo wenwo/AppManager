@@ -14,6 +14,7 @@ namespace AppManager.Controls
     {
         private bool _accent;
         private bool _danger;
+        private bool _dropDown;
         private bool _hover;
         private bool _pressed;
         private UiIconKind? _icon;
@@ -34,6 +35,10 @@ namespace AppManager.Controls
         /// <summary>危险操作的主按钮（删除等不可撤回的动作）：红色实底，优先于 Accent。</summary>
         [Category("外观")]
         public bool Danger { get { return _danger; } set { _danger = value; Invalidate(); } }
+
+        /// <summary>点了会弹出菜单（而不是直接执行动作）的按钮：文字右侧画一个向下的小箭头。</summary>
+        [Category("外观")]
+        public bool DropDown { get { return _dropDown; } set { _dropDown = value; Invalidate(); } }
 
         [Category("外观")]
         public UiIconKind? Icon { get { return _icon; } set { _icon = value; Invalidate(); } }
@@ -82,15 +87,19 @@ namespace AppManager.Controls
             Rectangle r = ClientRectangle;
             r.Inflate(-1, -1);
             int radius = DpiHelper.Scale(6, DpiHelper.ForControl(this));
+            // 带下拉箭头时，文字和图标在箭头左边的区域里居中
+            Rectangle content = r;
+            if (_dropDown) content.Width = Math.Max(0, content.Width - DpiHelper.Scale(14, DpiHelper.ForControl(this)));
             if (!Enabled)
             {
                 // 停用：灰底、浅字，主按钮也一样，一眼能看出现在点不了
                 using (SolidBrush b = new SolidBrush(Theme.SegmentBg)) Draw.FillRoundedRect(g, b, r, radius);
                 using (SolidBrush br = new SolidBrush(Theme.TextTertiary))
                 {
-                    if (_icon.HasValue) PaintIconAndText(g, r, br, Theme.TextTertiary);
-                    else Draw.DrawStringCenter(g, Text, Font, br, r);
+                    if (_icon.HasValue) PaintIconAndText(g, content, br, Theme.TextTertiary);
+                    else Draw.DrawStringCenter(g, Text, Font, br, content);
                 }
+                if (_dropDown) PaintDropDownArrow(g, r, Theme.TextTertiary);
                 return;
             }
             if (_danger)
@@ -115,8 +124,27 @@ namespace AppManager.Controls
             Color tc = _accent || _danger ? Color.White : Theme.TextPrimary;
             using (SolidBrush br = new SolidBrush(tc))
             {
-                if (_icon.HasValue) PaintIconAndText(g, r, br, tc);
-                else Draw.DrawStringCenter(g, Text, Font, br, r);
+                if (_icon.HasValue) PaintIconAndText(g, content, br, tc);
+                else Draw.DrawStringCenter(g, Text, Font, br, content);
+            }
+            if (_dropDown) PaintDropDownArrow(g, r, _accent || _danger ? Color.White : Theme.TextSecondary);
+        }
+
+        /// <summary>按钮右侧向下的小箭头：表示点了会弹出菜单。</summary>
+        private void PaintDropDownArrow(Graphics g, Rectangle r, Color color)
+        {
+            int dpi = DpiHelper.ForControl(this);
+            float cx = r.Right - DpiHelper.Scale(13, dpi), cy = r.Y + r.Height / 2F + DpiHelper.Scale(1, dpi) / 2F;
+            float half = DpiHelper.Scale(4, dpi), drop = DpiHelper.Scale(4, dpi) / 2F;
+            using (Pen pen = new Pen(color, Math.Max(1.4F, DpiHelper.Scale(3, dpi) / 2F)))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                pen.LineJoin = LineJoin.Round;
+                g.DrawLines(pen, new PointF[]
+                {
+                    new PointF(cx - half, cy - drop), new PointF(cx, cy + drop), new PointF(cx + half, cy - drop)
+                });
             }
         }
 

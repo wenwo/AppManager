@@ -1075,7 +1075,8 @@ namespace AppManager
             organizeBtn.Text = "整理桌面";
             organizeBtn.Icon = UiIconKind.Organize;
             organizeBtn.Accent = false;
-            organizeBtn.Size = new Size(98, 32);
+            organizeBtn.DropDown = true;   // 点了弹菜单：带下拉箭头
+            organizeBtn.Size = new Size(112, 32);
             organizeBtn.Click += OnOrganize;
             Controls.Add(organizeBtn);
 
@@ -1658,6 +1659,9 @@ namespace AppManager
             bool website = m == SidebarControl.ContentMode.Website;
             grid.ShowRowActions = website;
             grid.ShowTimeColumn = website;   // 资源列表额外显示日期列
+            // 「添加」在资源模式弹菜单（带下拉箭头、宽一点），在软件模式直接进添加页
+            addBtn.DropDown = website;
+            addBtn.Width = Dpi(website ? 90 : 76);
             RebuildSidebar();
             if (website)
             {

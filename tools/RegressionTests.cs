@@ -380,7 +380,11 @@ namespace AppManager
                         Check(category.Text == categories && target.Text == path, "property content truncated or stale");
                         foreach (TextBox box in new TextBox[] { category, target })
                         {
-                            Check(box.ReadOnly && box.Multiline && box.ScrollBars == ScrollBars.Vertical, "long values cannot be read safely");
+                            // 放得下就不挂滚动条；超过两行放不下时必须有，长内容才能滚动着看全
+                            bool overflow = (box.GetLineFromCharIndex(box.TextLength) + 1) * box.Font.Height > box.ClientSize.Height;
+                            Check(box.ReadOnly && box.Multiline && (!overflow || box.ScrollBars == ScrollBars.Vertical),
+                                "long values cannot be read safely");
+                            Check(overflow || box.ScrollBars == ScrollBars.None, "a short value still carries a scrollbar");
                             box.SelectAll();
                             Check(box.SelectedText == box.Text, "property content cannot be selected for copy");
                             Check(dialog.ClientRectangle.Contains(dialog.RectangleToClient(box.RectangleToScreen(box.ClientRectangle))), "property field exceeds dialog");
