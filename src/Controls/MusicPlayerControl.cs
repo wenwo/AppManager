@@ -345,7 +345,7 @@ namespace AppManager.Controls
             }
             else
             {
-                queueSearchRect = new Rectangle(116, 8, Math.Max(140, width - 132), 34);
+                queueSearchRect = new Rectangle(backRect.Right + 14, 8, Math.Max(140, width - backRect.Right - 30), 34);   // 紧跟在「返回」右边：返回键宽度随缩放变化
                 showHeaderCount = false;
             }
             queueSearch.SetBounds(queueSearchRect.X, queueSearchRect.Y, queueSearchRect.Width, queueSearchRect.Height);
@@ -355,7 +355,7 @@ namespace AppManager.Controls
         {
             Draw.DrawBackButton(g, backRect, hover == 3, pressed == 3, DpiHelper.ForControl(this));
             if (!queueVisible || !queueSearch.Visible || showHeaderCount)
-                TextRenderer.DrawText(g, "正在播放", Theme.SectionTitleFont, new Rectangle(116, 8, 180, 34),
+                TextRenderer.DrawText(g, "正在播放", Theme.SectionTitleFont, new Rectangle(backRect.Right + 14, 8, 180, 34),
                     Theme.TextPrimary, TextFormatFlags.VerticalCenter | TextFormatFlags.Left);
             if (showHeaderCount)
             {

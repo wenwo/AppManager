@@ -29,7 +29,37 @@ namespace AppManager
         private void RefreshDesktopBackupPanel()
         {
             if (desktopBackupPanel == null || desktopBackupPanel.IsDisposed) return;
+            // 后台正在整理或还原时，清单正被工作线程修改：这时不去读它，操作结束后会再刷新一次
+            if (desktopOperationRunning) return;
             desktopBackupPanel.SetItems(new List<DesktopBackupEntry>(config.DesktopBackup));
+        }
+
+        /// <summary>
+        /// 整理桌面、还原、自动收纳等正在后台搬动文件时，清单里的操作先不做，在面板上方说明原因。
+        /// 否则同一份清单会被两个后台操作同时处理（同一条被还原两次、报「还原失败」）。
+        /// </summary>
+        private bool DesktopWorkBlocked(DesktopBackupPanel panel)
+        {
+            if (!DesktopWorkRunning()) return false;
+            panel.SetStatus("整理桌面或还原正在进行，完成后再操作清单。", true);
+            return true;
+        }
+
+        /// <summary>开始一次清单操作：与「整理桌面」菜单的操作互斥（共用 desktopOperationRunning），期间菜单按钮停用、面板忙碌。</summary>
+        private bool BeginDesktopPanelWork(DesktopBackupPanel panel)
+        {
+            if (DesktopWorkBlocked(panel)) return false;
+            desktopOperationRunning = true;
+            organizeBtn.Enabled = false;
+            panel.SetBusy(true);
+            return true;
+        }
+
+        private void EndDesktopPanelWork(DesktopBackupPanel panel)
+        {
+            desktopOperationRunning = false;
+            organizeBtn.Enabled = true;
+            panel.SetBusy(false);
         }
 
         /// <summary>还原一条：确认后在后台把它移回桌面并从清单里去掉；失败时保留清单项并说明原因。</summary>
@@ -37,8 +67,9 @@ namespace AppManager
         {
             DesktopBackupPanel panel = desktopBackupPanel;
             if (panel == null || panel.Busy || !config.DesktopBackup.Contains(e)) return;
+            if (DesktopWorkBlocked(panel)) return;
             if (!ConfirmDialog.Show("还原条目", "把「" + Path.GetFileName(e.CurrentPath) + "」还原到桌面？", "还原", "取消")) return;
-            panel.SetBusy(true);
+            if (!BeginDesktopPanelWork(panel)) return;   // 确认框开着时可能有别的桌面操作开始了：再查一次
             AppConfig cfg = config;
             DesktopOrganizer worker = organizer;
             ThreadPool.QueueUserWorkItem(delegate
@@ -60,7 +91,7 @@ namespace AppManager
                 finally { saveError = AppConfig.EndSaveBatch(); }
                 RunOnUi(delegate
                 {
-                    panel.SetBusy(false);
+                    EndDesktopPanelWork(panel);
                     // 保存失败统一回滚并只提示一次（附带本操作的具体说明），不再另弹第二个框。
                     if (saveError != null) ReportBatchSaveFailure(cfg, error ?? saveError);
                     ReloadLibrary();
@@ -83,8 +114,9 @@ namespace AppManager
         {
             DesktopBackupPanel panel = desktopBackupPanel;
             if (panel == null || panel.Busy || !config.DesktopBackup.Contains(e)) return;
+            if (DesktopWorkBlocked(panel)) return;
             if (!ConfirmDialog.Show("移除清单项", "从清单移除这条记录？\n不会删除备份文件。", "移除", "取消")) return;
-            panel.SetBusy(true);
+            if (!BeginDesktopPanelWork(panel)) return;   // 确认框开着时可能有别的桌面操作开始了：再查一次
             AppConfig cfg = config;
             DesktopOrganizer worker = organizer;
             ThreadPool.QueueUserWorkItem(delegate
@@ -98,7 +130,7 @@ namespace AppManager
                 finally { saveError = AppConfig.EndSaveBatch(); }
                 RunOnUi(delegate
                 {
-                    panel.SetBusy(false);
+                    EndDesktopPanelWork(panel);
                     if (saveError != null) ReportBatchSaveFailure(cfg, "清单项未能移除：" + (error ?? saveError));
                     RefreshDesktopBackupPanel();
                     if (failure != null)
@@ -116,8 +148,9 @@ namespace AppManager
         {
             DesktopBackupPanel panel = desktopBackupPanel;
             if (panel == null || panel.Busy || config.DesktopBackup.Count == 0) return;
+            if (DesktopWorkBlocked(panel)) return;
             if (!ConfirmDialog.Show("全部还原", "把清单中的 " + config.DesktopBackup.Count + " 个条目全部还原到桌面？", "全部还原", "取消")) return;
-            panel.SetBusy(true);
+            if (!BeginDesktopPanelWork(panel)) return;   // 确认框开着时可能有别的桌面操作开始了：再查一次
             AppConfig cfg = config;
             DesktopOrganizer worker = organizer;
             ThreadPool.QueueUserWorkItem(delegate
@@ -131,7 +164,7 @@ namespace AppManager
                 finally { saveError = AppConfig.EndSaveBatch(); }
                 RunOnUi(delegate
                 {
-                    panel.SetBusy(false);
+                    EndDesktopPanelWork(panel);
                     ReportBatchSaveFailure(cfg, saveError);
                     ReloadLibrary();
                     RefreshDesktopBackupPanel();

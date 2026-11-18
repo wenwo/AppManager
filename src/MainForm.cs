@@ -5226,7 +5226,7 @@ namespace AppManager
                 // 只读全集分类：以「加入」方式把条目多归属到其它分类（原归属与「全部」中的条目均不变）
                 items.Add(MkSubMenu(website ? "添加到分类" : "添加到默认分类", website ? BuildResourceAddItems(app) : BuildAddCategoryItems(app, false)));
                 if (!website)
-                    items.Add(MkSubMenu("添加到自定义",BuildAddCategoryItems(app, true)));
+                    items.Add(MkSubMenu("添加到自定义", BuildAddCategoryItems(app, true)));
                 AddDeleteMenu(items, app);
             }
             else
@@ -5239,7 +5239,7 @@ namespace AppManager
                     // 用户添加的条目可改名
                     if (FindAddedEntry(app.TargetPath, currentCategory) >= 0 || IsAddedAnywhere(app.TargetPath))
                     {
-                        items.Add(MkMenu("重命名…",delegate { RenameAddedEntry(app); }));
+                        items.Add(MkMenu("重命名…", delegate { RenameAddedEntry(app); }));
                     }
                 }
                 else
@@ -5262,10 +5262,10 @@ namespace AppManager
                 if (website)
                 {
                     // 资源条目：仅资源分类相关操作（硬移动到资源分类），不涉及常用/软件自定义分类
-                    items.Add(MkSubMenu("移动到分类",BuildMoveResourceItems(app)));
+                    items.Add(MkSubMenu("移动到分类", BuildMoveResourceItems(app)));
                     // 加入集合：相簿式多归属分组，不搬文件（多选时整批加入）
                     if (CanEditCategory(currentCategory))
-                        items.Add(MkSubMenu("添加到集合",BuildJoinCollectionItems(targets)));
+                        items.Add(MkSubMenu("添加到集合", BuildJoinCollectionItems(targets)));
                 }
                 else
                 {
@@ -5273,15 +5273,15 @@ namespace AppManager
                         items.Add(MkMenu("从常用移除", delegate { ToggleFavorite(app, false); }));
                     else
                         items.Add(MkMenu("添加到常用", delegate { ToggleFavorite(app, true); }));
-                    items.Add(MkSubMenu("添加到默认分类",BuildAddCategoryItems(app, false)));
-                    items.Add(MkSubMenu("添加到自定义",BuildAddCustomItems(app)));
+                    items.Add(MkSubMenu("添加到默认分类", BuildAddCategoryItems(app, false)));
+                    items.Add(MkSubMenu("添加到自定义", BuildAddCustomItems(app)));
                 }
                 if (RemovableFromCurrent(new List<AppInfo> { app }).Count > 0)
                     items.Add(MkMenu("从「" + currentCategory + "」移除", delegate { RemoveFromCategory(app); }));
                 // 集合视图内（含当前文件夹内搜索）：移出仅解除集合归属，文件保留在父分类
                 if (currentCollection != null)
                 {
-                    items.Add(MkMenu("从集合移除",delegate { RemoveItemsFromCategory(targets, currentCollection); }));
+                    items.Add(MkMenu("从集合移除", delegate { RemoveItemsFromCategory(targets, currentCollection); }));
                 }
                 if (!website && InCustom(app))
                     items.Add(MkMenu("从自定义移除", delegate { RemoveFromCustom(app); }));
@@ -5323,7 +5323,7 @@ namespace AppManager
                 items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
                 items.Add(MkSep());
                 // 只读全集分类：以「加入」方式多归属到资源分类
-                items.Add(MkSubMenu("添加到分类",BuildResourceAddItems(targets)));
+                items.Add(MkSubMenu("添加到分类", BuildResourceAddItems(targets)));
                 if (AnyDeletableEntry(targets))
                     items.Add(MkMenu("删除", delegate { ConfirmDeleteEntriesDisk(targets); }));
                 return;
@@ -5340,18 +5340,18 @@ namespace AppManager
 
             items.Add(MkSep());
             // 改名仅支持单条：保留菜单项并置灰（与资源管理器一致），避免误以为可批量改名
-            MenuWindow.MenuItem rename = MkMenu("重命名…",null);
+            MenuWindow.MenuItem rename = MkMenu("重命名…", null);
             rename.Disabled = true;
             items.Add(rename);
-            items.Add(MkSubMenu("移动到分类",BuildMoveResourceItems(targets)));
+            items.Add(MkSubMenu("移动到分类", BuildMoveResourceItems(targets)));
             if (CanEditCategory(currentCategory))
-                items.Add(MkSubMenu("添加到集合",BuildJoinCollectionItems(targets)));
+                items.Add(MkSubMenu("添加到集合", BuildJoinCollectionItems(targets)));
             List<AppInfo> removable = RemovableFromCurrent(targets);
             if (removable.Count > 0)
                 items.Add(MkMenu("从「" + currentCategory + "」移除",
                     delegate { RemoveTargetsFromCategory(removable, currentCategory); }));
             if (currentCollection != null)
-                items.Add(MkMenu("从集合移除",delegate { RemoveItemsFromCategory(targets, currentCollection); }));
+                items.Add(MkMenu("从集合移除", delegate { RemoveItemsFromCategory(targets, currentCollection); }));
 
             if (AnyDeletableEntry(targets))
             {
@@ -5378,7 +5378,7 @@ namespace AppManager
                 items.Add(MkMenu("复制名称", delegate { CopyText(JoinNames(targets)); }));
                 items.Add(MkMenu("复制路径", delegate { CopyText(JoinPaths(targets)); }));
                 items.Add(MkSep());
-                items.Add(MkSubMenu("添加到默认分类",BuildAddCategoryItems(targets, false)));
+                items.Add(MkSubMenu("添加到默认分类", BuildAddCategoryItems(targets, false)));
                 if (AnyDeletableEntry(targets))
                 {
                     items.Add(MkSep());
@@ -5398,8 +5398,8 @@ namespace AppManager
             bool allFavorite = AllFavorite(targets);
             items.Add(MkMenu(allFavorite ? "从常用移除" : "添加到常用",
                 delegate { ToggleFavorite(targets, !allFavorite); }));
-            items.Add(MkSubMenu("添加到默认分类",BuildAddCategoryItems(targets, false)));
-            items.Add(MkSubMenu("添加到自定义",BuildAddCustomItems(targets)));
+            items.Add(MkSubMenu("添加到默认分类", BuildAddCategoryItems(targets, false)));
+            items.Add(MkSubMenu("添加到自定义", BuildAddCustomItems(targets)));
             List<AppInfo> removable = RemovableFromCurrent(targets);
             if (removable.Count > 0)
                 items.Add(MkMenu("从「" + currentCategory + "」移除",
@@ -6668,6 +6668,7 @@ namespace AppManager
                     organizeBtn.Enabled = true;
                     if (autoScan != null) autoScan.Resume();
                     HideStatusBar();
+                    RefreshDesktopBackupPanel();   // 设置页里的桌面备份清单开着时，换上整理或还原之后的清单
                     ReportBatchSaveFailure(cfg, saveError);
                     if (failure != null)
                     {

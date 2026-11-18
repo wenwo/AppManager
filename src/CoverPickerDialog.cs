@@ -926,6 +926,16 @@ namespace AppManager
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
+        /// <summary>
+        /// 嵌在主窗口里时，Tab 在页面里循环：页面只是盖在集合编辑页上面，编辑页的输入框还在下面；
+        /// 不循环的话 Tab 走到最后一个控件后会把焦点交给主窗口，落进被盖住的名称或简介框，打字就改到看不见的地方。
+        /// </summary>
+        protected override bool ProcessTabKey(bool forward)
+        {
+            if (Embedded) return SelectNextControl(ActiveControl, forward, true, true, true);
+            return base.ProcessTabKey(forward);
+        }
+
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             checkVersion++;   // 还在后台检查的结果作废

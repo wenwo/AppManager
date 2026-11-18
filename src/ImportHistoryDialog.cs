@@ -312,8 +312,19 @@ namespace AppManager
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
-            Reload();   // 嵌入时 OnVisibleChanged 还会在每次切到这个目录时再读；多读一次没有副作用，只认最后一次的结果
+            if (!Embedded) Reload();   // 嵌入时由 OnVisibleChanged 在每次切到这个目录时读取，这里不再多读一遍
         }
+
+        /// <summary>嵌入时第一次显示：变为可见那一刻句柄可能还没建好（OnVisibleChanged 里读不了），建好后补读一次。</summary>
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            if (!loadWhenHandleCreated) return;
+            loadWhenHandleCreated = false;
+            BeginInvoke((Action)delegate { if (Visible && !IsDisposed) Reload(); });
+        }
+
+        private bool loadWhenHandleCreated;
 
         protected override void OnVisibleChanged(EventArgs e)
         {
@@ -322,6 +333,7 @@ namespace AppManager
             {
                 close.Visible = false;
                 if (Visible && IsHandleCreated) Reload();
+                else if (Visible) loadWhenHandleCreated = true;
             }
         }
 

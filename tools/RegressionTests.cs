@@ -6032,6 +6032,15 @@ namespace AppManager
                 Check(info.IsEditing && desc.Text == "改到一半", "opening the cover page ended the edit");
                 Check(!(bool)formType.GetProperty("CanImportHere", Private).GetValue(form, null), "drops and pastes still import while the cover page is open");
 
+                // 焦点在页面里；Tab 在页面里循环一整圈，不会落进下面被盖住的编辑页输入框
+                Check(page.ContainsFocus, "focus stayed outside the cover page");
+                MethodInfo tab = typeof(CoverPickerDialog).GetMethod("ProcessTabKey", Private);
+                for (int i = 0; i < 20; i++)
+                {
+                    tab.Invoke(page, new object[] { i % 3 != 2 });
+                    Check(page.ContainsFocus && !info.ContainsFocus, "Tab moved focus out of the cover page (step " + i + ")");
+                }
+
                 // 后台刷新、状态条不能把别的控件顶到页面上面，也不能结束编辑；窗口缩放时页面跟着铺满
                 Invoke(form, "RefreshGrid");
                 Invoke(form, "ShowStatusBar", "测试", 0, 0);
@@ -6080,6 +6089,19 @@ namespace AppManager
                 {
                     Invoke(form, "RefreshDesktopBackupPanel");
                     Check(restoreAll.Enabled, "restore-all stayed disabled with an entry in the list");
+
+                    // 「整理桌面」菜单的后台操作还在跑时，清单里的操作直接拦下并说明，不弹确认、不开第二个后台操作
+                    FieldInfo running = formType.GetField("desktopOperationRunning", Private);
+                    running.SetValue(form, true);
+                    try
+                    {
+                        Invoke(form, "RestoreAllDesktopEntries");
+                        Invoke(form, "RemoveDesktopEntry", config.DesktopBackup[0]);
+                        string blockedStatus = (string)typeof(Controls.DesktopBackupPanel).GetField("status", Private).GetValue(backup);
+                        Check(FindModalForm() == null && !backup.Busy && config.DesktopBackup.Count == 1 && blockedStatus.Contains("正在进行"),
+                            "a list operation started while another desktop operation was running: " + blockedStatus);
+                    }
+                    finally { running.SetValue(form, false); }
                     int busyEvents = 0;
                     backup.BusyChanged += delegate { busyEvents++; };
                     backup.SetBusy(true);

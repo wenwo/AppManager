@@ -24,6 +24,7 @@ namespace AppManager.Controls
         private readonly PreviewLoader<TextPreview> loader;
         private readonly RoundButton externalButton;
         private readonly RoundButton saveButton;
+        private readonly Font textFont;
         private readonly System.Windows.Forms.Timer renderTimer;
         private int renderGeneration;
         private CancellationTokenSource renderCancellation;
@@ -111,8 +112,9 @@ namespace AppManager.Controls
             textBox.ScrollBars = RichTextBoxScrollBars.Both;
             textBox.BackColor = Theme.Card;
             textBox.ForeColor = Theme.TextPrimary;
-            // 正文用主题字体（缓存实例，不在这里释放）：系统等宽字体显示中文是点阵宋体，和程序其它地方差得太远
-            textBox.Font = Theme.FontOf(10F);
+            // 正文用等宽字体：代码、日志、按空格对齐的表格要能对齐列（编辑器同理）。英文优先 Consolas，比系统默认的 Courier New 清楚
+            textFont = new Font(Theme.InstalledFamilies.Contains("Consolas") ? "Consolas" : FontFamily.GenericMonospace.Name, 10F, FontStyle.Regular);
+            textBox.Font = textFont;
             textBox.Visible = false;
             textBox.TextChanged += delegate { OnTextEdited(); };
             Controls.Add(textBox);
@@ -574,9 +576,9 @@ namespace AppManager.Controls
             Rectangle area = TextArea;
             if (area.Width <= 0 || area.Height <= 0) return;
             // 白色圆角卡片 + 细描边：与图片查看器的画布、各页面里的卡片同一种边框；编辑框和预览都缩在里面
-            using (SolidBrush fill = new SolidBrush(Theme.Card)) Draw.FillRoundedRect(g, fill, area, Dpi(8));
+            using (SolidBrush fill = new SolidBrush(Theme.Card)) Draw.FillRoundedRect(g, fill, area, Dpi(Theme.RadiusCard));
             using (Pen p = new Pen(Theme.ControlBorder, 1))
-                Draw.DrawRoundedRect(g, p, new Rectangle(area.X, area.Y, area.Width - 1, area.Height - 1), Dpi(8));
+                Draw.DrawRoundedRect(g, p, new Rectangle(area.X, area.Y, area.Width - 1, area.Height - 1), Dpi(Theme.RadiusCard));
             if (loadFailed)
             {
                 using (SolidBrush b = new SolidBrush(Theme.TextSecondary))
@@ -605,7 +607,7 @@ namespace AppManager.Controls
             using (SolidBrush bg = new SolidBrush(Theme.SegmentBg)) Draw.FillRoundedRect(g, bg, seg, Dpi(7));
             Rectangle active = showMarkdown ? markdownTabRect : plainTabRect;
             active.Inflate(-Dpi(2), -Dpi(2));
-            using (SolidBrush b = new SolidBrush(Color.White)) Draw.FillRoundedRect(g, b, active, Dpi(6));
+            using (SolidBrush b = new SolidBrush(Color.White)) Draw.FillRoundedRect(g, b, active, Dpi(Theme.RadiusControl));
             g.SmoothingMode = mode;
             TextRenderer.DrawText(g, "Markdown", Theme.ButtonFont, markdownTabRect,
                 showMarkdown ? Theme.AccentText : Theme.TextSecondary,
@@ -730,6 +732,7 @@ namespace AppManager.Controls
                 renderTimer.Dispose();
                 if (textBox != null) textBox.Dispose();
                 if (markdownBox != null) markdownBox.Dispose();
+                textFont.Dispose();
                 CancelResizeRender();
             }
             base.Dispose(disposing);

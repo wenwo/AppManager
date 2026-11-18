@@ -321,7 +321,7 @@ namespace AppManager
             Color ink = error ? Theme.DangerText : Theme.WarningText;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (SolidBrush back = new SolidBrush(error ? Theme.DangerBg : Theme.WarningBg))
-                Draw.FillRoundedRect(g, back, r, Dpi(6));
+                Draw.FillRoundedRect(g, back, r, Dpi(Theme.RadiusControl));
             float cx = r.X + r.Width / 2F;
             float stroke = Math.Max(1.6F, Dpi(2));
             using (Pen pen = new Pen(ink, stroke))

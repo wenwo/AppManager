@@ -40,6 +40,8 @@ namespace AppManager
             LayoutControls();   // 先按主窗口大小定好位置，再显示
             page.Show();
             page.BringToFront();
+            // 焦点必须进到页面里：留在下面编辑页的输入框上的话，打字会改到被盖住的名称或简介
+            if (!page.ContainsFocus) page.SelectNextControl(null, true, true, true, true);
             Invalidate();
         }
 

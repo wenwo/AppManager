@@ -281,7 +281,7 @@ namespace AppManager
         public static void DrawBackButton(Graphics g, Rectangle r, bool hot, bool pressed, int dpi)
         {
             if (r.Width <= 0 || r.Height <= 0) return;
-            int radius = DpiHelper.Scale(6, dpi);
+            int radius = DpiHelper.Scale(Theme.RadiusControl, dpi);
             Color fill = pressed ? Theme.SegmentBg : (hot ? Theme.CardHover : Theme.Card);
             using (SolidBrush b = new SolidBrush(fill)) FillRoundedRect(g, b, r, radius);
             using (Pen p = new Pen(hot ? Mix(Theme.ControlBorder, Theme.Accent, 0.2F) : Theme.ControlBorder, 1F))
