@@ -5964,6 +5964,27 @@ namespace AppManager
                 host.Hide();
             }
 
+            // 1b. 集合编辑页的简介框：无边框多行框在创建过程中会自己调一次高度（触发尺寸变化），
+            // 文字又长到要换行时，曾在句柄还没建完时切换滚动条而抛「创建窗口句柄时出错」
+            using (Form host = new Form { ShowInTaskbar = false, StartPosition = FormStartPosition.Manual, Location = new Point(-3000, -3000) })
+            {
+                Panel panel = new Panel { Visible = false };
+                TextBox box = new TextBox { Multiline = true, BorderStyle = BorderStyle.None, Font = Theme.BodyFont };
+                InputDialog.ScrollBarsWhenNeeded(box);
+                panel.Controls.Add(box);
+                host.Controls.Add(panel);
+                host.Show();
+                Application.DoEvents();
+                box.Text = "2026 年春天出门拍的照片，按地点再分了子集合。";
+                panel.Visible = true;   // 修复前在这里抛异常
+                Check(box.IsHandleCreated && box.ScrollBars == ScrollBars.None, "the scrollbar was switched while the handle was still being created");
+                PumpUntil(delegate { return box.ScrollBars == ScrollBars.Vertical; }, 2000);
+                Check(box.ScrollBars == ScrollBars.Vertical && box.Text.StartsWith("2026"), "wrapping text in a borderless box did not get its scrollbar after opening");
+                box.Text = "";   // 相邻边界：空简介不需要滚动条
+                Check(box.ScrollBars == ScrollBars.None, "scrollbar stayed after the borderless box was emptied");
+                host.Hide();
+            }
+
             // 3. 桌面备份清单：松开回车才还原；按住不放产生的重复回车不算
             using (Controls.DesktopBackupListControl list = new Controls.DesktopBackupListControl())
             {

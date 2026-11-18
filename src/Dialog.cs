@@ -1048,9 +1048,12 @@ namespace AppManager
         {
             box.ScrollBars = ScrollBars.None;
             bool updating = false;
+            // 句柄建完之后才为 true。窗口创建过程中系统还会回调尺寸变化（无边框多行框会在这时自己调一次高度），
+            // 此时 IsHandleCreated 已经是 true，但改 ScrollBars 会重建一个还没建完的句柄（抛「创建窗口句柄时出错」）。
+            bool ready = box.IsHandleCreated;
             EventHandler update = delegate
             {
-                if (updating || box.IsDisposed || !box.IsHandleCreated) return;
+                if (updating || !ready || box.IsDisposed || !box.IsHandleCreated) return;
                 if (!box.ReadOnly && box.Focused && box.CanUndo) return;
                 int lines = box.GetLineFromCharIndex(box.TextLength) + 1;
                 ScrollBars wanted = lines * box.Font.Height > box.ClientSize.Height ? ScrollBars.Vertical : ScrollBars.None;
@@ -1060,13 +1063,23 @@ namespace AppManager
                 {
                     int start = box.SelectionStart, length = box.SelectionLength;
                     box.ScrollBars = wanted;
+                    ready = box.IsHandleCreated;   // 这次重建是这里发起的，走到这一行时新句柄已经建完
                     box.Select(start, length);
                     box.ScrollToCaret();
                 }
                 finally { updating = false; }
             };
-            // HandleCreated 发生在窗口创建过程中，此时改 ScrollBars 会重建一个还没建完的句柄（抛异常）：延后到消息循环再判断
-            box.HandleCreated += delegate { box.BeginInvoke(update, box, EventArgs.Empty); };
+            // HandleCreated 发生在窗口创建过程中：延后到消息循环，那时句柄已经建完，再判断要不要滚动条
+            box.HandleCreated += delegate
+            {
+                box.BeginInvoke((MethodInvoker)delegate
+                {
+                    if (box.IsDisposed || !box.IsHandleCreated) return;
+                    ready = true;
+                    update(box, EventArgs.Empty);
+                });
+            };
+            box.HandleDestroyed += delegate { ready = false; };
             box.TextChanged += update;
             box.SizeChanged += update;
             // 焦点移到窗口里别的控件时补上（切到别的程序不算离开，撤销记录保留）。
