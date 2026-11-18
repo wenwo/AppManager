@@ -7678,7 +7678,7 @@ namespace AppManager
                     Check(any.CurrentFolder == dir && any.CheckedFiles.Count == 0, "an unrestricted drop of a folder checked it as a file");
                     any.DropMany(new string[] { sub, notes });
                     PumpUntil(delegate { return !any.Checking; }, 15000);
-                    Check(any.CheckedFiles.Count == 1 && any.CheckedFiles[0] == notes && any.StatusText.Contains("1 个文件夹没有加入"),
+                    Check(any.CheckedFiles.Count == 1 && any.CheckedFiles[0] == notes && any.StatusText.Contains("1 个文件夹没有添加"),
                         "an unrestricted drop of a folder and a file is wrong: " + any.StatusText);
                     host.Controls.Remove(any);
                 }
@@ -7763,7 +7763,7 @@ namespace AppManager
                 // 拖进文件夹和文件：文件夹勾上，文件跳过
                 page.DropMany(new string[] { dropped, loose });
                 PumpUntil(delegate { return !page.Checking; }, 15000);
-                Check(page.CheckedFiles.Contains(dropped) && page.CheckedFiles.Count == 2 && page.StatusText.Contains("1 个文件没有加入"),
+                Check(page.CheckedFiles.Contains(dropped) && page.CheckedFiles.Count == 2 && page.StatusText.Contains("1 个文件没有添加"),
                     "dropping into the folder page is wrong: " + page.StatusText);
 
                 // 「已选的文件夹」里第二行是上级文件夹
@@ -7832,7 +7832,7 @@ namespace AppManager
                 // 拖进文件夹和程序：程序勾上；提示不指向软件页没有的「添加文件夹…」
                 page.DropMany(new string[] { exeDir, tool });
                 PumpUntil(delegate { return !page.Checking; }, 15000);
-                Check(page.CheckedFiles.Contains(tool) && page.StatusText.Contains("1 个文件夹没有加入") && !page.StatusText.Contains("添加文件夹")
+                Check(page.CheckedFiles.Contains(tool) && page.StatusText.Contains("1 个文件夹没有添加") && !page.StatusText.Contains("添加文件夹")
                     && page.StatusText.Contains("已选的软件"), "the drop notice on the software page is wrong: " + page.StatusText);
                 page.StartPreview(tool);
                 PumpUntil(delegate { return !page.PreviewLoading; }, 15000);
@@ -7900,9 +7900,12 @@ namespace AppManager
                 // 再点添加不会叠第二个页面；窗口缩放时页面跟着铺满
                 Invoke(form, "PickFiles");
                 Check(ReferenceEquals(field("addPage"), page), "a second add page was opened");
-                form.ClientSize = new Size(1000, 640);
+                // 新尺寸按窗口最小尺寸来取：最小尺寸随显示缩放变大，125% 下写死的 1000×640 小于它，窗口根本缩不到
+                Size resized = new Size(form.MinimumSize.Width + 40, form.MinimumSize.Height + 40);
+                form.ClientSize = resized;
                 Application.DoEvents();
-                Check(page.Width == 1000 && page.Bottom == 640, "the add page did not follow the window size: " + page.Bounds);
+                Check(form.ClientSize == resized && page.Width == resized.Width && page.Bottom == resized.Height,
+                    "the add page did not follow the window size: " + page.Bounds + " in " + form.ClientSize);
 
                 // Esc 返回：页面释放，侧栏、集合栏和列表按原样恢复
                 typeof(Controls.MediaAddPage).GetMethod("ProcessCmdKey", Private).Invoke(page, new object[] { new Message(), Keys.Escape });
