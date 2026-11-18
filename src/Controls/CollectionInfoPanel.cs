@@ -736,7 +736,7 @@ namespace AppManager.Controls
             int perPage = thumbPerPage;
             int pages = ThumbPageCount();
             bool pageLoading = ThumbsLoading && CurrentPageMissing();
-            string caption = creating ? "从要加入的图片里选" : "从集合里的图片选";
+            string caption = creating ? "从要添加的图片里选" : "从集合里的图片选";
             PaintCaption(g, pageLoading ? caption + " · 加载中…" : caption,
                 new Rectangle(thumbStartX, pickerCaptionY, Math.Max(0, thumbAreaWidth - Dpi(104)), Dpi(20)));
 

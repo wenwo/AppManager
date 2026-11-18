@@ -64,8 +64,8 @@ namespace AppManager
                     }
                     string message = "在「音乐」分类中发现 " + missing.Count + " 条记录的原文件已不存在"
                         + "（所在目录仍可访问）。\n\n" + MissingMusicPreview(missing)
-                        + "\n\n仅移除数据库记录，不会删除磁盘、回收站或任何文件。是否继续？";
-                    if (!ConfirmDialog.Show("清理失效音乐记录", message))
+                        + "\n\n仅移除数据库记录，不会删除磁盘、回收站或任何文件。";
+                    if (!ConfirmDialog.Show("清理失效音乐记录", message, "清理", "取消"))
                     {
                         missingMusicCleanupRunning = false;
                         return;
@@ -164,7 +164,7 @@ namespace AppManager
             }
             if (ActiveResourceStoreRoots().Count == 0)
             {
-                MessageDialog.Show(this, "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。",
+                MessageDialog.Show(this, "未启用任何资源存储位置，请在设置 > 资源存储位置中启用至少一个位置。",
                     "扫描本机音乐", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }

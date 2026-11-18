@@ -93,7 +93,7 @@ namespace AppManager.Controls
             externalButton = new RoundButton { Text = "外部打开", Accent = false };
             externalButton.Click += delegate
             {
-                if (paths.Count == 0 || !ConfirmLeave("打开外部程序前，是否保存对“{0}”的修改？", false)) return;
+                if (paths.Count == 0 || !ConfirmLeave("打开外部程序前，是否保存对「{0}」的修改？", false)) return;
                 if (!Launcher.OpenWith(paths[index]))
                     MessageDialog.Show(this, "无法启动 Windows 打开方式选择器。", "外部打开", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             };
@@ -401,10 +401,10 @@ namespace AppManager.Controls
             try
             {
                 if (File.Exists(path) && File.GetLastWriteTimeUtc(path) != current.LastWriteUtc
-                    && MessageDialog.Show(this, "“" + Path.GetFileName(path) + "”已在外部被修改，保存将覆盖这些修改。是否继续？",
+                    && MessageDialog.Show(this, "「" + Path.GetFileName(path) + "」已在外部被修改，保存将覆盖这些修改。是否继续？",
                         "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return false;
-                if (current.MixedNewlines && MessageDialog.Show(this, "“" + Path.GetFileName(path) + "”混用了多种换行符，保存后会统一为 "
+                if (current.MixedNewlines && MessageDialog.Show(this, "「" + Path.GetFileName(path) + "」混用了多种换行符，保存后会统一为 "
                         + (newline == "\r\n" ? "CRLF" : newline == "\n" ? "LF" : "CR") + "。是否继续？",
                         "保存", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return false;
@@ -462,7 +462,7 @@ namespace AppManager.Controls
         /// <summary>离开当前文件前处理未保存的修改；返回 false 表示用户选择取消。</summary>
         public bool ConfirmLeave()
         {
-            return ConfirmLeave("是否保存对“{0}”的修改？", true);
+            return ConfirmLeave("是否保存对「{0}」的修改？", true);
         }
 
         /// <summary>
@@ -487,13 +487,13 @@ namespace AppManager.Controls
         private void ResolvePendingEdits()
         {
             if (!HasUnsavedChanges()) return;
-            if (MessageDialog.Show(this, "是否保存对“" + Path.GetFileName(paths[index]) + "”的修改？", "文本",
+            if (MessageDialog.Show(this, "是否保存对「" + Path.GetFileName(paths[index]) + "」的修改？", "文本",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) == DialogResult.Yes)
             {
                 // 这里无法取消离开，“取消”实为丢弃修改：按钮直接写明“放弃修改”，避免误点。
                 while (!Save())
                 {
-                    if (!ConfirmDialog.Show("修改没有保存", "点“重试”再次保存；点“放弃修改”将丢弃这些修改。", "重试", "放弃修改"))
+                    if (!ConfirmDialog.Show("修改没有保存", "点「重试」再次保存；点「放弃修改」将丢弃这些修改。", "重试", "放弃修改"))
                         break;
                 }
             }

@@ -80,8 +80,8 @@ namespace AppManager
         private static string ValidateName(string name, string label)
         {
             if (string.IsNullOrWhiteSpace(name)) return label + "不能为空";
-            if (name.IndexOf('/') >= 0) return label + "不能包含“/”";
-            if (name.StartsWith("col:", StringComparison.OrdinalIgnoreCase)) return label + "不能以“col:”开头";
+            if (name.IndexOf('/') >= 0) return label + "不能包含「/」";
+            if (name.StartsWith("col:", StringComparison.OrdinalIgnoreCase)) return label + "不能以「col:」开头";
             if (name.Length > MaxNameLength) return label + "过长（最多 " + MaxNameLength + " 个字符）";
             return null;
         }

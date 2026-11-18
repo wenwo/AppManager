@@ -548,7 +548,7 @@ namespace AppManager
                 {
                     long id = list[i];
                     string name = byId[id][2];
-                    if (string.IsNullOrEmpty(name)) throw new IOException("分组树中存在空名称，不能安全改名。");
+                    if (string.IsNullOrEmpty(name)) throw new IOException("分组树中存在空名称，不能安全重命名。");
                     string key = CollectionKeys.GetChildKey(parentKey, name);
                     newKeys[id] = key;
                     pending.Enqueue(id);
@@ -565,7 +565,7 @@ namespace AppManager
                         throw new IOException("集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）：" + entry.Value);
                 }
                 if (targetOwners.ContainsKey(entry.Value))
-                    throw new IOException("改名目标路径重复：" + entry.Value);
+                    throw new IOException("重命名目标路径重复：" + entry.Value);
                 targetOwners[entry.Value] = entry.Key;
             }
 
@@ -575,7 +575,7 @@ namespace AppManager
                 long existingId;
                 if (!groups.TryGetValue(entry.Key, out existingId) || existingId == entry.Value) continue;
                 if (newKeys.ContainsKey(existingId))
-                    throw new IOException("改名目标与子树内其它分组冲突：" + entry.Key);
+                    throw new IOException("重命名目标与子树内其它分组冲突：" + entry.Key);
                 if (GroupHasReferences(db, existingId))
                     throw new IOException("目标分类名称已被其它分类或记录使用，不能合并不同分类。");
                 retired.Add(existingId);

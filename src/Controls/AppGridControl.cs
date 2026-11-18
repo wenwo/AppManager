@@ -88,7 +88,7 @@ namespace AppManager.Controls
         private int ListBottomPad { get { return Dpi(10); } }     // 列表底部留白（滚动范围）
         private int ListMargin { get { return Dpi(14); } }
         private int ListIcon { get { return Dpi(20); } }
-        private int ActionBtnW { get { return Dpi(40); } }
+        private int ActionBtnW { get { return Dpi(48); } }
         private int ActionBtnGap { get { return Dpi(4); } }
         // 每条记录为独立卡片：卡片间距 + 圆角
         private int ListGap { get { return Dpi(4); } }
@@ -236,7 +236,7 @@ namespace AppManager.Controls
         public bool ShowTimeColumn { get; set; }
 
         private string rowDeleteText = "删除";
-        private string[] rowActionLabels = new string[] { "改名", "删除" };
+        private string[] rowActionLabels = new string[] { "重命名", "删除" };
 
         /// <summary>列表行第二个操作按钮的文案：集合内为「移除」（仅从集合移出），其余为「删除」。</summary>
         public string RowDeleteText
@@ -247,7 +247,7 @@ namespace AppManager.Controls
                 string v = string.IsNullOrEmpty(value) ? "删除" : value;
                 if (v == rowDeleteText) return;
                 rowDeleteText = v;
-                rowActionLabels = new string[] { "改名", v };
+                rowActionLabels = new string[] { "重命名", v };
                 Invalidate();   // 文案切换立即重绘，无需依赖调用方再刷新列表
             }
         }

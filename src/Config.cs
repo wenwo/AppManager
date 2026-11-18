@@ -1968,24 +1968,24 @@ namespace AppManager
             foreach (string name in CustomCategories)
             {
                 string error = CategoryRules.ValidateName(name);
-                if (error != null) return "软件分类“" + name + "”无效：" + error;
-                if (!software.Add(name)) return "软件分类“" + name + "”重复。";
+                if (error != null) return "软件分类「" + name + "」无效：" + error;
+                if (!software.Add(name)) return "软件分类「" + name + "」重复。";
             }
             foreach (string name in ResourceCategories)
             {
                 string error = CategoryRules.ValidateName(name);
-                if (error != null) return "资源分类“" + name + "”无效：" + error;
-                if (!resources.Add(name)) return "资源分类“" + name + "”重复。";
+                if (error != null) return "资源分类「" + name + "」无效：" + error;
+                if (!resources.Add(name)) return "资源分类「" + name + "」重复。";
             }
             foreach (string name in software)
                 if (CategoryRules.IsAnyReservedName(name))
-                    return "软件分类“" + name + "”是系统保留名称。";
+                    return "软件分类「" + name + "」是系统保留名称。";
             foreach (string name in resources)
-                if (CategoryRules.IsAnyReservedName(name)) return "资源分类“" + name + "”是系统保留名称。";
+                if (CategoryRules.IsAnyReservedName(name)) return "资源分类「" + name + "」是系统保留名称。";
             if (rejectCrossModeDuplicates)
             {
                 foreach (string name in resources)
-                    if (software.Contains(name)) return "软件分类与资源分类不能同名：“" + name + "”。";
+                    if (software.Contains(name)) return "软件分类与资源分类不能同名：「" + name + "」。";
             }
             string collectionError = ValidateCollectionTree(resources);
             if (collectionError != null) return collectionError;
@@ -2006,11 +2006,11 @@ namespace AppManager
                 ResourceCollection collection = Collections[i];
                 if (collection == null) return "集合列表中包含空项。";
                 string error = CategoryRules.ValidateCollectionName(collection.Name);
-                if (error != null) return "集合“" + collection.Name + "”无效：" + error;
+                if (error != null) return "集合「" + collection.Name + "」无效：" + error;
                 error = CategoryRules.ValidateCollectionName(collection.Parent);
-                if (error != null) return "集合“" + collection.Name + "”的父分类“" + collection.Parent + "”无效：" + error;
+                if (error != null) return "集合「" + collection.Name + "」的父分类「" + collection.Parent + "」无效：" + error;
                 if (!resourceCategories.Contains(collection.Parent))
-                    return "集合“" + collection.Name + "”引用了不存在的资源分类“" + collection.Parent + "”。";
+                    return "集合「" + collection.Name + "」引用了不存在的资源分类「" + collection.Parent + "」。";
 
                 string key = CollectionKeys.GetKey(collection);
                 if (key.Length > CollectionKeys.MaxKeyLength)
@@ -2018,14 +2018,14 @@ namespace AppManager
                 int depth = CollectionKeys.Depth(key);
                 if (depth <= 0 || depth > CollectionKeys.MaxDepth)
                     return "集合嵌套层级超过上限（最多 " + CollectionKeys.MaxDepth + " 层）：" + key;
-                if (!keys.Add(key)) return "集合“" + key + "”重复。";
+                if (!keys.Add(key)) return "集合「" + key + "」重复。";
 
                 if (string.IsNullOrEmpty(collection.ParentCollection)) continue;
                 string root, parentCollection, name;
                 if (!CollectionKeys.TryParse(collection.ParentCollection, out root, out parentCollection, out name))
-                    return "集合“" + key + "”的父集合键无效。";
+                    return "集合「" + key + "」的父集合键无效。";
                 if (!string.Equals(root, collection.Parent, StringComparison.OrdinalIgnoreCase))
-                    return "集合“" + key + "”与父集合不属于同一资源分类。";
+                    return "集合「" + key + "」与父集合不属于同一资源分类。";
             }
 
             for (int i = 0; i < Collections.Count; i++)
@@ -2036,12 +2036,12 @@ namespace AppManager
                 HashSet<string> chain = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 while (!string.IsNullOrEmpty(cursor))
                 {
-                    if (!chain.Add(cursor)) return "集合“" + key + "”的父集合链存在循环或自引用。";
+                    if (!chain.Add(cursor)) return "集合「" + key + "」的父集合链存在循环或自引用。";
                     ResourceCollection parent;
                     if (!index.TryGet(cursor, out parent))
-                        return "集合“" + key + "”引用了不存在的父集合“" + cursor + "”。";
+                        return "集合「" + key + "」引用了不存在的父集合「" + cursor + "」。";
                     if (!string.Equals(parent.Parent, collection.Parent, StringComparison.OrdinalIgnoreCase))
-                        return "集合“" + key + "”的父集合根分类不一致。";
+                        return "集合「" + key + "」的父集合根分类不一致。";
                     cursor = parent.ParentCollection;
                 }
             }
@@ -2059,30 +2059,30 @@ namespace AppManager
                     foreach (string category in entry.Value)
                     {
                         if (!CollectionKeys.IsCollectionKey(category)) continue;
-                        if (index.Find(category) == null) return "条目“" + entry.Key + "”的归属引用了不存在的集合“" + category + "”。";
+                        if (index.Find(category) == null) return "条目「" + entry.Key + "」的归属引用了不存在的集合「" + category + "」。";
                     }
             foreach (KeyValuePair<string, List<string>> entry in ExcludedCategories)
                 if (entry.Value != null)
                     foreach (string category in entry.Value)
                     {
                         if (!CollectionKeys.IsCollectionKey(category)) continue;
-                        if (index.Find(category) == null) return "条目“" + entry.Key + "”的排除项引用了不存在的集合“" + category + "”。";
+                        if (index.Find(category) == null) return "条目「" + entry.Key + "」的排除项引用了不存在的集合「" + category + "」。";
                     }
             foreach (string category in ItemOrder.Keys)
                 if (CollectionKeys.IsCollectionKey(category) && index.Find(category) == null)
-                    return "排序配置引用了不存在的集合“" + category + "”。";
+                    return "排序配置引用了不存在的集合「" + category + "」。";
             foreach (string category in CategoryViewMode.Keys)
                 if (CollectionKeys.IsCollectionKey(category) && index.Find(category) == null)
-                    return "视图配置引用了不存在的集合“" + category + "”。";
+                    return "视图配置引用了不存在的集合「" + category + "」。";
             foreach (string category in CategoryIconNames.Keys)
             {
                 string collectionKey;
                 if (CollectionKeys.TryGetReferencedCollectionKey(category, out collectionKey) && index.Find(collectionKey) == null)
-                    return "图标配置引用了不存在的集合“" + collectionKey + "”。";
+                    return "图标配置引用了不存在的集合「" + collectionKey + "」。";
             }
             foreach (string category in SidebarOrder)
                 if (CollectionKeys.IsCollectionKey(category) && index.Find(category) == null)
-                    return "侧栏配置引用了不存在的集合“" + category + "”。";
+                    return "侧栏配置引用了不存在的集合「" + category + "」。";
             return null;
         }
 

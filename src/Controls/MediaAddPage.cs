@@ -238,7 +238,7 @@ namespace AppManager.Controls
             pathBox.Font = Theme.BodyFont;
             pathBox.AccessibleName = "文件或文件夹路径";
             pathBox.HandleCreated += delegate { SendMessage(pathBox.Handle, EM_SETCUEBANNER, (IntPtr)1, kind == MediaAddKind.Folders
-                ? "粘贴文件夹路径：回车打开它，点「添加」直接加入" : "粘贴文件或文件夹路径后回车：文件会被勾上，文件夹会被打开"); };
+                ? "粘贴文件夹路径：回车打开它，点「添加」直接添加这个文件夹" : "粘贴文件或文件夹路径后回车：文件会被勾上，文件夹会被打开"); };
             pathBox.GotFocus += delegate { pathBox.BackColor = Color.White; Invalidate(pathFrame); };
             pathBox.LostFocus += delegate { pathBox.BackColor = Theme.SearchBg; Invalidate(pathFrame); };
             pathBox.TextChanged += delegate
@@ -1009,9 +1009,9 @@ namespace AppManager.Controls
                 added++;
             }
             CheckedChanged();
-            string folderNote = folders.Count == 0 ? string.Empty : "；" + folders.Count + " 个文件夹没有加入"
+            string folderNote = folders.Count == 0 ? string.Empty : "；" + folders.Count + " 个文件夹没有添加"
                 + (kind == MediaAddKind.Software ? "（这里只添加 .exe 程序）" : "（整个文件夹请用「添加文件夹…」）");
-            if (over > 0) SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "，有 " + over + " 个没有加入" + folderNote + "。", true);
+            if (over > 0) SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "，有 " + over + " 个没有添加" + folderNote + "。", true);
             else if (skipped > 0)
                 SetNotice("已勾选 " + added + " 个；" + skipped + " 项不是" + TypeText() + "文件，已跳过" + folderNote + "。", false);
             else SetNotice("已勾选拖进来的 " + added + " 个" + ItemNoun + folderNote + "。左侧「已选的" + ItemNoun + "」里可以查看。", false);
@@ -1032,9 +1032,9 @@ namespace AppManager.Controls
             }
             CheckedChanged();
             List<string> notes = new List<string>();
-            if (files.Count > 0) notes.Add(files.Count + " 个文件没有加入（这里只添加文件夹）");
-            if (roots > 0) notes.Add(roots + " 个整盘没有加入");
-            if (over > 0) notes.Add("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个，有 " + over + " 个没有加入");
+            if (files.Count > 0) notes.Add(files.Count + " 个文件没有添加（这里只添加文件夹）");
+            if (roots > 0) notes.Add(roots + " 个整盘没有添加");
+            if (over > 0) notes.Add("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个，有 " + over + " 个没有添加");
             SetNotice("已勾选拖进来的 " + added + " 个文件夹" + (notes.Count > 0 ? "；" + string.Join("；", notes.ToArray()) : string.Empty) + "。", over > 0);
         }
 
@@ -1290,18 +1290,18 @@ namespace AppManager.Controls
             return PathPickerDialog.DescribeExtensions(extensions);
         }
 
-        /// <summary>没有提示时状态行的内容：还没勾选时说明怎么选；勾了以后是数量、（文件）来自几个文件夹和前几个名字。</summary>
+        /// <summary>
+        /// 没有提示时状态行的内容：还没勾选时只说现在的状态（怎么选已经写在标题下面，这里不再重复），
+        /// 外加一条标题下没提到的用法；勾了以后是数量、（文件）来自几个文件夹和前几个名字。
+        /// </summary>
         private string Summary()
         {
             int total = TotalChecked;
             if (total == 0)
             {
-                if (kind == MediaAddKind.Folders)
-                    return "点文件夹前的勾选框勾选，单击文件夹进入下一级；右侧的按钮可以勾选当前所在的文件夹。";
-                if (kind == MediaAddKind.Software)
-                    return "在「已安装的软件」里勾选，或者到下面的位置里找 .exe 勾选；单击在右侧查看，双击或点勾选框勾选。";
-                return "单击文件在右侧预览，点勾选框或双击勾选要添加的" + (typeName.Length > 0 ? typeName : "文件")
-                    + "；可以在几个文件夹里一起选，Ctrl+A 全选当前文件夹。";
+                if (kind == MediaAddKind.Folders) return "还没有勾选文件夹。";
+                if (kind == MediaAddKind.Software) return "还没有勾选软件。";
+                return "还没有勾选" + (typeName.Length > 0 ? typeName : "文件") + "。可以在几个文件夹里一起选，Ctrl+A 全选当前文件夹。";
             }
             List<string> names = new List<string>();
             for (int i = 0; i < checkedApps.Count && names.Count < 3; i++) names.Add(checkedApps[i].Name);
@@ -1417,7 +1417,7 @@ namespace AppManager.Controls
                 }
                 if (!checkedSet.Contains(typed.Path) && TotalChecked >= PathPickerDialog.MaxCheckedFiles)
                 {
-                    SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "，输入的没有加入。", true);
+                    SetNotice("一次最多选 " + PathPickerDialog.MaxCheckedFiles + " 个" + ItemNoun + "，输入的没有添加。", true);
                     return;
                 }
                 AddChecked(typed.Path);

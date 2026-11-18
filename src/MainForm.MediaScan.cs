@@ -41,7 +41,7 @@ namespace AppManager
             }
             if (ActiveResourceStoreRoots().Count == 0)
             {
-                MessageDialog.Show(this, "请先在设置 > 存储位置中启用至少一个现有资源存储位置。\n本功能不会新增或修改存储位置。",
+                MessageDialog.Show(this, "请先在设置 > 资源存储位置中启用至少一个现有资源存储位置。\n本功能不会新增或修改存储位置。",
                     title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -207,7 +207,7 @@ namespace AppManager
             if (result.Reused > 0) text.Append("；另复用 ").Append(FormatLocalMediaBytes(result.Bytes - result.CopyBytes));
             if (result.CleanupPending > 0)
                 text.Append("\n已收录复用中有 ").Append(result.CleanupPending)
-                    .Append(" 个原文件仍存在（上次移入未完成删源）；本次扫描不会删除，请在导入记录中重试“删除已入库项的源文件”。");
+                    .Append(" 个原文件仍存在（上次移入未完成删源）；本次扫描不会删除，请在导入记录中重试「删除已入库项的源文件」。");
             if (result.UnreadableDirectories > 0 || result.ReadFailures > 0)
             {
                 text.Append("\n失败：").Append(result.UnreadableDirectories).Append(" 个不可读目录，")
@@ -218,7 +218,7 @@ namespace AppManager
                     int count = Math.Min(5, result.FailureSamples.Count);
                     for (int i = 0; i < count; i++) text.Append("\n").Append(result.FailureSamples[i]);
                 }
-                text.Append("\n可先处理失败项，再选择“重新扫描”。");
+                text.Append("\n可先处理失败项，再选择「重新扫描」。");
             }
             text.Append("\n\n导入时可选择移入资源库（成功项删源、失败项保留）或仅复制保留原件；不会新增或修改存储位置。");
             text.Append("\n").Append(metadataHint);

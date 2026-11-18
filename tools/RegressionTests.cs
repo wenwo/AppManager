@@ -324,20 +324,37 @@ namespace AppManager
                         if (open.Modal) { dialog = open; break; }
                     if (dialog == null) return;
                     dialog.Opacity = 0;
-                    foreach (Control button in dialog.Controls)
-                        if (button.Text == (accept ? "确定" : "取消"))
-                        {
-                            timer.Stop();
-                            typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });
-                            clicked = true;
-                            return;
-                        }
+                    Control button = ConfirmButton(dialog, accept);
+                    if (button != null)
+                    {
+                        timer.Stop();
+                        typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });
+                        clicked = true;
+                        return;
+                    }
                     if (elapsed.ElapsedMilliseconds > 3000) { timer.Stop(); dialog.Close(); }
                 };
                 timer.Start();
                 action();
             }
             Check(clicked, "confirmation did not execute");
+        }
+
+        /// <summary>
+        /// 确认框上的按钮：accept 取主按钮，否则取取消一侧。主按钮的文字写的是具体动作（「删除」「还原」「移除」……），
+        /// 不再一律是「确定」，所以先按文字找，找不到再按主按钮 / 非主按钮来认。
+        /// </summary>
+        private static Control ConfirmButton(Form dialog, bool accept)
+        {
+            Control fallback = null;
+            foreach (Control child in dialog.Controls)
+            {
+                if (child.Text == (accept ? "确定" : "取消")) return child;
+                Controls.RoundButton round = child as Controls.RoundButton;
+                if (round == null) continue;
+                if (accept ? (round.Accent && fallback == null) : !round.Accent) fallback = child;
+            }
+            return fallback;
         }
 
         private static void InspectProperties(Action open, string categories, string path, Action<Form> inspect = null, bool waitForMetadata = false)
@@ -569,7 +586,7 @@ namespace AppManager
                 using (new FileStream(app.TargetPath, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
                     string locked = TryRename(form, app, false, "locked.7z");
-                    Check(locked != null && locked.StartsWith("无法改名："), "locked file: " + locked);
+                    Check(locked != null && locked.StartsWith("无法重命名："), "locked file: " + locked);
                 }
                 Check(File.Exists(beforeLock) && app.TargetPath == beforeLock && EntriesOf(form, app)[0].Path == beforeLock, "locked rename changed records");
 
@@ -1070,19 +1087,19 @@ namespace AppManager
                 List<MenuWindow.MenuItem> single = (List<MenuWindow.MenuItem>)
                     Invoke(form, "BuildContextMenu", first);
                 CheckMenuOrder(single, "打开", "复制名称", "复制路径", "隐藏", "从常用移除",
-                    "添加到默认分类…", "添加到自定义…", "从「开发工具」移除", "从自定义移除",
+                    "添加到默认分类", "添加到自定义", "从「开发工具」移除", "从自定义移除",
                     "卸载", "属性…");
 
                 List<AppInfo> targets = new List<AppInfo> { first, second };
                 List<MenuWindow.MenuItem> batch = (List<MenuWindow.MenuItem>)
                     Invoke(form, "BuildContextMenu", first, targets);
                 CheckMenuOrder(batch, "已选择 2 个项目", "打开", "复制名称", "复制路径", "隐藏",
-                    "添加到常用", "添加到默认分类…", "添加到自定义…", "从“开发工具”移除", "从自定义移除");
+                    "添加到常用", "添加到默认分类", "添加到自定义", "从「开发工具」移除", "从自定义移除");
 
                 typeof(MainForm).GetField("currentCategory", Private).SetValue(form, "全部软件");
                 List<MenuWindow.MenuItem> readOnly = (List<MenuWindow.MenuItem>)
                     Invoke(form, "BuildContextMenu", first, targets);
-                CheckMenuOrder(readOnly, "已选择 2 个项目", "打开", "复制名称", "复制路径", "添加到默认分类…");
+                CheckMenuOrder(readOnly, "已选择 2 个项目", "打开", "复制名称", "复制路径", "添加到默认分类");
             }
 
             AppConfig resourceConfig = RenameConfig("menu-order-resource");
@@ -1094,14 +1111,14 @@ namespace AppManager
             {
                 List<MenuWindow.MenuItem> single = (List<MenuWindow.MenuItem>)
                     Invoke(form, "BuildContextMenu", photo1);
-                CheckMenuOrder(single, "打开文件", "复制名称", "复制路径", "隐藏", "移动到分类…",
-                    "加入集合…", "从「照片」移除", "删除", "属性…");
+                CheckMenuOrder(single, "打开文件", "复制名称", "复制路径", "隐藏", "移动到分类",
+                    "添加到集合", "从「照片」移除", "删除", "属性…");
 
                 List<AppInfo> targets = new List<AppInfo> { photo1, photo2 };
                 List<MenuWindow.MenuItem> batch = (List<MenuWindow.MenuItem>)
                     Invoke(form, "BuildContextMenu", photo1, targets);
                 CheckMenuOrder(batch, "已选择 2 个项目", "打开", "复制名称", "复制路径", "隐藏",
-                    "移动到分类…", "加入集合…", "从「照片」移出", "删除");
+                    "移动到分类", "添加到集合", "从「照片」移除", "删除");
             }
         }
 
@@ -1242,7 +1259,7 @@ namespace AppManager
                 {
                     List<MenuWindow.MenuItem> batch = new List<MenuWindow.MenuItem>();
                     Invoke(form, "BuildSoftwareMultiMenu", batch, first, targets, readOnly);
-                    List<MenuWindow.MenuItem> defaults = FindMenu(batch, "添加到默认分类…").SubItems;
+                    List<MenuWindow.MenuItem> defaults = FindMenu(batch, "添加到默认分类").SubItems;
                     MenuWindow.MenuItem office = FindMenu(defaults, "办公软件");
                     Check(office.Disabled == readOnly, "batch availability did not reflect partial/all membership");
                     if (!office.Disabled) office.Action();
@@ -4991,7 +5008,7 @@ namespace AppManager
                 typeof(MainForm).GetField("currentCollection", Private).SetValue(form, collection);
                 SelectForTest(form, first, second);
                 Controls.TextViewerControl viewer = OpenTextViewer(form, first, first, second);
-                MenuWindow.MenuItem remove = FindMenuItem(ViewerMenu(form, viewer, first.TargetPath), "从集合移出");
+                MenuWindow.MenuItem remove = FindMenuItem(ViewerMenu(form, viewer, first.TargetPath), "从集合移除");
                 Check(remove != null && !remove.Disabled, "viewer collection menu missing");
                 remove.Action();
                 Check(!HasCollection(config, first, collection) && HasCollection(config, second, collection),
@@ -6077,7 +6094,7 @@ namespace AppManager
                         Form dialog = FindModalForm();
                         if (dialog == null) return;
                         dialog.Opacity = 0;
-                        Control button = FindControlByText(dialog, accept ? "确定" : "取消");
+                        Control button = FindControlByText(dialog, accept ? "确定" : "取消") ?? ConfirmButton(dialog, accept);
                         if (button == null)
                         {
                             if (elapsed.ElapsedMilliseconds > 3000) { stray = true; dialog.Close(); }
@@ -6147,6 +6164,7 @@ namespace AppManager
             foreach (Control child in dialog.Controls) if (child.Text == text) button = child;
             if (button == null && command == 2)
                 foreach (Control child in dialog.Controls) if (child.Text == "知道了") button = child;
+            if (button == null && command == 1) button = ConfirmButton(dialog, true);   // 主按钮写的是具体动作时
             if (button == null) return false;
             dialog.Opacity = 0;
             typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });

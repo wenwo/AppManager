@@ -61,7 +61,7 @@ namespace AppManager
             }
             // 正在编辑别的集合且有没保存的改动：先问一句，不直接丢掉
             if (collectionInfo.HasUnsavedEdit && !ConfirmDialog.Show("新建集合",
-                "正在编辑的集合还有没保存的修改，新建会放弃这些修改。\n\n确定放弃并新建吗？")) return;
+                "正在编辑的集合还有没保存的修改，新建会放弃这些修改。", "放弃并新建", "继续编辑")) return;
             // 和选中 / 编辑集合一样先退出查看器与播放器，不让它们被新建页盖在下面继续运行
             HideImageViewer();
             HideTextViewer();

@@ -722,7 +722,7 @@ namespace AppManager
             {
                 if (roots == null || roots.Count == 0)
                 {
-                    item.Error = "未启用任何资源存储位置，请在设置 > 存储位置中启用至少一个位置。";
+                    item.Error = "未启用任何资源存储位置，请在设置 > 资源存储位置中启用至少一个位置。";
                     return null;
                 }
                 HashSet<string> tried;
@@ -817,7 +817,7 @@ namespace AppManager
             {
                 // 排队期间集合被删除：仍入库到分类，只放弃集合归属，避免整批副本无人登记。
                 batch.Collection = null;
-                batch.Error = "目标集合已不存在，仅加入分类。";
+                batch.Error = "目标集合已不存在，仅添加到分类。";
             }
             List<AddedEntry> added = new List<AddedEntry>();
             List<string> memberships = new List<string>();

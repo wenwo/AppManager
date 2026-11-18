@@ -160,7 +160,7 @@ namespace AppManager
 
         private void RenameDisplayName(AppInfo app)
         {
-            string newName = InputDialog.Show("改名", "显示名（不修改磁盘上的文件）：", app.Name);
+            string newName = InputDialog.Show("重命名", "显示名（不修改磁盘上的文件）：", app.Name);
             if (newName == null) return;
             newName = newName.Trim();
             if (newName.Length == 0) return;
@@ -181,12 +181,12 @@ namespace AppManager
             string blocker = RenameBlocker(oldPath, folder);
             if (blocker != null)
             {
-                MessageDialog.Show(this, blocker, "改名", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageDialog.Show(this, blocker, "重命名", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
             string initial = InitialRenameText(app, oldPath, folder);
             renameUnsaved = false;
-            string accepted = InputDialog.Show("改名", "新名称（同时修改磁盘上的文件名）：", initial,
+            string accepted = InputDialog.Show("重命名", "新名称（同时修改磁盘上的文件名）：", initial,
                 folder ? -1 : StemLength(initial),
                 delegate(string input) { return TryRenameOnDisk(app, oldPath, folder, input); });
             if (accepted == null) return;
@@ -198,7 +198,7 @@ namespace AppManager
         private string RenameBlocker(string path, bool folder)
         {
             if (folder && config.AddedItems.EntriesUnder(path).Count > 0)
-                return "「" + Path.GetFileName(path) + "」内包含其它已收录的项目，改名后这些项目会失效。\n请先移除这些项目后再改名。";
+                return "「" + Path.GetFileName(path) + "」内包含其它已收录的项目，重命名后这些项目会失效。\n请先移除这些项目后再重命名。";
             return null;
         }
 
@@ -277,7 +277,7 @@ namespace AppManager
                     foreach (string category in TypedCategoriesOf(app, EntriesAt(oldPath)))
                         if (!MediaRules.FitsCategory(category, newPath, false))
                             return MediaRules.CategoryTypeHint(category) + "，不能改为" + (newExt.Length > 0 ? "「" + newExt + "」" : "无扩展名");
-                    if (!ConfirmDialog.Show("改名", "如果改变扩展名（" + ExtText(oldExt) + " → " + ExtText(newExt) + "），可能会导致文件不可用。\n确实要更改吗？"))
+                    if (!ConfirmDialog.Show("重命名", "如果改变扩展名（" + ExtText(oldExt) + " → " + ExtText(newExt) + "），可能会导致文件不可用。\n确定要更改扩展名吗？", "更改", "取消"))
                         return string.Empty;
                 }
             }
@@ -289,7 +289,7 @@ namespace AppManager
             {
                 if (!(ex is Win32Exception || ex is IOException || ex is UnauthorizedAccessException
                     || ex is ArgumentException || ex is NotSupportedException)) throw;
-                return "无法改名：" + ex.Message.TrimEnd('。', '.', '\r', '\n');
+                return "无法重命名：" + ex.Message.TrimEnd('。', '.', '\r', '\n');
             }
             ForgetMoveOutAfterRename(oldPath);
 
@@ -312,7 +312,7 @@ namespace AppManager
             {
                 if (!(ex is Win32Exception || ex is IOException || ex is UnauthorizedAccessException)) throw;
                 renameUnsaved = true;
-                ShowStatusBar("已改名为「" + name + "」，但资源库未能保存，改回原名也失败。下次保存成功前请不要退出程序。", 0, 0);
+                ShowStatusBar("已重命名为「" + name + "」，但资源库未能保存，改回原名也失败。下次保存成功前请不要退出程序。", 0, 0);
                 return null;
             }
             RekeyEntry(newKey, oldKey, newPath, oldPath, folder);
@@ -321,7 +321,7 @@ namespace AppManager
             app.Key = oldKey;
             app.Name = oldAppName;
             app.DisplayIcon = oldDisplayIcon;
-            return "资源库未能保存，已撤销改名";
+            return "资源库未能保存，已撤销重命名";
         }
 
         /// <summary>显示名：文件为主名（列表补上扩展名展示），文件夹为完整名称。</summary>

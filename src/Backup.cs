@@ -839,7 +839,7 @@ namespace AppManager
                 return LayoutBackup.Create(name, out id, out error) ? null : error;
             }, delegate
             {
-                SetStatus("已新建备份「" + name + "」。需要改名可以在卡片的「更多」菜单里重命名。", false);
+                SetStatus("已新建备份「" + name + "」。需要换个名字，可以在卡片的「更多」菜单里重命名。", false);
                 ReloadList(id);
             });
         }
