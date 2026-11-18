@@ -177,6 +177,7 @@ namespace AppManager
                 Run("local scan result headline and key numbers", LocalScanResultSummaries);
                 Run("backup list ignores update leftovers", BackupListSkipsOld);
                 Run("backup create removes stale temporary snapshots", BackupCleansStaleTemp);
+                Run("backup meta records resource categories, keeps them on rename, old meta stays unknown", BackupResourceCategoryMeta);
                 Run("music player caches the scaled cover per size", MusicPlayerCoverCache);
                 Run("import history sorts problems first and names each record's state", ImportHistoryRules);
                 Run("import history dialog loads the journal and hands back the batch to clean up", ImportHistoryDialogFlow);
@@ -8636,6 +8637,34 @@ namespace AppManager
             finally
             {
                 try { if (Directory.Exists(stale)) Directory.Delete(stale, true); } catch { }
+                try { if (!string.IsNullOrEmpty(id) && Directory.Exists(Path.Combine(Paths.BackupsDir, id))) Directory.Delete(Path.Combine(Paths.BackupsDir, id), true); } catch { }
+            }
+        }
+
+        private static void BackupResourceCategoryMeta()
+        {
+            string id = null, error;
+            try
+            {
+                int expected = AppConfig.Load().ResourceCategories.Count;
+                Check(LayoutBackup.Create("回归资源分类计数", out id, out error), "backup create failed: " + error);
+                Func<LayoutBackupInfo> find = delegate { return LayoutBackup.List().Find(i => i.Id == id); };
+                Check(find().ResourceCategoryCount == expected, "new backup did not record resource categories: " + find().ResourceCategoryCount);
+                Check(LayoutBackup.Rename(id, "回归改名", out error), "rename failed: " + error);
+                Check(find().Name == "回归改名" && find().ResourceCategoryCount == expected, "rename lost the resource category count");
+
+                // 旧版 meta.xml 没有 resourceCategories：读出 -1，重命名也不凭空写出 0
+                string meta = Path.Combine(Paths.BackupsDir, id, "meta.xml");
+                File.WriteAllText(meta, "<backup name=\"旧备份\" created=\"2026-10-29 14:18:40\" stash=\"2\" custom=\"5\" categories=\"1\" />");
+                Check(find().ResourceCategoryCount == -1 && find().CategoryCount == 1, "old meta not read as unknown");
+                Check(LayoutBackup.Rename(id, "旧备份改名", out error), "rename of old backup failed: " + error);
+                Check(find().ResourceCategoryCount == -1 && !File.ReadAllText(meta).Contains("resourceCategories"), "rename invented a resource category count");
+                Check(Controls.BackupListControl.Facts(find())[1] == "软件页自建分类 1 个", "old backup chip not labelled as software-only");
+                File.WriteAllText(meta, "<backup name=\"坏值\" created=\"\" stash=\"0\" custom=\"0\" categories=\"0\" resourceCategories=\"-5\" />");
+                Check(find().ResourceCategoryCount == -1, "negative resource category count accepted");
+            }
+            finally
+            {
                 try { if (!string.IsNullOrEmpty(id) && Directory.Exists(Path.Combine(Paths.BackupsDir, id))) Directory.Delete(Path.Combine(Paths.BackupsDir, id), true); } catch { }
             }
         }

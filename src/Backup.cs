@@ -620,7 +620,8 @@ namespace AppManager
     /// 布局备份面板：嵌在设置页右侧（不再另开窗口），分上下两块。
     /// 上块「本机存档」：标题、一句说明、「新建备份」，下面是结果提示行和备份卡片列表；
     /// 恢复、覆盖、重命名、删除都在卡片上发起，会改动数据的操作先确认。
-    /// 下块「换电脑用」：一张固定在底部的卡片，说明 .ambak 备份包并放导出、导入两个按钮，备份包的进度和结果写在卡片里。
+    /// 下块「换电脑用」：固定在底部、与上块同样的标题行（说明 .ambak 备份包，右侧导出、导入两个按钮）加整行宽的提示行，
+    /// 备份包的进度和结果写在这一行。
     /// 结果直接写在面板上，不另弹提示框。恢复成功后触发 Restored，由主窗口重新加载；
     /// 操作进行中 Busy 为真，设置页据此挡住返回和切换。
     /// </summary>
@@ -630,22 +631,20 @@ namespace AppManager
         private const string LocalTitle = "本机存档";
         private const string LocalNote = "存在这台电脑上，连桌面收纳的文件一起存；弄乱了点「恢复」就能回到当时。";
         private const string PackageTitle = "换电脑用";
-        private const string PackageLine = "导出成一个 .ambak 文件，拿到另一台电脑上导入，分类和设置就跟过去了。";
-        private const string PackageNote = "只带分类和设置，不带文件本身；导入会替换现在的分类和设置，替换前自动备份。";
+        private const string PackageNote = "导出成 .ambak 文件带到别的电脑；只含分类和设置，不含文件。";
         private const int MenuWidth = 176;
         private const int ToolbarH = 34;
         private const int ButtonW = 116;
-        private const int HeaderH = 50;        // 「本机存档」标题 + 说明
-        private const int StatusH = 28;        // 本机存档操作的结果提示行
-        private const int PackageTitleH = 34;  // 「换电脑用」标题
-        private const int PackageCardH = 78;
+        private const int HeaderH = 50;        // 一块的标题 + 说明，按钮在右侧垂直居中
+        private const int StatusH = 28;        // 一块的结果提示行（占满整行宽，长路径也放得下）
+        private const int PackageGap = 12;     // 「换电脑用」上方分隔线到标题的距离
         private const int Shadow = 8;   // 与设置页约定：左右各多留 8px 放卡片阴影，按钮和文字向内缩进同样距离
 
         private readonly BackupListControl list;
         private readonly RoundButton btnCreate;
         private readonly RoundButton export = new RoundButton { Text = "导出到文件…" };
         private readonly RoundButton import = new RoundButton { Text = "从文件导入…" };
-        private string packageStatus = string.Empty;   // 备份包的进度或结果；为空时卡片第二行显示说明
+        private string packageStatus = string.Empty;   // 备份包的进度或结果，写在「换电脑用」下方的提示行
         private bool packageWarning;
         private bool operationRunning;
         private int reloadGeneration;
@@ -703,26 +702,24 @@ namespace AppManager
         {
             base.OnResize(e);
             int gap = Dpi(Shadow), w = Math.Min(Dpi(ButtonW), Math.Max(0, Width - gap * 2) / 3), h = Dpi(ToolbarH);
-            btnCreate.SetBounds(Math.Max(gap, Width - gap - w), (Dpi(HeaderH) - h) / 2, w, h);
-            Rectangle card = PackageCardRect();
-            int buttonTop = card.Top + (card.Height - h) / 2;
-            import.SetBounds(Math.Max(card.Left, card.Right - Dpi(16) - w), buttonTop, w, h);
-            export.SetBounds(Math.Max(card.Left, import.Left - Dpi(8) - w), buttonTop, w, h);
+            btnCreate.SetBounds(Width - gap - w, (Dpi(HeaderH) - h) / 2, w, h);
+            int buttonTop = PackageHeaderTop() + (Dpi(HeaderH) - h) / 2;
+            import.SetBounds(Width - gap - w, buttonTop, w, h);
+            export.SetBounds(import.Left - gap - w, buttonTop, w, h);
             int top = Dpi(HeaderH + StatusH);
-            list.Bounds = new Rectangle(0, top, Width, Math.Max(0, PackageTop() - Dpi(8) - top));
+            list.Bounds = new Rectangle(0, top, Width, Math.Max(0, PackageTop() - top));
             Invalidate();
         }
 
-        /// <summary>「换电脑用」一块的顶部：固定在面板底部，留出卡片阴影。</summary>
+        /// <summary>「换电脑用」一块的顶部（分隔线位置）：固定在面板底部，与「本机存档」同样是标题行 + 提示行。</summary>
         private int PackageTop()
         {
-            return Math.Max(Dpi(HeaderH + StatusH), Height - Dpi(PackageTitleH + PackageCardH + Shadow));
+            return Math.Max(Dpi(HeaderH + StatusH), Height - Dpi(PackageGap + HeaderH + StatusH));
         }
 
-        private Rectangle PackageCardRect()
+        private int PackageHeaderTop()
         {
-            int gap = Dpi(Shadow);
-            return new Rectangle(gap, PackageTop() + Dpi(PackageTitleH), Math.Max(0, Width - gap * 2), Dpi(PackageCardH));
+            return PackageTop() + Dpi(PackageGap);
         }
 
         /// <summary>每次显示时重新读取列表：备份目录可能在别处被改动过。</summary>
@@ -756,23 +753,24 @@ namespace AppManager
                         Draw.DrawStringLeft(g, status, Theme.CaptionFont, brush,
                             new Rectangle(gap, Dpi(HeaderH), Math.Max(0, Width - gap * 2), Dpi(StatusH)));
 
-                // 下块：换电脑用
-                int top = PackageTop();
-                Draw.DrawStringLeft(g, PackageTitle, Theme.SectionTitleFont, primary,
-                    new Rectangle(gap, top + Dpi(4), Math.Max(0, Width - gap * 2), Dpi(PackageTitleH - 8)));
-                Rectangle card = PackageCardRect();
-                if (card.Width <= 0) return;
-                int radius = Dpi(Theme.RadiusCard);
-                Draw.DrawShadow(g, card, radius, 0.18f);
-                using (SolidBrush fill = new SolidBrush(Theme.Card)) Draw.FillRoundedRect(g, fill, card, radius);
-                int left = card.Left + Dpi(16), right = export.Left - Dpi(16);
-                if (right <= left) return;
-                Draw.DrawStringLeft(g, PackageLine, Theme.BodyFont, primary, new Rectangle(left, card.Top + Dpi(16), right - left, Dpi(22)));
-                Rectangle second = new Rectangle(left, card.Top + Dpi(40), right - left, Dpi(20));
-                if (packageStatus.Length == 0) Draw.DrawStringLeft(g, PackageNote, Theme.CaptionFont, secondary, second);
-                else
+                // 下块：换电脑用（分隔线 + 标题、说明 + 整行宽的提示行）
+                int top = PackageTop(), header = PackageHeaderTop();
+                using (Pen line = new Pen(Theme.Separator, 1))
+                    g.DrawLine(line, gap, top, Width - gap - 1, top);
+                int noteW = Math.Max(0, export.Left - gap * 3);
+                Draw.DrawStringLeft(g, PackageTitle, Theme.SectionTitleFont, primary, new Rectangle(gap, header + Dpi(2), noteW, Dpi(24)));
+                Draw.DrawStringLeft(g, PackageNote, Theme.CaptionFont, secondary, new Rectangle(gap, header + Dpi(26), noteW, Dpi(20)));
+                if (packageStatus.Length > 0)
                     using (SolidBrush brush = new SolidBrush(packageWarning ? Theme.WarningText : Theme.SuccessText))
-                        Draw.DrawStringLeft(g, packageStatus, Theme.CaptionFont, brush, second);
+                    using (StringFormat format = new StringFormat(StringFormatFlags.NoWrap))
+                    {
+                        // 放不下时省略中间、保留结尾：导出位置的文件名和错误原因的最后部分都还看得见
+                        format.LineAlignment = StringAlignment.Center;
+                        format.Trimming = StringTrimming.EllipsisPath;
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+                        g.DrawString(packageStatus, Theme.CaptionFont, brush,
+                            new Rectangle(gap, header + Dpi(HeaderH), Math.Max(0, Width - gap * 2), Dpi(StatusH)), format);
+                    }
             }
         }
 
@@ -783,7 +781,7 @@ namespace AppManager
             Invalidate();
         }
 
-        /// <summary>备份包（导出、导入）的进度和结果：写在「换电脑用」卡片的第二行，为空时恢复成说明文字。</summary>
+        /// <summary>备份包（导出、导入）的进度和结果：写在「换电脑用」下方的提示行，为空时不显示。</summary>
         internal void SetPackageStatus(string text, bool warning)
         {
             packageStatus = text ?? string.Empty;
