@@ -618,8 +618,24 @@ namespace AppManager
         public static bool Show(string title, string message, string okText, string cancelText)
         {
             // 与提示框（MessageDialog）共用同一个窗体：正文自动换行，高度随内容变化
+            return Show(title, message, okText, cancelText, false);
+        }
+
+        /// <summary>
+        /// 不可撤回的动作（删除文件、删除集合 / 分类 / 备份等）用这个：主按钮画成红色并写明动作。
+        /// 回车、Esc 的行为与普通确认框相同（回车确认、Esc 取消），只是颜色不同。
+        /// </summary>
+        public static bool ShowDanger(string title, string message, string okText)
+        {
+            return Show(title, message, okText, "取消", true);
+        }
+
+        private static bool Show(string title, string message, string okText, string cancelText, bool danger)
+        {
+            // 与提示框（MessageDialog）共用同一个窗体：正文自动换行，高度随内容变化
             using (MessageForm f = new MessageForm(title, message, new string[] { okText, cancelText },
-                new DialogResult[] { DialogResult.OK, DialogResult.Cancel }, 0, DialogResult.Cancel))
+                new DialogResult[] { DialogResult.OK, DialogResult.Cancel }, 0, DialogResult.Cancel,
+                MessageBoxIcon.None, danger ? 0 : -1))
             {
                 ShowModal(f);
                 return f.Result == DialogResult.OK;

@@ -40,7 +40,7 @@ namespace AppManager
                 : (defaultButton == MessageBoxDefaultButton.Button3 ? 2 : 0);
             if (index >= labels.Length) index = 0;
             PlaySound(icon);
-            using (MessageForm form = new MessageForm(caption, text, labels, results, index, escape))
+            using (MessageForm form = new MessageForm(caption, text, labels, results, index, escape, icon, -1))
             {
                 ConfirmDialog.ShowModal(form, ownerControl == null ? null : ownerControl.FindForm());
                 return form.Result;
@@ -132,19 +132,35 @@ namespace AppManager
         private readonly DialogResult[] results;
         private readonly int defaultIndex;
         private readonly DialogResult escapeResult;
+        private readonly MessageBoxIcon severity;
         private Rectangle textRect;
+
+        // 标题前的等级标记（仅出错、警告时显示）：96 DPI 下的边长和与标题的间距
+        private const int BadgeSize = 20;
+        private const int BadgeGap = 8;
 
         /// <summary>用户的选择；没点按钮就关掉时取 Esc 的结果，Esc 无效的组合取最后一个按钮（「否」）。</summary>
         internal DialogResult Result { get; private set; }
 
         internal MessageForm(string title, string message, string[] labels, DialogResult[] results, int defaultIndex,
             DialogResult escapeResult)
+            : this(title, message, labels, results, defaultIndex, escapeResult, MessageBoxIcon.None, -1)
+        {
+        }
+
+        /// <summary>
+        /// severity：出错（Error）和警告（Warning）在标题前画红 / 橙色标记，一眼能和普通提示分开；其它不画。
+        /// dangerIndex：这个下标的按钮是不可撤回的动作（删除等），画成红色；没有则传 -1。
+        /// </summary>
+        internal MessageForm(string title, string message, string[] labels, DialogResult[] results, int defaultIndex,
+            DialogResult escapeResult, MessageBoxIcon severity, int dangerIndex)
         {
             this.title = title ?? string.Empty;
             this.message = message ?? string.Empty;
             this.results = results;
             this.defaultIndex = defaultIndex;
             this.escapeResult = escapeResult;
+            this.severity = severity;
             Result = escapeResult != DialogResult.None ? escapeResult : results[results.Length - 1];
 
             FormBorderStyle = FormBorderStyle.None;
@@ -160,6 +176,7 @@ namespace AppManager
             {
                 DialogResult result = results[i];
                 buttons[i] = ConfirmDialog.MakeBtn(labels[i], i == defaultIndex);
+                buttons[i].Danger = i == dangerIndex;
                 buttons[i].Click += delegate { Choose(result); };
                 Controls.Add(buttons[i]);
             }
@@ -277,13 +294,45 @@ namespace AppManager
             base.OnPaint(e);
             // 白底由窗体背景色铺好，描边由 BufferedDialogForm 统一画
             Graphics g = e.Graphics;
+            int titleLeft = Dpi(Pad);
+            if (HasBadge)
+            {
+                PaintBadge(g, new Rectangle(titleLeft, Dpi(18) + (Dpi(30) - Dpi(BadgeSize)) / 2, Dpi(BadgeSize), Dpi(BadgeSize)));
+                titleLeft += Dpi(BadgeSize) + Dpi(BadgeGap);
+            }
             using (SolidBrush text = new SolidBrush(Theme.TextPrimary))
             {
-                Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, text, new Rectangle(Dpi(Pad), Dpi(18), Width - Dpi(Pad) * 2, Dpi(30)));
+                Draw.DrawStringLeft(g, title, Theme.DialogTitleFont, text, new Rectangle(titleLeft, Dpi(18), Width - titleLeft - Dpi(Pad), Dpi(30)));
                 if (message.Length == 0) return;
                 g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
                 g.DrawString(message, Theme.BodyFont, text, textRect, TextFormat);
             }
+        }
+
+        private bool HasBadge
+        {
+            get { return severity == MessageBoxIcon.Error || severity == MessageBoxIcon.Warning; }
+        }
+
+        /// <summary>等级标记：浅色圆角底 + 同色系的感叹号（出错红、警告橙），自己画，不依赖图标字体。</summary>
+        private void PaintBadge(Graphics g, Rectangle r)
+        {
+            bool error = severity == MessageBoxIcon.Error;
+            Color ink = error ? Theme.DangerText : Theme.WarningText;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            using (SolidBrush back = new SolidBrush(error ? Theme.DangerBg : Theme.WarningBg))
+                Draw.FillRoundedRect(g, back, r, Dpi(6));
+            float cx = r.X + r.Width / 2F;
+            float stroke = Math.Max(1.6F, Dpi(2));
+            using (Pen pen = new Pen(ink, stroke))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                g.DrawLine(pen, cx, r.Y + r.Height * 0.26F, cx, r.Y + r.Height * 0.56F);
+            }
+            float dot = stroke * 1.15F;
+            using (SolidBrush fill = new SolidBrush(ink))
+                g.FillEllipse(fill, cx - dot / 2F, r.Y + r.Height * 0.72F - dot / 2F, dot, dot);
         }
 
         protected override void OnKeyDown(KeyEventArgs e)

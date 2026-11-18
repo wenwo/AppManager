@@ -455,25 +455,7 @@ namespace AppManager.Controls
                 "以后弄乱了，可以整体恢复到这一刻。",
                 "点右上角的「新建备份」开始。"
             };
-            int tile = Dpi(56);
-            int blockH = tile + Dpi(16) + Dpi(26) + Dpi(8) + lines.Length * Dpi(20);
-            int y = Math.Max(Dpi(8), (Height - blockH) / 2 - Dpi(10));
-            Rectangle tileRect = new Rectangle((Width - tile) / 2, y, tile, tile);
-            using (SolidBrush tb = new SolidBrush(Mix(Theme.Accent, Theme.Background, 0.87f)))
-                Draw.FillRoundedRect(g, tb, tileRect, Dpi(14));
-            Draw.DrawGlyph(g, GlyphBackup, Rectangle.Inflate(tileRect, -Dpi(15), -Dpi(15)), Theme.Accent);
-            y += tile + Dpi(16);
-            using (SolidBrush title = new SolidBrush(Theme.TextPrimary))
-                Draw.DrawStringCenter(g, "还没有备份", Theme.FontOf(11F, FontStyle.Bold), title, new Rectangle(0, y, Width, Dpi(26)));
-            y += Dpi(26) + Dpi(8);
-            using (SolidBrush text = new SolidBrush(Theme.TextSecondary))
-            {
-                foreach (string line in lines)
-                {
-                    Draw.DrawStringCenter(g, line, Theme.CaptionFont, text, new Rectangle(0, y, Width, Dpi(20)));
-                    y += Dpi(20);
-                }
-            }
+            Draw.DrawEmptyState(g, new Rectangle(0, 0, Width, Height), GlyphBackup, "还没有备份", lines, DpiHelper.ForControl(this));
         }
 
         private void PaintHeaders(Graphics g)

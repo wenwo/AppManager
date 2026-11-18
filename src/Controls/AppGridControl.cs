@@ -965,12 +965,29 @@ namespace AppManager.Controls
             catch { }
         }
 
-        /// <summary>空态提示：主内容区居中显示浅灰文案（网格/列表通用）。</summary>
+        private string emptyGlyph = "";
+        private string emptyTitle = "暂无内容";
+        private string[] emptyLines = new string[0];
+
+        /// <summary>
+        /// 没有条目时显示什么：图标、标题和说明。由宿主按场景给出（搜不到、分类为空、集合为空……），
+        /// 让「为什么是空的」和「接下来做什么」都看得到。
+        /// </summary>
+        public void SetEmptyState(string glyph, string title, params string[] lines)
+        {
+            emptyGlyph = glyph ?? string.Empty;
+            emptyTitle = string.IsNullOrEmpty(title) ? "暂无内容" : title;
+            emptyLines = lines ?? new string[0];
+            if (apps.Count == 0) Invalidate();
+        }
+
+        internal string EmptyTitle { get { return emptyTitle; } }
+
+        /// <summary>空态：主内容区居中显示图标、标题和说明（网格/列表通用）。</summary>
         private void PaintEmptyState(Graphics g)
         {
-            using (SolidBrush br = new SolidBrush(Theme.TextSecondary))
-                Draw.DrawStringCenter(g, "暂无内容", Theme.BodyFont, br,
-                    new Rectangle(0, 0, ClientSize.Width, ClientSize.Height));
+            Draw.DrawEmptyState(g, new Rectangle(0, 0, ClientSize.Width, ClientSize.Height), emptyGlyph, emptyTitle, emptyLines,
+                DpiHelper.ForControl(this));
         }
 
         /// <summary>

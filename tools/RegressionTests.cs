@@ -6986,7 +6986,7 @@ namespace AppManager
             string emptyText = null;
             using (ImportHistoryDialog dialog = new ImportHistoryDialog(Path.Combine(root, "import-history", "missing"), delegate { return false; }))
                 whenLoaded(dialog, delegate { emptyText = (string)field(dialog, "placeholder"); });
-            Check(emptyText == "暂无导入记录", "empty journal state wrong: " + emptyText);
+            Check(emptyText == "还没有导入记录", "empty journal state wrong: " + emptyText);
 
             // 读取还没结束就关闭：后台线程不得再回调已关闭的窗口
             using (ImportHistoryDialog dialog = new ImportHistoryDialog(journal, delegate { return false; }))

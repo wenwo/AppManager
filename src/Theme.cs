@@ -39,6 +39,9 @@ namespace AppManager
 
         // 语义色：危险/成功/状态等，集中管理避免魔法值散落
         public static readonly Color DeleteRed = Color.FromArgb(245, 74, 69);
+        // 危险操作实底按钮（删除等）的悬停 / 按下色：与强调色按钮同样的「悬停略亮、按下略暗」
+        public static readonly Color DangerHover = Color.FromArgb(248, 99, 94);
+        public static readonly Color DangerPressed = Color.FromArgb(221, 62, 57);
         // 状态文字与浅底：成功 / 警示 / 失败，导入记录、布局备份、设置页等共用同一组
         public static readonly Color SuccessText = Color.FromArgb(24, 128, 66);
         public static readonly Color SuccessBg = Color.FromArgb(228, 245, 234);

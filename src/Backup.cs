@@ -929,7 +929,7 @@ namespace AppManager
             string consequence = info.IsPreRestore
                 ? "这是那次恢复前自动保存的布局，删除后无法找回。"
                 : "备份文件会被永久删除，当前布局不受影响。";
-            if (!ConfirmDialog.Show("删除备份", "删除" + Quote(info) + "？\r\n" + consequence, "删除", "取消")) return;
+            if (!ConfirmDialog.ShowDanger("删除备份", "删除" + Quote(info) + "？\r\n" + consequence, "删除")) return;
 
             RunBackupOperation(info.Id, "正在删除…", "删除失败：", delegate
             {

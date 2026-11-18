@@ -13,6 +13,7 @@ namespace AppManager.Controls
     public class RoundButton : Control
     {
         private bool _accent;
+        private bool _danger;
         private bool _hover;
         private bool _pressed;
         private UiIconKind? _icon;
@@ -29,6 +30,10 @@ namespace AppManager.Controls
 
         [Category("外观")]
         public bool Accent { get { return _accent; } set { _accent = value; Invalidate(); } }
+
+        /// <summary>危险操作的主按钮（删除等不可撤回的动作）：红色实底，优先于 Accent。</summary>
+        [Category("外观")]
+        public bool Danger { get { return _danger; } set { _danger = value; Invalidate(); } }
 
         [Category("外观")]
         public UiIconKind? Icon { get { return _icon; } set { _icon = value; Invalidate(); } }
@@ -88,7 +93,12 @@ namespace AppManager.Controls
                 }
                 return;
             }
-            if (_accent)
+            if (_danger)
+            {
+                Color bg = _pressed ? Theme.DangerPressed : (_hover ? Theme.DangerHover : Theme.DeleteRed);
+                using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, radius);
+            }
+            else if (_accent)
             {
                 Color bg = _pressed ? Theme.AccentPressed : (_hover ? Theme.AccentHover : Theme.Accent);
                 using (SolidBrush b = new SolidBrush(bg)) Draw.FillRoundedRect(g, b, r, radius);
@@ -102,7 +112,7 @@ namespace AppManager.Controls
                 Color border = _hover ? Blend(Theme.ControlBorder, Theme.Accent, 0.2f) : Theme.ControlBorder;
                 using (Pen p = new Pen(border, 1)) Draw.DrawRoundedRect(g, p, r, radius);
             }
-            Color tc = _accent ? Color.White : Theme.TextPrimary;
+            Color tc = _accent || _danger ? Color.White : Theme.TextPrimary;
             using (SolidBrush br = new SolidBrush(tc))
             {
                 if (_icon.HasValue) PaintIconAndText(g, r, br, tc);

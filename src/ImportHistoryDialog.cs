@@ -57,6 +57,7 @@ namespace AppManager
         private readonly ThemedToolTip tip = new ThemedToolTip();
 
         private Rectangle leftFrame, rightFrame, tilesRect, noticeRect;   // 已按当前 DPI 换算
+        private const string EmptyText = "还没有导入记录";   // 读到了、但一条都没有：画成带图标和说明的空状态
         private string placeholder = "正在读取导入记录…";
         private string headerSummary = string.Empty;
         private Record current;
@@ -333,7 +334,7 @@ namespace AppManager
                 + (attention > 0 ? " · " + attention + " 次需留意" : string.Empty);
             if (unreadable > 0) headerSummary += (headerSummary.Length > 0 ? " · " : string.Empty) + unreadable + " 条记录无法读取";
             placeholder = failed && loaded.Count == 0 ? "读取导入记录失败，请稍后再试。"
-                : loaded.Count == 0 ? (unreadable > 0 ? "导入记录无法读取。" : "暂无导入记录") : null;
+                : loaded.Count == 0 ? (unreadable > 0 ? "导入记录无法读取。" : EmptyText) : null;
             ApplyVisibility();
             if (placeholder == null)
             {
@@ -533,7 +534,13 @@ namespace AppManager
                 {
                     Rectangle whole = Rectangle.FromLTRB(leftFrame.X, leftFrame.Y, rightFrame.Right, leftFrame.Bottom);
                     DrawCard(g, whole);
-                    Draw.DrawStringCenter(g, placeholder, Theme.BodyFont, tertiary, whole);
+                    if (placeholder == EmptyText)
+                        Draw.DrawEmptyState(g, whole, "", EmptyText, new string[]
+                        {
+                            "把文件拖进资源分类，或用「添加」导入之后，",
+                            "每次导入的结果都会记在这里。"
+                        }, DpiHelper.ForControl(this));
+                    else Draw.DrawStringCenter(g, placeholder, Theme.BodyFont, tertiary, whole);
                     return;
                 }
                 DrawCard(g, leftFrame);

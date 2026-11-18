@@ -2145,6 +2145,7 @@ namespace AppManager
             // 行内第二个按钮：集合视图（含集合内搜索）为「移除」，分类/全部资源下为「删除」
             grid.RowDeleteText = (contentMode == SidebarControl.ContentMode.Website
                 && currentCollection != null) ? "移除" : "删除";
+            UpdateGridEmptyState(kw);   // 列表为空时说清是哪种空（见 MainForm.EmptyState.cs）
             grid.SetApps(shown);
             StartIconLoad();
             // 拖动排序在可排序分类/集合、非搜索态开放；表头排序或分页内容不参与重排
@@ -2794,7 +2795,7 @@ namespace AppManager
                     ? "\n\n警告：选中的位置没有可用回收站，将继续永久删除，无法恢复。"
                     : "\n文件将移入回收站，可恢复；如系统无法放入回收站，会先再次确认。";
             }
-            if (!ConfirmDialog.Show(allMissing ? "删除条目" : "删除文件", msg, "删除", "取消")) return false;
+            if (!ConfirmDialog.ShowDanger(allMissing ? "删除条目" : "删除文件", msg, "删除")) return false;
             if (!ConfirmTextViewerMutation(valid)) return false;
             DeleteEntriesDisk(valid);
             return true;
@@ -3950,9 +3951,9 @@ namespace AppManager
             for (int i = 0; i < subtree.Count; i++) keys.Add(CollectionKeys.GetKey(subtree[i]));
             int affected = CollectionOps.CountAffectedMembers(config, subtree);
             string childText = subtree.Count > 1 ? "及其 " + (subtree.Count - 1) + " 个子集合" : string.Empty;
-            if (!ConfirmDialog.Show("删除集合",
+            if (!ConfirmDialog.ShowDanger("删除集合",
                 "删除集合「" + c.Name + "」" + childText + "？\n将移除 " + affected + " 项资源的集合归属；不会删除磁盘文件。",
-                "删除", "取消")) return;
+                "删除")) return;
             List<string> covers = new List<string>();
             for (int i = 0; i < subtree.Count; i++)
                 if (!string.IsNullOrEmpty(subtree[i].Cover)) covers.Add(subtree[i].Cover);
@@ -4311,7 +4312,7 @@ namespace AppManager
                     "删除分类", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
-            if (!ConfirmDialog.Show("删除分类", "删除分类「" + category + "」？\n该分类下的条目将回归默认分类。", "删除", "取消")) return;
+            if (!ConfirmDialog.ShowDanger("删除分类", "删除分类「" + category + "」？\n该分类下的条目将回归默认分类。", "删除")) return;
             List<string> collectionCovers = new List<string>();
             List<string> removedCollectionKeys = new List<string>();
             if (resource)
@@ -6533,7 +6534,7 @@ namespace AppManager
             string msg = valid.Count == 1
                 ? "删除「" + valid[0].Name + "」？\n只移除记录，不删除磁盘文件。"
                 : "删除这 " + valid.Count + " 个条目？\n只移除记录，不删除磁盘文件。";
-            if (!ConfirmDialog.Show("删除条目", msg, "删除", "取消")) return;
+            if (!ConfirmDialog.ShowDanger("删除条目", msg, "删除")) return;
             bool removed = false;
             foreach (AppInfo app in valid)
             {
@@ -6667,8 +6668,7 @@ namespace AppManager
                         return;
                     }
                     ReloadLibrary();
-                    MessageDialog.Show(successText(count), "整理桌面",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    ShowNotice(successText(count));   // 成功只在底部提示条说一声，不弹窗打断
                 });
             });
         }
@@ -6952,8 +6952,7 @@ namespace AppManager
             try
             {
                 if (!config.ExportTo(path)) throw new IOException("备份包未能写入，请检查目标路径和磁盘空间。");
-                MessageDialog.Show("已导出备份包：\n" + path, "导出备份包",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                ShowNotice("已导出备份包：" + path);   // 成功只在底部提示条说一声，不弹窗打断
             }
             catch (Exception ex)
             {

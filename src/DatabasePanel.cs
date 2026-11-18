@@ -64,6 +64,7 @@ namespace AppManager
         private readonly List<Op> ops = new List<Op>();
 
         private Rectangle leftFrame, rightFrame, tilesRect, noticeRect;   // 已按当前 DPI 换算
+        private const string EmptyText = "还没有操作记录";   // 读到了、但一条都没有：画成带图标和说明的空状态
         private string placeholder = "正在读取操作记录…";
         private string detailText = "正在读取明细…";   // 右侧明细区的占位文字；有明细可看时为 null
         private string headerSummary = string.Empty;
@@ -354,7 +355,7 @@ namespace AppManager
 
             headerSummary = ops.Count == 0 ? string.Empty : (moreOps ? "已列出最近 " : "共 ") + ops.Count + " 次操作";
             filter.Text = showSystem ? "隐藏系统自动记录" : "显示系统自动记录";
-            placeholder = ops.Count == 0 ? "还没有操作记录" : null;
+            placeholder = ops.Count == 0 ? EmptyText : null;
             int select = 0;
             opList.BeginUpdate();
             try
@@ -764,7 +765,13 @@ namespace AppManager
                 {
                     Rectangle whole = Rectangle.FromLTRB(leftFrame.X, leftFrame.Y, rightFrame.Right, leftFrame.Bottom);
                     DrawCard(g, whole);
-                    Draw.DrawStringCenter(g, placeholder, Theme.BodyFont, tertiary, whole);
+                    if (placeholder == EmptyText)
+                        Draw.DrawEmptyState(g, whole, "", EmptyText, new string[]
+                        {
+                            "新建分类、调整集合、修改设置之后，每次改动都会记在这里；",
+                            "最新的一次可以撤销。"
+                        }, DpiHelper.ForControl(this));
+                    else Draw.DrawStringCenter(g, placeholder, Theme.BodyFont, tertiary, whole);
                     return;
                 }
                 DrawCard(g, leftFrame);

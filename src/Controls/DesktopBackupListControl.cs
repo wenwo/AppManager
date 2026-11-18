@@ -189,8 +189,11 @@ namespace AppManager.Controls
             g.SmoothingMode = SmoothingMode.AntiAlias;
             if (items.Count == 0)
             {
-                using (SolidBrush text = new SolidBrush(Theme.TextTertiary))
-                    Draw.DrawStringCenter(g, "清单是空的：收纳过的桌面条目都已还原或移除。", Theme.BodyFont, text, ClientRectangle);
+                Draw.DrawEmptyState(g, ClientRectangle, GlyphFolder, "清单是空的", new string[]
+                {
+                    "收纳过的桌面条目都已还原或移除。",
+                    "用「整理桌面」收纳之后，收走的条目会列在这里，可以逐个还原。"
+                }, DpiHelper.ForControl(this));
                 return;
             }
             GraphicsState state = g.Save();

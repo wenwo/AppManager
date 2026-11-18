@@ -259,6 +259,44 @@ namespace AppManager
                 g.FillEllipse(center, r.X + (r.Width - 1 - dot) / 2F, r.Y + (r.Height - 1 - dot) / 2F, dot, dot);
         }
 
+        /// <summary>
+        /// 统一的空状态：居中的浅色图标块 + 一行标题 + 若干行说明，说清「这里是空的」和「接下来可以做什么」。
+        /// 主列表、布局备份、操作记录、导入记录、桌面备份清单共用。glyph 是系统图标字体里的字形，取不到时只是不画图标；
+        /// 区域太矮放不下图标块时，退回只画一行标题。
+        /// </summary>
+        public static void DrawEmptyState(Graphics g, Rectangle area, string glyph, string title, string[] lines, int dpi)
+        {
+            if (area.Width <= 0 || area.Height <= 0) return;
+            int count = lines == null ? 0 : lines.Length;
+            int tile = DpiHelper.Scale(56, dpi), titleH = DpiHelper.Scale(26, dpi), lineH = DpiHelper.Scale(20, dpi);
+            int blockH = tile + DpiHelper.Scale(16, dpi) + titleH + (count > 0 ? DpiHelper.Scale(8, dpi) + count * lineH : 0);
+            if (area.Height < blockH + DpiHelper.Scale(16, dpi))
+            {
+                using (SolidBrush plain = new SolidBrush(Theme.TextSecondary))
+                    DrawStringCenter(g, title, Theme.BodyFont, plain, area);
+                return;
+            }
+            int y = area.Y + Math.Max(DpiHelper.Scale(8, dpi), (area.Height - blockH) / 2 - DpiHelper.Scale(10, dpi));
+            Rectangle tileRect = new Rectangle(area.X + (area.Width - tile) / 2, y, tile, tile);
+            using (SolidBrush tb = new SolidBrush(Mix(Theme.Accent, Theme.Background, 0.87f)))
+                FillRoundedRect(g, tb, tileRect, DpiHelper.Scale(14, dpi));
+            int inset = DpiHelper.Scale(15, dpi);
+            DrawGlyph(g, glyph, Rectangle.Inflate(tileRect, -inset, -inset), Theme.Accent);
+            y += tile + DpiHelper.Scale(16, dpi);
+            using (SolidBrush titleBrush = new SolidBrush(Theme.TextPrimary))
+                DrawStringCenter(g, title, Theme.FontOf(11F, FontStyle.Bold), titleBrush, new Rectangle(area.X, y, area.Width, titleH));
+            if (count == 0) return;
+            y += titleH + DpiHelper.Scale(8, dpi);
+            using (SolidBrush text = new SolidBrush(Theme.TextSecondary))
+            {
+                foreach (string line in lines)
+                {
+                    DrawStringCenter(g, line, Theme.CaptionFont, text, new Rectangle(area.X, y, area.Width, lineH));
+                    y += lineH;
+                }
+            }
+        }
+
         /// <summary>绘制柔和阴影（多层半透明圆角，由外向内加深）。</summary>
         public static void DrawShadow(Graphics g, Rectangle rect, int radius)
         {
