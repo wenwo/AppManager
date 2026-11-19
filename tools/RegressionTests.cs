@@ -147,6 +147,7 @@ namespace AppManager
                 Run("collection draft validation covers rename, move and self-nesting", CollectionDraftValidation);
                 Run("collection edit page creates, keeps creating, renames and moves in one save", CollectionEditPageFlow);
                 Run("collection edit page keeps pending members, asks before dropping edits and cleans up failed covers", CollectionEditPageGuards);
+                Run("collection edit fields repaint whole after the page is resized", CollectionEditFieldsRepaintOnResize);
                 Run("collection deletion falls back to the nearest surviving ancestor", CollectionDeleteFallback);
                 Run("collection move keeps ids, order and references across parents", CollectionMovePersistence);
                 Run("collection move rejects invalid targets and failed saves stay retryable", CollectionMoveGuards);
@@ -1937,6 +1938,66 @@ namespace AppManager
                 Check((int)generation.GetValue(panel) == first + 1, "a lost completion post blocked the next thumbnail load");
             }
         }
+
+        // 集合编辑页：名称 / 简介的圆角输入框底随窗口变宽、变窄时必须整块重画；
+        // 只重画新露出的一条会留下旧宽度的圆角和描边（全屏切换时出现断口）。
+        private static void CollectionEditFieldsRepaintOnResize()
+        {
+            using (Form host = new Form())
+            using (Controls.CollectionInfoPanel panel = new Controls.CollectionInfoPanel())
+            {
+                host.ShowInTaskbar = false;
+                host.StartPosition = FormStartPosition.Manual;
+                host.Location = new Point(-3000, -3000);
+                host.ClientSize = new Size(900, 680);
+                panel.Dock = DockStyle.Fill;
+                panel.Visible = true;   // 信息页默认隐藏，主窗体用到时才显示
+                host.Controls.Add(panel);
+                panel.SetInfo("照片", "重画回归", "", 0, "", .5F, .5F, null, new List<string>());
+                host.Show();
+                panel.BeginEdit("照片", "");
+                Type type = typeof(Controls.CollectionInfoPanel);
+                MethodInfo ensureLayout = type.GetMethod("EnsureLayout", Private);
+                Panel[] fields = { (Panel)type.GetField("namePanel", Private).GetValue(panel),
+                    (Panel)type.GetField("descPanel", Private).GetValue(panel) };
+                foreach (int width in new int[] { 1700, 900 })   // 先变宽（全屏）再变窄（还原）
+                {
+                    Stopwatch wait = Stopwatch.StartNew();
+                    while (wait.ElapsedMilliseconds < 3000 && (HasPendingPaint(fields[0]) || HasPendingPaint(fields[1])))
+                    {
+                        Application.DoEvents();
+                        Thread.Sleep(10);
+                    }
+                    Check(!HasPendingPaint(fields[0]) && !HasPendingPaint(fields[1]), "fixture: edit fields never finished painting");
+                    int[] before = { fields[0].Width, fields[1].Width };
+                    host.ClientSize = new Size(width, 680);
+                    ensureLayout.Invoke(panel, null);   // 与真实绘制同一条路径：下一次绘制前按新尺寸重排
+                    for (int i = 0; i < fields.Length; i++)
+                    {
+                        Check(fields[i].Width != before[i], "fixture: resize to " + width + " did not change field " + i + " width ("
+                            + before[i] + ", panel " + panel.Size + ", editing " + panel.IsEditing + ", visible " + fields[i].Visible + ")");
+                        UpdateRect pending;
+                        Check(GetUpdateRect(fields[i].Handle, out pending, false)
+                            && pending.Left == 0 && pending.Top == 0
+                            && pending.Right == fields[i].ClientSize.Width && pending.Bottom == fields[i].ClientSize.Height,
+                            "field " + i + " only repaints [" + pending.Left + "," + pending.Top + "," + pending.Right + "," + pending.Bottom
+                            + "] of " + fields[i].ClientSize + " after resizing to " + width);
+                    }
+                }
+            }
+        }
+
+        private static bool HasPendingPaint(Control control)
+        {
+            UpdateRect pending;
+            return GetUpdateRect(control.Handle, out pending, false);
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct UpdateRect { public int Left, Top, Right, Bottom; }
+
+        [DllImport("user32.dll")]
+        private static extern bool GetUpdateRect(IntPtr hWnd, out UpdateRect rect, bool erase);
 
         // 还原期间登记的自动收纳抑制项先挂起，最外层还原结束才开始计时（“还原全部”超过抑制时长也不会过期）。
         private static void RestoreSuppressionStartsAtEnd()

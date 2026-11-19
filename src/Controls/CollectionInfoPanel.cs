@@ -558,6 +558,8 @@ namespace AppManager.Controls
         {
             Panel p = new Panel();
             p.BackColor = Theme.Card;
+            // 普通 Panel 改尺寸时只重画新露出的一条，圆角框会留下旧宽度的断口（全屏切换时明显）
+            p.Resize += delegate { p.Invalidate(); };
             p.Paint += delegate(object s, PaintEventArgs e)
             {
                 Graphics g = e.Graphics;
