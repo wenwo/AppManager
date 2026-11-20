@@ -1312,6 +1312,384 @@ namespace AppManager
                         "staging residue left behind");
                     Check(File.ReadAllText(batch.Items[0].Target) == "someone else", "occupied target overwritten");
                 });
+                Test("collection export folder names: invalid characters, device names, dots and duplicates", delegate
+                {
+                    Check(CollectionExport.SafeFolderName("旅行:2024/上*半?年") == "旅行_2024_上_半_年", "invalid characters kept");
+                    Check(CollectionExport.SafeFolderName("CON") == "CON_" && CollectionExport.SafeFolderName("nul.txt") == "nul_.txt"
+                        && CollectionExport.SafeFolderName("com1 ") == "com1_", "device name not escaped");
+                    Check(CollectionExport.SafeFolderName("..") == CollectionExport.FallbackName && CollectionExport.SafeFolderName("  ") == CollectionExport.FallbackName
+                        && CollectionExport.SafeFolderName(null) == CollectionExport.FallbackName, "empty name not replaced");
+                    // 与分类存储目录同一套规则：首尾的点都去掉
+                    Check(CollectionExport.SafeFolderName("相册. ") == "相册" && CollectionExport.SafeFolderName(".隐藏") == "隐藏", "leading/trailing dots or spaces");
+                    Check(CollectionExport.SafeFolderName("a\tb") == "a_b", "control character kept");
+                    HashSet<string> used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    Check(FileNames.Claim(used, "a.jpg", true) == "a.jpg" && FileNames.Claim(used, "A.JPG", true) == "A (2).JPG"
+                        && FileNames.Claim(used, "a.jpg", true) == "a (3).jpg", "file duplicates not numbered");
+                    Check(FileNames.Claim(used, "x.y", false) == "x.y" && FileNames.Claim(used, "x.y", false) == "x.y (2)", "folder duplicate numbered like a file");
+                    // 合并后的旧调用方行为不变：分类存储目录只多了设备名处理，桌面还原的同名编号照旧保留扩展名
+                    Check(ResourceStore.SafeCategoryDirectory("照片") == "照片" && ResourceStore.SafeCategoryDirectory("..a.b..") == "a.b"
+                        && ResourceStore.SafeCategoryDirectory("") == "其他" && ResourceStore.SafeCategoryDirectory("a:b") == "a_b"
+                        && ResourceStore.SafeCategoryDirectory("aux") == "aux_", "category directory rule changed");
+                    string occupied = Path.Combine(root, "names-" + Guid.NewGuid().ToString("N"));
+                    Directory.CreateDirectory(occupied); File.WriteAllText(Path.Combine(occupied, "a.txt"), "x");
+                    Check(FileNames.UniquePath(Path.Combine(occupied, "a.txt"), true) == Path.Combine(occupied, "a (2).txt")
+                        && FileNames.UniquePath(Path.Combine(occupied, "b.txt"), true) == Path.Combine(occupied, "b.txt"), "unique path numbering");
+                    int missing;
+                    List<KeyValuePair<string, bool>> existing = FileNames.Existing(new[] { Path.Combine(occupied, "a.txt"), occupied, null,
+                        Path.Combine(occupied, "A.TXT"), Path.Combine(occupied, "gone.txt") }, CancellationToken.None, out missing);
+                    Check(existing.Count == 2 && !existing[0].Value && existing[1].Value && missing == 2, "existing paths: " + existing.Count + "/" + missing);
+                });
+                Test("collection export copies members and sub-collections into a new same-name folder and keeps sources", delegate
+                {
+                    string dir = Path.Combine(root, "export-" + Guid.NewGuid().ToString("N"));
+                    string src = Path.Combine(dir, "src"), other = Path.Combine(dir, "other"), dest = Path.Combine(dir, "dest"), journal = Path.Combine(dir, "journal");
+                    Directory.CreateDirectory(Path.Combine(src, "album", "deep")); Directory.CreateDirectory(other); Directory.CreateDirectory(dest);
+                    File.WriteAllText(Path.Combine(src, "a.jpg"), "A1"); File.WriteAllText(Path.Combine(other, "a.jpg"), "A2");
+                    File.WriteAllText(Path.Combine(src, "b.txt"), "B"); File.WriteAllText(Path.Combine(src, "c.png"), "C");
+                    File.WriteAllText(Path.Combine(src, "album", "x.txt"), "X"); File.WriteAllText(Path.Combine(src, "album", "deep", "y.txt"), "Y");
+                    WriteStream(Path.Combine(src, "b.txt") + ":note", "kept");
+                    Directory.CreateDirectory(Path.Combine(dest, "旅行_2024")); File.WriteAllText(Path.Combine(dest, "旅行_2024", "mine.txt"), "M");
+                    CollectionExportNode plan = new CollectionExportNode { Name = "旅行:2024", Key = "k", Unavailable = 1 };
+                    plan.Sources.AddRange(new[] { Path.Combine(src, "a.jpg"), Path.Combine(other, "a.jpg"), Path.Combine(src, "b.txt"),
+                        Path.Combine(src, "album"), Path.Combine(src, "a.jpg"), Path.Combine(src, "missing.jpg") });
+                    CollectionExportNode child = new CollectionExportNode { Name = "b.txt" }; child.Sources.Add(Path.Combine(src, "c.png"));
+                    plan.Children.Add(child); plan.Children.Add(new CollectionExportNode { Name = "空的" });
+                    int unavailable; string error;
+                    ImportBatch batch = CollectionExport.Prepare(plan, dest, new CollectionExportForbidden[0], journal, CancellationToken.None, out unavailable, out error);
+                    Check(batch != null && error == null, "prepare failed: " + error);
+                    Check(unavailable == 2 && batch.Items.Count == 5, "members not filtered: " + unavailable + "/" + batch.Items.Count);
+                    Check(!Directory.Exists(batch.ExportRoot), "prepare touched the disk");
+                    List<int> seen = new List<int>();
+                    CollectionExportResult result = CollectionExport.Execute(batch, null, delegate(int i, string n) { seen.Add(i); }, CancellationToken.None);
+                    string top = Path.Combine(dest, "旅行_2024 (2)");
+                    Check(result.Kept && result.Copied == 5 && result.Failures.Count == 0 && result.Root == top, "export not kept: " + string.Join(";", result.Failures));
+                    Check(File.ReadAllText(Path.Combine(top, "a.jpg")) == "A1" && File.ReadAllText(Path.Combine(top, "a (2).jpg")) == "A2", "same-name members");
+                    Check(File.ReadAllText(Path.Combine(top, "b (2).txt")) == "B" && ReadStream(Path.Combine(top, "b (2).txt") + ":note") == "kept", "file vs sub-collection name or ADS");
+                    Check(File.ReadAllText(Path.Combine(top, "album", "deep", "y.txt")) == "Y" && File.ReadAllText(Path.Combine(top, "album", "x.txt")) == "X", "folder member");
+                    Check(File.ReadAllText(Path.Combine(top, "b.txt", "c.png")) == "C" && Directory.Exists(Path.Combine(top, "空的"))
+                        && Directory.GetFileSystemEntries(Path.Combine(top, "空的")).Length == 0, "sub-collection folders");
+                    Check(Directory.GetFileSystemEntries(top, "*", SearchOption.AllDirectories).Length == 10, "unexpected extra entries in export");
+                    Check(File.ReadAllText(Path.Combine(dest, "旅行_2024", "mine.txt")) == "M" && Directory.GetFileSystemEntries(Path.Combine(dest, "旅行_2024")).Length == 1,
+                        "existing same-name folder was merged or changed");
+                    Check(File.ReadAllText(Path.Combine(src, "a.jpg")) == "A1" && File.Exists(Path.Combine(src, "album", "deep", "y.txt"))
+                        && ReadStream(Path.Combine(src, "b.txt") + ":note") == "kept", "sources changed");
+                    Check(!Directory.GetFileSystemEntries(top, "*.import-*", SearchOption.AllDirectories).Any(), "staging residue");
+                    Check(FileImport.PendingJournals(journal).Length == 0 && File.Exists(Path.Combine(journal, batch.Id + ".complete")), "journal not settled");
+                    Check(seen.Count == 5, "progress not reported per item");
+                });
+                Test("collection export refuses forbidden targets by path, by disk identity and inside member folders", delegate
+                {
+                    string dir = Path.Combine(root, "export-guard-" + Guid.NewGuid().ToString("N"));
+                    string store = Path.Combine(dir, "store"), src = Path.Combine(dir, "src"), alias = Path.Combine(dir, "alias");
+                    Directory.CreateDirectory(store); Directory.CreateDirectory(Path.Combine(src, "album"));
+                    File.WriteAllText(Path.Combine(src, "a.jpg"), "A");
+                    List<CollectionExportForbidden> forbidden = new List<CollectionExportForbidden> {
+                        new CollectionExportForbidden { Path = store, Label = "资源存储位置" },
+                        new CollectionExportForbidden { Path = Path.Combine(dir, "planned"), Label = "资源目录" } };
+                    Check(CollectionExport.TargetError(store, forbidden) != null && CollectionExport.TargetError(store + "\\", forbidden) != null
+                        && CollectionExport.TargetError(Path.Combine(store, "sub").ToUpperInvariant(), forbidden) != null, "store or its child accepted");
+                    Check(CollectionExport.TargetError(dir, forbidden) == null && CollectionExport.TargetError(store + "-other", forbidden) == null, "sibling/parent rejected");
+                    Check(CollectionExport.TargetError("relative", forbidden) != null && CollectionExport.TargetError("C:relative", forbidden) != null
+                        && CollectionExport.TargetError(@"\rooted", forbidden) != null && CollectionExport.TargetError("", forbidden) != null, "partial path accepted");
+                    Check(CollectionExport.TargetError(@"\\server\share\folder", forbidden) == null, "network share rejected by text check");
+                    CollectionExportNode plan = new CollectionExportNode { Name = "planned" }; plan.Sources.Add(Path.Combine(src, "a.jpg"));
+                    int unavailable; string error;
+                    // 选的是禁止目录的上级、但新文件夹恰好就是还没建出来的禁止目录
+                    Check(CollectionExport.Prepare(plan, dir, forbidden, Path.Combine(dir, "journal"), CancellationToken.None, out unavailable, out error) == null
+                        && error != null && error.Contains("资源目录"), "final folder equal to a forbidden root accepted");
+                    // 联接点指向存储位置：字符串检查拦不住，按磁盘身份要拦住
+                    using (System.Diagnostics.Process mk = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
+                        "/c mklink /J \"" + alias + "\" \"" + store + "\"") { CreateNoWindow = true, UseShellExecute = false })) mk.WaitForExit();
+                    Check(Directory.Exists(alias), "junction setup");
+                    Check(CollectionExport.TargetError(Path.Combine(alias, "out"), forbidden) == null, "fixture: text check already rejects the alias");
+                    Check(CollectionExport.RealLocationError(Path.Combine(alias, "out"), forbidden, CancellationToken.None) != null, "alias of the store accepted by real-location check");
+                    Check(CollectionExport.RealLocationError(Path.Combine(src, "out"), forbidden, CancellationToken.None) == null, "unrelated folder rejected by real-location check");
+                    bool stopped = false;
+                    using (CancellationTokenSource canceled = new CancellationTokenSource())
+                    {
+                        canceled.Cancel();
+                        try { CollectionExport.RealLocationError(Path.Combine(src, "out"), forbidden, canceled.Token); }
+                        catch (OperationCanceledException) { stopped = true; }
+                    }
+                    Check(stopped, "real-location check ignored cancellation");
+                    plan.Name = "x";
+                    Check(CollectionExport.Prepare(plan, alias, forbidden, Path.Combine(dir, "journal"), CancellationToken.None, out unavailable, out error) == null
+                        && error != null && error.Contains("资源存储位置"), "export through a junction into the store accepted: " + error);
+                    Directory.Delete(alias);
+                    // 指向禁止目录里某个子文件夹的别名（subst 盘、映射盘同理）：卷号+文件 ID 对不上，要靠真实路径判断
+                    string inner = Path.Combine(store, "分类A"), innerAlias = Path.Combine(dir, "inner-alias");
+                    Directory.CreateDirectory(inner);
+                    using (System.Diagnostics.Process mk = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe",
+                        "/c mklink /J \"" + innerAlias + "\" \"" + inner + "\"") { CreateNoWindow = true, UseShellExecute = false })) mk.WaitForExit();
+                    Check(Directory.Exists(innerAlias), "inner junction setup");
+                    Check(CollectionExport.TargetError(Path.Combine(innerAlias, "out"), forbidden) == null, "fixture: text check already rejects the inner alias");
+                    error = CollectionExport.RealLocationError(Path.Combine(innerAlias, "out"), forbidden, CancellationToken.None);
+                    Check(error != null && error.Contains("资源存储位置"), "alias of a folder inside the store accepted: " + error);
+                    Directory.Delete(innerAlias);
+                    // 所选位置已不存在：不补建，提示重选
+                    Check(CollectionExport.Prepare(plan, Path.Combine(dir, "gone", "deeper"), forbidden, Path.Combine(dir, "journal"), CancellationToken.None, out unavailable, out error) == null
+                        && error != null && error.Contains("已不存在") && !Directory.Exists(Path.Combine(dir, "gone")), "missing parent was recreated");
+                    // 导出位置在成员文件夹里面：整批拒绝，不复制
+                    plan.Sources.Add(Path.Combine(src, "album"));
+                    Check(CollectionExport.Prepare(plan, Path.Combine(src, "album"), forbidden, Path.Combine(dir, "journal"), CancellationToken.None, out unavailable, out error) == null
+                        && error != null && error.Contains("集合成员文件夹"), "export into a member folder accepted");
+                    Check(!Directory.Exists(Path.Combine(src, "album", "x")) && !Directory.Exists(Path.Combine(dir, "journal")), "refused export left files behind");
+                    // 一个实体文件都没有：不建文件夹
+                    CollectionExportNode empty = new CollectionExportNode { Name = "空", Unavailable = 2 };
+                    empty.Sources.Add(Path.Combine(src, "gone.jpg"));
+                    Check(CollectionExport.Prepare(empty, dir, forbidden, Path.Combine(dir, "journal"), CancellationToken.None, out unavailable, out error) == null
+                        && unavailable == 3 && error.Contains("没有可导出的文件"), "empty collection export prepared");
+                });
+                Test("collection export cancel, decline and failure roll back copies and new folders; keep retains the rest", delegate
+                {
+                    string dir = Path.Combine(root, "export-roll-" + Guid.NewGuid().ToString("N"));
+                    string src = Path.Combine(dir, "src"), dest = Path.Combine(dir, "dest"), journal = Path.Combine(dir, "journal");
+                    Directory.CreateDirectory(src); Directory.CreateDirectory(dest);
+                    CollectionExportNode plan = new CollectionExportNode { Name = "集" };
+                    foreach (string name in new[] { "1.txt", "2.txt", "3.txt" })
+                    {
+                        File.WriteAllText(Path.Combine(src, name), "data-" + name); plan.Sources.Add(Path.Combine(src, name));
+                    }
+                    CollectionExportNode child = new CollectionExportNode { Name = "子" }; child.Sources.Add(Path.Combine(src, "1.txt"));
+                    plan.Children.Add(child);
+                    int unavailable; string error;
+                    Func<ImportBatch> prepare = delegate
+                    {
+                        ImportBatch prepared = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                        Check(prepared != null, "prepare failed: " + error);
+                        return prepared;
+                    };
+                    Action sourcesIntact = delegate
+                    {
+                        foreach (string name in new[] { "1.txt", "2.txt", "3.txt" })
+                            Check(File.ReadAllText(Path.Combine(src, name)) == "data-" + name, "source changed: " + name);
+                    };
+
+                    // 取消：已复制的两项撤回，新建的导出文件夹和子文件夹删除
+                    using (CancellationTokenSource cancel = new CancellationTokenSource())
+                    {
+                        ImportBatch batch = prepare();
+                        int asked = 0;
+                        CollectionExportResult result = CollectionExport.Execute(batch, delegate(ImportBatch b) { asked++; return true; },
+                            delegate(int i, string n) { if (i == 2) cancel.Cancel(); }, cancel.Token);
+                        Check(asked == 0 && result.Canceled && !result.Kept && result.Leftovers.Count == 0, "cancel result");
+                        Check(!Directory.Exists(batch.ExportRoot) && Directory.GetFileSystemEntries(dest).Length == 0, "cancel left copies or folders");
+                        Check(FileImport.PendingJournals(journal).Length == 0, "cancel left journal pending");
+                    }
+                    sourcesIntact();
+
+                    // 部分失败：一项被占用。拒绝保留时整批撤回；保留时其余项留下，并补建子集合文件夹
+                    using (FileStream hold = new FileStream(Path.Combine(src, "2.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+                    {
+                        int asked = 0;
+                        ImportBatch batch = prepare();
+                        CollectionExportResult result = CollectionExport.Execute(batch, delegate(ImportBatch b) { asked++; return false; }, null, CancellationToken.None);
+                        Check(asked == 1 && result.Declined && !result.Kept && result.Failures.Count == 1 && result.Failures[0].StartsWith("2.txt"), "decline result");
+                        Check(!Directory.Exists(batch.ExportRoot), "declined export left files");
+
+                        batch = prepare();
+                        result = CollectionExport.Execute(batch, delegate(ImportBatch b) { asked++; return true; }, null, CancellationToken.None);
+                        Check(asked == 2 && result.Kept && result.Copied == 3 && result.Failures.Count == 1, "keep result");
+                        Check(File.Exists(Path.Combine(batch.ExportRoot, "1.txt")) && File.Exists(Path.Combine(batch.ExportRoot, "子", "1.txt"))
+                            && !File.Exists(Path.Combine(batch.ExportRoot, "2.txt")), "kept export content");
+                        Directory.Delete(batch.ExportRoot, true);
+                    }
+                    sourcesIntact();
+
+                    // 全部失败：不问，直接撤回
+                    using (new FileStream(Path.Combine(src, "1.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+                    using (new FileStream(Path.Combine(src, "2.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+                    using (new FileStream(Path.Combine(src, "3.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+                    {
+                        ImportBatch batch = prepare();
+                        int asked = 0;
+                        CollectionExportResult result = CollectionExport.Execute(batch, delegate(ImportBatch b) { asked++; return true; }, null, CancellationToken.None);
+                        Check(asked == 0 && !result.Kept && !result.Declined && result.Failures.Count == 4 && !Directory.Exists(batch.ExportRoot), "all-failed result");
+                    }
+
+                    // 复制到一半磁盘满：不询问，整批撤回
+                    {
+                        ImportBatch batch = prepare();
+                        int asked = 0;
+                        CollectionExportResult result = CollectionExport.Execute(batch, delegate(ImportBatch b) { asked++; return true; },
+                            delegate(int i, string n) { if (i == 2) batch.SpaceLimited = true; }, CancellationToken.None);
+                        Check(asked == 0 && result.SpaceLimited && !result.Kept && !result.Declined, "space-limited export asked or kept");
+                        Check(!Directory.Exists(batch.ExportRoot) && Directory.GetFileSystemEntries(dest).Length == 0 && result.Leftovers.Count == 0,
+                            "space-limited export left copies or folders");
+                        Check(FileImport.PendingJournals(journal).Length == 0, "space-limited export left journal pending");
+                    }
+                    sourcesIntact();
+
+                    // 询问保留期间用户选了取消或退出：即使回答「保留」也按撤回处理
+                    using (new FileStream(Path.Combine(src, "2.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+                    using (CancellationTokenSource cancel = new CancellationTokenSource())
+                    {
+                        ImportBatch batch = prepare();
+                        CollectionExportResult result = CollectionExport.Execute(batch, delegate(ImportBatch b) { cancel.Cancel(); return true; }, null, cancel.Token);
+                        Check(!result.Kept && result.Canceled && !result.Declined && !Directory.Exists(batch.ExportRoot), "keep answered after cancel was honoured");
+                    }
+                    sourcesIntact();
+
+                    // 选了保留之后日志才写不进去（日志目录被换成同名文件）：副本保留，不撤回，并说明记录没保存
+                    using (new FileStream(Path.Combine(src, "2.txt"), FileMode.Open, FileAccess.Read, FileShare.None))
+                    {
+                        ImportBatch batch = prepare();
+                        CollectionExportResult result = CollectionExport.Execute(batch, delegate(ImportBatch b)
+                        {
+                            Directory.Delete(journal, true); File.WriteAllText(journal, "not a folder");
+                            return true;
+                        }, null, CancellationToken.None);
+                        File.Delete(journal);
+                        Check(result.Kept && result.Copied == 3 && File.Exists(Path.Combine(batch.ExportRoot, "1.txt"))
+                            && Directory.Exists(Path.Combine(batch.ExportRoot, "子")), "kept export rolled back after a journal failure");
+                        Check(result.Failures.Any(f => f.StartsWith("2.txt")) && result.Failures.Any(f => f.Contains("导出记录未能保存")),
+                            "journal failure or item failure not reported: " + string.Join(" | ", result.Failures));
+                        Directory.Delete(batch.ExportRoot, true);
+                    }
+                    sourcesIntact();
+
+                    // 复制引擎中途抛出（日志写不进去之类）：当场撤回
+                    {
+                        ImportBatch batch = prepare();
+                        CollectionExportResult result = CollectionExport.Execute(batch, null,
+                            delegate(int i, string n) { if (i == 2) throw new IOException("journal disk gone"); }, CancellationToken.None);
+                        Check(!result.Kept && result.Error != null && result.Error.Contains("journal disk gone"), "abort result");
+                        Check(!Directory.Exists(batch.ExportRoot) && result.Leftovers.Count == 0, "abort left copies");
+                    }
+                    sourcesIntact();
+                });
+                Test("interrupted collection export is rolled back at next start; finished exports are left alone", delegate
+                {
+                    string dir = Path.Combine(root, "export-recover-" + Guid.NewGuid().ToString("N"));
+                    string src = Path.Combine(dir, "src"), dest = Path.Combine(dir, "dest"), journal = Path.Combine(dir, "journal");
+                    Directory.CreateDirectory(src); Directory.CreateDirectory(dest);
+                    CollectionExportNode plan = new CollectionExportNode { Name = "中断" };
+                    foreach (string name in new[] { "1.txt", "2.txt", "3.txt" })
+                    {
+                        File.WriteAllText(Path.Combine(src, name), "data-" + name); plan.Sources.Add(Path.Combine(src, name));
+                    }
+                    plan.Children.Add(new CollectionExportNode { Name = "子" });
+                    int unavailable; string error;
+                    ImportBatch batch = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                    try
+                    {
+                        // 进程在第三项开始前崩溃：日志每秒最多落盘一次，这两项在日志里还没有身份记录，
+                        // 另留一个本批的临时副本，模拟正在复制的那一项（走 Execute：先建导出文件夹、记身份标记）
+                        CollectionExport.Execute(batch, null, delegate(int i, string n)
+                        {
+                            if (i != 2) return;
+                            File.WriteAllText(batch.Items[2].Target + ".import-" + batch.Id, "partial");
+                            throw new InvalidProgramException("simulated crash");
+                        }, CancellationToken.None);
+                    }
+                    catch (InvalidProgramException) { }
+                    Check(FileImport.PendingJournals(journal).Length == 1 && File.Exists(Path.Combine(batch.ExportRoot, "2.txt"))
+                        && string.IsNullOrEmpty(Reload(batch).Items[1].TargetId), "crash fixture: journal already had the copy identity");
+                    CollectionExport.Recover(journal);
+                    Check(!Directory.Exists(batch.ExportRoot), "interrupted export not rolled back");
+                    Check(FileImport.PendingJournals(journal).Length == 0 && FileImport.Load(Path.Combine(journal, batch.Id + ".xml")).Finished, "journal not finished");
+                    Check(File.ReadAllText(Path.Combine(src, "2.txt")) == "data-2.txt", "recovery touched sources");
+
+                    ImportBatch done = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                    Check(CollectionExport.Execute(done, null, null, CancellationToken.None).Kept, "fixture export failed");
+                    File.WriteAllText(Path.Combine(journal, done.Id + ".pending"), "");   // 收尾后、删标记前断电
+                    CollectionExport.Recover(journal);
+                    Check(File.Exists(Path.Combine(done.ExportRoot, "3.txt")) && Directory.Exists(Path.Combine(done.ExportRoot, "子")), "finished export was rolled back");
+                    Check(FileImport.PendingJournals(journal).Length == 0, "finished export left pending");
+
+                    // 日志上限：撤回、取消的批次也按时间裁剪，仍待恢复的保留
+                    string prune = Path.Combine(dir, "prune"); Directory.CreateDirectory(prune);
+                    for (int i = 0; i < CollectionExport.JournalKeep + 5; i++)
+                    {
+                        string xml = Path.Combine(prune, "b" + i + ".xml"); File.WriteAllText(xml, "x");
+                        File.SetLastWriteTimeUtc(xml, DateTime.UtcNow.AddMinutes(i));
+                    }
+                    File.WriteAllText(Path.Combine(prune, "b0.pending"), "");
+                    CollectionExport.PruneJournal(prune, CollectionExport.JournalKeep);
+                    Check(Directory.GetFiles(prune, "*.xml").Length == CollectionExport.JournalKeep + 1 && File.Exists(Path.Combine(prune, "b0.xml"))
+                        && !File.Exists(Path.Combine(prune, "b1.xml")) && File.Exists(Path.Combine(prune, "b" + (CollectionExport.JournalKeep + 4) + ".xml")),
+                        "export journal not capped or pending journal dropped");
+                });
+                Test("export recovery only touches the folder it created: stale journals, tampered paths and finished-but-interrupted batches", delegate
+                {
+                    string dir = Path.Combine(root, "export-own-" + Guid.NewGuid().ToString("N"));
+                    string src = Path.Combine(dir, "src"), dest = Path.Combine(dir, "dest"), journal = Path.Combine(dir, "journal");
+                    Directory.CreateDirectory(src); Directory.CreateDirectory(dest);
+                    CollectionExportNode plan = new CollectionExportNode { Name = "旅行" };
+                    foreach (string name in new[] { "1.txt", "2.txt" })
+                    {
+                        File.WriteAllText(Path.Combine(src, name), "data-" + name); plan.Sources.Add(Path.Combine(src, name));
+                    }
+                    plan.Children.Add(new CollectionExportNode { Name = "空" });
+                    int unavailable; string error;
+
+                    // 一次被撤回、但未完成标记残留的导出；之后同一位置又成功导出了一次
+                    ImportBatch stale = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                    CollectionExportResult declined = CollectionExport.Execute(stale, delegate { return false; },
+                        delegate(int i, string n) { if (i == 1) throw new IOException("disk gone"); }, CancellationToken.None);
+                    Check(!declined.Kept && !Directory.Exists(stale.ExportRoot) && !string.IsNullOrEmpty(stale.ExportRootStamp), "stale fixture");
+                    File.WriteAllText(Path.Combine(journal, stale.Id + ".pending"), "");
+                    ImportBatch fresh = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                    Check(fresh.ExportRoot == stale.ExportRoot, "fixture: second export should reuse the same folder name");
+                    Check(CollectionExport.Execute(fresh, null, null, CancellationToken.None).Kept, "second export failed");
+                    CollectionExport.Recover(journal);
+                    Check(File.Exists(Path.Combine(fresh.ExportRoot, "1.txt")) && File.Exists(Path.Combine(fresh.ExportRoot, "2.txt"))
+                        && Directory.Exists(Path.Combine(fresh.ExportRoot, "空")), "stale journal deleted a later export at the same path");
+
+                    // 日志被改写成别处的路径：恢复不删导出文件夹以外的空目录
+                    string outside = Path.Combine(dir, "outside-empty"); Directory.CreateDirectory(outside);
+                    ImportBatch tampered = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                    try
+                    {
+                        // 走 Execute（先建导出文件夹、记身份标记），复制一项后进程崩溃；崩溃前日志里混进了外面的路径
+                        CollectionExport.Execute(tampered, null, delegate(int i, string n)
+                        {
+                            if (i != 1) return;
+                            tampered.ExportDirectories.Add(outside);
+                            FileImport.Save(tampered);
+                            throw new InvalidProgramException("simulated crash");
+                        }, CancellationToken.None);
+                    }
+                    catch (InvalidProgramException) { }
+                    Check(File.Exists(Path.Combine(tampered.ExportRoot, "1.txt")) && FileImport.PendingJournals(journal).Length == 1, "tampered fixture");
+                    CollectionExport.Recover(journal);
+                    Check(!Directory.Exists(tampered.ExportRoot), "recovery did not roll back the interrupted export");
+                    Check(Directory.Exists(outside), "recovery deleted an empty folder outside the export");
+
+                    // 已决定保留、收尾前中断：恢复补建空的子集合文件夹，副本保留
+                    ImportBatch kept = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                    Check(CollectionExport.Execute(kept, null, null, CancellationToken.None).Kept, "fixture export failed");
+                    Directory.Delete(Path.Combine(kept.ExportRoot, "空"));
+                    File.WriteAllText(Path.Combine(journal, kept.Id + ".pending"), "");
+                    CollectionExport.Recover(journal);
+                    Check(Directory.Exists(Path.Combine(kept.ExportRoot, "空")) && File.Exists(Path.Combine(kept.ExportRoot, "1.txt")),
+                        "interrupted kept export not completed");
+
+                    // 准备之后导出位置被别的程序占了：不往里写，提示重试
+                    ImportBatch raced = CollectionExport.Prepare(plan, dest, null, journal, CancellationToken.None, out unavailable, out error);
+                    Directory.CreateDirectory(raced.ExportRoot); File.WriteAllText(Path.Combine(raced.ExportRoot, "theirs.txt"), "t");
+                    CollectionExportResult refused = CollectionExport.Execute(raced, null, null, CancellationToken.None);
+                    Check(refused.Refused && !refused.Kept && refused.Error.Contains("刚被占用")
+                        && Directory.GetFileSystemEntries(raced.ExportRoot).Length == 1, "export wrote into a folder created by someone else");
+                });
+                Test("journal saves back off for large batches and import journals carry no export fields", delegate
+                {
+                    ImportBatch batch = Batch(ImportOperation.Copy, "a.txt");
+                    FileImport.Save(batch);
+                    Check(!File.ReadAllText(Path.Combine(batch.JournalDirectory, batch.Id + ".xml")).Contains("Export"), "import journal serialized export fields");
+                    batch.SaveCost = 50;
+                    Check(FileImport.SaveInterval(batch) == 1000, "small batches should keep the one-second interval");
+                    batch.SaveCost = 400;
+                    Check(FileImport.SaveInterval(batch) == 4000, "large batches should save less often");
+                    batch.SaveCost = int.MaxValue;
+                    Check(FileImport.SaveInterval(batch) == int.MaxValue, "interval overflowed");
+                    // 1 万项的批次：落盘耗时，用来说明放宽间隔的必要
+                    ImportBatch big = new ImportBatch { JournalDirectory = batch.JournalDirectory, Operation = ImportOperation.Copy };
+                    for (int i = 0; i < 10000; i++)
+                        big.Items.Add(new ImportItem { Source = @"C:\source\folder\file-" + i + ".jpg", Target = @"D:\export\集合\file-" + i + ".jpg" });
+                    FileImport.Save(big);
+                    Console.WriteLine("INFO journal save of 10000 items took " + big.SaveCost + " ms, next progress save after " + FileImport.SaveInterval(big) + " ms");
+                });
             }
             finally { Paths.DataDirOverride = null; Directory.Delete(root, true); }
             Console.WriteLine("RESULT " + passed + " passed, " + failed + " failed"); return failed == 0 ? 0 : 1;

@@ -380,13 +380,7 @@ namespace AppManager
 
         private static string UniqueSibling(string path)
         {
-            string dir = Path.GetDirectoryName(path);
-            string name = Path.GetFileNameWithoutExtension(path), ext = Path.GetExtension(path);
-            for (int i = 2; ; i++)
-            {
-                string candidate = Path.Combine(dir, name + " (" + i + ")" + ext);
-                if (!File.Exists(candidate) && !Directory.Exists(candidate)) return candidate;
-            }
+            return FileNames.UniquePath(path, true);
         }
 
         public static bool Restore(string id, out string error)

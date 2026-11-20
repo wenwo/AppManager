@@ -62,11 +62,19 @@ namespace AppManager
         public ImportOperation Operation;
         public int CopyBytesPerSecond;
         public List<ImportItem> Items = new List<ImportItem>();
+        // 集合导出：本批新建的导出根目录、它创建时的身份标记，与各子集合文件夹；
+        // 撤回或中断恢复时先核对标记确认仍是本批建的那个文件夹，再只删除其中已空的目录。导入批次不写这几项。
+        public string ExportRoot, ExportRootStamp;
+        public List<string> ExportDirectories = new List<string>();
+        public bool ShouldSerializeExportRoot() { return !string.IsNullOrEmpty(ExportRoot); }
+        public bool ShouldSerializeExportRootStamp() { return !string.IsNullOrEmpty(ExportRootStamp); }
+        public bool ShouldSerializeExportDirectories() { return ExportDirectories != null && ExportDirectories.Count > 0; }
         [XmlIgnore] internal ImportDuplicateReport DuplicateReport;
         [XmlIgnore] public string JournalDirectory;
         [XmlIgnore] public uint ClipboardSequence;
         [XmlIgnore] internal Func<ImportItem, string> ResolveTarget;
         internal int SavedAt;
+        internal int SaveCost;   // 上次整批落盘耗时（毫秒），决定逐项进度的落盘间隔
     }
 
     // 文件先完整落地，数据库提交成功后才允许删源；提交失败撤回入库副本。
@@ -270,6 +278,32 @@ namespace AppManager
             using (SafeFileHandle handle = Open(path, ReadAttributes, ShareAll, BackupSemantics | OpenReparsePoint)) return Identity(handle);
         }
 
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(SafeFileHandle handle, StringBuilder path, uint length, uint flags);
+
+        /// <summary>
+        /// 已存在路径在磁盘上的真实完整路径（跟随链接；subst 盘、映射盘还原成所在磁盘或共享上的路径），
+        /// 去掉 \\?\ 前缀，网络路径写成 \\server\share\…。用于判断一个位置是否落在另一个目录之内。
+        /// </summary>
+        internal static string FinalPath(string path)
+        {
+            using (SafeFileHandle handle = Open(path, ReadAttributes, ShareAll, BackupSemantics))
+            {
+                StringBuilder text = new StringBuilder(1024);
+                uint length = GetFinalPathNameByHandle(handle, text, (uint)text.Capacity, 0);
+                if (length >= text.Capacity)
+                {
+                    text.Capacity = (int)length + 1;
+                    length = GetFinalPathNameByHandle(handle, text, (uint)text.Capacity, 0);
+                }
+                if (length == 0 || length >= text.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error(), "无法取得真实路径：" + path);
+                string final = text.ToString(0, (int)length);
+                if (final.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) return @"\\" + final.Substring(8);
+                if (final.StartsWith(@"\\?\", StringComparison.Ordinal)) return final.Substring(4);
+                return final;
+            }
+        }
+
         private static void RequireIdentity(string path, string expected)
         {
             EnsureNoLinks(path);
@@ -344,6 +378,7 @@ namespace AppManager
 
         internal static void Save(ImportBatch batch)
         {
+            int started = Environment.TickCount;
             Directory.CreateDirectory(batch.JournalDirectory);
             string path = Path.Combine(batch.JournalDirectory, batch.Id + ".xml"), temp = path + ".tmp";
             EscapeBatch(batch);
@@ -358,6 +393,17 @@ namespace AppManager
             finally { UnescapeBatch(batch); }
             if (File.Exists(path)) Paths.ReplaceFile(temp, path); else File.Move(temp, path);
             batch.SavedAt = Environment.TickCount;
+            batch.SaveCost = Math.Max(0, unchecked(batch.SavedAt - started));
+        }
+
+        /// <summary>
+        /// 逐项进度落盘的最小间隔：至少 1 秒，且不短于上次整批落盘耗时的 10 倍。
+        /// 每次落盘都要把整批重新序列化，项数上万时一次可达数百毫秒；按耗时放宽间隔，日志写入占用的时间不超过约 1/10，
+        /// 不会随项数平方增长。代价是大批次中断时日志更旧：未记下身份的副本按恢复规则保留或核对后撤回。
+        /// </summary>
+        internal static int SaveInterval(ImportBatch batch)
+        {
+            return Math.Max(1000, batch.SaveCost > int.MaxValue / 10 ? int.MaxValue : batch.SaveCost * 10);
         }
 
         private const char EscapeOpen = '\uE000';
@@ -411,6 +457,8 @@ namespace AppManager
         {
             batch.Id = EscapeValue(batch.Id); batch.Category = EscapeValue(batch.Category);
             batch.Collection = EscapeValue(batch.Collection); batch.Error = EscapeValue(batch.Error);
+            batch.ExportRoot = EscapeValue(batch.ExportRoot); batch.ExportRootStamp = EscapeValue(batch.ExportRootStamp);
+            for (int i = 0; i < batch.ExportDirectories.Count; i++) batch.ExportDirectories[i] = EscapeValue(batch.ExportDirectories[i]);
             foreach (ImportItem item in batch.Items)
             {
                 item.Source = EscapeValue(item.Source); item.Target = EscapeValue(item.Target); item.Origin = EscapeValue(item.Origin);
@@ -435,6 +483,9 @@ namespace AppManager
         {
             batch.Id = UnescapeValue(batch.Id); batch.Category = UnescapeValue(batch.Category);
             batch.Collection = UnescapeValue(batch.Collection); batch.Error = UnescapeValue(batch.Error);
+            batch.ExportRoot = UnescapeValue(batch.ExportRoot); batch.ExportRootStamp = UnescapeValue(batch.ExportRootStamp);
+            if (batch.ExportDirectories == null) batch.ExportDirectories = new List<string>();
+            for (int i = 0; i < batch.ExportDirectories.Count; i++) batch.ExportDirectories[i] = UnescapeValue(batch.ExportDirectories[i]);
             foreach (ImportItem item in batch.Items)
             {
                 item.Source = UnescapeValue(item.Source); item.Target = UnescapeValue(item.Target); item.Origin = UnescapeValue(item.Origin);
@@ -455,10 +506,10 @@ namespace AppManager
             }
         }
 
-        // 逐项进度最多每秒落盘一次；阶段边界（开始、提交前后、结束）始终落盘，恢复不依赖逐项状态。
+        // 逐项进度按 SaveInterval 落盘（至少间隔 1 秒，大批次相应放宽）；阶段边界（开始、提交前后、结束）始终落盘，恢复不依赖逐项状态。
         private static void SaveSoon(ImportBatch batch)
         {
-            if (unchecked(Environment.TickCount - batch.SavedAt) >= 1000) Save(batch);
+            if (unchecked(Environment.TickCount - batch.SavedAt) >= SaveInterval(batch)) Save(batch);
         }
 
         private static string Marker(ImportBatch batch) { return Path.Combine(batch.JournalDirectory, batch.Id + ".pending"); }
@@ -764,7 +815,7 @@ namespace AppManager
 
         // 临时落点归本批所有，整体删除（不触碰源文件；硬链接只移除名字）。
         // 返回 false 表示有残留：正常结束的批次不会再走启动恢复，残留必须记日志并写进导入记录，不能静默留下。
-        private static bool RemoveStaging(string staging)
+        internal static bool RemoveStaging(string staging)
         {
             try
             {
@@ -1081,7 +1132,7 @@ namespace AppManager
             }
         }
 
-        private static bool SameContent(string a, string b)
+        internal static bool SameContent(string a, string b)
         {
             using (SafeFileHandle x = Open(a, GenericRead, ShareRead, SequentialScan))
             using (SafeFileHandle y = Open(b, GenericRead, ShareRead, SequentialScan))

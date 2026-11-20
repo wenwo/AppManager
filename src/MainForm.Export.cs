@@ -56,17 +56,10 @@ namespace AppManager
         /// <summary>收集磁盘上仍存在的实体路径（去重，保持选中顺序）；complete 表示每个条目都有可导出的文件。</summary>
         private static List<string> ExportPaths(IEnumerable<AppInfo> apps, out bool complete)
         {
-            complete = true;
-            List<string> paths = new List<string>();
-            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (AppInfo app in apps)
-            {
-                string path = ExportCandidate(app);
-                if (path == null) { complete = false; continue; }
-                try { path = Path.GetFullPath(path); } catch (Exception) { complete = false; continue; }
-                if (!File.Exists(path) && !Directory.Exists(path)) { complete = false; continue; }
-                if (seen.Add(path)) paths.Add(path);
-            }
+            int missing;
+            List<string> paths = FileNames.Existing(apps.Select(ExportCandidate), System.Threading.CancellationToken.None, out missing)
+                .Select(p => p.Key).ToList();
+            complete = missing == 0;
             return paths;
         }
 

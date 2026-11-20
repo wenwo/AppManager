@@ -149,6 +149,7 @@ namespace AppManager
                 Run("collection edit page keeps pending members, asks before dropping edits and cleans up failed covers", CollectionEditPageGuards);
                 Run("collection edit fields repaint whole after the page is resized", CollectionEditFieldsRepaintOnResize);
                 Run("collection deletion falls back to the nearest surviving ancestor", CollectionDeleteFallback);
+                Run("collection export copies members into a chosen folder, blocks store targets and keeps the library unchanged", CollectionExportFlow);
                 Run("collection move keeps ids, order and references across parents", CollectionMovePersistence);
                 Run("collection move rejects invalid targets and failed saves stay retryable", CollectionMoveGuards);
                 Run("collection internal drag reports one final drop and cancels on escape", CollectionSidebarInternalDrag);
@@ -4333,6 +4334,219 @@ namespace AppManager
                 Check(config.Collections.Count == 0, "top-level deletion left collection definitions behind");
                 Check(AppConfig.Load().Collections.Count == 0, "top-level deletion was not persisted");
             }
+        }
+
+        /// <summary>
+        /// 集合「导出…」：菜单位置、禁止目录名单、导出内容（含子集合、非成员不导出）、资源库不变、重名不覆盖；
+        /// 部分失败时在界面线程询问并按「保留」处理；排队中取消不建任何文件夹。
+        /// </summary>
+        private static void CollectionExportFlow()
+        {
+            AppConfig config = RenameConfig("collection-export");
+            config.AutoScan = false;
+            string photos = Path.Combine(config.ResourceStorePath, "照片");
+            AppInfo a = AddEntry(config, "照片", Path.Combine(photos, "a.jpg"), false, true, "a");
+            AppInfo b = AddEntry(config, "照片", Path.Combine(photos, "b.jpg"), false, true, "b");
+            AppInfo c = AddEntry(config, "照片", Path.Combine(photos, "c.jpg"), false, true, "c");
+            AppInfo outside = AddEntry(config, "照片", Path.Combine(photos, "not-member.jpg"), false, true, "n");
+            string rootKey = CollectionKeys.Make("照片", "旅行"), childKey = rootKey + "/2024";
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "旅行" });
+            config.Collections.Add(new ResourceCollection { Parent = "照片", Name = "2024", ParentCollection = rootKey });
+            CollectionOps.AddMember(config, a.Key, rootKey);
+            CollectionOps.AddMember(config, b.Key, rootKey);
+            CollectionOps.AddMember(config, c.Key, childKey);
+            Check(config.Save(), "database fixture save failed");
+            // 数据目录（root）本身禁止导出，目标放在它外面
+            string dest = Path.Combine(Path.GetTempPath(), "AppManagerExportDest_" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(dest);
+            FieldInfo exportCancel = typeof(MainForm).GetField("exportCancel", Private);
+            try
+            {
+                // 与其它集合用例一致：成员投影来自保存时的资源库，不另外注入条目
+                using (MainForm form = ResourceForm(config, "照片"))
+                {
+                    form.ShowInTaskbar = false;
+                    form.StartPosition = FormStartPosition.Manual;
+                    form.Location = new Point(-3000, -3000);
+                    form.ClientSize = new Size(1000, 680);
+                    form.Show();
+                    Application.DoEvents();
+                    Label status = (Label)typeof(MainForm).GetField("statusLabel", Private).GetValue(form);
+
+                    Invoke(form, "ShowCollectionMenu", rootKey, new Point(-2000, -2000));
+                    MenuWindow menu = Application.OpenForms.OfType<MenuWindow>().FirstOrDefault();
+                    Check(menu != null, "collection menu did not open");
+                    CheckMenuOrder((List<MenuWindow.MenuItem>)typeof(MenuWindow).GetField("items", Private).GetValue(menu),
+                        "编辑集合…", "导出…", "删除集合");
+                    menu.Close();
+
+                    List<CollectionExportForbidden> forbidden = (List<CollectionExportForbidden>)Invoke(form, "ExportForbiddenRoots");
+                    // 用例的存储目录都在数据目录下面：去掉数据目录这一条再查，才测得到各存储位置自己的规则
+                    List<CollectionExportForbidden> stores = forbidden.Where(f => !string.Equals(f.Path, Paths.DataDir, StringComparison.OrdinalIgnoreCase)).ToList();
+                    Check(stores.Count < forbidden.Count, "data directory missing from the forbidden list");
+                    foreach (string blocked in new[] { config.ResourceStorePath, photos })
+                    {
+                        string message = CollectionExport.TargetError(blocked, stores);
+                        Check(message != null && message.Contains("资源存储位置"), "export allowed into " + blocked + ": " + message);
+                    }
+                    foreach (string blocked in new[] { config.ManageRootPath, Path.Combine(config.ManageRootPath, "Resources"), config.FileStorePath, config.FolderStorePath })
+                        Check(CollectionExport.TargetError(blocked, stores) != null, "export allowed into " + blocked);
+                    Check(CollectionExport.TargetError(Paths.DataDir, forbidden) != null, "export allowed into the data directory");
+                    Check(CollectionExport.TargetError(dest, forbidden) == null, "ordinary folder rejected");
+
+                    List<string> dialogs = new List<string>();
+                    using (System.Windows.Forms.Timer dismiss = new System.Windows.Forms.Timer { Interval = 10 })
+                    {
+                        // 成功路径不应弹窗；万一弹出，记下内容并关掉，避免用例卡住
+                        dismiss.Tick += delegate
+                        {
+                            Form dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Modal);
+                            if (dialog == null) return;
+                            FieldInfo message = dialog.GetType().GetField("message", Private);
+                            dialogs.Add(message == null ? dialog.Text : (string)message.GetValue(dialog));
+                            dialog.Close();
+                        };
+                        dismiss.Start();
+                        Invoke(form, "StartCollectionExport", rootKey, dest);
+                        PumpUntil(delegate { return exportCancel.GetValue(form) == null; });
+                    }
+                    Check(dialogs.Count == 0, "export showed a dialog: " + string.Join(" | ", dialogs));
+                    string top = Path.Combine(dest, "旅行");
+                    Check(File.Exists(Path.Combine(top, "a.jpg")) && File.Exists(Path.Combine(top, "b.jpg"))
+                        && File.Exists(Path.Combine(top, "2024", "c.jpg")), "collection members not exported: " + status.Text + " | "
+                        + string.Join(", ", Directory.GetFileSystemEntries(dest, "*", SearchOption.AllDirectories)));
+                    Check(Directory.GetFileSystemEntries(top, "*", SearchOption.AllDirectories).Length == 4, "non-member or extra files exported");
+                    Check(status.Text.Contains("已导出「旅行」") && status.Text.Contains("共 3 项"), "success notice: " + status.Text);
+                    Check(File.Exists(a.TargetPath) && File.Exists(b.TargetPath) && File.Exists(c.TargetPath), "export changed sources");
+                    AppConfig loaded = AppConfig.Load();
+                    Check(loaded.Collections.Count == 2 && loaded.ItemCategories[a.Key].Contains(rootKey)
+                        && loaded.ItemCategories[c.Key].Contains(childKey) && loaded.AddedItems.Count == 4, "export changed the library");
+
+                    // 没有数据库的会话（读取失败时的回退）：成员在界面线程从可见资源池取，与网格同口径
+                    ConfigDatabase database = config.Database;
+                    try
+                    {
+                        config.Database = null;
+                        typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo> { a, b, c, outside });
+                        typeof(MainForm).GetField("cachedVisiblePool", Private).SetValue(form, null);
+                        CollectionExportNode plan = (CollectionExportNode)Invoke(form, "BuildExportPlan", CollectionOps.FindByKey(config, rootKey));
+                        Check(plan.Sources.Count == 2 && plan.Sources.Contains(a.TargetPath) && plan.Sources.Contains(b.TargetPath)
+                            && plan.Children.Count == 1 && plan.Children[0].Name == "2024" && plan.Children[0].Sources.Count == 1
+                            && plan.Children[0].Sources[0] == c.TargetPath, "in-memory export plan does not match the collection tree");
+                    }
+                    finally { config.Database = database; }
+
+                    // 部分失败：界面线程问「保留已导出的…吗？」，选保留后再提示未导出的项
+                    List<string> asked = new List<string>();
+                    List<Form> handled = new List<Form>();
+                    using (new FileStream(b.TargetPath, FileMode.Open, FileAccess.Read, FileShare.None))
+                    using (System.Windows.Forms.Timer answer = new System.Windows.Forms.Timer { Interval = 10 })
+                    {
+                        answer.Tick += delegate
+                        {
+                            Form dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Modal);
+                            if (dialog == null || handled.Contains(dialog)) return;
+                            handled.Add(dialog);
+                            dialog.Opacity = 0;
+                            FieldInfo message = dialog.GetType().GetField("message", Private);
+                            asked.Add(message == null ? dialog.Text : (string)message.GetValue(dialog));
+                            Control button = ConfirmButton(dialog, true);
+                            if (button != null) typeof(Control).GetMethod("OnClick", Private).Invoke(button, new object[] { EventArgs.Empty });
+                            else dialog.Close();
+                        };
+                        answer.Start();
+                        Invoke(form, "StartCollectionExport", rootKey, dest);
+                        PumpUntil(delegate { return exportCancel.GetValue(form) == null && asked.Count >= 2; });
+                    }
+                    string second = Path.Combine(dest, "旅行 (2)");
+                    Check(asked.Count == 2 && asked[0].StartsWith("保留已导出的 2 项吗？") && asked[0].Contains("b.jpg"), "partial prompt: " + string.Join(" | ", asked));
+                    Check(asked[1].Contains("以下 1 项未能导出") && asked[1].Contains("b.jpg"), "partial report: " + string.Join(" | ", asked));
+                    Check(File.Exists(Path.Combine(second, "a.jpg")) && File.Exists(Path.Combine(second, "2024", "c.jpg"))
+                        && !File.Exists(Path.Combine(second, "b.jpg")), "kept partial export content");
+                    Check(Directory.GetFileSystemEntries(Path.Combine(dest, "旅行")).Length == 3, "second export touched the first folder");
+
+                    FieldInfo importRunning = typeof(MainForm).GetField("importRunning", Private);
+                    // 排在导入后面：轮到时才取成员，排队期间加入集合的文件也导出（无数据库会话，成员来自界面线程的资源池）
+                    AppInfo late = AddEntry(config, "照片", Path.Combine(photos, "late.jpg"), false, true, "late");
+                    Invoke(form, "InvalidateAddedIndex");   // 直接改了 AddedItems，与产品里添加条目后一样让索引失效
+                    ConfigDatabase savedDatabase = config.Database;
+                    try
+                    {
+                        config.Database = null;
+                        typeof(MainForm).GetField("allApps", Private).SetValue(form, new List<AppInfo> { a, b, c, outside, late });
+                        typeof(MainForm).GetField("cachedVisiblePool", Private).SetValue(form, null);
+                        importRunning.SetValue(form, true);
+                        Invoke(form, "StartCollectionExport", rootKey, dest);
+                        CollectionOps.AddMember(config, late.Key, rootKey);
+                        importRunning.SetValue(form, false);
+                        Invoke(form, "StartNextImport");
+                        PumpUntil(delegate { return exportCancel.GetValue(form) == null; });
+                    }
+                    finally { config.Database = savedDatabase; }
+                    Check(File.Exists(Path.Combine(dest, "旅行 (3)", "late.jpg")) && File.Exists(Path.Combine(dest, "旅行 (3)", "a.jpg")),
+                        "queued export used the member list from before it started: " + status.Text + " | " + string.Join(", ", Directory.GetFileSystemEntries(dest, "*", SearchOption.AllDirectories)));
+                    Check(status.Text.Contains("共 4 项"), "queued export notice: " + status.Text);
+
+                    // 排队期间集合被改名：仍导出这个集合，文件夹和提示用新名字
+                    ResourceCollection renamed = CollectionOps.FindByKey(config, rootKey);
+                    importRunning.SetValue(form, true);
+                    Invoke(form, "StartCollectionExport", rootKey, dest);
+                    CollectionOps.RenameSubtree(config, renamed, "旅行改");
+                    Check(config.Save(), "rename fixture save failed");
+                    importRunning.SetValue(form, false);
+                    Invoke(form, "StartNextImport");
+                    PumpUntil(delegate { return exportCancel.GetValue(form) == null; });
+                    Check(File.Exists(Path.Combine(dest, "旅行改", "a.jpg")) && File.Exists(Path.Combine(dest, "旅行改", "2024", "c.jpg")),
+                        "collection renamed while queued was not exported: " + status.Text);
+                    Check(status.Text.Contains("已导出「旅行改」"), "renamed export notice: " + status.Text);
+                    CollectionOps.RenameSubtree(config, renamed, "旅行");
+                    Check(config.Save(), "rename back failed");
+
+                    // 排队期间集合被删：提示已不存在，不建文件夹
+                    ResourceCollection removed = CollectionOps.FindByKey(config, rootKey);
+                    List<string> gone = new List<string>();
+                    using (System.Windows.Forms.Timer dismiss = new System.Windows.Forms.Timer { Interval = 10 })
+                    {
+                        dismiss.Tick += delegate
+                        {
+                            Form dialog = Application.OpenForms.Cast<Form>().FirstOrDefault(f => f.Modal);
+                            if (dialog == null) return;
+                            FieldInfo message = dialog.GetType().GetField("message", Private);
+                            gone.Add(message == null ? dialog.Text : (string)message.GetValue(dialog));
+                            dialog.Close();
+                        };
+                        dismiss.Start();
+                        importRunning.SetValue(form, true);
+                        Invoke(form, "StartCollectionExport", rootKey, dest);
+                        config.Collections.Remove(removed);
+                        importRunning.SetValue(form, false);
+                        Invoke(form, "StartNextImport");
+                        PumpUntil(delegate { return exportCancel.GetValue(form) == null && gone.Count > 0; });
+                    }
+                    config.Collections.Insert(0, removed);
+                    Check(gone.Count == 1 && gone[0].Contains("已不存在"), "deleted collection not reported: " + string.Join(" | ", gone));
+                    Check(!Directory.Exists(Path.Combine(dest, "旅行 (4)")), "deleted collection still exported");
+
+                    // 排在导入后面时取消：不建文件夹，提示已取消
+                    importRunning.SetValue(form, true);
+                    Invoke(form, "StartCollectionExport", rootKey, dest);
+                    Check(exportCancel.GetValue(form) != null, "queued export not registered");
+                    Invoke(form, "CancelCollectionExport");
+                    importRunning.SetValue(form, false);
+                    Invoke(form, "StartNextImport");
+                    PumpUntil(delegate { return exportCancel.GetValue(form) == null; });
+                    Check(!Directory.Exists(Path.Combine(dest, "旅行 (4)")), "canceled export created a folder");
+                    Check(status.Text == "已取消导出「旅行」。", "cancel notice: " + status.Text);
+
+                    // 已确认退出、等当前文件处理完时不再接新的导出
+                    FieldInfo exitPending = typeof(MainForm).GetField("importExitPending", Private);
+                    exitPending.SetValue(form, true);
+                    ClickConfirmation(delegate { Invoke(form, "StartCollectionExport", rootKey, dest); }, true);
+                    exitPending.SetValue(form, false);
+                    Check(exportCancel.GetValue(form) == null && !Directory.Exists(Path.Combine(dest, "旅行 (4)")), "export accepted while exiting");
+                }
+            }
+            finally { Directory.Delete(dest, true); }
         }
 
         private static CollectionMoveRequest MoveRequest(CollectionMoveKind kind, string source, string target)

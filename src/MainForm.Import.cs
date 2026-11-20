@@ -16,6 +16,8 @@ namespace AppManager
         private readonly Queue<Action> importQueue = new Queue<Action>();
         private bool importRunning, importExitPending, importStatusShown;
         private CancellationTokenSource importCancel = new CancellationTokenSource();
+        // 队列任务结束时留下的结果提示（如集合导出）：由 StartNextImport 在队列状态更新后显示
+        private Action pendingQueueReport;
         private readonly ThemedToolTip importTip = new ThemedToolTip();
         private System.Windows.Forms.Timer importStatusTimer;
         private string importTipText;
@@ -374,9 +376,13 @@ namespace AppManager
 
         private void StartNextImport()
         {
+            // 刚结束的任务留下的结果提示：等队列状态更新后再显示。任务的收尾回调与本方法由同一后台线程先后投递，顺序有保证。
+            Action report = pendingQueueReport;
+            pendingQueueReport = null;
             if (importQueue.Count == 0)
             {
                 importRunning = false;
+                if (report != null) report();
                 if (importExitPending)
                 {
                     // Cancelling imports must not poison this session if the subsequent exit is cancelled.
@@ -398,18 +404,24 @@ namespace AppManager
                 }
                 finally { RunOnUi(StartNextImport); }
             });
+            // 已确认退出：提示留到队列清空、退出之前再显示，否则会被紧接着的退出连同窗口一起关掉
+            if (report != null) { if (importExitPending) pendingQueueReport = report; else report(); }
         }
 
         // 用户退出时导入仍在进行：确认后取消剩余项，当前文件处理完即退出；未完成项的源文件不会被删除。
         private void RequestImportExit()
         {
             if (importExitPending) return;
-            if (MessageDialog.Show(this, "文件导入尚未完成。\n是否取消剩余项目，并在当前文件处理完后退出？\n已入库的项目会保留，未完成项目的源文件不会被删除。",
+            // 队列里有集合导出时由导出一侧说明（见 ConfirmExitWithExport），否则按导入询问。
+            string status;
+            bool? exportConfirmed = ConfirmExitWithExport(out status);
+            if (exportConfirmed == false) return;
+            if (exportConfirmed == null && MessageDialog.Show(this, "文件导入尚未完成。\n是否取消剩余项目，并在当前文件处理完后退出？\n已入库的项目会保留，未完成项目的源文件不会被删除。",
                 "导入文件", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             importExitPending = true;
             // 已协商异步的来源必须收到结束通知；排队任务用已取消 token 收尾，不能直接丢弃回调。
             importCancel.Cancel();
-            ShowStatusBar("正在取消导入，完成当前文件后退出…", 0, 0);
+            ShowStatusBar(status ?? "正在取消导入，完成当前文件后退出…", 0, 0);
         }
 
         private void QueueImport(string[] paths, ImportOperation operation, string category, string collection, bool resource, uint sequence,
@@ -994,7 +1006,7 @@ namespace AppManager
         // 启动时处理上次中断的导入：清理临时落点、撤回未入库副本；同时限制日志数量。
         private void RecoverImports()
         {
-            string journal = ImportJournal;
+            string journal = ImportJournal, exportJournal = ExportJournal;
             EnqueueImport(delegate
             {
                 foreach (string marker in FileImport.PendingJournals(journal))
@@ -1016,6 +1028,8 @@ namespace AppManager
                 }
                 try { FileImport.Prune(journal, 200); }
                 catch (Exception ex) { Paths.LogError(ex); }
+                // 上次中断的集合导出：撤回未完成批次的副本和空文件夹（不进入导入记录）。
+                CollectionExport.Recover(exportJournal);
             });
         }
 

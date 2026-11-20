@@ -3839,7 +3839,7 @@ namespace AppManager
             return true;
         }
 
-        /// <summary>集合右键菜单：编辑 / 删除。</summary>
+        /// <summary>集合右键菜单：新建子集合 / 移到最外层 / 编辑 / 导出 / 删除。</summary>
         private void ShowCollectionMenu(string key, Point screen)
         {
             ResourceCollection c = FindCollectionByKey(key);
@@ -3858,6 +3858,7 @@ namespace AppManager
             }
             items.Add(MkSep());
             items.Add(MkMenu("编辑集合…", delegate { EditCollection(c); }));   // 进入信息页页内编辑，不弹对话框
+            items.Add(MkMenu("导出…", delegate { ExportCollection(c); }));      // 复制到所选文件夹，见 MainForm.CollectionExport.cs
             items.Add(MkMenu("删除集合", delegate { DeleteCollection(c); }));
             MenuWindow mw = new MenuWindow(items, 160);
             mw.Location = FixLocation(screen, mw.Size);
@@ -6159,16 +6160,7 @@ namespace AppManager
         /// <summary>把分类名转换为合法目录名：替换非法字符并去除首尾空格/句点。</summary>
         private static string SafeDirName(string name)
         {
-            if (string.IsNullOrEmpty(name)) return "其他";
-            char[] invalid = Path.GetInvalidFileNameChars();
-            char[] chars = name.ToCharArray();
-            for (int i = 0; i < chars.Length; i++)
-            {
-                for (int j = 0; j < invalid.Length; j++)
-                    if (chars[i] == invalid[j]) { chars[i] = '_'; break; }
-            }
-            string s = new string(chars).Trim().Trim('.');
-            return s.Length == 0 ? "其他" : s;
+            return ResourceStore.SafeCategoryDirectory(name);
         }
 
         /// <summary>解析收纳根路径：配置 ManageRootPath 可用则用之，否则默认 H:\Manage，再回退本地 QuickCenter。</summary>

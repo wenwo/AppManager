@@ -121,16 +121,7 @@ namespace AppManager
 
         internal static string SafeCategoryDirectory(string name)
         {
-            if (string.IsNullOrEmpty(name)) return "其他";
-            char[] invalid = Path.GetInvalidFileNameChars();
-            char[] chars = name.ToCharArray();
-            for (int i = 0; i < chars.Length; i++)
-            {
-                for (int j = 0; j < invalid.Length; j++)
-                    if (chars[i] == invalid[j]) { chars[i] = '_'; break; }
-            }
-            string value = new string(chars).Trim().Trim('.');
-            return value.Length == 0 ? "其他" : value;
+            return FileNames.SafeName(name, "其他");
         }
 
         /// <summary>拖放提示用：来源都在同一卷且有同卷资源位置时，移动不复制数据。</summary>
